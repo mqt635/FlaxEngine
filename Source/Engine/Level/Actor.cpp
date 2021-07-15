@@ -15,7 +15,9 @@
 #include "Engine/Core/Cache.h"
 #include "Engine/Core/Collections/CollectionPoolCache.h"
 #include "Engine/Debug/Exceptions/JsonParseException.h"
+#include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderView.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Serialization/ISerializeModifier.h"
 #include "Engine/Serialization/Serialization.h"
@@ -1088,7 +1090,7 @@ void Actor::OnTransformChanged()
 
     if (_parent)
     {
-        _parent->GetTransform().LocalToWorld(_localTransform, _transform);
+        _parent->_transform.LocalToWorld(_localTransform, _transform);
     }
     else
     {
@@ -1246,12 +1248,6 @@ void Actor::OnDebugDraw()
     for (auto* script : Scripts)
         if (script->GetEnabled())
             script->OnDebugDraw();
-
-    for (auto& child : Children)
-    {
-        if (child->GetIsActive())
-            child->OnDebugDraw();
-    }
 }
 
 void Actor::OnDebugDrawSelected()
@@ -1494,6 +1490,7 @@ void WriteObjectToBytes(SceneObject* obj, rapidjson_flax::StringBuffer& buffer, 
 
 bool Actor::ToBytes(const Array<Actor*>& actors, MemoryWriteStream& output)
 {
+    PROFILE_CPU();
     if (actors.IsEmpty())
     {
         // Cannot serialize empty list
@@ -1553,6 +1550,7 @@ Array<byte> Actor::ToBytes(const Array<Actor*>& actors)
 
 bool Actor::FromBytes(const Span<byte>& data, Array<Actor*>& output, ISerializeModifier* modifier)
 {
+    PROFILE_CPU();
     output.Clear();
 
     ASSERT(modifier);
@@ -1597,11 +1595,14 @@ bool Actor::FromBytes(const Span<byte>& data, Array<Actor*>& output, ISerializeM
         // Order in parent
         int32 orderInParent;
         stream.ReadInt32(&orderInParent);
-        order.At(i) = orderInParent;
+        order[i] = orderInParent;
 
         // Load JSON 
         rapidjson_flax::Document document;
-        document.Parse(buffer, bufferSize);
+        {
+            PROFILE_CPU_NAMED("Json.Parse");
+            document.Parse(buffer, bufferSize);
+        }
         if (document.HasParseError())
         {
             Log::JsonParseException(document.GetParseError(), document.GetErrorOffset());
@@ -1637,11 +1638,13 @@ bool Actor::FromBytes(const Span<byte>& data, Array<Actor*>& output, ISerializeM
         // Order in parent
         int32 orderInParent;
         stream.ReadInt32(&orderInParent);
-        order.Add(orderInParent);
 
         // Load JSON 
         rapidjson_flax::Document document;
-        document.Parse(buffer, bufferSize);
+        {
+            PROFILE_CPU_NAMED("Json.Parse");
+            document.Parse(buffer, bufferSize);
+        }
         if (document.HasParseError())
         {
             Log::JsonParseException(document.GetParseError(), document.GetErrorOffset());
@@ -1655,17 +1658,19 @@ bool Actor::FromBytes(const Span<byte>& data, Array<Actor*>& output, ISerializeM
     Scripting::ObjectsLookupIdMapping.Set(nullptr);
 
     // Link objects
-    for (int32 i = 0; i < objectsCount; i++)
+    //for (int32 i = 0; i < objectsCount; i++)
     {
-        SceneObject* obj = sceneObjects->At(i);
-        obj->PostLoad();
+        //SceneObject* obj = sceneObjects->At(i);
+        // TODO: post load or post spawn?
+        //obj->PostLoad();
     }
 
     // Update objects order
-    for (int32 i = 0; i < objectsCount; i++)
+    //for (int32 i = 0; i < objectsCount; i++)
     {
-        SceneObject* obj = sceneObjects->At(i);
-        obj->SetOrderInParent(order[i]);
+        //SceneObject* obj = sceneObjects->At(i);
+        // TODO: remove order from saved data?
+        //obj->SetOrderInParent(order[i]);
     }
 
     // Call events (only for parents because they will propagate events down the tree)
@@ -1680,6 +1685,10 @@ bool Actor::FromBytes(const Span<byte>& data, Array<Actor*>& output, ISerializeM
         {
             actor->BreakPrefabLink();
         }
+    }
+    for (int32 i = 0; i < parents->Count(); i++)
+    {
+        parents->At(i)->PostSpawn();
     }
     for (int32 i = 0; i < parents->Count(); i++)
     {
@@ -1723,6 +1732,7 @@ Array<Actor*> Actor::FromBytes(const Span<byte>& data, const Dictionary<Guid, Gu
 
 Array<Guid> Actor::TryGetSerializedObjectsIds(const Span<byte>& data)
 {
+    PROFILE_CPU();
     Array<Guid> result;
     if (data.Length() > 0)
     {
@@ -1743,6 +1753,7 @@ Array<Guid> Actor::TryGetSerializedObjectsIds(const Span<byte>& data)
 
 String Actor::ToJson()
 {
+    PROFILE_CPU();
     rapidjson_flax::StringBuffer buffer;
     CompactJsonWriter writer(buffer);
     writer.SceneObject(this);
@@ -1754,9 +1765,14 @@ String Actor::ToJson()
 
 void Actor::FromJson(const StringAnsiView& json)
 {
+    PROFILE_CPU();
+
     // Load JSON
     rapidjson_flax::Document document;
-    document.Parse(json.Get(), json.Length());
+    {
+        PROFILE_CPU_NAMED("Json.Parse");
+        document.Parse(json.Get(), json.Length());
+    }
     if (document.HasParseError())
     {
         Log::JsonParseException(document.GetParseError(), document.GetErrorOffset());

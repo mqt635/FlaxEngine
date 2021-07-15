@@ -4,9 +4,10 @@
 #include "GBufferPass.h"
 #include "VolumetricFogPass.h"
 #include "Engine/Graphics/Graphics.h"
+#include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderBuffers.h"
-#include "Engine/Content/Content.h"
 #include "Engine/Graphics/PixelFormatExtensions.h"
+#include "Engine/Content/Content.h"
 #if USE_EDITOR
 #include "Engine/Renderer/Lightmaps.h"
 #endif
@@ -313,11 +314,13 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererPointLightD
     context->ResetSR();
     context->ResetRenderTarget();
     const Viewport viewport = renderContext.Task->GetViewport();
+    GPUTexture* depthBuffer = renderContext.Buffers->DepthBuffer;
+    GPUTextureView* depthBufferSRV = depthBuffer->GetDescription().Flags & GPUTextureFlags::ReadOnlyDepthView ? depthBuffer->ViewReadOnlyDepth() : depthBuffer->View();
     context->SetViewportAndScissors(viewport);
     context->BindSR(0, renderContext.Buffers->GBuffer0);
     context->BindSR(1, renderContext.Buffers->GBuffer1);
     context->BindSR(2, renderContext.Buffers->GBuffer2);
-    context->BindSR(3, renderContext.Buffers->DepthBuffer);
+    context->BindSR(3, depthBufferSRV);
     context->BindSR(4, renderContext.Buffers->GBuffer3);
 
     // Setup shader data
@@ -413,11 +416,13 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererSpotLightDa
     context->ResetSR();
     context->ResetRenderTarget();
     const Viewport viewport = renderContext.Task->GetViewport();
+    GPUTexture* depthBuffer = renderContext.Buffers->DepthBuffer;
+    GPUTextureView* depthBufferSRV = depthBuffer->GetDescription().Flags & GPUTextureFlags::ReadOnlyDepthView ? depthBuffer->ViewReadOnlyDepth() : depthBuffer->View();
     context->SetViewportAndScissors(viewport);
     context->BindSR(0, renderContext.Buffers->GBuffer0);
     context->BindSR(1, renderContext.Buffers->GBuffer1);
     context->BindSR(2, renderContext.Buffers->GBuffer2);
-    context->BindSR(3, renderContext.Buffers->DepthBuffer);
+    context->BindSR(3, depthBufferSRV);
     context->BindSR(4, renderContext.Buffers->GBuffer3);
 
     // Setup shader data
@@ -561,6 +566,7 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
     }
 
     // Select best Up vector
+    Vector3 side = Vector3::UnitX;
     Vector3 upDirection = Vector3::UnitX;
     Vector3 VectorUps[] = { Vector3::UnitY, Vector3::UnitX, Vector3::UnitZ };
     for (int32 i = 0; i < ARRAY_COUNT(VectorUps); i++)
@@ -568,7 +574,7 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
         const Vector3 vectorUp = VectorUps[i];
         if (Math::Abs(Vector3::Dot(lightDirection, vectorUp)) < (1.0f - 0.0001f))
         {
-            const Vector3 side = Vector3::Normalize(Vector3::Cross(vectorUp, lightDirection));
+            side = Vector3::Normalize(Vector3::Cross(vectorUp, lightDirection));
             upDirection = Vector3::Normalize(Vector3::Cross(lightDirection, side));
             break;
         }
@@ -596,17 +602,22 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
         // Calculate cascade split frustum corners in view space
         for (int32 j = 0; j < 4; j++)
         {
-            // Calculate frustum in WS and VS
             float overlap = 0;
             if (blendCSM)
                 overlap = 0.2f * (splitMinRatio - oldSplitMinRatio);
-
             const auto frustumRangeVS = mainCache->FrustumCornersVs[j + 4] - mainCache->FrustumCornersVs[j];
             frustumCorners[j] = mainCache->FrustumCornersVs[j] + frustumRangeVS * (splitMinRatio - overlap);
             frustumCorners[j + 4] = mainCache->FrustumCornersVs[j] + frustumRangeVS * splitMaxRatio;
         }
 
-        // Perform stabilization (using Projection Snapping)
+        // Perform stabilization
+        enum StabilizationMode
+        {
+            None,
+            ProjectionSnapping,
+            ViewSnapping,
+        };
+        const StabilizationMode stabilization = ViewSnapping; // TODO: expose to graphics settings maybe
         Vector3 cascadeMinBoundLS;
         Vector3 cascadeMaxBoundLS;
         Vector3 target;
@@ -617,12 +628,21 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
 
             // Compute bounding box center
             Vector3::TransformCoordinate(boundingVS.Center, view.IV, target);
-
             cascadeMaxBoundLS = Vector3(boundingVS.Radius);
             cascadeMinBoundLS = -cascadeMaxBoundLS;
+
+            if (stabilization == ViewSnapping)
+            {
+                // Snap the target to the texel units (reference: ShaderX7 - Practical Cascaded Shadows Maps)
+                float shadowMapHalfSize = shadowMapsSizeCSM * 0.5f;
+                float x = Math::Ceil(Vector3::Dot(target, upDirection) * shadowMapHalfSize / boundingVS.Radius) * boundingVS.Radius / shadowMapHalfSize;
+                float y = Math::Ceil(Vector3::Dot(target, side) * shadowMapHalfSize / boundingVS.Radius) * boundingVS.Radius / shadowMapHalfSize;
+                float z = Vector3::Dot(target, lightDirection);
+                target = upDirection * x + side * y + lightDirection * z;
+            }
         }
 
-        const auto nearClip = -2000.0f;
+        const auto nearClip = 0.0f;
         const auto farClip = cascadeMaxBoundLS.Z - cascadeMinBoundLS.Z;
 
         // Create shadow view matrix
@@ -631,7 +651,8 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
         // Create viewport for culling with extended near/far planes due to culling issues
         Matrix cullingVP;
         {
-            Matrix::OrthoOffCenter(cascadeMinBoundLS.X, cascadeMaxBoundLS.X, cascadeMinBoundLS.Y, cascadeMaxBoundLS.Y, -100000.0f, farClip + 100000.0f, shadowProjection);
+            const float cullRangeExtent = 100000.0f;
+            Matrix::OrthoOffCenter(cascadeMinBoundLS.X, cascadeMaxBoundLS.X, cascadeMinBoundLS.Y, cascadeMaxBoundLS.Y, -cullRangeExtent, farClip + cullRangeExtent, shadowProjection);
             Matrix::Multiply(shadowView, shadowProjection, cullingVP);
         }
 
@@ -642,12 +663,12 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
         Matrix::Multiply(shadowView, shadowProjection, shadowVP);
 
         // Stabilize the shadow matrix on the projection
+        if (stabilization == ProjectionSnapping)
         {
-            auto shadowPixelPosition = shadowVP.GetTranslation() * (shadowMapsSizeCSM * 0.5f);
+            Vector3 shadowPixelPosition = shadowVP.GetTranslation() * (shadowMapsSizeCSM * 0.5f);
             shadowPixelPosition.Z = 0;
-            const auto shadowPixelPositionRounded = Vector3(Math::Round(shadowPixelPosition.X), Math::Round(shadowPixelPosition.Y), 0.0f);
-            auto shadowPixelOffset = Vector4(shadowPixelPositionRounded - shadowPixelPosition, 0.0f);
-            shadowPixelOffset *= 2.0f / shadowMapsSizeCSM;
+            const Vector3 shadowPixelPositionRounded(Math::Round(shadowPixelPosition.X), Math::Round(shadowPixelPosition.Y), 0.0f);
+            const Vector4 shadowPixelOffset((shadowPixelPositionRounded - shadowPixelPosition) * (2.0f / shadowMapsSizeCSM), 0.0f);
             shadowProjection.SetRow4(shadowProjection.GetRow4() + shadowPixelOffset);
             Matrix::Multiply(shadowView, shadowProjection, shadowVP);
         }
@@ -687,11 +708,13 @@ void ShadowsPass::RenderShadow(RenderContext& renderContext, RendererDirectional
     context->ResetSR();
     context->ResetRenderTarget();
     const Viewport viewport = renderContext.Task->GetViewport();
+    GPUTexture* depthBuffer = renderContext.Buffers->DepthBuffer;
+    GPUTextureView* depthBufferSRV = depthBuffer->GetDescription().Flags & GPUTextureFlags::ReadOnlyDepthView ? depthBuffer->ViewReadOnlyDepth() : depthBuffer->View();
     context->SetViewportAndScissors(viewport);
     context->BindSR(0, renderContext.Buffers->GBuffer0);
     context->BindSR(1, renderContext.Buffers->GBuffer1);
     context->BindSR(2, renderContext.Buffers->GBuffer2);
-    context->BindSR(3, renderContext.Buffers->DepthBuffer);
+    context->BindSR(3, depthBufferSRV);
     context->BindSR(4, renderContext.Buffers->GBuffer3);
 
     // Setup shader data

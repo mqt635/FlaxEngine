@@ -6,6 +6,7 @@
 #include "ScriptingType.h"
 #include "FlaxEngine.Gen.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Threading/ThreadLocal.h"
 #include "Engine/Threading/IRunnable.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Platform/File.h"
@@ -21,10 +22,12 @@
 #include "MException.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Core/ObjectsRemovalService.h"
+#include "Engine/Core/Types/TimeSpan.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Content/Asset.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Engine/EngineService.h"
+#include "Engine/Engine/Globals.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Serialization/JsonTools.h"
 #include <ThirdParty/mono-2.0/mono/metadata/mono-debug.h>
@@ -109,7 +112,7 @@ Action Scripting::ScriptsLoaded;
 Action Scripting::ScriptsUnload;
 Action Scripting::ScriptsReloading;
 Action Scripting::ScriptsReloaded;
-ThreadLocal<Scripting::IdsMappingTable*, 32> Scripting::ObjectsLookupIdMapping;
+ThreadLocal<Scripting::IdsMappingTable*, PLATFORM_THREADS_LIMIT, true> Scripting::ObjectsLookupIdMapping;
 ScriptingService ScriptingServiceInstance;
 
 bool initFlaxEngine();
@@ -186,35 +189,35 @@ bool ScriptingService::Init()
 
 void ScriptingService::Update()
 {
-    PROFILE_CPU_NAMED("Scripting.Update");
+    PROFILE_CPU_NAMED("Scripting::Update");
 
     INVOKE_EVENT(Update);
 }
 
 void ScriptingService::LateUpdate()
 {
-    PROFILE_CPU_NAMED("Scripting.LateUpdate");
+    PROFILE_CPU_NAMED("Scripting::LateUpdate");
 
     INVOKE_EVENT(LateUpdate);
 }
 
 void ScriptingService::FixedUpdate()
 {
-    PROFILE_CPU_NAMED("Scripting.FixedUpdate");
+    PROFILE_CPU_NAMED("Scripting::FixedUpdate");
 
     INVOKE_EVENT(FixedUpdate);
 }
 
 void ScriptingService::Draw()
 {
-    PROFILE_CPU_NAMED("Scripting.Draw");
+    PROFILE_CPU_NAMED("Scripting::Draw");
 
     INVOKE_EVENT(Draw);
 }
 
 void ScriptingService::BeforeExit()
 {
-    PROFILE_CPU_NAMED("Scripting.BeforeExit");
+    PROFILE_CPU_NAMED("Scripting::BeforeExit");
 
     INVOKE_EVENT(Exit);
 }
@@ -222,12 +225,6 @@ void ScriptingService::BeforeExit()
 MDomain* Scripting::GetRootDomain()
 {
     return _monoRootDomain;
-}
-
-MonoDomain* Scripting::GetMonoScriptsDomain()
-{
-    ASSERT(_monoScriptsDomain != nullptr);
-    return _monoScriptsDomain->GetNative();
 }
 
 MDomain* Scripting::GetScriptsDomain()
@@ -262,7 +259,10 @@ bool Scripting::LoadBinaryModules(const String& path, const String& projectFolde
 
     // Parse Json data
     rapidjson_flax::Document document;
-    document.Parse((char*)fileData.Get(), fileData.Count());
+    {
+        PROFILE_CPU_NAMED("Json.Parse");
+        document.Parse((char*)fileData.Get(), fileData.Count());
+    }
     if (document.HasParseError())
     {
         LOG(Error, "Failed to file contents.");
@@ -349,7 +349,8 @@ bool Scripting::LoadBinaryModules(const String& path, const String& projectFolde
                         const auto startTime = DateTime::NowUTC();
 #if PLATFORM_ANDROID
                         // On Android all native binaries are side-by-side with the app
-                        nativePath = StringUtils::GetDirectoryName(Platform::GetExecutableFilePath()) / StringUtils::GetFileName(nativePath);
+                        nativePath = StringUtils::GetDirectoryName(Platform::GetExecutableFilePath());
+                        nativePath /= StringUtils::GetFileName(nativePath);
 #endif
                         auto library = Platform::LoadLibrary(nativePath.Get());
                         if (!library)
@@ -411,6 +412,7 @@ bool Scripting::LoadBinaryModules(const String& path, const String& projectFolde
 
 bool Scripting::Load()
 {
+    PROFILE_CPU();
     // Note: this action can be called from main thread (due to Mono problems with assemblies actions from other threads)
     ASSERT(IsInMainThread());
 
@@ -474,6 +476,7 @@ bool Scripting::Load()
 
 void Scripting::Release()
 {
+    PROFILE_CPU();
     // Note: this action can be called from main thread (due to Mono problems with assemblies actions from other threads)
     ASSERT(IsInMainThread());
 
@@ -641,9 +644,7 @@ MClass* Scripting::FindClass(MonoClass* monoClass)
 {
     if (monoClass == nullptr)
         return nullptr;
-
-    PROFILE_CPU_NAMED("FindClass");
-
+    PROFILE_CPU();
     auto& modules = BinaryModule::GetModules();
     for (auto module : modules)
     {
@@ -655,7 +656,6 @@ MClass* Scripting::FindClass(MonoClass* monoClass)
                 return result;
         }
     }
-
     return nullptr;
 }
 
@@ -663,9 +663,7 @@ MClass* Scripting::FindClass(const StringAnsiView& fullname)
 {
     if (fullname.IsEmpty())
         return nullptr;
-
-    PROFILE_CPU_NAMED("FindClass");
-
+    PROFILE_CPU();
     auto& modules = BinaryModule::GetModules();
     for (auto module : modules)
     {
@@ -677,7 +675,6 @@ MClass* Scripting::FindClass(const StringAnsiView& fullname)
                 return result;
         }
     }
-
     return nullptr;
 }
 
@@ -685,9 +682,7 @@ MonoClass* Scripting::FindClassNative(const StringAnsiView& fullname)
 {
     if (fullname.IsEmpty())
         return nullptr;
-
-    PROFILE_CPU_NAMED("FindClassNative");
-
+    PROFILE_CPU();
     auto& modules = BinaryModule::GetModules();
     for (auto module : modules)
     {
@@ -699,7 +694,6 @@ MonoClass* Scripting::FindClassNative(const StringAnsiView& fullname)
                 return result->GetNative();
         }
     }
-
     return nullptr;
 }
 
@@ -707,9 +701,7 @@ ScriptingTypeHandle Scripting::FindScriptingType(const StringAnsiView& fullname)
 {
     if (fullname.IsEmpty())
         return ScriptingTypeHandle();
-
-    PROFILE_CPU_NAMED("FindScriptingType");
-
+    PROFILE_CPU();
     auto& modules = BinaryModule::GetModules();
     for (auto module : modules)
     {
@@ -719,7 +711,6 @@ ScriptingTypeHandle Scripting::FindScriptingType(const StringAnsiView& fullname)
             return ScriptingTypeHandle(module, typeIndex);
         }
     }
-
     return ScriptingTypeHandle();
 }
 
@@ -732,8 +723,7 @@ ScriptingObject* Scripting::FindObject(Guid id, MClass* type)
 {
     if (!id.IsValid())
         return nullptr;
-
-    PROFILE_CPU_NAMED("FindObject");
+    PROFILE_CPU();
 
     // Try to map object id
     const auto idsMapping = ObjectsLookupIdMapping.Get();
@@ -812,8 +802,7 @@ ScriptingObject* Scripting::FindObject(const MonoObject* managedInstance)
 {
     if (managedInstance == nullptr)
         return nullptr;
-
-    PROFILE_CPU_NAMED("FindObject");
+    PROFILE_CPU();
 
     // TODO: optimize it by reading the unmanagedPtr or _internalId from managed Object property
 
@@ -830,7 +819,7 @@ ScriptingObject* Scripting::FindObject(const MonoObject* managedInstance)
 
 void Scripting::OnManagedInstanceDeleted(ScriptingObject* obj)
 {
-    PROFILE_CPU_NAMED("OnManagedInstanceDeleted");
+    PROFILE_CPU();
     ASSERT(obj);
 
     // Validate if object still exists
@@ -867,7 +856,7 @@ bool Scripting::IsEveryAssemblyLoaded()
 
 bool Scripting::IsTypeFromGameScripts(MClass* type)
 {
-    const auto binaryModule = ManagedBinaryModule::GetModule(type->GetAssembly());
+    const auto binaryModule = ManagedBinaryModule::GetModule(type ? type->GetAssembly() : nullptr);
     return binaryModule && binaryModule != GetBinaryModuleCorlib() && binaryModule != GetBinaryModuleFlaxEngine();
 }
 
@@ -942,7 +931,7 @@ bool initFlaxEngine()
         if (exception)
         {
             MException ex(exception);
-            ex.Log(LogType::Fatal, TEXT("FlaxEngine.ClassLibraryInitializer.Init"));
+            ex.Log(LogType::Fatal, TEXT("FlaxEngine.Scripting.Init"));
             return true;
         }
 

@@ -11,7 +11,10 @@ namespace Flax.Build.Bindings
 {
     partial class BindingsGenerator
     {
-        private static readonly Dictionary<string, string> CSharpNativeToManagedBasicTypes = new Dictionary<string, string>()
+        private static readonly HashSet<string> CSharpUsedNamespaces = new HashSet<string>();
+        private static readonly List<string> CSharpUsedNamespacesSorted = new List<string>();
+
+        internal static readonly Dictionary<string, string> CSharpNativeToManagedBasicTypes = new Dictionary<string, string>()
         {
             // Language types
             { "int8", "sbyte" },
@@ -29,7 +32,7 @@ namespace Flax.Build.Bindings
             { "double", "double" },
         };
 
-        private static readonly Dictionary<string, string> CSharpNativeToManagedDefault = new Dictionary<string, string>()
+        internal static readonly Dictionary<string, string> CSharpNativeToManagedDefault = new Dictionary<string, string>()
         {
             // Engine types
             { "String", "string" },
@@ -59,7 +62,39 @@ namespace Flax.Build.Bindings
             if (value.StartsWith("TEXT(\"") && value.EndsWith("\")"))
                 return value.Substring(5, value.Length - 6);
 
+            // In-built constants
+            switch (value)
+            {
+            case "nullptr":
+            case "NULL":
+            case "String::Empty":
+            case "StringView::Empty": return "null";
+            case "MAX_int8": return "sbyte.MaxValue";
+            case "MAX_uint8": return "byte.MaxValue";
+            case "MAX_int16": return "short.MaxValue";
+            case "MAX_uint16": return "ushort.MaxValue";
+            case "MAX_int32": return "int.MaxValue";
+            case "MAX_uint32": return "uint.MaxValue";
+            case "MAX_int64": return "long.MaxValue";
+            case "MAX_uint64": return "ulong.MaxValue";
+            case "MAX_float": return "float.MaxValue";
+            case "MAX_double": return "double.MaxValue";
+            case "true":
+            case "false": return value;
+            }
+
+            // Numbers
+            if (float.TryParse(value, out _) || (value[value.Length - 1] == 'f' && float.TryParse(value.Substring(0, value.Length - 1), out _)))
+                return value;
+
             value = value.Replace("::", ".");
+            var dot = value.LastIndexOf('.');
+            ApiTypeInfo apiType = null;
+            if (dot != -1)
+            {
+                var type = new TypeInfo { Type = value.Substring(0, dot) };
+                apiType = FindApiTypeInfo(buildData, type, caller);
+            }
 
             if (attribute)
             {
@@ -92,50 +127,30 @@ namespace Flax.Build.Bindings
                     case "Quaternion.Identity": return "typeof(Quaternion), \"0,0,0,1\"";
                     }
 
+                    // Enums
+                    if (apiType != null && apiType.IsEnum)
+                        return value;
+
                     return null;
                 }
             }
 
             // Skip constants unsupported in C#
-            var dot = value.LastIndexOf('.');
-            if (dot != -1)
-            {
-                var type = new TypeInfo { Type = value.Substring(0, dot) };
-                var apiType = FindApiTypeInfo(buildData, type, caller);
-                if (apiType != null && apiType.IsStruct)
-                    return null;
-            }
+            if (apiType != null && apiType.IsStruct)
+                return null;
 
             // Special case for value constructors
             if (value.Contains('(') && value.Contains(')'))
                 return "new " + value;
 
-            // Convert from C++ to C#
-            switch (value)
-            {
-            case "nullptr":
-            case "NULL":
-            case "String.Empty":
-            case "StringView.Empty": return "null";
-
-            case "MAX_int8": return "sbyte.MaxValue";
-            case "MAX_uint8": return "byte.MaxValue";
-            case "MAX_int16": return "short.MaxValue";
-            case "MAX_uint16": return "ushort.MaxValue";
-            case "MAX_int32": return "int.MaxValue";
-            case "MAX_uint32": return "uint.MaxValue";
-            case "MAX_int64": return "long.MaxValue";
-            case "MAX_uint64": return "ulong.MaxValue";
-            case "MAX_float": return "float.MaxValue";
-            case "MAX_double": return "double.MaxValue";
-
-            default: return value;
-            }
+            return value;
         }
 
         private static string GenerateCSharpNativeToManaged(BuildData buildData, TypeInfo typeInfo, ApiTypeInfo caller)
         {
             string result;
+            if (typeInfo?.Type == null)
+                throw new ArgumentNullException();
 
             // Use dynamic array as wrapper container for fixed-size native arrays
             if (typeInfo.IsArray)
@@ -192,14 +207,35 @@ namespace Flax.Build.Bindings
             if (typeInfo.Type == "BytesContainer" && typeInfo.GenericArgs == null)
                 return "byte[]";
 
+            // Function
+            if (typeInfo.Type == "Function" && typeInfo.GenericArgs != null)
+            {
+                if (typeInfo.GenericArgs.Count == 0)
+                    throw new Exception("Missing function return type.");
+                if (typeInfo.GenericArgs.Count > 1)
+                {
+                    var args = string.Empty;
+                    args += GenerateCSharpNativeToManaged(buildData, typeInfo.GenericArgs[1], caller);
+                    for (int i = 2; i < typeInfo.GenericArgs.Count; i++)
+                        args += ", " + GenerateCSharpNativeToManaged(buildData, typeInfo.GenericArgs[i], caller);
+                    if (typeInfo.GenericArgs[0].Type == "void")
+                        return string.Format("Action<{0}>", args);
+                    return string.Format("Func<{0}, {1}>", args, GenerateCSharpNativeToManaged(buildData, typeInfo.GenericArgs[0], caller));
+                }
+                if (typeInfo.GenericArgs[0].Type == "void")
+                    return "Action";
+                return string.Format("Func<{0}>", GenerateCSharpNativeToManaged(buildData, typeInfo.GenericArgs[0], caller));
+            }
+
             // Find API type info
             var apiType = FindApiTypeInfo(buildData, typeInfo, caller);
             if (apiType != null)
             {
+                CSharpUsedNamespaces.Add(apiType.Namespace);
+
                 if (apiType.IsScriptingObject)
                     return typeInfo.Type.Replace("::", ".");
-
-                if (typeInfo.IsPtr && (apiType is LangType || apiType.IsPod))
+                if (typeInfo.IsPtr && apiType.IsPod)
                     return typeInfo.Type.Replace("::", ".") + '*';
             }
 
@@ -226,6 +262,10 @@ namespace Flax.Build.Bindings
 
             // ScriptingObjectReference or AssetReference or WeakAssetReference or SoftObjectReference
             if ((typeInfo.Type == "ScriptingObjectReference" || typeInfo.Type == "AssetReference" || typeInfo.Type == "WeakAssetReference" || typeInfo.Type == "SoftObjectReference") && typeInfo.GenericArgs != null)
+                return "IntPtr";
+
+            // Function
+            if (typeInfo.Type == "Function" && typeInfo.GenericArgs != null)
                 return "IntPtr";
 
             return GenerateCSharpNativeToManaged(buildData, typeInfo, caller);
@@ -258,6 +298,9 @@ namespace Flax.Build.Bindings
             case "ManagedScriptingObject":
                 // object
                 return "FlaxEngine.Object.GetUnmanagedPtr";
+            case "Function":
+                // delegate
+                return "Marshal.GetFunctionPointerForDelegate";
             default:
                 var apiType = FindApiTypeInfo(buildData, typeInfo, caller);
                 if (apiType != null)
@@ -464,9 +507,8 @@ namespace Flax.Build.Bindings
                         if (comment[i - 1].StartsWith("/// "))
                             tooltip += " " + comment[i - 1].Substring(4);
                     }
-                    if (tooltip.IndexOf('\"') != -1)
-                        tooltip = tooltip.Replace("\"", "\\\"");
-                    contents.Append(indent).Append("[Tooltip(\"").Append(tooltip).Append("\")]").AppendLine();
+                    tooltip = tooltip.Replace("\"", "\"\"");
+                    contents.Append(indent).Append("[Tooltip(@\"").Append(tooltip).Append("\")]").AppendLine();
                 }
             }
             if (writeDefaultValue)
@@ -522,7 +564,7 @@ namespace Flax.Build.Bindings
                 contents.Append("abstract ");
             contents.Append("unsafe partial class ").Append(classInfo.Name);
             if (classInfo.BaseType != null && !classInfo.IsBaseTypeHidden)
-                contents.Append(" : ").Append(GenerateCSharpNativeToManaged(buildData, classInfo.BaseType, classInfo));
+                contents.Append(" : ").Append(GenerateCSharpNativeToManaged(buildData, new TypeInfo { Type = classInfo.BaseType.Name }, classInfo));
             contents.AppendLine();
             contents.Append(indent + "{");
             indent += "    ";
@@ -548,6 +590,50 @@ namespace Flax.Build.Bindings
 
                 contents.AppendLine();
 
+                var useCustomDelegateSignature = false;
+                for (var i = 0; i < paramsCount; i++)
+                {
+                    var paramType = eventInfo.Type.GenericArgs[i];
+                    var result = GenerateCSharpNativeToManaged(buildData, paramType, classInfo);
+                    if ((paramType.IsRef && !paramType.IsConst && paramType.IsPod(buildData, classInfo)) || result[result.Length - 1] == '*')
+                        useCustomDelegateSignature = true;
+                    CppParamsWrappersCache[i] = result;
+                }
+
+                string eventSignature;
+                if (useCustomDelegateSignature)
+                {
+                    contents.Append(indent).Append($"/// <summary>The delegate for event {eventInfo.Name}.</summary>").AppendLine();
+                    contents.Append(indent).Append("public delegate void ").Append(eventInfo.Name).Append("Delegate(");
+                    for (var i = 0; i < paramsCount; i++)
+                    {
+                        var paramType = eventInfo.Type.GenericArgs[i];
+                        if (i != 0)
+                            contents.Append(", ");
+                        if (paramType.IsRef && !paramType.IsConst && paramType.IsPod(buildData, classInfo))
+                            contents.Append("ref ");
+                        contents.Append(CppParamsWrappersCache[i]).Append(" arg").Append(i);
+                    }
+                    contents.Append(");").AppendLine().AppendLine();
+                    eventSignature = "event " + eventInfo.Name + "Delegate";
+                }
+                else
+                {
+                    eventSignature = "event Action";
+                    if (paramsCount != 0)
+                    {
+                        eventSignature += '<';
+                        for (var i = 0; i < paramsCount; i++)
+                        {
+                            if (i != 0)
+                                eventSignature += ", ";
+                            CppParamsWrappersCache[i] = GenerateCSharpNativeToManaged(buildData, eventInfo.Type.GenericArgs[i], classInfo);
+                            eventSignature += CppParamsWrappersCache[i];
+                        }
+                        eventSignature += '>';
+                    }
+                }
+
                 foreach (var comment in eventInfo.Comment)
                 {
                     if (comment.Contains("/// <returns>"))
@@ -565,19 +651,6 @@ namespace Flax.Build.Bindings
                     contents.Append("private ");
                 if (eventInfo.IsStatic)
                     contents.Append("static ");
-                string eventSignature = "event Action";
-                if (paramsCount != 0)
-                {
-                    eventSignature += '<';
-                    for (var i = 0; i < paramsCount; i++)
-                    {
-                        if (i != 0)
-                            eventSignature += ", ";
-                        CppParamsWrappersCache[i] = GenerateCSharpNativeToManaged(buildData, eventInfo.Type.GenericArgs[i], classInfo);
-                        eventSignature += CppParamsWrappersCache[i];
-                    }
-                    eventSignature += '>';
-                }
                 contents.Append(eventSignature);
                 contents.Append(' ').AppendLine(eventInfo.Name);
                 contents.Append(indent).Append('{').AppendLine();
@@ -609,9 +682,12 @@ namespace Flax.Build.Bindings
                 contents.Append($"void Internal_{eventInfo.Name}_Invoke(");
                 for (var i = 0; i < paramsCount; i++)
                 {
+                    var paramType = eventInfo.Type.GenericArgs[i];
                     if (i != 0)
                         contents.Append(", ");
                     contents.Append(CppParamsWrappersCache[i]);
+                    if (paramType.IsRef && !paramType.IsConst && paramType.IsPod(buildData, classInfo))
+                        contents.Append("*");
                     contents.Append(" arg").Append(i);
                 }
                 contents.Append(')').AppendLine();
@@ -620,8 +696,11 @@ namespace Flax.Build.Bindings
                 contents.Append('(');
                 for (var i = 0; i < paramsCount; i++)
                 {
+                    var paramType = eventInfo.Type.GenericArgs[i];
                     if (i != 0)
                         contents.Append(", ");
+                    if (paramType.IsRef && !paramType.IsConst && paramType.IsPod(buildData, classInfo))
+                        contents.Append("ref *");
                     contents.Append("arg").Append(i);
                 }
                 contents.Append(");").AppendLine();
@@ -856,7 +935,7 @@ namespace Flax.Build.Bindings
                 contents.Append("private ");
             contents.Append("unsafe partial struct ").Append(structureInfo.Name);
             if (structureInfo.BaseType != null && structureInfo.IsPod)
-                contents.Append(" : ").Append(GenerateCSharpNativeToManaged(buildData, structureInfo.BaseType, structureInfo));
+                contents.Append(" : ").Append(GenerateCSharpNativeToManaged(buildData, new TypeInfo { Type = structureInfo.BaseType.Name }, structureInfo));
             contents.AppendLine();
             contents.Append(indent + "{");
             indent += "    ";
@@ -881,7 +960,7 @@ namespace Flax.Build.Bindings
                     contents.Append("static ");
                 string type;
 
-                if (fieldInfo.NoArray && fieldInfo.Type.IsArray)
+                if (fieldInfo.Type.IsArray && (fieldInfo.NoArray || structureInfo.IsPod))
                 {
                     // Fixed-size array that needs to be inlined into structure instead of passing it as managed array
                     fieldInfo.Type.IsArray = false;
@@ -1055,29 +1134,17 @@ namespace Flax.Build.Bindings
             contents.Append("true").AppendLine();
             contents.AppendLine("// This code was auto-generated. Do not modify it.");
             contents.AppendLine();
+            var headerPos = contents.Length;
 
-            // Using declarations
-            contents.AppendLine("using System;");
-            contents.AppendLine("using System.ComponentModel;");
-            contents.AppendLine("using System.Runtime.CompilerServices;");
-            contents.AppendLine("using System.Runtime.InteropServices;");
-            foreach (var e in moduleInfo.Children)
-            {
-                bool tmp = false;
-                foreach (var apiTypeInfo in e.Children)
-                {
-                    if (apiTypeInfo.Namespace != "FlaxEngine")
-                    {
-                        tmp = true;
-                        contents.AppendLine("using FlaxEngine;");
-                        break;
-                    }
-                }
-                if (tmp)
-                    break;
-            }
-            // TODO: custom using declarations support
-            // TODO: generate using declarations based on references modules (eg. using FlaxEngine, using Plugin1 in game API)
+            CSharpUsedNamespaces.Clear();
+            CSharpUsedNamespaces.Add(null);
+            CSharpUsedNamespaces.Add(string.Empty);
+            CSharpUsedNamespaces.Add("System");
+            CSharpUsedNamespaces.Add("System.ComponentModel");
+            CSharpUsedNamespaces.Add("System.Globalization");
+            CSharpUsedNamespaces.Add("System.Runtime.CompilerServices");
+            CSharpUsedNamespaces.Add("System.Runtime.InteropServices");
+            CSharpUsedNamespaces.Add("FlaxEngine");
 
             // Process all API types from the file
             var useBindings = false;
@@ -1092,7 +1159,21 @@ namespace Flax.Build.Bindings
             if (!useBindings)
                 return;
 
+            {
+                var header = new StringBuilder();
+
+                // Using declarations
+                CSharpUsedNamespacesSorted.Clear();
+                CSharpUsedNamespacesSorted.AddRange(CSharpUsedNamespaces);
+                CSharpUsedNamespacesSorted.Sort();
+                for (var i = 2; i < CSharpUsedNamespacesSorted.Count; i++)
+                    header.AppendLine($"using {CSharpUsedNamespacesSorted[i]};");
+
+                contents.Insert(headerPos, header.ToString());
+            }
+
             // Save generated file
+            contents.AppendLine();
             contents.AppendLine("#endif");
             Utilities.WriteFileIfChanged(bindings.GeneratedCSharpFilePath, contents.ToString());
         }

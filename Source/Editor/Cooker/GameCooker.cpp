@@ -10,6 +10,7 @@
 #include "Engine/Serialization/JsonTools.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Engine/EngineService.h"
+#include "Engine/Engine/Globals.h"
 #include "Engine/Threading/ThreadSpawner.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Steps/ValidateStep.h"
@@ -336,7 +337,7 @@ void GameCooker::Build(BuildPlatform platform, BuildConfiguration configuration,
     data.OriginalOutputPath = outputPath;
     FileSystem::NormalizePath(data.OriginalOutputPath);
     data.OriginalOutputPath = FileSystem::ConvertRelativePathToAbsolute(Globals::ProjectFolder, data.OriginalOutputPath);
-    data.CodeOutputPath = data.DataOutputPath = data.OriginalOutputPath;
+    data.NativeCodeOutputPath = data.ManagedCodeOutputPath = data.DataOutputPath = data.OriginalOutputPath;
     data.CacheDirectory = Globals::ProjectCacheFolder / TEXT("Cooker") / tools->GetName();
     if (!FileSystem::DirectoryExists(data.CacheDirectory))
     {

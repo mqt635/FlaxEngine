@@ -58,6 +58,9 @@ API_STRUCT(InBuild) struct FLAXENGINE_API VariantType
         Int3,
         Int4,
 
+        Int16,
+        Uint16,
+
         MAX
     };
 
@@ -135,6 +138,8 @@ API_STRUCT(InBuild) struct FLAXENGINE_API Variant
     union
     {
         bool AsBool;
+        int16 AsInt16;
+        uint16 AsUint16;
         int32 AsInt;
         uint32 AsUint;
         int64 AsInt64;
@@ -152,7 +157,7 @@ API_STRUCT(InBuild) struct FLAXENGINE_API Variant
             int32 Length;
         } AsBlob;
 
-        Dictionary<Variant, Variant>* AsDictionary;
+        Dictionary<Variant, Variant, HeapAllocation>* AsDictionary;
 
         byte AsData[16];
     };
@@ -184,6 +189,8 @@ public:
     Variant(Variant&& other) noexcept;
 
     Variant(bool v);
+    Variant(int16 v);
+    Variant(uint16 v);
     Variant(int32 v);
     Variant(uint32 v);
     Variant(int64 v);
@@ -215,7 +222,7 @@ public:
     explicit Variant(const Matrix& v);
     Variant(Array<Variant, HeapAllocation>&& v);
     Variant(const Array<Variant, HeapAllocation>& v);
-    explicit Variant(const Dictionary<Variant, Variant>& v);
+    explicit Variant(const Dictionary<Variant, Variant, HeapAllocation>& v);
     explicit Variant(const CommonValue& v);
 
     ~Variant();

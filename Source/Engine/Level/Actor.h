@@ -176,7 +176,7 @@ public:
     /// <param name="value">New parent</param>
     /// <param name="worldPositionsStays">Should actor world positions remain the same after parent change?</param>
     /// <param name="canBreakPrefabLink">True if can break prefab link on changing the parent.</param>
-    void SetParent(Actor* value, bool worldPositionsStays, bool canBreakPrefabLink);
+    API_FUNCTION() void SetParent(Actor* value, bool worldPositionsStays, bool canBreakPrefabLink);
 
     /// <summary>
     /// Gets amount of child actors.
@@ -665,12 +665,12 @@ public:
 #if USE_EDITOR
 
     /// <summary>
-    /// Draws debug shapes for the actor and all child actors.
+    /// Draws debug shapes for the actor and all child scripts.
     /// </summary>
     virtual void OnDebugDraw();
 
     /// <summary>
-    /// Draws debug shapes for the selected actor and all child actors.
+    /// Draws debug shapes for the selected actor and all child scripts.
     /// </summary>
     virtual void OnDebugDrawSelected();
 
@@ -868,7 +868,7 @@ public:
     /// <param name="data">The input data.</param>
     /// <param name="idsMapping">The serialized objects Ids mapping. Can be used to convert the spawned objects ids and references to them.</param>
     /// <returns>The output actors.</returns>
-    API_FUNCTION() static Array<Actor*> FromBytes(const Span<byte>& data, const Dictionary<Guid, Guid>& idsMapping);
+    API_FUNCTION() static Array<Actor*> FromBytes(const Span<byte>& data, const Dictionary<Guid, Guid, HeapAllocation>& idsMapping);
 
     /// <summary>
     /// Tries the get serialized objects ids from the raw bytes.

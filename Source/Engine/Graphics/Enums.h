@@ -4,7 +4,6 @@
 
 #include "Engine/Core/Types/BaseTypes.h"
 #include "Engine/Core/Config.h"
-#include "Engine/Scripting/ScriptingType.h"
 
 /// <summary>
 /// Graphics rendering backend system types.
@@ -798,6 +797,11 @@ API_ENUM() enum class ViewMode
     /// Draw meshes vertex colors
     /// </summary>
     VertexColors = 19,
+
+    /// <summary>
+    /// Draw physics colliders debug view
+    /// </summary>
+    PhysicsColliders = 20,
 };
 
 /// <summary>

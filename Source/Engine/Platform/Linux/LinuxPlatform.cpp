@@ -1195,8 +1195,8 @@ struct Property
 
 namespace Impl
 {
-	LinuxKeyboard Keyboard;
-	LinuxMouse Mouse;
+	LinuxKeyboard* Keyboard;
+	LinuxMouse* Mouse;
     StringAnsi ClipboardText;
 
     void ClipboardGetText(String& result, X11::Atom source, X11::Atom atom, X11::Window window)
@@ -2031,8 +2031,14 @@ bool LinuxPlatform::Init()
     char buffer[UNIX_APP_BUFF_SIZE];
 
     // Get user locale string
-    char* locale = setlocale(LC_ALL, NULL);
+    setlocale(LC_ALL, "");
+    const char* locale = setlocale(LC_CTYPE, NULL);
+    if (strcmp(locale, "C") == 0)
+        locale = "";
     UserLocale = String(locale);
+    if (UserLocale.FindLast('.') != -1)
+        UserLocale = UserLocale.Left(UserLocale.Find('.'));
+    UserLocale.Replace('_', '-');
 
     // Get computer name string
     gethostname(buffer, UNIX_APP_BUFF_SIZE);
@@ -2191,8 +2197,8 @@ bool LinuxPlatform::Init()
 		}
 	}
 
-    Input::Mouse = &Impl::Mouse;
-    Input::Keyboard = &Impl::Keyboard;
+    Input::Mouse = Impl::Mouse = New<LinuxMouse>();
+    Input::Keyboard = Impl::Keyboard = New<LinuxKeyboard>();
 
     return false;
 }

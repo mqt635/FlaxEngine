@@ -19,6 +19,7 @@
 #include "Engine/Scripting/ManagedCLR/MMethod.h"
 #include "Engine/Scripting/Script.h"
 #include "Engine/Scripting/BinaryModule.h"
+#include "Engine/Threading/Threading.h"
 #include <ThirdParty/mono-2.0/mono/metadata/appdomain.h>
 #if USE_EDITOR
 #include "Engine/Renderer/Lightmaps.h"
@@ -267,7 +268,7 @@ void SceneRenderTask::OnCollectDrawCalls(RenderContext& renderContext)
     {
         for (int32 i = 0; i < CustomActors.Count(); i++)
         {
-            if (CustomActors[i]->GetIsActive())
+            if (CustomActors[i] && CustomActors[i]->GetIsActive())
                 CustomActors[i]->DrawHierarchy(renderContext);
         }
     }

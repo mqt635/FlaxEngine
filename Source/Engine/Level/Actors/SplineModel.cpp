@@ -5,9 +5,15 @@
 #include "Engine/Engine/Engine.h"
 #include "Engine/Core/Math/Matrix3x4.h"
 #include "Engine/Serialization/Serialization.h"
+#include "Engine/Graphics/GPUBufferDescription.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/GPUBuffer.h"
+#include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderTools.h"
+#include "Engine/Level/Scene/SceneRendering.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Renderer/DrawCall.h"
+#include "Engine/Renderer/RenderList.h"
 #if USE_EDITOR
 #include "Editor/Editor.h"
 #endif
@@ -203,6 +209,8 @@ void SplineModel::OnSplineUpdated()
     for (int32 i = 1; i < _instances.Count(); i++)
         BoundingSphere::Merge(_sphere, _instances[i].Sphere, _sphere);
     BoundingBox::FromSphere(_sphere, _box);
+    if (_sceneRenderingKey != -1)
+        GetSceneRendering()->UpdateGeometry(this, _sceneRenderingKey);
 }
 
 void SplineModel::UpdateDeformationBuffer()
@@ -472,6 +480,14 @@ void SplineModel::OnTransformChanged()
 {
     // Base
     ModelInstanceActor::OnTransformChanged();
+
+    OnSplineUpdated();
+}
+
+void SplineModel::OnActiveInTreeChanged()
+{
+    // Base
+    ModelInstanceActor::OnActiveInTreeChanged();
 
     OnSplineUpdated();
 }

@@ -2,17 +2,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using FlaxEditor.Content;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.Scripting;
 using FlaxEditor.Surface;
 using FlaxEditor.Viewport.Cameras;
 using FlaxEditor.Viewport.Previews;
+using FlaxEditor.Viewport.Widgets;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using Object = FlaxEngine.Object;
 
 // ReSharper disable UnusedMember.Local
 // ReSharper disable UnusedMember.Global
@@ -49,6 +53,7 @@ namespace FlaxEditor.Windows.Assets
         {
             private readonly AnimationGraphWindow _window;
             private ContextMenuButton _showFloorButton;
+            private ViewportWidgetButton _playPauseButton;
             private StaticModel _floorModel;
 
             public AnimationGraphPreview(AnimationGraphWindow window)
@@ -60,6 +65,33 @@ namespace FlaxEditor.Windows.Assets
                 _showFloorButton = ViewWidgetShowMenu.AddButton("Floor", OnShowFloorModelClicked);
                 _showFloorButton.Icon = Style.Current.CheckBoxTick;
                 _showFloorButton.IndexInParent = 1;
+
+                // Playback Speed
+                {
+                    var playbackSpeed = ViewWidgetButtonMenu.AddButton("Playback Speed");
+                    var playbackSpeedValue = new FloatValueBox(-1, 90, 2, 70.0f, 0.0f, 10000.0f, 0.001f)
+                    {
+                        Parent = playbackSpeed
+                    };
+                    playbackSpeedValue.ValueChanged += () => PreviewActor.UpdateSpeed = playbackSpeedValue.Value;
+                    ViewWidgetButtonMenu.VisibleChanged += control => playbackSpeedValue.Value = PreviewActor.UpdateSpeed;
+                }
+
+                // Play/Pause widget
+                {
+                    var playPauseWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
+                    _playPauseButton = new ViewportWidgetButton(null, Editor.Instance.Icons.Pause64)
+                    {
+                        TooltipText = "Animation playback play (F5) or pause (F6)",
+                        Parent = playPauseWidget,
+                    };
+                    _playPauseButton.Clicked += button =>
+                    {
+                        PlayAnimation = !PlayAnimation;
+                        button.Icon = PlayAnimation ? Editor.Instance.Icons.Pause64 : Editor.Instance.Icons.Play64;
+                    };
+                    playPauseWidget.Parent = this;
+                }
 
                 // Floor model
                 _floorModel = new StaticModel
@@ -100,9 +132,29 @@ namespace FlaxEditor.Windows.Assets
             }
 
             /// <inheritdoc />
+            public override bool OnKeyDown(KeyboardKeys key)
+            {
+                var inputOptions = Editor.Instance.Options.Options.Input;
+                if (inputOptions.Play.Process(this, key))
+                {
+                    PlayAnimation = true;
+                    _playPauseButton.Icon = PlayAnimation ? Editor.Instance.Icons.Pause64 : Editor.Instance.Icons.Play64;
+                    return true;
+                }
+                if (inputOptions.Pause.Process(this, key))
+                {
+                    PlayAnimation = false;
+                    _playPauseButton.Icon = PlayAnimation ? Editor.Instance.Icons.Pause64 : Editor.Instance.Icons.Play64;
+                    return true;
+                }
+                return base.OnKeyDown(key);
+            }
+
+            /// <inheritdoc />
             public override void OnDestroy()
             {
-                FlaxEngine.Object.Destroy(ref _floorModel);
+                Object.Destroy(ref _floorModel);
+                _playPauseButton = null;
                 _showFloorButton = null;
 
                 base.OnDestroy();
@@ -206,11 +258,18 @@ namespace FlaxEditor.Windows.Assets
             }
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct AnimGraphDebugFlowInfo
+        {
+            public uint NodeId;
+            public int BoxId;
+        }
+
         private FlaxObjectRefPickerControl _debugPicker;
         private NavigationBar _navigationBar;
         private PropertiesProxy _properties;
         private Tab _previewTab;
-        private readonly List<Editor.AnimGraphDebugFlowInfo> _debugFlows = new List<Editor.AnimGraphDebugFlowInfo>();
+        private readonly List<AnimGraphDebugFlowInfo> _debugFlows = new List<AnimGraphDebugFlowInfo>();
 
         /// <summary>
         /// Gets the animated model actor used for the animation preview.
@@ -251,9 +310,9 @@ namespace FlaxEditor.Windows.Assets
             _surface.ContextChanged += OnSurfaceContextChanged;
 
             // Toolstrip
-            _toolstrip.AddButton(editor.Icons.Bone32, () => _preview.ShowNodes = !_preview.ShowNodes).SetAutoCheck(true).LinkTooltip("Show animated model nodes debug view");
+            _toolstrip.AddButton(editor.Icons.Bone64, () => _preview.ShowNodes = !_preview.ShowNodes).SetAutoCheck(true).LinkTooltip("Show animated model nodes debug view");
             _toolstrip.AddSeparator();
-            _toolstrip.AddButton(editor.Icons.Docs32, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/animation/anim-graph/index.html")).LinkTooltip("See documentation to learn more");
+            _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/animation/anim-graph/index.html")).LinkTooltip("See documentation to learn more");
 
             // Debug picker
             var debugPickerContainer = new ContainerControl();
@@ -285,7 +344,7 @@ namespace FlaxEditor.Windows.Assets
                 Parent = this
             };
 
-            Editor.AnimGraphDebugFlow += OnDebugFlow;
+            Animations.DebugFlow += OnDebugFlow;
         }
 
         private void OnSurfaceContextChanged(VisjectSurfaceContext context)
@@ -293,26 +352,27 @@ namespace FlaxEditor.Windows.Assets
             _surface.UpdateNavigationBar(_navigationBar, _toolstrip);
         }
 
-        private bool OnCheckValid(FlaxEngine.Object obj, ScriptType type)
+        private bool OnCheckValid(Object obj, ScriptType type)
         {
             return obj is AnimatedModel player && player.AnimationGraph == OriginalAsset;
         }
 
-        private void OnDebugFlow(Editor.AnimGraphDebugFlowInfo flowInfo)
+        private void OnDebugFlow(Asset asset, Object obj, uint nodeId, uint boxId)
         {
             // Filter the flow
             if (_debugPicker.Value != null)
             {
-                if (flowInfo.Asset != OriginalAsset || _debugPicker.Value != flowInfo.Object)
+                if (asset != OriginalAsset || _debugPicker.Value != obj)
                     return;
             }
             else
             {
-                if (flowInfo.Asset != Asset || _preview.PreviewActor != flowInfo.Object)
+                if (asset != Asset || _preview.PreviewActor != obj)
                     return;
             }
 
             // Register flow to show it in UI on a surface
+            var flowInfo = new AnimGraphDebugFlowInfo { NodeId = nodeId, BoxId = (int)boxId };
             lock (_debugFlows)
             {
                 _debugFlows.Add(flowInfo);
@@ -457,7 +517,7 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnDestroy()
         {
-            Editor.AnimGraphDebugFlow -= OnDebugFlow;
+            Animations.DebugFlow -= OnDebugFlow;
 
             _properties = null;
             _navigationBar = null;

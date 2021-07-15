@@ -6,12 +6,13 @@
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/Animations/CurveSerialization.h"
+#include "Engine/Threading/Threading.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #if USE_EDITOR
 #include "Engine/Serialization/MemoryWriteStream.h"
 #endif
 
-REGISTER_BINARY_ASSET(Animation, "FlaxEngine.Animation", nullptr, false);
+REGISTER_BINARY_ASSET(Animation, "FlaxEngine.Animation", false);
 
 Animation::Animation(const SpawnParams& params, const AssetInfo* info)
     : BinaryAsset(params, info)
