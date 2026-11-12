@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
 using FlaxEngine;
@@ -53,7 +59,7 @@ namespace FlaxEditor.SceneGraph.Actors
             }
 
             /// <inheritdoc />
-            public override bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+            public override bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
             {
                 normal = Vector3.Up;
                 var sphere = new BoundingSphere(Transform.Translation, 10.0f);
@@ -71,21 +77,19 @@ namespace FlaxEditor.SceneGraph.Actors
         public NavLinkNode(Actor actor)
         : base(actor)
         {
-            var bytes = ID.ToByteArray();
-            bytes[0] += 1;
-            AddChildNode(new LinkNode(this, new Guid(bytes), true));
-            bytes[0] += 1;
-            AddChildNode(new LinkNode(this, new Guid(bytes), false));
+            var id = ID;
+            AddChildNode(new LinkNode(this, GetSubID(id, 0), true));
+            AddChildNode(new LinkNode(this, GetSubID(id, 1), false));
         }
 
         /// <inheritdoc />
         public override bool AffectsNavigation => true;
 
         /// <inheritdoc />
-        public override bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+        public override bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             normal = Vector3.Up;
-            distance = float.MaxValue;
+            distance = Real.MaxValue;
             return false;
         }
     }

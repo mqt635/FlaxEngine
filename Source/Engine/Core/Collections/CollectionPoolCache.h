@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -39,7 +39,6 @@ template<typename T, CollectionPoolCacheUtils::ClearCallback<T> ClearCallback = 
 class CollectionPoolCache
 {
 public:
-
     /// <summary>
     /// Helper object used to access the pooled collection and return it to the pool after usage (on code scope execution end).
     /// </summary>
@@ -48,17 +47,15 @@ public:
         friend CollectionPoolCache;
 
     private:
-
         CollectionPoolCache* _pool;
 
-        ScopeCache(CollectionPoolCache* pool, T* value)
+        FORCE_INLINE ScopeCache(CollectionPoolCache* pool, T* value)
         {
             _pool = pool;
             Value = value;
         }
 
     public:
-
         T* Value;
 
         ScopeCache() = delete;
@@ -74,7 +71,7 @@ public:
 
         ~ScopeCache()
         {
-            _pool->Release(Value);
+            _pool->Put(Value);
         }
 
         T* operator->()
@@ -99,19 +96,10 @@ public:
     };
 
 private:
-
     CriticalSection _locker;
     Array<T*, InlinedAllocation<64>> _pool;
 
-    void Release(T* value)
-    {
-        _locker.Lock();
-        _pool.Add(value);
-        _locker.Unlock();
-    }
-
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="CollectionPoolCache"/> class.
     /// </summary>
@@ -121,12 +109,20 @@ public:
     }
 
 public:
+    /// <summary>
+    /// Gets the collection instance from the pool. Can reuse the object from the pool or create a new one. Returns collection is always cleared and ready to use.
+    /// </summary>
+    /// <returns>The collection (cleared).</returns>
+    FORCE_INLINE ScopeCache Get()
+    {
+        return ScopeCache(this, GetUnscoped());
+    }
 
     /// <summary>
     /// Gets the collection instance from the pool. Can reuse the object from the pool or create a new one. Returns collection is always cleared and ready to use.
     /// </summary>
     /// <returns>The collection (cleared).</returns>
-    ScopeCache Get()
+    T* GetUnscoped()
     {
         T* result;
         _locker.Lock();
@@ -135,10 +131,18 @@ public:
         else
             result = CreateCallback();
         _locker.Unlock();
-
         ClearCallback(result);
+        return result;
+    }
 
-        return ScopeCache(this, result);
+    /// <summary>
+    /// Puts the collection value back to the pool.
+    /// </summary>
+    void Put(T* value)
+    {
+        _locker.Lock();
+        _pool.Add(value);
+        _locker.Unlock();
     }
 
     /// <summary>

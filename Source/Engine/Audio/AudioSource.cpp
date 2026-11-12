@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "AudioSource.h"
 #include "Engine/Core/Log.h"
@@ -8,21 +8,27 @@
 #include "Engine/Engine/Time.h"
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "AudioBackend.h"
 #include "Audio.h"
+
+void AudioBackend::Source::SetStreamingFirstChunk(AudioSource* source, int32 chunkIndex)
+{
+    source->_streamingFirstChunk = chunkIndex;
+}
 
 AudioSource::AudioSource(const SpawnParams& params)
     : Actor(params)
     , _velocity(Vector3::Zero)
     , _volume(1.0f)
     , _pitch(1.0f)
-    , _minDistance(1.0f)
-    , _attenuation(1.0f)
+    , _minDistance(1000.0f)
     , _loop(false)
     , _playOnStart(false)
+    , _startTime(0.0f)
+    , _allowSpatialization(true)
+    , Clip(this)
 {
-    Clip.Changed.Bind<AudioSource, &AudioSource::OnClipChanged>(this);
-    Clip.Loaded.Bind<AudioSource, &AudioSource::OnClipLoaded>(this);
 }
 
 void AudioSource::SetVolume(float value)
@@ -30,13 +36,9 @@ void AudioSource::SetVolume(float value)
     value = Math::Saturate(value);
     if (Math::NearEqual(_volume, value))
         return;
-
     _volume = value;
-
-    if (SourceIDs.HasItems())
-    {
-        AudioBackend::Source::VolumeChanged(this);
-    }
+    if (SourceID)
+        AudioBackend::Source::VolumeChanged(SourceID, _volume);
 }
 
 void AudioSource::SetPitch(float value)
@@ -44,27 +46,30 @@ void AudioSource::SetPitch(float value)
     value = Math::Clamp(value, 0.5f, 2.0f);
     if (Math::NearEqual(_pitch, value))
         return;
-
     _pitch = value;
+    if (SourceID)
+        AudioBackend::Source::PitchChanged(SourceID, _pitch);
+}
 
-    if (SourceIDs.HasItems())
-    {
-        AudioBackend::Source::PitchChanged(this);
-    }
+void AudioSource::SetPan(float value)
+{
+    value = Math::Clamp(value, -1.0f, 1.0f);
+    if (Math::NearEqual(_pan, value))
+        return;
+    _pan = value;
+    if (SourceID)
+        AudioBackend::Source::PanChanged(SourceID, _pan);
 }
 
 void AudioSource::SetIsLooping(bool value)
 {
     if (_loop == value)
         return;
-
     _loop = value;
 
     // When streaming we handle looping manually by the proper buffers submission
-    if (SourceIDs.HasItems() && !UseStreaming())
-    {
-        AudioBackend::Source::IsLoopingChanged(this);
-    }
+    if (SourceID && !UseStreaming())
+        AudioBackend::Source::IsLoopingChanged(SourceID, _loop);
 }
 
 void AudioSource::SetPlayOnStart(bool value)
@@ -72,18 +77,19 @@ void AudioSource::SetPlayOnStart(bool value)
     _playOnStart = value;
 }
 
+void AudioSource::SetStartTime(float value)
+{
+    _startTime = value;
+}
+
 void AudioSource::SetMinDistance(float value)
 {
     value = Math::Max(0.0f, value);
     if (Math::NearEqual(_minDistance, value))
         return;
-
     _minDistance = value;
-
-    if (SourceIDs.HasItems())
-    {
-        AudioBackend::Source::MinDistanceChanged(this);
-    }
+    if (SourceID)
+        AudioBackend::Source::SpatialSetupChanged(SourceID, Is3D(), _attenuation, _minDistance, _dopplerFactor);
 }
 
 void AudioSource::SetAttenuation(float value)
@@ -91,43 +97,84 @@ void AudioSource::SetAttenuation(float value)
     value = Math::Max(0.0f, value);
     if (Math::NearEqual(_attenuation, value))
         return;
-
     _attenuation = value;
+    if (SourceID)
+        AudioBackend::Source::SpatialSetupChanged(SourceID, Is3D(), _attenuation, _minDistance, _dopplerFactor);
+}
 
-    if (SourceIDs.HasItems())
-    {
-        AudioBackend::Source::AttenuationChanged(this);
-    }
+void AudioSource::SetDopplerFactor(float value)
+{
+    value = Math::Max(0.0f, value);
+    if (Math::NearEqual(_dopplerFactor, value))
+        return;
+    _dopplerFactor = value;
+    if (SourceID)
+        AudioBackend::Source::SpatialSetupChanged(SourceID, Is3D(), _attenuation, _minDistance, _dopplerFactor);
+}
+
+void AudioSource::SetAllowSpatialization(bool value)
+{
+    if (_allowSpatialization == value)
+        return;
+    _allowSpatialization = value;
+    if (SourceID)
+        AudioBackend::Source::SpatialSetupChanged(SourceID, Is3D(), _attenuation, _minDistance, _dopplerFactor);
 }
 
 void AudioSource::Play()
 {
-    if (_state == States::Playing)
+    auto state = _state;
+    if (state == States::Playing)
         return;
-    if (Clip == nullptr)
+    PROFILE_CPU();
+    if (Clip == nullptr || Clip->WaitForLoaded())
     {
         LOG(Warning, "Cannot play audio source without a clip ({0})", GetNamePath());
         return;
     }
 
+    if (SourceID == 0)
+    {
+        // Create audio source
+        SourceID = AudioBackend::Source::Add(Clip->Info(), GetPosition(), GetOrientation(), GetVolume(), GetPitch(), GetPan(), GetIsLooping() && !UseStreaming(), Is3D(), GetAttenuation(), GetMinDistance(), GetDopplerFactor());
+        if (SourceID == 0)
+        {
+            LOG(Warning, "Cannot create audio source ({0})", GetNamePath());
+            return;
+        }
+    }
+
     _state = States::Playing;
     _isActuallyPlayingSth = false;
-
-    // Don't block scripting if audio is not loaded or has missing streaming data
-    if (!Clip->IsLoaded())
-        return;
 
     // Audio clips with disabled streaming are controlled by audio source, otherwise streaming manager will play it
     if (Clip->IsStreamable())
     {
-        // Request faster streaming update
-        Clip->RequestStreamingUpdate();
+        if (state == States::Paused)
+        {
+            // Resume
+            PlayInternal();
+        }
+        else
+        {
+            // Request faster streaming update
+            Clip->RequestStreamingUpdate();
+
+            // If we are looping and streaming also update streaming buffers
+            if (_loop || state == States::Stopped)
+                RequestStreamingBuffersUpdate();
+        }
+    }
+    else if (SourceID)
+    {
+        // Play it right away
+        AudioBackend::Source::SetNonStreamingBuffer(SourceID, Clip->Buffers[0]);
+        PlayInternal();
     }
     else
     {
-        // Play it right away
-        SetNonStreamingBuffer();
-        PlayInternal();
+        // Source was not properly added to the Audio Backend
+        LOG(Warning, "Cannot play uninitialized audio source.");
     }
 }
 
@@ -137,10 +184,9 @@ void AudioSource::Pause()
         return;
 
     _state = States::Paused;
-
     if (_isActuallyPlayingSth)
     {
-        AudioBackend::Source::Pause(this);
+        AudioBackend::Source::Pause(SourceID);
         _isActuallyPlayingSth = false;
     }
 }
@@ -149,32 +195,37 @@ void AudioSource::Stop()
 {
     if (_state == States::Stopped)
         return;
+    PROFILE_CPU();
 
     _state = States::Stopped;
     _isActuallyPlayingSth = false;
     _streamingFirstChunk = 0;
-
-    if (SourceIDs.HasItems())
-        AudioBackend::Source::Stop(this);
+    _savedTime = 0.0f;
+    if (SourceID)
+        AudioBackend::Source::Stop(SourceID);
 }
 
 float AudioSource::GetTime() const
 {
-    if (_state == States::Stopped || SourceIDs.IsEmpty())
+    if (_state == States::Stopped || SourceID == 0 || Clip == nullptr || !Clip->IsLoaded())
         return 0.0f;
 
-    float time = AudioBackend::Source::GetCurrentBufferTime(this);
-    ASSERT(time >= 0.0f && time <= Clip->GetLength());
+    float time = AudioBackend::Source::GetCurrentBufferTime(SourceID);
 
     if (UseStreaming())
     {
         // Apply time offset to the first streaming buffer binded to the source including the already queued buffers
         int32 numProcessedBuffers = 0;
-        AudioBackend::Source::GetProcessedBuffersCount(const_cast<AudioSource*>(this), numProcessedBuffers);
+        AudioBackend::Source::GetProcessedBuffersCount(SourceID, numProcessedBuffers);
         time += Clip->GetBufferStartTime(_streamingFirstChunk + numProcessedBuffers);
     }
 
     time = Math::Clamp(time, 0.0f, Clip->GetLength());
+
+    if (time <= 0.0001f && _savedTime > 0.0001f)
+    {
+        time = _savedTime;
+    }
 
     return time;
 }
@@ -193,6 +244,9 @@ void AudioSource::SetTime(float time)
         Stop();
     }
 
+    // Restore _savedTime after Stop() resets it
+    _savedTime = time;
+
     if (UseStreaming())
     {
         // Update the first audio clip chunk to use for streaming and peek the relative time offset from the chunk start
@@ -202,7 +256,7 @@ void AudioSource::SetTime(float time)
         time = relativeTime;
     }
 
-    AudioBackend::Source::SetCurrentBufferTime(this, time);
+    AudioBackend::Source::SetCurrentBufferTime(SourceID, time);
 
     // Restore state if was stopped
     if (isActuallyPlayingSth)
@@ -218,31 +272,34 @@ bool AudioSource::Is3D() const
 {
     if (Clip == nullptr || Clip->WaitForLoaded())
         return false;
-    return Clip->Is3D();
+    return _allowSpatialization && Clip->Is3D();
 }
 
-void AudioSource::Cleanup()
+void AudioSource::RequestStreamingBuffersUpdate()
 {
-    _savedState = GetState();
-    _savedTime = GetTime();
-    Stop();
-
-    AudioBackend::Source::Cleanup(this);
-
-    SourceIDs.Clear();
+    _needToUpdateStreamingBuffers = true;
 }
 
-void AudioSource::OnClipChanged()
+void AudioSource::OnAssetChanged(Asset* asset, void* caller)
 {
     Stop();
+
+    // Destroy current source (will be created on the next play), because clip might use different spatial options or audio data format
+    if (SourceID)
+    {
+        AudioBackend::Source::Remove(SourceID);
+        SourceID = 0;
+    }
 }
 
-void AudioSource::OnClipLoaded()
+void AudioSource::OnAssetLoaded(Asset* asset, void* caller)
 {
-    if (SourceIDs.IsEmpty())
+    if (!SourceID)
         return;
 
-    AudioBackend::Source::ClipLoaded(this);
+    // Reset spatial and playback
+    AudioBackend::Source::IsLoopingChanged(SourceID, _loop && !UseStreaming());
+    AudioBackend::Source::SpatialSetupChanged(SourceID, Is3D(), _attenuation, _minDistance, _dopplerFactor);
 
     // Start playing if source was waiting for the clip to load
     if (_state == States::Playing && !_isActuallyPlayingSth)
@@ -255,46 +312,45 @@ void AudioSource::OnClipLoaded()
         else
         {
             // Play it right away
-            SetNonStreamingBuffer();
+            AudioBackend::Source::SetNonStreamingBuffer(SourceID, Clip->Buffers[0]);
             PlayInternal();
         }
     }
 }
 
+void AudioSource::OnAssetUnloaded(Asset* asset, void* caller)
+{
+}
+
 bool AudioSource::UseStreaming() const
 {
-    return Clip && Clip->IsLoaded() && Clip->IsStreamable();
-}
-
-void AudioSource::Restore()
-{
-    if (Clip)
-    {
-        if (_savedState != States::Stopped)
-            Play();
-        if (_savedState == States::Paused)
-            Pause();
-
-        SetTime(_savedTime);
-
-        if (_savedState != States::Stopped && UseStreaming())
-            RequestStreamingBuffersUpdate();
-    }
-}
-
-void AudioSource::SetNonStreamingBuffer()
-{
-    ASSERT(Clip && !Clip->IsStreamable());
-
-    AudioBackend::Source::SetNonStreamingBuffer(this);
+    if (Clip == nullptr || Clip->WaitForLoaded())
+        return false;
+    return Clip->IsStreamable();
 }
 
 void AudioSource::PlayInternal()
 {
-    AudioBackend::Source::Play(this);
-
+    AudioBackend::Source::Play(SourceID);
     _isActuallyPlayingSth = true;
+    _startingToPlay = true;
 }
+
+#if USE_EDITOR
+
+#include "Engine/Debug/DebugDraw.h"
+
+void AudioSource::OnDebugDrawSelected()
+{
+    // Draw influence range
+    if (_allowSpatialization)
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(_transform.Translation, _minDistance), Color::CornflowerBlue, 0, true);
+
+    // Base
+    Actor::OnDebugDrawSelected();
+}
+
+#endif
 
 void AudioSource::Serialize(SerializeStream& stream, const void* otherObj)
 {
@@ -306,10 +362,14 @@ void AudioSource::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE(Clip);
     SERIALIZE_MEMBER(Volume, _volume);
     SERIALIZE_MEMBER(Pitch, _pitch);
+    SERIALIZE_MEMBER(Pan, _pan);
     SERIALIZE_MEMBER(MinDistance, _minDistance);
     SERIALIZE_MEMBER(Attenuation, _attenuation);
+    SERIALIZE_MEMBER(DopplerFactor, _dopplerFactor);
     SERIALIZE_MEMBER(Loop, _loop);
     SERIALIZE_MEMBER(PlayOnStart, _playOnStart);
+    SERIALIZE_MEMBER(StartTime, _startTime);
+    SERIALIZE_MEMBER(AllowSpatialization, _allowSpatialization);
 }
 
 void AudioSource::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
@@ -317,13 +377,17 @@ void AudioSource::Deserialize(DeserializeStream& stream, ISerializeModifier* mod
     // Base
     Actor::Deserialize(stream, modifier);
 
-    DESERIALIZE(Clip);
     DESERIALIZE_MEMBER(Volume, _volume);
     DESERIALIZE_MEMBER(Pitch, _pitch);
+    DESERIALIZE_MEMBER(Pan, _pan);
     DESERIALIZE_MEMBER(MinDistance, _minDistance);
     DESERIALIZE_MEMBER(Attenuation, _attenuation);
+    DESERIALIZE_MEMBER(DopplerFactor, _dopplerFactor);
     DESERIALIZE_MEMBER(Loop, _loop);
     DESERIALIZE_MEMBER(PlayOnStart, _playOnStart);
+    DESERIALIZE_MEMBER(StartTime, _startTime);
+    DESERIALIZE_MEMBER(AllowSpatialization, _allowSpatialization);
+    DESERIALIZE(Clip);
 }
 
 bool AudioSource::HasContentLoaded() const
@@ -331,7 +395,7 @@ bool AudioSource::HasContentLoaded() const
     return Clip == nullptr || Clip->IsLoaded();
 }
 
-bool AudioSource::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool AudioSource::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return false;
 }
@@ -339,6 +403,7 @@ bool AudioSource::IntersectsItself(const Ray& ray, float& distance, Vector3& nor
 void AudioSource::Update()
 {
     PROFILE_CPU();
+    PROFILE_MEM(Audio);
 
     // Update the velocity
     const Vector3 pos = GetPosition();
@@ -346,32 +411,69 @@ void AudioSource::Update()
     const auto prevVelocity = _velocity;
     _velocity = (pos - _prevPos) / dt;
     _prevPos = pos;
-    if (_velocity != prevVelocity)
+    if (_velocity != prevVelocity && Is3D())
     {
-        AudioBackend::Source::VelocityChanged(this);
+        AudioBackend::Source::VelocityChanged(SourceID, _velocity);
+    }
+
+    float curTime = 0.0f;
+    if (_state != States::Stopped && SourceID && Clip && Clip->IsLoaded())
+    {
+        curTime = GetTime();
+        if (curTime > 0.0001f)
+            _savedTime = curTime;
+    }
+
+    // Reset starting to play value once time is greater than zero
+    if (_startingToPlay && curTime > 0.0f)
+    {
+        _startingToPlay = false;
+    }
+
+    if (Math::NearEqual(curTime, _startTime) && _isActuallyPlayingSth && _startingToPlay)
+        ClipStarted();
+
+    if (!UseStreaming() && Math::NearEqual(curTime, 0.0f) && _isActuallyPlayingSth && !_startingToPlay)
+    {
+        int32 queuedBuffers;
+        AudioBackend::Source::GetQueuedBuffersCount(SourceID, queuedBuffers);
+        if (queuedBuffers)
+        {
+            if (GetIsLooping())
+            {
+                Stop();
+                Play();
+            }
+            else
+            {
+                Stop();
+            }
+            ClipFinished();
+        }
     }
 
     // Skip other update logic if it's not valid streamable source
-    if (!UseStreaming() || SourceIDs.IsEmpty())
+    if (!UseStreaming() || SourceID == 0)
         return;
     auto clip = Clip.Get();
+    clip->Locker.Lock();
 
     // Handle streaming buffers queue submit (ensure that clip has loaded the first chunk with audio data)
-    if (_needToUpdateStreamingBuffers && clip->Buffers[_streamingFirstChunk] != AUDIO_BUFFER_ID_INVALID)
+    if (_needToUpdateStreamingBuffers && clip->Buffers[_streamingFirstChunk] != 0)
     {
         // Get buffers in a queue count
         int32 numQueuedBuffers;
-        AudioBackend::Source::GetQueuedBuffersCount(this, numQueuedBuffers);
+        AudioBackend::Source::GetQueuedBuffersCount(SourceID, numQueuedBuffers);
 
         // Queue missing buffers
-        uint32 bufferId;
-        if (numQueuedBuffers < 1 && (bufferId = clip->Buffers[_streamingFirstChunk]) != AUDIO_BUFFER_ID_INVALID)
+        uint32 bufferID;
+        if (numQueuedBuffers < 1 && (bufferID = clip->Buffers[_streamingFirstChunk]) != 0)
         {
-            AudioBackend::Source::QueueBuffer(this, bufferId);
+            AudioBackend::Source::QueueBuffer(SourceID, bufferID);
         }
-        if (numQueuedBuffers < 2 && _streamingFirstChunk + 1 < clip->Buffers.Count() && (bufferId = clip->Buffers[_streamingFirstChunk + 1]) != AUDIO_BUFFER_ID_INVALID)
+        if (numQueuedBuffers < 2 && _streamingFirstChunk + 1 < clip->Buffers.Count() && (bufferID = clip->Buffers[_streamingFirstChunk + 1]) != 0)
         {
-            AudioBackend::Source::QueueBuffer(this, bufferId);
+            AudioBackend::Source::QueueBuffer(SourceID, bufferID);
         }
 
         // Clear flag
@@ -389,13 +491,13 @@ void AudioSource::Update()
     {
         // Get the processed buffers count
         int32 numProcessedBuffers = 0;
-        AudioBackend::Source::GetProcessedBuffersCount(this, numProcessedBuffers);
+        AudioBackend::Source::GetProcessedBuffersCount(SourceID, numProcessedBuffers);
         if (numProcessedBuffers > 0)
         {
             ASSERT(numProcessedBuffers <= ASSET_FILE_DATA_CHUNKS);
 
             // Unbind processed buffers from the source
-            AudioBackend::Source::DequeueProcessedBuffers(this);
+            AudioBackend::Source::DequeueProcessedBuffers(SourceID);
 
             // Move the chunk pointer (AudioStreamingHandler will request new chunks streaming)
             _streamingFirstChunk += numProcessedBuffers;
@@ -410,14 +512,14 @@ void AudioSource::Update()
                     _streamingFirstChunk = 0;
 
                     // Stop audio and request buffers re-sync and then play continue
-                    AudioBackend::Source::Stop(this);
-                    RequestStreamingBuffersUpdate();
-                    _isActuallyPlayingSth = false;
+                    Stop();
+                    Play();
                 }
                 else
                 {
                     Stop();
                 }
+                ClipFinished();
             }
             ASSERT(_streamingFirstChunk < clip->Buffers.Count());
 
@@ -425,6 +527,8 @@ void AudioSource::Update()
             clip->RequestStreamingUpdate();
         }
     }
+
+    clip->Locker.Unlock();
 }
 
 void AudioSource::OnEnable()
@@ -432,11 +536,27 @@ void AudioSource::OnEnable()
     _prevPos = GetPosition();
     _velocity = Vector3::Zero;
 
-    Audio::OnAddSource(this);
+    // Add source
+    ASSERT_LOW_LAYER(!Audio::Sources.Contains(this));
+    Audio::Sources.Add(this);
     GetScene()->Ticking.Update.AddTick<AudioSource, &AudioSource::Update>(this);
 #if USE_EDITOR
     GetSceneRendering()->AddViewportIcon(this);
 #endif
+
+    // Restore playback state
+    if (Clip)
+    {
+        if (_savedState != States::Stopped)
+            Play();
+        if (_savedState == States::Paused)
+            Pause();
+
+        SetTime(_savedTime);
+
+        if (_savedState != States::Stopped && UseStreaming())
+            RequestStreamingBuffersUpdate();
+    }
 
     // Base
     Actor::OnEnable();
@@ -444,13 +564,24 @@ void AudioSource::OnEnable()
 
 void AudioSource::OnDisable()
 {
+    // Cache playback state
+    _savedState = GetState();
+    _savedTime = GetTime();
+
+    // End playback
     Stop();
 
+    // Remove source
 #if USE_EDITOR
     GetSceneRendering()->RemoveViewportIcon(this);
 #endif
     GetScene()->Ticking.Update.RemoveTick(this);
-    Audio::OnRemoveSource(this);
+    if (SourceID)
+    {
+        AudioBackend::Source::Remove(SourceID);
+        SourceID = 0;
+    }
+    Audio::Sources.Remove(this);
 
     // Base
     Actor::OnDisable();
@@ -464,9 +595,9 @@ void AudioSource::OnTransformChanged()
     _box = BoundingBox(_transform.Translation);
     _sphere = BoundingSphere(_transform.Translation, 0.0f);
 
-    if (IsActiveInHierarchy() && SourceIDs.HasItems())
+    if (IsActiveInHierarchy() && SourceID && Is3D())
     {
-        AudioBackend::Source::TransformChanged(this);
+        AudioBackend::Source::TransformChanged(SourceID, _transform.Translation, _transform.Orientation);
     }
 }
 
@@ -482,5 +613,7 @@ void AudioSource::BeginPlay(SceneBeginData* data)
             return;
 #endif
         Play();
+        if (GetStartTime() > 0)
+            SetTime(GetStartTime());
     }
 }

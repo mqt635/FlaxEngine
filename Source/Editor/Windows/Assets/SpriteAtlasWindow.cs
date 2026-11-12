@@ -1,11 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.IO;
 using System.Linq;
 using System.Xml;
 using FlaxEditor.Content;
 using FlaxEditor.Content.Import;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
+using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Scripting;
@@ -50,10 +52,8 @@ namespace FlaxEditor.Windows.Assets
                     {
                         var sprite = Asset.GetSprite(i);
                         var area = sprite.Area;
-
-                        Vector2 position = area.Location * rect.Size + rect.Location;
-                        Vector2 size = area.Size * rect.Size;
-
+                        var position = area.Location * rect.Size + rect.Location;
+                        var size = area.Size * rect.Size;
                         Render2D.DrawRectangle(new Rectangle(position, size), style.BackgroundSelected);
                     }
                 }
@@ -85,15 +85,15 @@ namespace FlaxEditor.Windows.Assets
                     set => Sprite.Name = value;
                 }
 
-                [EditorOrder(1), Limit(-4096, 4096)]
-                public Vector2 Location
+                [EditorOrder(1)]
+                public Float2 Location
                 {
                     get => Sprite.Location;
                     set => Sprite.Location = value;
                 }
 
-                [EditorOrder(3), Limit(0, 4096)]
-                public Vector2 Size
+                [EditorOrder(3), Limit(0)]
+                public Float2 Size
                 {
                     get => Sprite.Size;
                     set => Sprite.Size = value;
@@ -105,15 +105,26 @@ namespace FlaxEditor.Windows.Assets
             public SpriteEntry[] Sprites;
 
             [EditorOrder(1000), EditorDisplay("Import Settings", EditorDisplayAttribute.InlineStyle)]
-            public TextureImportSettings ImportSettings = new TextureImportSettings();
+            public FlaxEngine.Tools.TextureTool.Options ImportSettings = new();
 
             public sealed class ProxyEditor : GenericEditor
             {
                 public override void Initialize(LayoutElementsContainer layout)
                 {
+                    var proxy = (PropertiesProxy)Values[0];
+                    if (proxy._window == null)
+                    {
+                        layout.Label("Loading...", TextAlignment.Center);
+                        return;
+                    }
+                    
                     base.Initialize(layout);
 
-                    layout.Space(10);
+                    // Creates the import path UI
+                    var group = layout.Group("Import Path");
+                    Utilities.Utils.CreateImportPathUI(group, proxy._window.Item as BinaryAssetItem);
+
+                    layout.Space(5);
                     var reimportButton = layout.Button("Reimport");
                     reimportButton.Button.Clicked += () => ((PropertiesProxy)Values[0]).Reimport();
                 }
@@ -135,19 +146,56 @@ namespace FlaxEditor.Windows.Assets
                             group.Panel.Tag = i;
                             group.Panel.MouseButtonRightClicked += OnGroupPanelMouseButtonRightClicked;
                             group.Object(new ListValueContainer(elementType, i, Values));
+
+                            var stringNameElement = group.Editors[0].ChildrenEditors.Find(x => x is StringEditor).Layout.Children.Find(x => x is TextBoxElement) as TextBoxElement;
+                            if (stringNameElement != null)
+                            {
+                                stringNameElement.TextBox.TextBoxEditEnd += (textbox) => OnNameChanged(group.Panel, (TextBox)textbox);
+                            }
                         }
                     }
                 }
 
-                private void OnGroupPanelMouseButtonRightClicked(DropPanel groupPanel, Vector2 location)
+                private void OnNameChanged(DropPanel panel, TextBox textbox)
+                {
+                    panel.HeaderText = textbox.Text;
+                }
+
+                private void OnGroupPanelMouseButtonRightClicked(DropPanel groupPanel, Float2 location)
                 {
                     var menu = new ContextMenu();
+
+                    var copySprite = menu.AddButton("Copy sprite");
+                    copySprite.Tag = groupPanel.Tag;
+                    copySprite.ButtonClicked += OnCopySpriteClicked;
+
+                    var pasteSprite = menu.AddButton("Paste sprite");
+                    pasteSprite.Tag = groupPanel.Tag;
+                    pasteSprite.ButtonClicked += OnPasteSpriteClicked;
 
                     var deleteSprite = menu.AddButton("Delete sprite");
                     deleteSprite.Tag = groupPanel.Tag;
                     deleteSprite.ButtonClicked += OnDeleteSpriteClicked;
 
                     menu.Show(groupPanel, location);
+                }
+
+                private void OnCopySpriteClicked(ContextMenuButton button)
+                {
+                    var window = ((PropertiesProxy)ParentEditor.Values[0])._window;
+                    var index = (int)button.Tag;
+                    var sprite = window.Asset.GetSprite(index);
+                    Clipboard.Text = FlaxEngine.Json.JsonSerializer.Serialize(sprite, typeof(Sprite));
+                }
+
+                private void OnPasteSpriteClicked(ContextMenuButton button)
+                {
+                    var window = ((PropertiesProxy)ParentEditor.Values[0])._window;
+                    var index = (int)button.Tag;
+                    var sprite = window.Asset.GetSprite(index);
+                    var pasted = FlaxEngine.Json.JsonSerializer.Deserialize<Sprite>(Clipboard.Text);
+                    sprite.Area = pasted.Area;
+                    window.Asset.SetSprite(index, ref sprite);
                 }
 
                 private void OnDeleteSpriteClicked(ContextMenuButton button)
@@ -185,11 +233,7 @@ namespace FlaxEditor.Windows.Assets
                 UpdateSprites();
 
                 // Try to restore target asset texture import options (useful for fast reimport)
-                if (TextureImportEntry.Internal_GetTextureImportOptions(win.Item.Path, out TextureImportSettings.InternalOptions options))
-                {
-                    // Restore settings
-                    ImportSettings.FromInternal(ref options);
-                }
+                Editor.TryRestoreImportOptions(ref ImportSettings, win.Item.Path);
 
                 // Prepare restore data
                 PeekState();
@@ -241,6 +285,8 @@ namespace FlaxEditor.Windows.Assets
         public SpriteAtlasWindow(Editor editor, AssetItem item)
         : base(editor, item)
         {
+            var inputOptions = Editor.Options.Options.Input;
+
             // Split Panel
             _split = new SplitPanel(Orientation.Horizontal, ScrollBars.None, ScrollBars.Vertical)
             {
@@ -264,15 +310,15 @@ namespace FlaxEditor.Windows.Assets
             _propertiesEditor.Modified += MarkAsEdited;
 
             // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save");
+            _saveButton = _toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save", ref inputOptions.Save);
             _toolstrip.AddButton(editor.Icons.Import64, () => Editor.ContentImporting.Reimport((BinaryAssetItem)Item)).LinkTooltip("Reimport");
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.AddFile64, () =>
             {
                 var sprite = new Sprite
                 {
-                    Name = StringUtils.IncrementNameNumber("New Sprite", name => Asset.Sprites.All(s => s.Name != name)),
-                    Area = new Rectangle(Vector2.Zero, Vector2.One),
+                    Name = Utilities.Utils.IncrementNameNumber("New Sprite", name => Asset.Sprites.All(s => s.Name != name)),
+                    Area = new Rectangle(Float2.Zero, Float2.One),
                 };
                 Asset.AddSprite(sprite);
                 MarkAsEdited();
@@ -280,7 +326,9 @@ namespace FlaxEditor.Windows.Assets
                 _propertiesEditor.BuildLayout();
             }).LinkTooltip("Add a new sprite");
             _toolstrip.AddSeparator();
-            _toolstrip.AddButton(editor.Icons.CenterView64, _preview.CenterView).LinkTooltip("Center view");
+            _toolstrip.AddButton(editor.Icons.CenterView64, _preview.CenterView).LinkTooltip("Center view", ref editor.Options.Options.Input.ShowEditorContents);
+
+            InputActions.Add(options => options.ShowEditorContents, _preview.CenterView);
         }
 
         /// <inheritdoc />
@@ -368,14 +416,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

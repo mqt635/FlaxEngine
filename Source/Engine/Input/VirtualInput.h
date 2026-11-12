@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,7 +11,7 @@
 /// </summary>
 API_STRUCT() struct ActionConfig
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(ActionConfig);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(ActionConfig);
 
     /// <summary>
     /// The action "friendly name" used to access it from code.
@@ -48,6 +48,12 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(ActionConfig);
     /// </summary>
     API_FIELD(Attributes="EditorOrder(40)")
     InputGamepadIndex Gamepad;
+
+    /// <summary>
+    /// Threshold for non-binary value inputs such as gamepad stick position to decide if action was triggered. Can be sued to activate action only if input value is higher than specified number.
+    /// </summary>
+    API_FIELD(Attributes = "EditorOrder(50)")
+    float DeadZone = 0.5f;
 };
 
 /// <summary>
@@ -55,7 +61,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(ActionConfig);
 /// </summary>
 API_STRUCT() struct AxisConfig
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(AxisConfig);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(AxisConfig);
 
     /// <summary>
     /// The axis "friendly name" used to access it from code.
@@ -86,6 +92,18 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(AxisConfig);
     /// </summary>
     API_FIELD(Attributes="EditorOrder(40)")
     KeyboardKeys NegativeButton;
+
+    /// <summary>
+    /// The button to be pressed for movement in positive direction. Use <see cref="GamepadButton.None"/> to ignore it.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(45)")
+    GamepadButton GamepadPositiveButton;
+
+    /// <summary>
+    /// The button to be pressed for movement in negative direction. Use <see cref="GamepadButton.None"/> to ignore it.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(46)")
+    GamepadButton GamepadNegativeButton;
 
     /// <summary>
     /// Any positive or negative values that are less than this number will register as zero. Useful for gamepads to specify the deadzone.

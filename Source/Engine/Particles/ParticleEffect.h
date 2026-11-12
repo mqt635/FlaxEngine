@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,12 +12,11 @@
 /// <summary>
 /// Particle system parameter.
 /// </summary>
-API_CLASS(NoSpawn) class ParticleEffectParameter : public PersistentScriptingObject
+API_CLASS(NoSpawn) class ParticleEffectParameter : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(ParticleEffectParameter);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(ParticleEffectParameter);
     friend ParticleEffect;
 private:
-
     ParticleEffect* _effect = nullptr;
     int32 _emitterIndex;
     int32 _paramIndex;
@@ -25,29 +24,12 @@ private:
     void Init(ParticleEffect* effect, int32 emitterIndex, int32 paramIndex);
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ParticleEffectParameter"/> class.
     /// </summary>
     ParticleEffectParameter()
-        : PersistentScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
+        : ScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
     {
-    }
-
-    ParticleEffectParameter(const ParticleEffectParameter& other)
-        : ParticleEffectParameter()
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-    }
-
-    ParticleEffectParameter& operator=(const ParticleEffectParameter& other)
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-        return *this;
     }
 
     /// <summary>
@@ -111,13 +93,13 @@ public:
     /// Gets the default value of the parameter (set in particle emitter asset).
     /// </summary>
     /// <returns>The default value.</returns>
-    API_PROPERTY() Variant GetDefaultEmitterValue() const;
+    API_PROPERTY() const Variant& GetDefaultEmitterValue() const;
 
     /// <summary>
     /// Gets the value of the parameter.
     /// </summary>
     /// <returns>The value.</returns>
-    API_PROPERTY() Variant GetValue() const;
+    API_PROPERTY() const Variant& GetValue() const;
 
     /// <summary>
     /// Sets the value of the parameter.
@@ -135,11 +117,11 @@ public:
 /// <summary>
 /// The particle system instance that plays the particles simulation in the game.
 /// </summary>
-API_CLASS() class FLAXENGINE_API ParticleEffect : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Particle Effect\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API ParticleEffect : public Actor, IAssetReference
 {
-DECLARE_SCENE_OBJECT(ParticleEffect);
+    DECLARE_SCENE_OBJECT(ParticleEffect);
 public:
-
     /// <summary>
     /// The particles simulation update modes.
     /// </summary>
@@ -161,7 +143,7 @@ public:
     /// </summary>
     API_STRUCT() struct ParameterOverride
     {
-    DECLARE_SCRIPTING_TYPE_NO_SPAWN(ParameterOverride);
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(ParameterOverride);
 
         /// <summary>
         /// The name of the track that has overriden parameter.
@@ -180,17 +162,19 @@ public:
     };
 
 private:
-
     uint64 _lastUpdateFrame;
-    float _lastMinDstSqr;
-    Matrix _world;
+    Real _lastMinDstSqr;
     int32 _sceneRenderingKey = -1;
     uint32 _parametersVersion = 0; // Version number for _parameters to be in sync with Instance.ParametersVersion
     Array<ParticleEffectParameter> _parameters; // Cached for scripting API
     Array<ParameterOverride> _parametersOverrides; // Cached parameter modifications to be applied to the parameters
+    bool _isPlaying = false;
+    bool _isStopped = false;
+#if USE_EDITOR
+    Array<AssetReference<ParticleEmitter>> _cachedEmitters;
+#endif
 
 public:
-
     /// <summary>
     /// The particle system to play.
     /// </summary>
@@ -208,8 +192,13 @@ public:
     API_FIELD(Attributes="NoSerialize, HideInEditor")
     ScriptingObjectReference<SceneRenderTask> CustomViewRenderTask;
 
-public:
+    /// <summary>
+    /// Toggles particles spawning functionality (for all emitters) at runtime.
+    /// </summary>
+    API_FIELD(Attributes="NoSerialize, HideInEditor")
+    bool CanSpawn = true;
 
+public:
     /// <summary>
     /// The particles simulation update mode. Defines how to update particles emitter.
     /// </summary>
@@ -241,9 +230,15 @@ public:
     bool IsLooping = true;
 
     /// <summary>
-    /// If true, the particle simulation will be updated even when an actor cannot be seen by any camera. Otherwise, the simulation will stop running when the actor is off-screen.
+    /// Determines whether the particle effect should play on start.
     /// </summary>
     API_FIELD(Attributes="EditorDisplay(\"Particle Effect\"), DefaultValue(true), EditorOrder(60)")
+    bool PlayOnStart = true;
+
+    /// <summary>
+    /// If true, the particle simulation will be updated even when an actor cannot be seen by any camera. Otherwise, the simulation will stop running when the actor is off-screen.
+    /// </summary>
+    API_FIELD(Attributes="EditorDisplay(\"Particle Effect\"), DefaultValue(true), EditorOrder(70)")
     bool UpdateWhenOffscreen = true;
 
     /// <summary>
@@ -253,16 +248,19 @@ public:
     DrawPass DrawModes = DrawPass::Default;
 
     /// <summary>
-    /// Gets the actor world matrix transform.
+    /// The object sort order key used when sorting drawable objects during rendering. Use lower values to draw object before others, higher values are rendered later (on top). Can be used to control transparency drawing.
     /// </summary>
-    /// <param name="world">Result world matrix</param>
-    FORCE_INLINE void GetWorld(Matrix* world) const
-    {
-        *world = _world;
-    }
+    API_FIELD(Attributes="EditorDisplay(\"Particle Effect\"), EditorOrder(80), DefaultValue(0)")
+    int8 SortOrder = 0;
+
+#if USE_EDITOR
+    /// <summary>
+    /// If checked, the particle emitter debug shapes will be shawn during debug drawing. This includes particle spawn location shapes display.
+    /// </summary>
+    API_FIELD(Attributes = "EditorDisplay(\"Particle Effect\"), EditorOrder(200)") bool ShowDebugDraw = false;
+#endif
 
 public:
-
     /// <summary>
     /// Gets the effect parameters collection. Those parameters are instanced from the <see cref="ParticleSystem"/> that contains a linear list of emitters and every emitter has a list of own parameters.
     /// </summary>
@@ -295,7 +293,7 @@ public:
     /// <param name="emitterTrackName">The emitter track name (in particle system asset).</param>
     /// <param name="paramName">The emitter parameter name (in particle emitter asset).</param>
     /// <returns>The value.</returns>
-    API_FUNCTION() Variant GetParameterValue(const StringView& emitterTrackName, const StringView& paramName);
+    API_FUNCTION() const Variant& GetParameterValue(const StringView& emitterTrackName, const StringView& paramName);
 
     /// <summary>
     /// Set the particle parameter value.
@@ -311,7 +309,6 @@ public:
     API_FUNCTION() void ResetParameters();
 
 public:
-
     /// <summary>
     /// Gets the current time position of the particle system timeline animation playback (in seconds).
     /// </summary>
@@ -338,6 +335,11 @@ public:
     API_PROPERTY() int32 GetParticlesCount() const;
 
     /// <summary>
+    /// Gets whether or not the particle effect is playing.
+    /// </summary>
+    API_PROPERTY(Attributes="NoSerialize, HideInEditor") bool GetIsPlaying() const;
+
+    /// <summary>
     /// Resets the particles simulation state (clears the instance state data but preserves the instance parameters values).
     /// </summary>
     API_FUNCTION() void ResetSimulation();
@@ -345,7 +347,30 @@ public:
     /// <summary>
     /// Performs the full particles simulation update (postponed for the next particle manager update).
     /// </summary>
-    API_FUNCTION() void UpdateSimulation();
+    /// <param name="singleFrame">True if update animation by a single frame only (time time since last engine update), otherwise will update simulation with delta time since last update.</param>
+    API_FUNCTION() void UpdateSimulation(bool singleFrame = false);
+
+    /// <summary>
+    /// Manually spawns additional particles into the simulation.
+    /// </summary>
+    /// <param name="count">Amount of particles to spawn.</param>
+    /// <param name="emitterTrackName">Name of the emitter track to spawn particles in. Empty if spawn particles into all tracks.</param>
+    API_FUNCTION() void SpawnParticles(int32 count, const StringView& emitterTrackName = String::Empty);
+
+    /// <summary>
+    /// Plays the simulation.
+    /// </summary>
+    API_FUNCTION() void Play();
+
+    /// <summary>
+    /// Pauses the simulation.
+    /// </summary>
+    API_FUNCTION() void Pause();
+
+    /// <summary>
+    /// Stops and resets the simulation.
+    /// </summary>
+    API_FUNCTION() void Stop();
 
     /// <summary>
     /// Updates the actor bounds.
@@ -365,35 +390,40 @@ public:
 #if USE_EDITOR
 protected:
     // Exposed parameters overrides for Editor Undo.
-    API_PROPERTY(Attributes="HideInEditor, Serialize") Array<ParticleEffect::ParameterOverride> GetParametersOverrides();
+    API_PROPERTY(Attributes="HideInEditor, Serialize") Array<ParticleEffect::ParameterOverride>& GetParametersOverrides();
     API_PROPERTY() void SetParametersOverrides(const Array<ParticleEffect::ParameterOverride>& value);
 #endif
 
 private:
-
     void Update();
 #if USE_EDITOR
     void UpdateExecuteInEditor();
 #endif
     void CacheModifiedParameters();
     void ApplyModifiedParameters();
-    void OnParticleSystemModified();
-    void OnParticleSystemLoaded();
+#if USE_EDITOR
+    void OnParticleEmittersClear();
+    void OnParticleEmitterLoaded();
+#endif
+
+    // [IAssetReference]
+    void OnAssetChanged(Asset* asset, void* caller) override;
+    void OnAssetLoaded(Asset* asset, void* caller) override;
+    void OnAssetUnloaded(Asset* asset, void* caller) override;
 
 public:
-
     // [Actor]
     bool HasContentLoaded() const override;
-    void Draw(RenderContext& renderContext) override;
-    void DrawGeneric(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
+    void OnDebugDraw() override;
 #endif
     void OnLayerChanged() override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 #if USE_EDITOR
-    BoundingBox GetEditorBox() const override
+    BoundingBox GetEditorBoundingBox() const override
     {
         const Vector3 size(50);
         return BoundingBox(_transform.Translation - size, _transform.Translation + size);
@@ -401,7 +431,6 @@ public:
 #endif
 
 protected:
-
     // [Actor]
     void EndPlay() override;
     void OnEnable() override;

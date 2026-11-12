@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,12 +10,18 @@
 /// <summary>
 /// Current materials shader version.
 /// </summary>
-#define MATERIAL_GRAPH_VERSION 149
+#define MATERIAL_GRAPH_VERSION 187
 
 class Material;
 class GPUShader;
 class GPUConstantBuffer;
 class MemoryReadStream;
+
+// Draw pipeline constant buffer (with per-draw constants at slot 2)
+GPU_CB_STRUCT(MaterialShaderDataPerDraw {
+    Float3 DrawPadding;
+    uint32 DrawObjectIndex;
+    });
 
 /// <summary>
 /// Represents material shader that can be used to render objects, visuals or effects. Contains a dedicated shader.
@@ -23,32 +29,31 @@ class MemoryReadStream;
 class MaterialShader : public IMaterial
 {
 protected:
-
     struct PipelineStateCache
     {
-        GPUPipelineState* PS[6];
+        GPUPipelineState* PS[3];
         GPUPipelineState::Description Desc;
 
         PipelineStateCache()
         {
-            Platform::MemoryClear(PS, sizeof(PS));
+            Platform::MemoryClear(this, sizeof(*this));
         }
 
-        void Init(GPUPipelineState::Description& desc)
+        void Init(const GPUPipelineState::Description& desc)
         {
             Desc = desc;
         }
 
-        GPUPipelineState* GetPS(CullMode mode, bool wireframe)
+        GPUPipelineState* GetPS(const MaterialShader* owner, CullMode mode)
         {
-            const int32 index = static_cast<int32>(mode) + (wireframe ? 3 : 0);
+            const int32 index = (int32)mode;
             auto ps = PS[index];
             if (!ps)
-                PS[index] = ps = InitPS(mode, wireframe);
+                PS[index] = ps = InitPS(owner, mode);
             return ps;
         }
 
-        GPUPipelineState* InitPS(CullMode mode, bool wireframe);
+        GPUPipelineState* InitPS(const MaterialShader* owner, CullMode mode);
 
         void Release()
         {
@@ -57,15 +62,14 @@ protected:
     };
 
 protected:
-
     bool _isLoaded;
+    DrawPass _drawModes = DrawPass::None;
     GPUShader* _shader;
     GPUConstantBuffer* _cb;
     Array<byte> _cbData;
     MaterialInfo _info;
 
 protected:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -73,14 +77,12 @@ protected:
     MaterialShader(const StringView& name);
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="MaterialShader"/> class.
     /// </summary>
     virtual ~MaterialShader();
 
 public:
-
     /// <summary>
     /// Creates and loads the material from the data.
     /// </summary>
@@ -98,21 +100,19 @@ public:
     /// <returns>The created and loaded material or null if failed.</returns>
     static MaterialShader* CreateDummy(MemoryReadStream& shaderCacheStream, const MaterialInfo& info);
 
-    GPUShader* GetShader() const;
-
     /// <summary>
     /// Clears the loaded data.
     /// </summary>
     virtual void Unload();
 
 protected:
-
     bool Load(MemoryReadStream& shaderCacheStream, const MaterialInfo& info);
     virtual bool Load() = 0;
 
 public:
-
     // [IMaterial]
+    DrawPass GetDrawModes() const override;
     const MaterialInfo& GetInfo() const override;
+    GPUShader* GetShader() const override;
     bool IsReady() const override;
 };

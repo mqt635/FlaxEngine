@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -8,8 +8,51 @@ namespace FlaxEngine.GUI
     /// Progress bar control shows visual progress of the action or set of actions.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.Control" />
+    [ActorToolbox("UI")]
     public class ProgressBar : ContainerControl
     {
+        /// <summary>
+        /// The method used to effect the bar.
+        /// </summary>
+        public enum BarMethod
+        {
+            /// <summary>
+            /// Stretch the bar.
+            /// </summary>
+            Stretch,
+            
+            /// <summary>
+            /// Clip the bar.
+            /// </summary>
+            Clip,
+        }
+        
+        /// <summary>
+        /// The origin to move the progress bar to.
+        /// </summary>
+        public enum BarOrigin
+        {
+            /// <summary>
+            /// Move the bar horizontally to the left.
+            /// </summary>
+            HorizontalLeft,
+            
+            /// <summary>
+            /// Move the bar horizontally to the right.
+            /// </summary>
+            HorizontalRight,
+            
+            /// <summary>
+            /// Move the bar vertically up.
+            /// </summary>
+            VerticalTop,
+            
+            /// <summary>
+            /// Move the bar vertically down.
+            /// </summary>
+            VerticalBottom,
+        }
+
         /// <summary>
         /// The value.
         /// </summary>
@@ -40,6 +83,18 @@ namespace FlaxEngine.GUI
         /// Gets a value indicating whether use progress value smoothing.
         /// </summary>
         public bool UseSmoothing => !Mathf.IsZero(SmoothingScale);
+
+        /// <summary>
+        /// The method used to effect the bar.
+        /// </summary>
+        [EditorOrder(41), Tooltip("The method used to effect the bar.")]
+        public BarMethod Method = BarMethod.Stretch;
+        
+        /// <summary>
+        /// The origin or where the bar decreases to.
+        /// </summary>
+        [EditorOrder(42), Tooltip("The origin or where the bar decreases to.")]
+        public BarOrigin Origin = BarOrigin.HorizontalLeft;
 
         /// <summary>
         /// Gets or sets the minimum value.
@@ -88,9 +143,11 @@ namespace FlaxEngine.GUI
                 if (!Mathf.NearEqual(value, _value))
                 {
                     _value = value;
-                    if (!UseSmoothing)
+                    if (!UseSmoothing || _firstUpdate)
                     {
                         _current = _value;
+                        if (_firstUpdate)
+                            _firstUpdate = false;
                     }
                 }
             }
@@ -99,20 +156,23 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the margin for the progress bar rectangle within the control bounds.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The margin for the progress bar rectangle within the control bounds.")]
+        [EditorDisplay("Bar Style"), EditorOrder(2011), Tooltip("The margin for the progress bar rectangle within the control bounds.")]
         public Margin BarMargin { get; set; }
 
         /// <summary>
         /// Gets or sets the color of the progress bar rectangle.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The color of the progress bar rectangle.")]
+        [EditorDisplay("Bar Style"), EditorOrder(2010), Tooltip("The color of the progress bar rectangle."), ExpandGroups]
         public Color BarColor { get; set; }
 
         /// <summary>
         /// Gets or sets the brush used for progress bar drawing.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The brush used for progress bar drawing.")]
+        [EditorDisplay("Bar Style"), EditorOrder(2012), Tooltip("The brush used for progress bar drawing.")]
         public IBrush BarBrush { get; set; }
+
+        // Used to remove initial lerp from the value on play.
+        private bool _firstUpdate = true;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ProgressBar"/> class.
@@ -165,15 +225,52 @@ namespace FlaxEngine.GUI
         {
             base.DrawSelf();
 
-            float progressNormalized = (_current - _minimum) / _maximum;
+            float progressNormalized = Mathf.InverseLerp(_minimum, _maximum, _current);
             if (progressNormalized > 0.001f)
             {
-                var barRect = new Rectangle(0, 0, Width * progressNormalized, Height);
-                BarMargin.ShrinkRectangle(ref barRect);
-                if (BarBrush != null)
-                    BarBrush.Draw(barRect, BarColor);
-                else
-                    Render2D.FillRectangle(barRect, BarColor);
+                Rectangle rect = new Rectangle(0, 0, Width, Height);
+                BarMargin.ShrinkRectangle(ref rect);
+                if (rect.Width <= 0.0f || rect.Height <= 0.0f)
+                    return;
+
+                Rectangle barRect = rect;
+                switch (Origin)
+                {
+                case BarOrigin.HorizontalLeft:
+                    barRect.Width *= progressNormalized;
+                    break;
+                case BarOrigin.HorizontalRight:
+                    barRect.Width *= progressNormalized;
+                    barRect.X = rect.Right - barRect.Width;
+                    break;
+                case BarOrigin.VerticalTop:
+                    barRect.Height *= progressNormalized;
+                    break;
+                case BarOrigin.VerticalBottom:
+                    barRect.Height *= progressNormalized;
+                    barRect.Y = rect.Bottom - barRect.Height;
+                    break;
+                default: break;
+                }
+
+                switch (Method)
+                {
+                case BarMethod.Stretch:
+                    if (BarBrush != null)
+                        BarBrush.Draw(barRect, BarColor);
+                    else
+                        Render2D.FillRectangle(barRect, BarColor);
+                    break;
+                case BarMethod.Clip:
+                    Render2D.PushClip(ref barRect);
+                    if (BarBrush != null)
+                        BarBrush.Draw(rect, BarColor);
+                    else
+                        Render2D.FillRectangle(rect, BarColor);
+                    Render2D.PopClip();
+                    break;
+                default: break;
+                }
             }
         }
     }

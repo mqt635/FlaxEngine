@@ -1,14 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/ISerializable.h"
-#include "ISerializeModifier.h"
 #include "Json.h"
 #include "JsonWriter.h"
 
+class ISerializeModifier;
+
 // The floating-point values serialization epsilon for equality checks precision
-#define SERIALIZE_EPSILON 0.0000001f
+#define SERIALIZE_EPSILON 1e-7f
+#define SERIALIZE_EPSILON_DOUBLE 1e-17
 
 // Helper macro to cast object on diff serialization
 #define SERIALIZE_GET_OTHER_OBJ(type) const auto other = static_cast<const type*>(otherObj)
@@ -73,4 +75,19 @@
         const auto e = SERIALIZE_FIND_MEMBER(stream, #name); \
         if (e != stream.MemberEnd() && e->value.IsBool()) \
             member = e->value.GetBool() ? 1 : 0; \
+    }
+
+// Explicit auto-cast for object pointer
+
+#define SERIALIZE_OBJ(name) \
+    if (Serialization::ShouldSerialize(name, decltype(name)(other ? &other->name : nullptr))) \
+	{ \
+		stream.JKEY(#name); \
+		Serialization::Serialize(stream, (const ScriptingObject*&)name, other ? &other->name : nullptr); \
+	}
+#define DESERIALIZE_OBJ(name)  \
+    { \
+        const auto e = SERIALIZE_FIND_MEMBER(stream, #name); \
+        if (e != stream.MemberEnd()) \
+            Serialization::Deserialize(e->value, (ScriptingObject*&)name, modifier); \
     }

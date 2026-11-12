@@ -1,14 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.RegularExpressions;
 using FlaxEditor.Content;
+using FlaxEditor.GUI.Docking;
 using FlaxEditor.SceneGraph;
-using FlaxEditor.Surface.ContextMenu;
+using FlaxEditor.Windows.Search;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Windows.Search;
 
 namespace FlaxEditor.Modules
 {
@@ -45,12 +46,9 @@ namespace FlaxEditor.Modules
     /// </summary>
     public class ContentFindingModule : EditorModule
     {
-        private List<QuickAction> _quickActions = new List<QuickAction>();
-
-        /// <summary>
-        /// The content finding context menu.
-        /// </summary>
-        public ContentFinder Finder { get; private set; }
+        private List<QuickAction> _quickActions;
+        private ContentFinder _finder;
+        private ContentSearchWindow _searchWin;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ContentFindingModule"/> class.
@@ -62,33 +60,116 @@ namespace FlaxEditor.Modules
         }
 
         /// <inheritdoc />
-        public override void OnInit()
-        {
-            base.OnInit();
-
-            Finder = new ContentFinder();
-        }
-
-        /// <inheritdoc />
         public override void OnExit()
         {
-            _quickActions.Clear();
-            _quickActions = null;
+            if (_quickActions != null)
+            {
+                _quickActions.Clear();
+                _quickActions = null;
+            }
 
-            Finder?.Dispose();
-            Finder = null;
+            if (_finder != null)
+            {
+                _finder.Dispose();
+                _finder = null;
+            }
+
+            if (_searchWin != null)
+            {
+                _searchWin.Dispose();
+                _searchWin = null;
+            }
 
             base.OnExit();
         }
 
         /// <summary>
-        /// Shows the finder.
+        /// Shows the content search window.
+        /// </summary>
+        public void ShowSearch()
+        {
+            // Try to find the currently focused editor window that might call this
+            DockWindow window = null;
+            foreach (var editorWindow in Editor.Windows.Windows)
+            {
+                if (editorWindow.Visible && editorWindow.ContainsFocus && editorWindow.Parent != null)
+                {
+                    window = editorWindow;
+                    break;
+                }
+            }
+
+            ShowSearch(window);
+        }
+
+        /// <summary>
+        /// Shows the content search window.
+        /// </summary>
+        /// <param name="control">The target control to show search for it.</param>
+        /// <param name="query">The initial query for the search.</param>
+        public void ShowSearch(Control control, string query = null)
+        {
+            // Try to find the owning window
+            DockWindow window = null;
+            while (control != null && window == null)
+            {
+                window = control as DockWindow;
+                control = control.Parent;
+            }
+
+            ShowSearch(window, query);
+        }
+
+        /// <summary>
+        /// Shows the content search window.
+        /// </summary>
+        /// <param name="window">The target window to show search next to it.</param>
+        /// <param name="query">The initial query for the search.</param>
+        public void ShowSearch(DockWindow window, string query = null)
+        {
+            if (_searchWin == null)
+                _searchWin = new ContentSearchWindow(Editor);
+            _searchWin.TargetWindow = window;
+            if (!_searchWin.IsHidden)
+            {
+                // Focus
+                _searchWin.SelectTab();
+                _searchWin.Focus();
+            }
+            else if (window != null)
+            {
+                // Show docked to the target window
+                _searchWin.Show(DockState.DockBottom, window);
+                _searchWin.SearchLocation = ContentSearchWindow.SearchLocations.CurrentAsset;
+            }
+            else
+            {
+                // Show floating
+                _searchWin.ShowFloating();
+                _searchWin.SearchLocation = ContentSearchWindow.SearchLocations.AllAssets;
+            }
+            if (window is ISearchWindow searchWindow)
+            {
+                _searchWin.SearchAssets = searchWindow.AssetType;
+            }
+            if (query != null)
+            {
+                _searchWin.Query = query;
+                _searchWin.Search();
+            }
+        }
+
+        /// <summary>
+        /// Shows the content finder popup.
         /// </summary>
         /// <param name="control">The target control to show finder over it.</param>
         public void ShowFinder(Control control)
         {
-            var position = (control.Size - new Vector2(Finder.Width, 300.0f)) * 0.5f;
-            Finder.Show(control, position);
+            var finder = _finder ?? (_finder = new ContentFinder());
+            if (control == null)
+                control = Editor.Instance.Windows.MainWindow.GUI;
+            var position = (control.Size - new Float2(finder.Width, 300.0f)) * 0.5f;
+            finder.Show(control, position);
         }
 
         /// <summary>
@@ -98,6 +179,8 @@ namespace FlaxEditor.Modules
         /// <param name="action">The actual action callback.</param>
         public void AddQuickAction(string name, Action action)
         {
+            if (_quickActions == null)
+                _quickActions = new List<QuickAction>();
             _quickActions.Add(new QuickAction
             {
                 Name = name,
@@ -109,9 +192,11 @@ namespace FlaxEditor.Modules
         /// Removes a quick action by name.
         /// </summary>
         /// <param name="name">The action's name.</param>
-        /// <returns>True when it succeed, false if there is no Quick Action with this name.</returns>
+        /// <returns>True when it succeeds, false if there is no Quick Action with this name.</returns>
         public bool RemoveQuickAction(string name)
         {
+            if (_quickActions == null)
+                return false;
             foreach (var action in _quickActions)
             {
                 if (action.Name.Equals(name))
@@ -120,7 +205,6 @@ namespace FlaxEditor.Modules
                     return true;
                 }
             }
-
             return false;
         }
 
@@ -144,12 +228,22 @@ namespace FlaxEditor.Modules
                         new SearchResult { Name = item.ShortName, Type = assetItem.TypeName, Item = item }
                     };
                 }
-                var actor = FlaxEngine.Object.Find<Actor>(ref id);
+                var actor = FlaxEngine.Object.Find<Actor>(ref id, true);
                 if (actor != null)
                 {
                     return new List<SearchResult>
                     {
                         new SearchResult { Name = actor.Name, Type = actor.TypeName, Item = actor }
+                    };
+                }
+                var script = FlaxEngine.Object.Find<Script>(ref id, true);
+                if (script != null && script.Actor != null)
+                {
+                    string actorPathStart = $"{script.Actor.Name}/";
+
+                    return new List<SearchResult>
+                    {
+                        new SearchResult { Name = $"{actorPathStart}{script.TypeName}", Type = script.TypeName, Item = script }
                     };
                 }
             }
@@ -183,14 +277,25 @@ namespace FlaxEditor.Modules
                 Profiler.EndEvent();
             }
 
+            if (_quickActions != null)
             {
                 Profiler.BeginEvent("QuickActions");
-                _quickActions.ForEach(action =>
+                foreach (var action in _quickActions)
                 {
                     if (nameRegex.Match(action.Name).Success && typeRegex.Match("Quick Action").Success)
                         matches.Add(new SearchResult { Name = action.Name, Type = "Quick Action", Item = action });
-                });
+                }
                 Profiler.EndEvent();
+            }
+
+            // Editor window
+            foreach (var window in Editor.Windows.Windows)
+            {
+                if (window is Windows.Assets.AssetEditorWindow)
+                    continue;
+                var windowName = window.Title + " (window)";
+                if (nameRegex.Match(windowName).Success)
+                    matches.Add(new SearchResult { Name = windowName, Type = "Window", Item = window });
             }
 
             Profiler.EndEvent();
@@ -247,9 +352,10 @@ namespace FlaxEditor.Modules
         {
             foreach (var contentItem in items)
             {
+                var name = contentItem.ShortName;
                 if (contentItem.IsAsset)
                 {
-                    if (nameRegex.Match(contentItem.ShortName).Success)
+                    if (nameRegex.Match(name).Success)
                     {
                         var asset = contentItem as AssetItem;
                         if (asset == null || !typeRegex.Match(asset.TypeName).Success)
@@ -263,7 +369,7 @@ namespace FlaxEditor.Modules
                             var splits = asset.TypeName.Split('.');
                             finalName = splits[splits.Length - 1];
                         }
-                        matches.Add(new SearchResult { Name = asset.ShortName, Type = finalName, Item = asset });
+                        matches.Add(new SearchResult { Name = name, Type = finalName, Item = asset });
                     }
                 }
                 else if (contentItem.IsFolder)
@@ -275,11 +381,12 @@ namespace FlaxEditor.Modules
                 }
                 else
                 {
-                    if (nameRegex.Match(contentItem.ShortName).Success && typeRegex.Match(contentItem.GetType().Name).Success)
+                    if (nameRegex.Match(name).Success && typeRegex.Match(contentItem.GetType().Name).Success)
                     {
                         string finalName = contentItem.GetType().Name.Replace("Item", "");
-
-                        matches.Add(new SearchResult { Name = contentItem.ShortName, Type = finalName, Item = contentItem });
+                        if (contentItem is ScriptItem)
+                            name = contentItem.FileName; // Show extension for scripts (esp. for .h and .cpp files of the same name)
+                        matches.Add(new SearchResult { Name = name, Type = finalName, Item = contentItem });
                     }
                 }
             }
@@ -303,6 +410,16 @@ namespace FlaxEditor.Modules
                 Editor.Instance.SceneEditing.Select(actor);
                 Editor.Instance.Windows.EditWin.Viewport.FocusSelection();
                 break;
+            case Script script:
+                if (script.Actor != null)
+                {
+                    Editor.Instance.SceneEditing.Select(script.Actor);
+                    Editor.Instance.Windows.EditWin.Viewport.FocusSelection();
+                }
+                break;
+            case Windows.EditorWindow window:
+                window.FocusOrShow();
+                break;
             }
         }
 
@@ -316,6 +433,7 @@ namespace FlaxEditor.Modules
             { "FlaxEditor.Content.Settings.BuildSettings", "Settings" },
             { "FlaxEditor.Content.Settings.GameSettings", "Settings" },
             { "FlaxEditor.Content.Settings.GraphicsSettings", "Settings" },
+            { "FlaxEditor.Content.Settings.NetworkSettings", "Settings" },
             { "FlaxEditor.Content.Settings.InputSettings", "Settings" },
             { "FlaxEditor.Content.Settings.LayersAndTagsSettings", "Settings" },
             { "FlaxEditor.Content.Settings.NavigationSettings", "Settings" },

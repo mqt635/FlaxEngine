@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,17 +9,15 @@
 /// <summary>
 /// Represents the version number made of major, minor, build and revision numbers.
 /// </summary>
-struct FLAXENGINE_API Version
+API_STRUCT(InBuild) struct FLAXENGINE_API Version
 {
 private:
-
     int32 _major;
     int32 _minor;
     int32 _build;
     int32 _revision;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the Version class with the specified major, minor, build, and revision numbers.
     /// </summary>
@@ -27,13 +25,7 @@ public:
     /// <param name="minor">The minor version number.</param>
     /// <param name="build">The build number.</param>
     /// <param name="revision">The revision number.</param>
-    Version(int32 major, int32 minor, int32 build, int32 revision)
-    {
-        _major = Math::Max(major, 0);
-        _minor = Math::Max(minor, 0);
-        _build = Math::Max(build, 0);
-        _revision = Math::Max(revision, 0);
-    }
+    Version(int32 major, int32 minor, int32 build, int32 revision);
 
     /// <summary>
     /// Initializes a new instance of the Version class using the specified major, minor, and build values.
@@ -41,26 +33,14 @@ public:
     /// <param name="major">The major version number.</param>
     /// <param name="minor">The minor version number.</param>
     /// <param name="build">The build number.</param>
-    Version(int32 major, int32 minor, int32 build)
-    {
-        _major = Math::Max(major, 0);
-        _minor = Math::Max(minor, 0);
-        _build = Math::Max(build, 0);
-        _revision = -1;
-    }
+    Version(int32 major, int32 minor, int32 build);
 
     /// <summary>
     /// Initializes a new instance of the Version class using the specified major and minor values.
     /// </summary>
     /// <param name="major">The major version number.</param>
     /// <param name="minor">The minor version number.</param>
-    Version(int32 major, int32 minor)
-    {
-        _major = Math::Max(major, 0);
-        _minor = Math::Max(minor, 0);
-        _build = -1;
-        _revision = -1;
-    }
+    Version(int32 major, int32 minor);
 
     /// <summary>
     /// Initializes a new instance of the Version class.
@@ -69,12 +49,11 @@ public:
     {
         _major = 0;
         _minor = 0;
-        _revision = 0;
-        _build = 0;
+        _revision = -1;
+        _build = -1;
     }
 
 public:
-
     /// <summary>
     /// Gets the value of the build component of the version number for the current Version object.
     /// </summary>
@@ -94,30 +73,12 @@ public:
     }
 
     /// <summary>
-    /// Gets the high 16 bits of the revision number.
-    /// </summary>
-    /// <returns>A 16-bit signed integer.</returns>
-    FORCE_INLINE int16 MajorRevision() const
-    {
-        return static_cast<int16>(_revision >> 16);
-    }
-
-    /// <summary>
     /// Gets the value of the minor component of the version number for the current Version object.
     /// </summary>
     /// <returns>The minor version number.</returns>
     FORCE_INLINE int32 Minor() const
     {
         return _minor;
-    }
-
-    /// <summary>
-    /// Gets the low 16 bits of the revision number.
-    /// </summary>
-    /// <returns>A 16-bit signed integer.</returns>
-    FORCE_INLINE int16 MinorRevision() const
-    {
-        return static_cast<int16>(_revision & 65535);
     }
 
     /// <summary>
@@ -130,7 +91,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Compares the current Version object to a specified Version object and returns an indication of their relative values.
     /// </summary>
@@ -148,68 +108,32 @@ public:
         return _major == obj._major && _minor == obj._minor && _build == obj._build && _revision == obj._revision;
     }
 
-    /// <summary>
-    /// Determines whether two specified Version objects are equal.
-    /// </summary>
-    /// <param name="other">The other Version object.</param>
-    /// <returns>True if <paramref name="v1" /> equals <paramref name="v2" />; otherwise, false.</returns>
     FORCE_INLINE bool operator==(const Version& other) const
     {
         return Equals(other);
     }
-
-    /// <summary>
-    /// Determines whether the first specified Version object is greater than the second specified Version object.
-    /// </summary>
-    /// <param name="other">The first Version object.</param>
-    /// <returns>True if <paramref name="v1" /> is greater than <paramref name="v2" />; otherwise, false.</returns>
-    FORCE_INLINE bool operator >(const Version& other) const
+    FORCE_INLINE bool operator>(const Version& other) const
     {
         return other < *this;
     }
-
-    /// <summary>
-    /// Determines whether the first specified Version object is greater than or equal to the second specified Version object.
-    /// /summary>
-    /// <param name="other">The other Version object.</param>
-    /// <returns>True if <paramref name="v1" /> is greater than or equal to <paramref name="v2" />; otherwise, false.</returns>
-    FORCE_INLINE bool operator >=(const Version& other) const
+    FORCE_INLINE bool operator>=(const Version& other) const
     {
         return other <= *this;
     }
-
-    /// <summary>
-    /// Determines whether two specified Version objects are not equal.
-    /// </summary>
-    /// <param name="other">The other Version object.</param>
-    /// <returns>True if <paramref name="v1" /> does not equal <paramref name="v2" />; otherwise, false.</returns>
     FORCE_INLINE bool operator!=(const Version& other) const
     {
         return !(*this == other);
     }
-
-    /// <summary>
-    /// Determines whether the first specified Version object is less than the second specified Version object.
-    /// </summary>
-    /// <param name="other">The first other object.</param>
-    /// <returns>True if <paramref name="v1" /> is less than <paramref name="v2" />; otherwise, false.</returns>
     FORCE_INLINE bool operator<(const Version& other) const
     {
         return CompareTo(other) < 0;
     }
-
-    /// <summary>
-    /// Determines whether the first specified Version object is less than or equal to the second Version object.
-    /// </summary>
-    /// <param name="other">The other Version object.</param>
-    /// <returns>True if <paramref name="v1" /> is less than or equal to <paramref name="v2" />; otherwise, false.</returns>
     FORCE_INLINE bool operator<=(const Version& other) const
     {
         return CompareTo(other) <= 0;
     }
 
 public:
-
     /// <summary>
     /// Converts the value of the current Version object to its equivalent <see cref="T:String" /> representation.
     /// A specified count indicates the number of components to return.
@@ -221,7 +145,6 @@ public:
     String ToString() const;
 
 public:
-
     /// <summary>
     /// Try to parse Version from string.
     /// </summary>

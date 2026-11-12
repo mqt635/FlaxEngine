@@ -1,7 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine
 {
+    partial struct RenderContextBatch
+    {
+        /// <summary>
+        /// Gets the main rendering context (for the main view). Returns the first context, other ones are usually used for shadow map projections.
+        /// </summary>
+        public ref RenderContext MainContext => ref Contexts[0];
+    }
+
     partial struct RenderView
     {
         /// <summary>
@@ -12,9 +20,12 @@ namespace FlaxEngine
             MaxShadowsQuality = Quality.Ultra;
             ModelLODDistanceFactor = 1.0f;
             ModelLODDistanceFactorSqrt = 1.0f;
+#pragma warning disable 0612
             ShadowModelLODDistanceFactor = 1.0f;
+#pragma warning restore 0612
             Flags = ViewFlags.DefaultGame;
             Mode = ViewMode.Default;
+            ViewportRect = new Float4(0, 0, 1, 1);
         }
 
         /// <summary>
@@ -25,9 +36,19 @@ namespace FlaxEngine
             Matrix.Invert(ref View, out IV);
             Matrix.Invert(ref Projection, out IP);
             Matrix.Multiply(ref View, ref Projection, out var viewProjection);
-            Frustum = new BoundingFrustum(viewProjection);
+            Frustum = new BoundingFrustum(ref viewProjection);
             Matrix.Invert(ref viewProjection, out IVP);
             CullingFrustum = Frustum;
+            NonJitteredProjection = Projection;
+        }
+
+        /// <summary>
+        /// Gets projection matrix for overlay geometry rendered after temporal anti-aliasing has been resolved.
+        /// </summary>
+        /// <param name="projection">Projection matrix valid for rendering before or after (matches current TAA jitter stage).</param>
+        public void GetOverlayProjection(out Matrix projection)
+        {
+            projection = IsTaaResolved ? NonJitteredProjection : Projection;
         }
 
         /// <summary>
@@ -37,10 +58,8 @@ namespace FlaxEngine
         /// <param name="projection">The projection.</param>
         public void SetUp(ref Matrix view, ref Matrix projection)
         {
-            Position = view.TranslationVector;
             Projection = projection;
             NonJitteredProjection = projection;
-            TemporalAAJitter = Vector4.Zero;
             View = view;
 
             UpdateCachedData();
@@ -55,7 +74,7 @@ namespace FlaxEngine
         /// <param name="direction">Camera's direction vector</param>
         /// <param name="up">Camera's up vector</param>
         /// <param name="angle">Camera's FOV angle (in degrees)</param>
-        public void SetProjector(float nearPlane, float farPlane, Vector3 position, Vector3 direction, Vector3 up, float angle)
+        public void SetProjector(float nearPlane, float farPlane, Float3 position, Float3 direction, Float3 up, float angle)
         {
             // Copy data
             Near = nearPlane;
@@ -65,11 +84,11 @@ namespace FlaxEngine
             // Create projection matrix
             Matrix.PerspectiveFov(angle * Mathf.DegreesToRadians, 1.0f, nearPlane, farPlane, out Projection);
             NonJitteredProjection = Projection;
-            TemporalAAJitter = Vector4.Zero;
+            TemporalAAJitter = Float4.Zero;
 
             // Create view matrix
             Direction = direction;
-            Vector3 target = Position + Direction;
+            var target = Position + Direction;
             Matrix.LookAt(ref Position, ref target, ref up, out View);
 
             UpdateCachedData();
@@ -81,36 +100,43 @@ namespace FlaxEngine
         /// <param name="camera">The camera.</param>
         public void CopyFrom(Camera camera)
         {
-            Position = camera.Position;
-            Direction = camera.Direction;
-            Near = camera.NearPlane;
-            Far = camera.FarPlane;
-            View = camera.View;
-            Projection = camera.Projection;
-            NonJitteredProjection = Projection;
-            TemporalAAJitter = Vector4.Zero;
-            RenderLayersMask = camera.RenderLayersMask;
-
-            UpdateCachedData();
+            var viewport = camera.Viewport;
+            CopyFrom(camera, ref viewport);
         }
 
         /// <summary>
         /// Copies render view data from the camera.
         /// </summary>
         /// <param name="camera">The camera.</param>
-        /// <param name="customViewport">The custom viewport to use for view/projeection matrices override.</param>
-        public void CopyFrom(Camera camera, ref Viewport customViewport)
+        /// <param name="viewport">The custom viewport to use for view/projeection matrices override.</param>
+        public void CopyFrom(Camera camera, ref Viewport viewport)
         {
-            Position = camera.Position;
-            Direction = camera.Direction;
+            Vector3 cameraPos = camera.Position;
+            LargeWorlds.UpdateOrigin(ref Origin, cameraPos);
+            Position = cameraPos - Origin;
+            Direction = camera.Forward;
             Near = camera.NearPlane;
             Far = camera.FarPlane;
-            camera.GetMatrices(out View, out Projection, ref customViewport);
+            camera.GetMatrices(out View, out Projection, ref viewport, ref Origin);
             NonJitteredProjection = Projection;
-            TemporalAAJitter = Vector4.Zero;
+            TemporalAAJitter = Float4.Zero;
             RenderLayersMask = camera.RenderLayersMask;
+            Flags = camera.RenderFlags;
+            Mode = camera.RenderMode;
+            ViewportRect = camera.ViewportRect;
 
             UpdateCachedData();
+        }
+
+        /// <summary>
+        /// Calculates the world matrix for the given transformation instance rendering.
+        /// </summary>
+        /// <param name="transform">The object transformation.</param>
+        /// <param name="world">The output matrix.</param>
+        public void GetWorldMatrix(ref Transform transform, out Matrix world)
+        {
+            Float3 translation = transform.Translation - Origin;
+            Matrix.Transformation(ref transform.Scale, ref transform.Orientation, ref translation, out world);
         }
     }
 }

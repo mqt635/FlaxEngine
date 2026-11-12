@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,18 +10,15 @@
 class DefaultGPUTasksExecutor : public GPUTasksExecutor
 {
 protected:
-
     GPUTasksContext* _context;
 
 public:
-
     /// <summary>
     /// Init
     /// </summary>
     DefaultGPUTasksExecutor();
 
 public:
-
     // [GPUTasksExecutor]
     String ToString() const override;
     void FrameBegin() override;

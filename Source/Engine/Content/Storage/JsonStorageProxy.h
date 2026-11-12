@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@ struct AssetInfo;
 class FLAXENGINE_API JsonStorageProxy
 {
 public:
-
     /// <summary>
     /// Determines whether the specified extension can be a json resource file.
     /// </summary>
@@ -31,6 +30,7 @@ public:
     /// <returns>True if found any asset, otherwise false.</returns>
     static bool GetAssetInfo(const StringView& path, Guid& resultId, String& resultDataTypeName);
 
+#if USE_EDITOR
     /// <summary>
     /// Changes asset ID.
     /// </summary>
@@ -38,4 +38,5 @@ public:
     /// <param name="newId">Asset ID to set</param>
     /// <returns>True if found any asset, otherwise false.</returns>
     static bool ChangeId(const StringView& path, const Guid& newId);
+#endif
 };

@@ -1,13 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Audio.h"
 #include "AudioBackend.h"
 #include "AudioSettings.h"
-#include "FlaxEngine.Gen.h"
 #include "Engine/Scripting/ScriptingType.h"
 #include "Engine/Scripting/BinaryModule.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/CommandLine.h"
 #include "Engine/Core/Log.h"
@@ -17,6 +17,9 @@
 #endif
 #if AUDIO_API_PS4
 #include "Platforms/PS4/Engine/Audio/AudioBackendPS4.h"
+#endif
+#if AUDIO_API_PS5
+#include "Platforms/PS5/Engine/Audio/AudioBackendPS5.h"
 #endif
 #if AUDIO_API_SWITCH
 #include "Platforms/Switch/Engine/Audio/AudioBackendSwitch.h"
@@ -28,17 +31,9 @@
 #include "XAudio2/AudioBackendXAudio2.h"
 #endif
 
-const Char* ToString(AudioFormat value)
+float AudioDataInfo::GetLength() const
 {
-    switch (value)
-    {
-    case AudioFormat::Raw:
-        return TEXT("Raw");
-    case AudioFormat::Vorbis:
-        return TEXT("Vorbis");
-    default:
-        return TEXT("");
-    }
+    return (float)NumSamples / (float)Math::Max(1U, SampleRate * NumChannels);
 }
 
 Array<AudioListener*> Audio::Listeners;
@@ -46,6 +41,8 @@ Array<AudioSource*> Audio::Sources;
 Array<AudioDevice> Audio::Devices;
 Action Audio::DevicesChanged;
 Action Audio::ActiveDeviceChanged;
+Action Audio::DeviceAdded;
+Action Audio::DeviceRemoved;
 AudioBackend* AudioBackend::Instance = nullptr;
 
 namespace
@@ -54,6 +51,9 @@ namespace
     float Volume = 1.0f;
     int32 ActiveDeviceIndex = -1;
     bool MuteOnFocusLoss = true;
+    bool EnableHRTF = true;
+    StringAnsi ExplicitDeviceName;
+    StringAnsi SystemDefaultDeviceName;
 }
 
 class AudioService : public EngineService
@@ -88,11 +88,31 @@ namespace
 void AudioSettings::Apply()
 {
     ::MuteOnFocusLoss = MuteOnFocusLoss;
+    if (AudioBackend::Instance != nullptr)
+    {
+        Audio::SetDopplerFactor(DopplerFactor);
+        Audio::SetEnableHRTF(EnableHRTF);
+    }
 }
 
 AudioDevice* Audio::GetActiveDevice()
 {
-    return &Devices[ActiveDeviceIndex];
+    if (ActiveDeviceIndex >= 0 && ActiveDeviceIndex < Devices.Count())
+        return &Devices[ActiveDeviceIndex];
+
+    if (!SystemDefaultDeviceName.IsEmpty() && Devices.HasItems())
+    {
+        for (int32 i = 0; i < Devices.Count(); i++)
+        {
+            if (Devices[i].InternalName == SystemDefaultDeviceName)
+                return &Devices[i];
+        }
+    }
+
+    if (Devices.HasItems())
+        return &Devices[0];
+
+    return nullptr;
 }
 
 int32 Audio::GetActiveDeviceIndex()
@@ -100,9 +120,28 @@ int32 Audio::GetActiveDeviceIndex()
     return ActiveDeviceIndex;
 }
 
+int32 Audio::GetActiveDeviceResolvedIndex()
+{
+    AudioDevice* active = GetActiveDevice();
+    if (active != nullptr)
+    {
+        for (int32 i = 0; i < Devices.Count(); i++)
+        {
+            if (&Devices[i] == active)
+                return i;
+        }
+    }
+    return -1;
+}
+
 void Audio::SetActiveDeviceIndex(int32 index)
 {
     index = Math::Clamp(index, -1, Devices.Count() - 1);
+    if (index >= 0 && index < Devices.Count())
+        ExplicitDeviceName = Devices[index].InternalName;
+    else
+        ExplicitDeviceName.Clear();
+
     if (ActiveDeviceIndex == index)
         return;
 
@@ -111,6 +150,21 @@ void Audio::SetActiveDeviceIndex(int32 index)
     AudioBackend::OnActiveDeviceChanged();
 
     ActiveDeviceChanged();
+}
+
+void Audio::SetActiveDeviceIndexSilent(int32 index)
+{
+    ActiveDeviceIndex = Math::Clamp(index, -1, Devices.Count() - 1);
+}
+
+const StringAnsi& Audio::GetExplicitDeviceName()
+{
+    return ExplicitDeviceName;
+}
+
+void Audio::SetSystemDefaultDeviceName(const StringAnsi& name)
+{
+    SystemDefaultDeviceName = name;
 }
 
 float Audio::GetMasterVolume()
@@ -134,47 +188,28 @@ void Audio::SetDopplerFactor(float value)
     AudioBackend::SetDopplerFactor(value);
 }
 
-void Audio::OnAddListener(AudioListener* listener)
+bool Audio::GetEnableHRTF()
 {
-    ASSERT(!Listeners.Contains(listener));
+    return EnableHRTF;
+}
 
-    if (Listeners.Count() >= AUDIO_MAX_LISTENERS)
+void Audio::SetEnableHRTF(bool value)
+{
+    if (EnableHRTF == value)
+        return;
+    if (value && EnumHasNoneFlags(AudioBackend::Features(), AudioBackend::FeatureFlags::HRTF))
     {
-        LOG(Error, "Unsupported amount of the audio listeners!");
+        LOG(Warning, "HRTF audio is not supported.");
         return;
     }
-
-    Listeners.Add(listener);
-    AudioBackend::Listener::OnAdd(listener);
-}
-
-void Audio::OnRemoveListener(AudioListener* listener)
-{
-    if (!Listeners.Remove(listener))
-    {
-        AudioBackend::Listener::OnRemove(listener);
-    }
-}
-
-void Audio::OnAddSource(AudioSource* source)
-{
-    ASSERT(!Sources.Contains(source));
-
-    Sources.Add(source);
-    AudioBackend::Source::OnAdd(source);
-}
-
-void Audio::OnRemoveSource(AudioSource* source)
-{
-    if (!Sources.Remove(source))
-    {
-        AudioBackend::Source::OnRemove(source);
-    }
+    EnableHRTF = value;
+    AudioBackend::Listener::ReinitializeAll();
 }
 
 bool AudioService::Init()
 {
     PROFILE_CPU_NAMED("Audio.Init");
+    PROFILE_MEM(Audio);
     const auto settings = AudioSettings::Get();
     const bool mute = CommandLine::Options.Mute.IsTrue() || settings->DisableAudio;
 
@@ -182,44 +217,34 @@ bool AudioService::Init()
     AudioBackend* backend = nullptr;
 #if AUDIO_API_NONE
     if (mute)
-    {
         backend = New<AudioBackendNone>();
-    }
 #endif
 #if AUDIO_API_PS4
     if (!backend)
-    {
         backend = New<AudioBackendPS4>();
-    }
+#endif
+#if AUDIO_API_PS5
+    if (!backend)
+        backend = New<AudioBackendPS5>();
 #endif
 #if AUDIO_API_SWITCH
     if (!backend)
-    {
         backend = New<AudioBackendSwitch>();
-    }
 #endif
 #if AUDIO_API_OPENAL
     if (!backend)
-    {
         backend = New<AudioBackendOAL>();
-    }
 #endif
 #if AUDIO_API_XAUDIO2
 	if (!backend)
-	{
 		backend = New<AudioBackendXAudio2>();
-	}
 #endif
 #if AUDIO_API_NONE
     if (!backend)
-    {
         backend = New<AudioBackendNone>();
-    }
 #else
     if (mute)
-    {
         LOG(Warning, "Cannot use mute audio. Null Audio Backend not available on this platform.");
-    }
 #endif
     if (backend == nullptr)
     {
@@ -230,9 +255,15 @@ bool AudioService::Init()
 
     LOG(Info, "Audio system initialization... (backend: {0})", AudioBackend::Name());
 
+    EnableHRTF = settings->EnableHRTF;
     if (AudioBackend::Init())
     {
         LOG(Warning, "Failed to initialize audio backend.");
+    }
+    if (EnableHRTF && EnumHasNoneFlags(AudioBackend::Features(), AudioBackend::FeatureFlags::HRTF))
+    {
+        LOG(Warning, "HRTF audio is not supported.");
+        EnableHRTF = false;
     }
 
     Engine::Pause.Bind(&OnEnginePause);
@@ -244,10 +275,11 @@ bool AudioService::Init()
 void AudioService::Update()
 {
     PROFILE_CPU_NAMED("Audio.Update");
+    PROFILE_MEM(Audio);
 
     // Update the master volume
     float masterVolume = MasterVolume;
-    if (MuteOnFocusLoss && !Engine::HasFocus)
+    if (MuteOnFocusLoss && Engine::IsPlayMode() && !Engine::HasFocus)
     {
         // Mute audio if app has no user focus
         masterVolume = 0.0f;

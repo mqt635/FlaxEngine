@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -18,34 +18,54 @@
 	public: \
 	explicit type(const SpawnParams& params, const AssetInfo* info)
 
+// Utility interface for objects that reference asset and want to get notified about asset reference changes.
+class FLAXENGINE_API IAssetReference
+{
+public:
+    virtual ~IAssetReference() = default;
+
+    // Asset reference got changed.
+    virtual void OnAssetChanged(Asset* asset, void* caller) = 0;
+    // Asset got loaded.
+    virtual void OnAssetLoaded(Asset* asset, void* caller) = 0;
+    // Asset gets unloaded.
+    virtual void OnAssetUnloaded(Asset* asset, void* caller) = 0;
+};
+
 /// <summary>
 /// Asset objects base class.
 /// </summary>
 API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API Asset : public ManagedScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Asset);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Asset);
     friend Content;
     friend LoadAssetTask;
     friend class ContentService;
 public:
-
     /// <summary>
     /// The asset loading result.
     /// </summary>
     DECLARE_ENUM_7(LoadResult, Ok, Failed, MissingDataChunk, CannotLoadData, CannotLoadStorage, CannotLoadInitData, InvalidData);
 
 protected:
+    enum class LoadState : int64
+    {
+        Unloaded,
+        Loaded,
+        LoadFailed,
+    };
 
     volatile int64 _refCount;
-    ContentLoadTask* _loadingTask;
+    volatile int64 _loadState;
+    volatile intptr _loadingTask;
 
-    int8 _isLoaded : 1; // Indicates that asset is loaded
-    int8 _loadFailed : 1; // Indicates that last asset loading has failed
     int8 _deleteFileOnUnload : 1; // Indicates that asset source file should be removed on asset unload
     int8 _isVirtual : 1; // Indicates that asset is pure virtual (generated or temporary, has no storage so won't be saved)
 
-public:
+    HashSet<IAssetReference*> _references;
+    CriticalSection _referencesLocker; // TODO: convert into a single interlocked exchange for the current thread owning lock
 
+public:
     /// <summary>
     /// Initializes a new instance of the <see cref="Asset"/> class.
     /// </summary>
@@ -54,31 +74,47 @@ public:
     explicit Asset(const SpawnParams& params, const AssetInfo* info);
 
 public:
-
     typedef Delegate<Asset*> EventType;
 
     /// <summary>
     /// Action called when asset gets loaded
+    /// [Deprecated in v1.13]
     /// </summary>
-    EventType OnLoaded;
+    DEPRECATED("Use Loaded event instead.") EventType OnLoaded;
+
+    /// <summary>
+    /// Action called when asset gets loaded. Always called from the main thread.
+    /// </summary>
+    API_EVENT() Delegate<Asset*> Loaded;
+
+    /// <summary>
+    /// Action called when asset start reloading (e.g. after reimport). Always called from the main thread.
+    /// [Deprecated in v1.13]
+    /// </summary>
+    DEPRECATED("Use Reloading event instead.") EventType OnReloading;
 
     /// <summary>
     /// Action called when asset start reloading (e.g. after reimport). Always called from the main thread.
     /// </summary>
-    EventType OnReloading;
+    Delegate<Asset*> Reloading;
 
     /// <summary>
-    /// Action called when asset gets unloaded
+    /// Action called when asset gets unloaded. Always called from the main thread.
+    /// [Deprecated in v1.13]
     /// </summary>
-    EventType OnUnloaded;
+    DEPRECATED("Use Unloaded event instead.") EventType OnUnloaded;
 
     /// <summary>
-    /// General purpose mutex for an asset object. Should guard most of asset functionalities to be secure.
+    /// Action called when asset gets unloaded. Always called from the main thread.
+    /// </summary>
+    Delegate<Asset*> Unloaded;
+
+    /// <summary>
+    /// General purpose mutex for an asset object. Should guard most of the asset functionalities to be secure.
     /// </summary>
     CriticalSection Locker;
 
 public:
-
     /// <summary>
     /// Gets asset's reference count. Asset will be automatically unloaded when this reaches zero.
     /// </summary>
@@ -87,25 +123,28 @@ public:
     /// <summary>
     /// Adds reference to that asset.
     /// </summary>
-    FORCE_INLINE void AddReference()
-    {
-        Platform::InterlockedIncrement(&_refCount);
-    }
+    void AddReference();
+
+    /// <summary>
+    /// Adds reference to that asset.
+    /// </summary>
+    void AddReference(IAssetReference* ref, bool week = false);
 
     /// <summary>
     /// Removes reference from that asset.
     /// </summary>
-    FORCE_INLINE void RemoveReference()
-    {
-        Platform::InterlockedDecrement(&_refCount);
-    }
-
-public:
+    void RemoveReference();
 
     /// <summary>
-    /// Gets the path to the asset storage file. In Editor it reflects the actual file, in cooked Game, it fakes the Editor path to be informative for developers.
+    /// Removes reference from that asset.
     /// </summary>
-    API_PROPERTY() virtual const String& GetPath() const = 0;
+    void RemoveReference(IAssetReference* ref, bool week = false);
+
+public:
+    /// <summary>
+    /// Gets the path to the asset storage file. In Editor, it reflects the actual file, in cooked Game, it fakes the Editor path to be informative for developers.
+    /// </summary>
+    API_PROPERTY() virtual StringView GetPath() const = 0;
 
     /// <summary>
     /// Gets the asset type name.
@@ -117,13 +156,16 @@ public:
     /// </summary>
     API_PROPERTY() FORCE_INLINE bool IsLoaded() const
     {
-        return _isLoaded != 0;
+        return Platform::AtomicRead(&_loadState) == (int64)LoadState::Loaded;
     }
 
     /// <summary>
     /// Returns true if last asset loading failed, otherwise false.
     /// </summary>
-    API_PROPERTY() bool LastLoadFailed() const;
+    API_PROPERTY() bool LastLoadFailed() const
+    {
+        return Platform::AtomicRead(&_loadState) == (int64)LoadState::LoadFailed;
+    }
 
     /// <summary>
     /// Determines whether this asset is virtual (generated or temporary, has no storage so it won't be saved).
@@ -134,16 +176,19 @@ public:
     }
 
 #if USE_EDITOR
-
     /// <summary>
     /// Determines whether this asset was marked to be deleted on unload.
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     API_PROPERTY() bool ShouldDeleteFileOnUnload() const;
-
 #endif
 
-public:
+    /// <summary>
+    /// Gets amount of CPU memory used by this resource (in bytes). It's a rough estimation. Memory may be fragmented, compressed or sub-allocated so the actual memory pressure from this resource may vary.
+    /// </summary>
+    API_PROPERTY() virtual uint64 GetMemoryUsage() const;
 
+public:
     /// <summary>
     /// Reloads the asset.
     /// </summary>
@@ -154,15 +199,19 @@ public:
     /// </summary>
     /// <param name="timeoutInMilliseconds">Custom timeout value in milliseconds.</param>
     /// <returns>True if cannot load that asset (failed or has been cancelled), otherwise false.</returns>
-    API_FUNCTION() bool WaitForLoaded(double timeoutInMilliseconds = 30000.0);
+    API_FUNCTION() bool WaitForLoaded(double timeoutInMilliseconds = 30000.0) const;
 
     /// <summary>
     /// Initializes asset data as virtual asset.
     /// </summary>
     virtual void InitAsVirtual();
 
-#if USE_EDITOR
+    /// <summary>
+    /// Cancels any asynchronous content streaming by this asset (eg. mesh data streaming into GPU memory). Will release any locks for asset storage container.
+    /// </summary>
+    virtual void CancelStreaming();
 
+#if USE_EDITOR
     /// <summary>
     /// Gets the asset references. Supported only in Editor.
     /// </summary>
@@ -170,10 +219,24 @@ public:
     /// For some asset types (e.g. scene or prefab) it may contain invalid asset ids due to not perfect gather method,
     /// which is optimized to perform scan very quickly. Before using those ids perform simple validation via Content cache API.
     /// The result collection contains only 1-level-deep references (only direct ones) and is invalid if asset is not loaded.
-    /// Also the output data may have duplicated asset ids or even invalid ids (Guid::Empty).
+    /// Also, the output data may have duplicated asset ids or even invalid ids (Guid::Empty).
+    /// </remarks>
+    /// <param name="assets">The output collection of the asset ids referenced by this asset.</param>
+    /// <param name="files">The output list of file paths referenced by this asset. Files might come from project Content folder (relative path is preserved in cooked game), or external location (copied into Content root folder of cooked game).</param>
+    virtual void GetReferences(Array<Guid, HeapAllocation>& assets, Array<String, HeapAllocation>& files) const;
+
+    /// <summary>
+    /// Gets the asset references. Supported only in Editor.
+    /// [Deprecated in v1.9]
+    /// </summary>
+    /// <remarks>
+    /// For some asset types (e.g. scene or prefab) it may contain invalid asset ids due to not perfect gather method,
+    /// which is optimized to perform scan very quickly. Before using those ids perform simple validation via Content cache API.
+    /// The result collection contains only 1-level-deep references (only direct ones) and is invalid if asset is not loaded.
+    /// Also, the output data may have duplicated asset ids or even invalid ids (Guid::Empty).
     /// </remarks>
     /// <param name="output">The output collection of the asset ids referenced by this asset.</param>
-    virtual void GetReferences(Array<Guid, HeapAllocation>& output) const;
+    DEPRECATED("Use GetReferences with assets and files parameter instead") virtual void GetReferences(Array<Guid, HeapAllocation>& output) const;
 
     /// <summary>
     /// Gets the asset references. Supported only in Editor.
@@ -182,11 +245,17 @@ public:
     /// For some asset types (e.g. scene or prefab) it may contain invalid asset ids due to not perfect gather method,
     /// which is optimized to perform scan very quickly. Before using those ids perform simple validation via Content cache API.
     /// The result collection contains only 1-level-deep references (only direct ones) and is invalid if asset is not loaded.
-    /// Also the output data may have duplicated asset ids or even invalid ids (Guid::Empty).
+    /// Also, the output data may have duplicated asset ids or even invalid ids (Guid::Empty).
     /// </remarks>
     /// <returns>The collection of the asset ids referenced by this asset.</returns>
     API_FUNCTION() Array<Guid, HeapAllocation> GetReferences() const;
 
+    /// <summary>
+    /// Saves this asset to the file. Supported only in Editor.
+    /// </summary>
+    /// <param name="path">The custom asset path to use for the saving. Use empty value to save this asset to its own storage location. Can be used to duplicate asset. Must be specified when saving virtual asset.</param>
+    /// <returns>True when cannot save data, otherwise false.</returns>
+    API_FUNCTION(Sealed) virtual bool Save(const StringView& path = StringView::Empty);
 #endif
 
     /// <summary>
@@ -195,7 +264,6 @@ public:
     void DeleteManaged();
 
 protected:
-
     /// <summary>
     /// Creates the loading tasks sequence (allows to inject custom tasks to asset loading logic).
     /// </summary>
@@ -225,23 +293,26 @@ protected:
     virtual void unload(bool isReloading) = 0;
 
 protected:
-
     virtual bool IsInternalType() const;
 
     bool onLoad(LoadAssetTask* task);
     void onLoaded();
-    void onLoaded_MainThread();
+    virtual void onLoaded_MainThread();
     virtual void onUnload_MainThread();
 #if USE_EDITOR
+    bool OnCheckSave(const StringView& path = StringView::Empty) const;
     virtual void onRename(const StringView& newPath) = 0;
 #endif
 
-public:
+    // Utilities to ensure specific engine systems are initialized before loading asset (eg. assets can be loaded during engine startup).
+    static bool WaitForInitGraphics();
+    static bool WaitForInitPhysics();
 
+public:
     // [ManagedScriptingObject]
     String ToString() const override;
     void OnDeleteObject() override;
-    void CreateManaged() override;
+    bool CreateManaged() override;
     void DestroyManaged() override;
     void OnManagedInstanceDeleted() override;
     void OnScriptingDispose() override;

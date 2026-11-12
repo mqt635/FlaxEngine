@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -82,7 +82,7 @@ namespace FlaxEditor.Windows
 
                 // Copy camera view parameters for the scene rendering
                 var view = sceneTask.View;
-                var viewport = new FlaxEngine.Viewport(Vector2.Zero, sceneTask.Buffers.Size);
+                var viewport = new FlaxEngine.Viewport(Float2.Zero, sceneTask.Buffers.Size);
                 view.CopyFrom(Camera, ref viewport);
                 sceneTask.View = view;
             }
@@ -107,7 +107,7 @@ namespace FlaxEditor.Windows
                 base.Draw();
 
                 // Draw frame
-                Render2D.DrawRectangle(new Rectangle(Vector2.Zero, Size), Color.Black);
+                Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), Color.Black);
             }
 
             /// <inheritdoc />
@@ -130,7 +130,7 @@ namespace FlaxEditor.Windows
         /// <summary>
         /// The viewport control.
         /// </summary>
-        public readonly MainEditorGizmoViewport Viewport;
+        public new readonly MainEditorGizmoViewport Viewport;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EditGameWindow"/> class.
@@ -140,6 +140,7 @@ namespace FlaxEditor.Windows
         : base(editor, true, ScrollBars.None)
         {
             Title = "Editor";
+            Icon = editor.Icons.Grid32;
 
             // Create viewport
             Viewport = new MainEditorGizmoViewport(editor)
@@ -150,7 +151,21 @@ namespace FlaxEditor.Windows
             };
             Viewport.Task.ViewFlags = ViewFlags.DefaultEditor;
 
+            Editor.SceneEditing.SelectionChanged += OnSelectionChanged;
             Editor.Scene.ActorRemoved += SceneOnActorRemoved;
+        }
+
+        /// <inheritdoc />
+        public override void OnEditorStateChanged()
+        {
+            base.OnEditorStateChanged();
+
+            UpdateCameraPreview();
+        }
+
+        private void OnSelectionChanged()
+        {
+            UpdateCameraPreview();
         }
 
         /// <summary>
@@ -174,7 +189,7 @@ namespace FlaxEditor.Windows
 
             _pilotActor = actor;
             _pilotStart = actor.Transform;
-            _pilotBounds = actor.BoxWithChildren;
+            _pilotBounds = actor.BoundingBoxWithChildren;
             Viewport.ViewTransform = _pilotStart;
             if (_pilotWidget == null)
             {
@@ -196,6 +211,7 @@ namespace FlaxEditor.Windows
             _pilotWidget.Text = string.Format("Piloting actor: {0} (click to stop)", actor.Name);
             _pilotWidget.PerformLayout();
             _pilotWidget.Parent.PerformLayout();
+            SelectTab();
         }
 
         /// <summary>
@@ -242,7 +258,7 @@ namespace FlaxEditor.Windows
         private void UpdateCameraPreview()
         {
             // Disable rendering preview during GI baking
-            if (Editor.StateMachine.CurrentState.IsPerformanceHeavy)
+            if (Editor == null || Editor.StateMachine.CurrentState.IsPerformanceHeavy)
             {
                 HideAllCameraPreviews();
                 return;
@@ -303,11 +319,11 @@ namespace FlaxEditor.Windows
                 const float maxWidth = maxHeight * aspectRatio;
                 const float viewSpaceMaxPercentage = 0.7f;
                 const float margin = 10;
-                Vector2 totalSize = Size * viewSpaceMaxPercentage - margin;
-                Vector2 singleSize = totalSize / count - count * margin;
+                var totalSize = Size * viewSpaceMaxPercentage - margin;
+                var singleSize = totalSize / count - count * margin;
                 float sizeX = Mathf.Clamp(singleSize.X, minWidth, maxWidth);
                 float sizeY = sizeX / aspectRatio;
-                singleSize = new Vector2(sizeX, sizeY);
+                singleSize = new Float2(sizeX, sizeY);
                 int countPerX = Mathf.FloorToInt(totalSize.X / singleSize.X);
                 int countPerY = Mathf.FloorToInt(totalSize.Y / singleSize.Y);
                 int index = 0;
@@ -318,7 +334,7 @@ namespace FlaxEditor.Windows
                         if (index == count)
                             break;
 
-                        var pos = Size - (singleSize + margin) * new Vector2(x, y);
+                        var pos = Size - (singleSize + margin) * new Float2(x, y);
                         _previews[index++].Bounds = new Rectangle(pos, singleSize);
                     }
 
@@ -376,9 +392,6 @@ namespace FlaxEditor.Windows
         /// <inheritdoc />
         public override void Update(float deltaTime)
         {
-            // TODO: call camera preview update only on selection change, or state change
-            UpdateCameraPreview();
-
             if (Root.GetKeyDown(KeyboardKeys.F12))
             {
                 Viewport.TakeScreenshot();
@@ -392,6 +405,14 @@ namespace FlaxEditor.Windows
                 transform.Scale = _pilotActor.Scale;
                 _pilotActor.Transform = transform;
             }
+        }
+
+        /// <inheritdoc />
+        protected override void OnSizeChanged()
+        {
+            base.OnSizeChanged();
+
+            UpdateCameraPreview();
         }
 
         /// <inheritdoc />
@@ -413,51 +434,64 @@ namespace FlaxEditor.Windows
             writer.WriteAttributeString("GridEnabled", Viewport.Grid.Enabled.ToString());
             writer.WriteAttributeString("ShowFpsCounter", Viewport.ShowFpsCounter.ToString());
             writer.WriteAttributeString("ShowNavigation", Viewport.ShowNavigation.ToString());
+            writer.WriteAttributeString("UseOrthographicProjection", Viewport.UseOrthographicProjection.ToString());
             writer.WriteAttributeString("NearPlane", Viewport.NearPlane.ToString());
             writer.WriteAttributeString("FarPlane", Viewport.FarPlane.ToString());
             writer.WriteAttributeString("FieldOfView", Viewport.FieldOfView.ToString());
             writer.WriteAttributeString("MovementSpeed", Viewport.MovementSpeed.ToString());
+            writer.WriteAttributeString("Brightness", Viewport.Brightness.ToString());
+            writer.WriteAttributeString("ViewportIconsScale", ViewportIconsRenderer.Scale.ToString());
+            writer.WriteAttributeString("ResolutionScale", Viewport.ResolutionScale.ToString());
             writer.WriteAttributeString("OrthographicScale", Viewport.OrthographicScale.ToString());
-            writer.WriteAttributeString("UseOrthographicProjection", Viewport.UseOrthographicProjection.ToString());
-            writer.WriteAttributeString("ViewFlags", ((long)Viewport.Task.View.Flags).ToString());
+            writer.WriteAttributeString("ViewFlags", ((ulong)Viewport.Task.View.Flags).ToString());
+            writer.WriteAttributeString("DebugView", ((int)Viewport.Task.ViewMode).ToString());
+            writer.WriteAttributeString("LayerMask", Viewport.Task.ViewLayersMask.Mask.ToString());
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
+            if (!Editor.Options.Options.Viewport.UsePersistenceOverDefaults)
+                return;
+            
             if (bool.TryParse(node.GetAttribute("GridEnabled"), out bool value1))
                 Viewport.Grid.Enabled = value1;
-
             if (bool.TryParse(node.GetAttribute("ShowFpsCounter"), out value1))
                 Viewport.ShowFpsCounter = value1;
-
             if (bool.TryParse(node.GetAttribute("ShowNavigation"), out value1))
                 Viewport.ShowNavigation = value1;
-
-            if (float.TryParse(node.GetAttribute("NearPlane"), out float value2))
-                Viewport.NearPlane = value2;
-
-            if (float.TryParse(node.GetAttribute("FarPlane"), out value2))
-                Viewport.FarPlane = value2;
-
-            if (float.TryParse(node.GetAttribute("FieldOfView"), out value2))
-                Viewport.FieldOfView = value2;
-
-            if (float.TryParse(node.GetAttribute("MovementSpeed"), out value2))
-                Viewport.MovementSpeed = value2;
-
-            if (float.TryParse(node.GetAttribute("OrthographicScale"), out value2))
-                Viewport.OrthographicScale = value2;
-
             if (bool.TryParse(node.GetAttribute("UseOrthographicProjection"), out value1))
                 Viewport.UseOrthographicProjection = value1;
-
-            if (long.TryParse(node.GetAttribute("ViewFlags"), out long value3))
+            if (float.TryParse(node.GetAttribute("NearPlane"), out float value2))
+                Viewport.NearPlane = value2;
+            if (float.TryParse(node.GetAttribute("FarPlane"), out value2))
+                Viewport.FarPlane = value2;
+            if (float.TryParse(node.GetAttribute("FieldOfView"), out value2))
+                Viewport.FieldOfView = value2;
+            if (float.TryParse(node.GetAttribute("MovementSpeed"), out value2))
+                Viewport.MovementSpeed = value2;
+            if (float.TryParse(node.GetAttribute("Brightness"), out value2))
+                Viewport.Brightness = value2;
+            if (float.TryParse(node.GetAttribute("ResolutionScale"), out value2))
+                Viewport.ResolutionScale = value2;
+            if (float.TryParse(node.GetAttribute("ViewportIconsScale"), out value2))
+                ViewportIconsRenderer.Scale = value2;
+            if (float.TryParse(node.GetAttribute("OrthographicScale"), out value2))
+                Viewport.OrthographicScale = value2;
+            if (ulong.TryParse(node.GetAttribute("ViewFlags"), out ulong value3))
                 Viewport.Task.ViewFlags = (ViewFlags)value3;
-
-            // Reset view flags if opening with different engine version (ViewFlags enum could be modified)
+            if (int.TryParse(node.GetAttribute("DebugView"), out int value4))
+                Viewport.Task.ViewMode = (ViewMode)value4;
+            if (uint.TryParse(node.GetAttribute("LayerMask"), out uint value5))
+                Viewport.Task.ViewLayersMask = new LayersMask(value5);
+            
+            // Reset view flags and view mode if opening with different engine version
+            // (ViewFlags and ViewMode enums could be modified)
             if (Editor.LastProjectOpenedEngineBuild != Globals.EngineBuildNumber)
+            {
                 Viewport.Task.ViewFlags = ViewFlags.DefaultEditor;
+                Viewport.Task.ViewMode = ViewMode.Default;
+            }
         }
 
         /// <inheritdoc />

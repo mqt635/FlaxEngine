@@ -1,10 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "MaterialShader.h"
-#include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Core/Types/Span.h"
+#include "Engine/Renderer/GI/DynamicDiffuseGlobalIllumination.h"
+#include "Engine/Renderer/GI/GlobalSurfaceAtlasPass.h"
+#include "Engine/Renderer/Utils/GlobalSignDistanceFieldPass.h"
 
 // Material shader features are plugin-based functionalities that are reusable between different material domains.
 struct MaterialShaderFeature
@@ -22,18 +24,17 @@ struct ForwardShadingFeature : MaterialShaderFeature
 {
     enum { MaxLocalLights = 4 };
 
-    enum { SRVs = 3 };
+    enum { SRVs = 6 };
 
-    PACK_STRUCT(struct Data
-        {
-        LightData DirectionalLight;
-        LightShadowData DirectionalLightShadow;
-        LightData SkyLight;
-        ProbeData EnvironmentProbe;
-        ExponentialHeightFogData ExponentialHeightFog;
-        Vector3 Dummy2;
+    PACK_STRUCT(struct Data {
+        ShaderLightData DirectionalLight;
+        ShaderLightData SkyLight;
+        ShaderEnvProbeData EnvironmentProbe;
+        ShaderExponentialHeightFogData ExponentialHeightFog;
+        ShaderVolumetricFogData VolumetricFogData;
+        Float3 Dummy2;
         uint32 LocalLightsCount;
-        LightData LocalLights[MaxLocalLights];
+        ShaderLightData LocalLights[MaxLocalLights];
         });
 
     static void Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv);
@@ -63,9 +64,35 @@ struct LightmapFeature : MaterialShaderFeature
 {
     enum { SRVs = 3 };
 
-    PACK_STRUCT(struct Data
-        {
-        Rectangle LightmapArea;
+    static bool Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv);
+#if USE_EDITOR
+    static void Generate(GeneratorData& data);
+#endif
+};
+
+// Material shader feature that adds Global Illumination sampling feature (light probes).
+struct GlobalIlluminationFeature : MaterialShaderFeature
+{
+    enum { SRVs = 4 };
+
+    PACK_STRUCT(struct Data {
+        DynamicDiffuseGlobalIlluminationPass::ConstantsData DDGI;
+        });
+
+    static bool Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv);
+#if USE_EDITOR
+    static void Generate(GeneratorData& data);
+#endif
+};
+
+// Material shader feature that adds SDF Reflections feature (software reflections). 
+struct SDFReflectionsFeature : MaterialShaderFeature
+{
+    enum { SRVs = 7 };
+
+    PACK_STRUCT(struct Data {
+        GlobalSignDistanceFieldPass::ConstantsData GlobalSDF;
+        GlobalSurfaceAtlasPass::ConstantsData GlobalSurfaceAtlas;
         });
 
     static bool Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv);

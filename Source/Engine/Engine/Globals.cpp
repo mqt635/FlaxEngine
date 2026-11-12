@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Globals.h"
 #include "Engine/Core/Types/String.h"
@@ -15,11 +15,13 @@ String Globals::EngineContentFolder;
 String Globals::ProjectSourceFolder;
 #endif
 String Globals::ProjectContentFolder;
-String Globals::MonoPath;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 bool Globals::FatalErrorOccurred;
 bool Globals::IsRequestingExit;
 int32 Globals::ExitCode;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
 uint64 Globals::MainThreadID;
+uint64 Globals::RenderThreadID;
 String Globals::EngineVersion(TEXT(FLAXENGINE_VERSION_TEXT));
 int32 Globals::EngineBuildNumber = FLAXENGINE_VERSION_BUILD;
 String Globals::ProductName;

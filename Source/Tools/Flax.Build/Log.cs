@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -65,7 +65,10 @@ namespace Flax.Build
                     if (ApplyConsoleColors)
                         Console.ForegroundColor = color;
 
-                    Console.WriteLine(Indent + message);
+                    if (color != ConsoleColor.Red)
+                        Console.WriteLine(Indent + message);
+                    else
+                        Console.Error.WriteLine(Indent + message);
 
                     if (ApplyConsoleColors)
                         Console.ResetColor();
@@ -74,6 +77,8 @@ namespace Flax.Build
                         System.Diagnostics.Debug.WriteLine(Indent + message);
                 }
             }
+            else if (Configuration.LogFileWithConsole)
+                return;
 
             if (_logFile != null)
             {
@@ -82,7 +87,10 @@ namespace Flax.Build
 
                 lock (_logFile)
                 {
-                    _logFileWriter.WriteLine(prefix + Indent + message);
+                    if (Configuration.LogFileWithConsole)
+                        _logFileWriter.WriteLine(message);
+                    else
+                        _logFileWriter.WriteLine(prefix + Indent + message);
                 }
             }
         }
@@ -101,6 +109,15 @@ namespace Flax.Build
         /// </summary>
         /// <param name="message">The message.</param>
         public static void Info(string message)
+        {
+            Write(message, _defaultColor, Configuration.ConsoleLog && !Configuration.LogMessagesOnly);
+        }
+
+        /// <summary>
+        /// Logs the information.
+        /// </summary>
+        /// <param name="message">The message.</param>
+        public static void Message(string message)
         {
             Write(message, _defaultColor, Configuration.ConsoleLog);
         }

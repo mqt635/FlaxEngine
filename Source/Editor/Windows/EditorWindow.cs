@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content;
+using FlaxEditor.Options;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using DockWindow = FlaxEditor.GUI.Docking.DockWindow;
@@ -25,6 +26,11 @@ namespace FlaxEditor.Windows
         protected virtual bool CanOpenContentFinder => true;
 
         /// <summary>
+        /// Gets a value indicating whether this window can use UI navigation (tab/enter).
+        /// </summary>
+        protected virtual bool CanUseNavigation => true;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="EditorWindow"/> class.
         /// </summary>
         /// <param name="editor">The editor.</param>
@@ -33,6 +39,7 @@ namespace FlaxEditor.Windows
         protected EditorWindow(Editor editor, bool hideOnClose, ScrollBars scrollBars)
         : base(editor.UI.MasterPanel, hideOnClose, scrollBars)
         {
+            AutoFocus = true;
             Editor = editor;
 
             InputActions.Add(options => options.ContentFinder, () =>
@@ -41,6 +48,78 @@ namespace FlaxEditor.Windows
                 {
                     Editor.ContentFinding.ShowFinder(RootWindow);
                 }
+            });
+
+            // Set up editor window shortcuts
+            InputActions.Add(options => options.ContentWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.ContentWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.SceneWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.SceneWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.ToolboxWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.ToolboxWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.PropertiesWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.PropertiesWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.GameWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.GameWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.EditorWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.EditWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.DebugLogWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.DebugLogWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.OutputLogWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.OutputLogWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.GraphicsQualityWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.GraphicsQualityWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.GameCookerWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.GameCookerWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.ProfilerWindow, () =>
+            {
+                if (InputOptions.ProfilerShortcutAvailable)
+                    Editor.Windows.ProfilerWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.ContentFinder, () =>
+            {
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.ContentFinding.ShowSearch();
+            });
+            InputActions.Add(options => options.VisualScriptDebuggerWindow, () => 
+            { 
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.VisualScriptDebuggerWin.FocusOrShow();
+            });
+            InputActions.Add(options => options.EditorOptionsWindow, () =>
+            {
+                if (InputOptions.WindowShortcutsAvailable)
+                    Editor.Windows.EditorOptionsWin.FocusOrShow();
             });
 
             // Register
@@ -146,6 +225,13 @@ namespace FlaxEditor.Windows
         }
 
         /// <summary>
+        /// Called when Editor will leave the play mode.
+        /// </summary>
+        public virtual void OnPlayEnding()
+        {
+        }
+
+        /// <summary>
         /// Called when Editor leaves the play mode.
         /// </summary>
         public virtual void OnPlayEnd()
@@ -185,8 +271,44 @@ namespace FlaxEditor.Windows
         #endregion
 
         /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            // Prevent closing the editor window when using RMB + Ctrl + W to slow down the camera flight
+            if (Editor.Options.Options.Input.CloseTab.Process(this, key))
+            {
+                if (Root.GetMouseButton(MouseButton.Right))
+                    return true;
+            }
+
+            if (base.OnKeyDown(key))
+                return true;
+
+            switch (key)
+            {
+            case KeyboardKeys.Return:
+                if (CanUseNavigation && Root?.FocusedControl != null)
+                {
+                    Root.SubmitFocused();
+                    return true;
+                }
+                break;
+            case KeyboardKeys.Tab:
+                if (CanUseNavigation && Root != null)
+                {
+                    bool shiftDown = Root.GetKey(KeyboardKeys.Shift);
+                    Root.Navigate(shiftDown ? NavDirection.Previous : NavDirection.Next);
+                    return true;
+                }
+                break;
+            }
+            return false;
+        }
+
+        /// <inheritdoc />
         public override void OnDestroy()
         {
+            if (IsDisposing)
+                return;
             OnExit();
 
             // Unregister

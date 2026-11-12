@@ -1,7 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace FlaxEngine
@@ -13,7 +12,7 @@ namespace FlaxEngine
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     public struct FloatR10G10B10A2
     {
-        private uint value;
+        private uint rawValue;
 
         /// <summary>
         /// Initializes a new instance of the <see cref = "T:FlaxEngine.FloatR10G10B10A2" /> structure.
@@ -24,7 +23,7 @@ namespace FlaxEngine
         /// <param name="w">The floating point value that should be stored in A component (2 bit format).</param>
         public FloatR10G10B10A2(float x, float y, float z, float w)
         {
-            value = Pack(x, y, z, w);
+            rawValue = Pack(x, y, z, w);
         }
 
         /// <summary>
@@ -32,67 +31,63 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="value">The floating point value that should be stored in 10 bit format.</param>
         /// <param name="w">The floating point value that should be stored in alpha component (2 bit format).</param>
-        public FloatR10G10B10A2(Vector3 value, float w = 0)
+        public FloatR10G10B10A2(Float3 value, float w = 0)
         {
-            this.value = Pack(value.X, value.Y, value.Z, w);
+            rawValue = Pack(value.X, value.Y, value.Z, w);
         }
 
         /// <summary>
         /// Initializes a new instance of the <see cref = "T:FlaxEngine.FloatR10G10B10A2" /> structure.
         /// </summary>
         /// <param name = "value">The floating point value that should be stored in 10 bit format.</param>
-        public FloatR10G10B10A2(Vector4 value)
+        public FloatR10G10B10A2(Float4 value)
         {
-            this.value = Pack(value.X, value.Y, value.Z, value.W);
+            rawValue = Pack(value.X, value.Y, value.Z, value.W);
         }
 
         /// <summary>
         /// Gets or sets the raw 32 bit value used to back this vector.
         /// </summary>
-        public uint RawValue
-        {
-            get => value;
-            set => this.value = value;
-        }
+        public uint RawValue => rawValue;
 
         /// <summary>
         /// Gets the R component.
         /// </summary>
-        public float R => (value & 0x3FF) / 1023.0f;
+        public float R => (rawValue & 0x3FF) / 1023.0f;
 
         /// <summary>
         /// Gets the G component.
         /// </summary>
-        public float G => ((value >> 10) & 0x3FF) / 1023.0f;
+        public float G => ((rawValue >> 10) & 0x3FF) / 1023.0f;
 
         /// <summary>
         /// Gets the B component.
         /// </summary>
-        public float B => ((value >> 20) & 0x3FF) / 1023.0f;
+        public float B => ((rawValue >> 20) & 0x3FF) / 1023.0f;
 
         /// <summary>
         /// Gets the A component.
         /// </summary>
-        public float A => (value >> 30) / 3.0f;
+        public float A => (rawValue >> 30) / 3.0f;
 
         /// <summary>
-        /// Performs an explicit conversion from <see cref = "T:FlaxEngine.Vector4" /> to <see cref = "T:FlaxEngine.FloatR10G10B10A2" />.
+        /// Performs an explicit conversion from <see cref = "T:FlaxEngine.Float4" /> to <see cref = "T:FlaxEngine.FloatR10G10B10A2" />.
         /// </summary>
         /// <param name="value">The value to be converted.</param>
         /// <returns>The converted value.</returns>
-        public static explicit operator FloatR10G10B10A2(Vector4 value)
+        public static explicit operator FloatR10G10B10A2(Float4 value)
         {
             return new FloatR10G10B10A2(value);
         }
 
         /// <summary>
-        /// Performs an implicit conversion from <see cref = "T:FlaxEngine.FloatR10G10B10A2" /> to <see cref = "T:FlaxEngine.Vector4" />.
+        /// Performs an implicit conversion from <see cref = "T:FlaxEngine.FloatR10G10B10A2" /> to <see cref = "T:FlaxEngine.Float4" />.
         /// </summary>
         /// <param name="value">The value to be converted.</param>
         /// <returns>The converted value.</returns>
-        public static implicit operator Vector4(FloatR10G10B10A2 value)
+        public static implicit operator Float4(FloatR10G10B10A2 value)
         {
-            return value.ToVector4();
+            return value.ToFloat4();
         }
 
         /// <summary>
@@ -103,7 +98,7 @@ namespace FlaxEngine
         /// <returns><c>true</c> if <paramref name="left" /> has the same value as <paramref name="right" />; otherwise, <c>false</c>.</returns>
         public static bool operator ==(FloatR10G10B10A2 left, FloatR10G10B10A2 right)
         {
-            return left.value == right.value;
+            return left.rawValue == right.rawValue;
         }
 
         /// <summary>
@@ -114,17 +109,16 @@ namespace FlaxEngine
         /// <returns><c>true</c> if <paramref name="left" /> has a different value than <paramref name="right" />; otherwise, <c>false</c>.</returns>
         public static bool operator !=(FloatR10G10B10A2 left, FloatR10G10B10A2 right)
         {
-            return left.value != right.value;
+            return left.rawValue != right.rawValue;
         }
 
         /// <summary>
-        /// Converts the value of the object to its equivalent string representation.
+        /// Returns a <see cref="System.String" /> that represents this instance.
         /// </summary>
-        /// <returns>The string representation of the value of this instance.</returns>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
         public override string ToString()
         {
-            Vector4 num = this;
-            return num.ToString(CultureInfo.CurrentCulture);
+            return ToFloat4().ToString();
         }
 
         /// <summary>
@@ -133,7 +127,7 @@ namespace FlaxEngine
         /// <returns>A 32-bit signed integer hash code.</returns>
         public override int GetHashCode()
         {
-            return value.GetHashCode();
+            return rawValue.GetHashCode();
         }
 
         /// <summary>
@@ -144,7 +138,7 @@ namespace FlaxEngine
         /// <returns><c>true</c> if <paramref name = "value1" /> is the same instance as <paramref name = "value2" /> or if both are <c>null</c> references or if <c>value1.Equals(value2)</c> returns <c>true</c>; otherwise, <c>false</c>.</returns>
         public static bool Equals(ref FloatR10G10B10A2 value1, ref FloatR10G10B10A2 value2)
         {
-            return value1.value == value2.value;
+            return value1.rawValue == value2.rawValue;
         }
 
         /// <summary>
@@ -154,7 +148,7 @@ namespace FlaxEngine
         /// <returns><c>true</c> if the current instance is equal to the specified object; <c>false</c> otherwise.</returns>
         public bool Equals(FloatR10G10B10A2 other)
         {
-            return other.value == value;
+            return other.rawValue == rawValue;
         }
 
         /// <summary>
@@ -164,12 +158,7 @@ namespace FlaxEngine
         /// <returns><c>true</c> if the current instance is equal to the specified object; <c>false</c> otherwise.</returns>
         public override bool Equals(object obj)
         {
-            if (obj == null || obj.GetType() != GetType())
-            {
-                return false;
-            }
-            var v = (FloatR10G10B10A2)obj;
-            return v.value == value;
+            return obj is FloatR10G10B10A2 other && rawValue == other.rawValue;
         }
 
         private static uint Pack(float x, float y, float z, float w)
@@ -191,38 +180,38 @@ namespace FlaxEngine
         }
 
         /// <summary>
-        /// Unpacks vector to Vector3.
+        /// Unpacks vector to Float3.
         /// </summary>
-        /// <returns>Vector3 value</returns>
-        public Vector3 ToVector3()
+        /// <returns>Float3 value</returns>
+        public Float3 ToFloat3()
         {
-            Vector3 vectorOut;
+            Float3 vectorOut;
 
-            uint tmp = value & 0x3FF;
+            uint tmp = rawValue & 0x3FF;
             vectorOut.X = tmp / 1023.0f;
-            tmp = (value >> 10) & 0x3FF;
+            tmp = (rawValue >> 10) & 0x3FF;
             vectorOut.Y = tmp / 1023.0f;
-            tmp = (value >> 20) & 0x3FF;
+            tmp = (rawValue >> 20) & 0x3FF;
             vectorOut.Z = tmp / 1023.0f;
 
             return vectorOut;
         }
 
         /// <summary>
-        /// Unpacks vector to Vector4.
+        /// Unpacks vector to Float4.
         /// </summary>
-        /// <returns>Vector4 value</returns>
-        public Vector4 ToVector4()
+        /// <returns>Float4 value</returns>
+        public Float4 ToFloat4()
         {
-            Vector4 vectorOut;
+            Float4 vectorOut;
 
-            uint tmp = value & 0x3FF;
+            uint tmp = rawValue & 0x3FF;
             vectorOut.X = tmp / 1023.0f;
-            tmp = (value >> 10) & 0x3FF;
+            tmp = (rawValue >> 10) & 0x3FF;
             vectorOut.Y = tmp / 1023.0f;
-            tmp = (value >> 20) & 0x3FF;
+            tmp = (rawValue >> 20) & 0x3FF;
             vectorOut.Z = tmp / 1023.0f;
-            vectorOut.W = (value >> 30) / 3.0f;
+            vectorOut.W = (rawValue >> 30) / 3.0f;
 
             return vectorOut;
         }

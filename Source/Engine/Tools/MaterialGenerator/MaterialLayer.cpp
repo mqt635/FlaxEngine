@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MATERIAL_GRAPH
 
@@ -15,7 +15,6 @@ MaterialLayer::MaterialLayer(const Guid& id)
     , ShadingModel(MaterialShadingModel::Lit)
     , MaskThreshold(0.3f)
     , OpacityThreshold(0.12f)
-    , ParamIdsMappings(8)
 {
     ASSERT(ID.IsValid());
 }
@@ -50,7 +49,7 @@ void MaterialLayer::Prepare()
             const auto node = &Graph.Nodes[i];
             if (node->Type == ROOT_NODE_TYPE)
             {
-                Root = (MaterialGraphNode*)node;
+                Root = node;
                 break;
             }
         }
@@ -159,7 +158,7 @@ MaterialLayer* MaterialLayer::Load(const Guid& id, ReadStream* graphData, const 
     {
         if (layer->Graph.Nodes[i].Type == ROOT_NODE_TYPE)
         {
-            layer->Root = (MaterialGraphNode*)&layer->Graph.Nodes[i];
+            layer->Root = &layer->Graph.Nodes[i];
             break;
         }
     }
@@ -170,28 +169,38 @@ MaterialLayer* MaterialLayer::Load(const Guid& id, ReadStream* graphData, const 
         LOG(Warning, "Missing root node in '{0}'.", caller);
         layer->createRootNode();
     }
-        // Ensure to have valid root node
-    else if (layer->Root->Boxes.Count() != static_cast<int32>(MaterialGraphBoxes::MAX))
+    // Ensure to have valid root node
+    else if (layer->Root->Boxes.Count() < static_cast<int32>(MaterialGraphBoxes::MAX))
     {
-#define ADD_BOX(type, valueType) \
-		if(layer->Root->Boxes.Count() <= static_cast<int32>(MaterialGraphBoxes::type)) \
-			layer->Root->Boxes.Add(MaterialGraphBox(layer->Root, static_cast<int32>(MaterialGraphBoxes::type), VariantType::valueType))
-        ADD_BOX(TessellationMultiplier, Float);
-        ADD_BOX(WorldDisplacement, Vector3);
-        ADD_BOX(SubsurfaceColor, Vector3);
+        LOG(Warning, "Incorrect root node in '{0}'.", caller);
+        layer->Root->Boxes.Resize(static_cast<int32>(MaterialGraphBoxes::MAX));
+#define INIT_BOX(type, valueType) \
+    { \
+        auto& box = layer->Root->Boxes[(int32)MaterialGraphBoxes::type]; \
+        if (box.Parent != layer->Root || box.ID != (int32)MaterialGraphBoxes::type || box.Type.Type != VariantType::valueType) \
+        { \
+            box.Parent = layer->Root; \
+            box.ID = (int32)MaterialGraphBoxes::type; \
+            box.Type.Type = VariantType::valueType; \
+        } \
+    }
+        INIT_BOX(Layer, Void);
+        INIT_BOX(Color, Float3);
+        INIT_BOX(Mask, Float);
+        INIT_BOX(Emissive, Float3);
+        INIT_BOX(Metalness, Float);
+        INIT_BOX(Specular, Float);
+        INIT_BOX(Roughness, Float);
+        INIT_BOX(AmbientOcclusion, Float);
+        INIT_BOX(Normal, Float3);
+        INIT_BOX(Opacity, Float);
+        INIT_BOX(Refraction, Float);
+        INIT_BOX(PositionOffset, Float3);
+        INIT_BOX(TessellationMultiplier, Float);
+        INIT_BOX(WorldDisplacement, Float3);
+        INIT_BOX(SubsurfaceColor, Float3);
+#undef INIT_BOX
         static_assert(static_cast<int32>(MaterialGraphBoxes::MAX) == 15, "Invalid amount of boxes added for root node. Please update the code above");
-        ASSERT(layer->Root->Boxes.Count() == static_cast<int32>(MaterialGraphBoxes::MAX));
-#if BUILD_DEBUG
-        // Test for valid pointers after node upgrade
-        for (int32 i = 0; i < layer->Root->Boxes.Count(); i++)
-        {
-            if (layer->Root->Boxes[i].Parent != layer->Root)
-            {
-                CRASH;
-            }
-        }
-#endif
-#undef ADD_BOX
     }
 
     // Setup
@@ -215,25 +224,25 @@ void MaterialLayer::createRootNode()
     rootNode.Boxes.Resize(static_cast<int32>(MaterialGraphBoxes::MAX));
 #define INIT_BOX(type, valueType) rootNode.Boxes[static_cast<int32>(MaterialGraphBoxes::type)] = MaterialGraphBox(&rootNode, static_cast<int32>(MaterialGraphBoxes::type), VariantType::valueType)
     INIT_BOX(Layer, Void);
-    INIT_BOX(Color, Vector3);
+    INIT_BOX(Color, Float3);
     INIT_BOX(Mask, Float);
-    INIT_BOX(Emissive, Vector3);
+    INIT_BOX(Emissive, Float3);
     INIT_BOX(Metalness, Float);
     INIT_BOX(Specular, Float);
     INIT_BOX(Roughness, Float);
     INIT_BOX(AmbientOcclusion, Float);
-    INIT_BOX(Normal, Vector3);
+    INIT_BOX(Normal, Float3);
     INIT_BOX(Opacity, Float);
     INIT_BOX(Refraction, Float);
-    INIT_BOX(PositionOffset, Vector3);
+    INIT_BOX(PositionOffset, Float3);
     INIT_BOX(TessellationMultiplier, Float);
-    INIT_BOX(WorldDisplacement, Vector3);
-    INIT_BOX(SubsurfaceColor, Vector3);
+    INIT_BOX(WorldDisplacement, Float3);
+    INIT_BOX(SubsurfaceColor, Float3);
     static_assert(static_cast<int32>(MaterialGraphBoxes::MAX) == 15, "Invalid amount of boxes created for root node. Please update the code above");
 #undef INIT_BOX
 
     // Mark as root
-    Root = (MaterialGraphNode*)&rootNode;
+    Root = &rootNode;
 }
 
 #endif

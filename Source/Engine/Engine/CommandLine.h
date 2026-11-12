@@ -1,17 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/String.h"
+#include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Types/Nullable.h"
 
 /// <summary>
 /// Command line options helper.
 /// </summary>
-class CommandLine
+class FLAXENGINE_API CommandLine
 {
 public:
-
     struct OptionsData
     {
         /// <summary>
@@ -48,20 +48,6 @@ public:
         /// -std (redirect log to standard output)
         /// </summary>
         Nullable<bool> Std;
-
-#if !BUILD_RELEASE
-
-        /// <summary>
-        /// -debug !ip:port! (Mono debugger address)
-        /// </summary>
-        Nullable<String> DebuggerAddress;
-
-        /// <summary>
-        /// -debugwait (instructs Mono debugger to wait for client attach for 5 seconds)
-        /// </summary>
-        Nullable<bool> WaitForDebugger;
-
-#endif
 
 #if PLATFORM_HAS_HEADLESS_MODE
 
@@ -113,11 +99,6 @@ public:
         Nullable<bool> Intel;
 
         /// <summary>
-        /// -monolog (enables advanced debugging for Mono runtime)
-        /// </summary>
-        Nullable<bool> MonoLog;
-
-        /// <summary>
         /// -mute (disables audio playback and uses Null Audio Backend)
         /// </summary>
         Nullable<bool> Mute;
@@ -127,12 +108,30 @@ public:
         /// </summary>
         Nullable<bool> LowDPI;
 
-#if USE_EDITOR
+#if PLATFORM_LINUX && PLATFORM_SDL
 
         /// <summary>
-        /// -project !path! (Startup project path)
+        /// -wayland (prefer Wayland over X11 as display server)
+        /// </summary>
+        Nullable<bool> Wayland;
+
+        /// <summary>
+        /// -x11 (prefer X11 over Wayland as display server)
+        /// </summary>
+        Nullable<bool> X11;
+
+#endif
+
+#if USE_EDITOR
+        /// <summary>
+        /// -project=<path> (Startup project path)
         /// </summary>
         String Project;
+
+        /// <summary>
+        /// -lastproject (Opens the last project)
+        /// </summary>
+        Nullable<bool> LastProject;
 
         /// <summary>
         /// -new (generates the project files inside the specified project folder or uses current workspace folder)
@@ -155,7 +154,7 @@ public:
         Nullable<bool> ClearCookerCache;
 
         /// <summary>
-        /// The build preset (-build !preset.target! or -build !preset!) (run game building on startup and exit app on end).
+        /// The build preset (-build=<preset.target> or -build=<preset>) (run game building on startup and exit app on end).
         /// </summary>
         Nullable<String> Build;
 
@@ -170,10 +169,26 @@ public:
         Nullable<bool> ShaderDebug;
 
         /// <summary>
-        /// -play !guid! ( Scene to play, can be empty to use default )
+        /// -exit (exits the editor after startup and performing all queued actions). Usefull when invoking editor from CL/CD.
+        /// </summary>
+        Nullable<bool> Exit;
+
+        /// <summary>
+        /// -play=<guid> ( Scene to play, can be empty to use default )
         /// </summary>
         Nullable<String> Play;
+#endif
 
+#if USE_EDITOR || !BUILD_RELEASE
+        /// <summary>
+        /// -shaderprofile (enables debugging data generation for shaders but leaves shader compiler optimizations active for performance profiling)
+        /// </summary>
+        Nullable<bool> ShaderProfile;
+
+        /// <summary>
+        /// -gpudebug (activates GPU Debug Layers and additional assertions for rendering validation)
+        /// </summary>
+        Nullable<bool> GPUDebug;
 #endif
     };
 
@@ -183,11 +198,46 @@ public:
     static OptionsData Options;
 
 public:
+    /// <summary>
+    /// The command line option data.
+    /// </summary>
+    struct FLAXENGINE_API Arg
+    {
+        // The name.
+        StringView Name;
+        // The value.
+        StringView Value;
+    };
 
     /// <summary>
-    /// Parses the input command line.
+    /// Gets the specific command line option value. Returns true if given argument has been set.
     /// </summary>
-    /// <param name="cmdLine">The command line.</param>
+    /// <returns>True if given argument has been provided in program command line.</returns>
+    static bool Get(const StringView& arg);
+
+    /// <summary>
+    /// Gets the specific command line option value. Returns true if given argument has been set and provides it's value (as string).
+    /// </summary>
+    /// <returns>True if given argument has been provided in program command line.</returns>
+    static bool Get(const StringView& arg, StringView& value);
+
+    /// <summary>
+    /// Gets the specific command line option value. Returns true if given argument has been set and provides it's value (as boolean). Returns ture if argument doesn't have specific value.
+    /// </summary>
+    /// <returns>True if given argument has been provided in program command line.</returns>
+    static bool Get(const StringView& arg, bool& value);
+
+    /// <summary>
+    /// Gets the specific command line option value. Returns true if given argument has been set and provides it's value (as integer).
+    /// </summary>
+    /// <returns>True if given argument has been provided in program command line.</returns>
+    static bool Get(const StringView& arg, int32& value);
+
+    /// <summary>
+    /// Parses the specified command line.
+    /// </summary>
+    /// <param name="cmdLine">The input command line.</param>
+    /// <param name="args">The parsed arguments</param>
     /// <returns>True if failed, otherwise false.</returns>
-    static bool Parse(const Char* cmdLine);
+    static bool Parse(const StringView& cmdLine, Array<Arg, HeapAllocation>& args);
 };

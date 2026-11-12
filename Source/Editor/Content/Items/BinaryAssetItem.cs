@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Text;
@@ -120,7 +120,7 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public override Actor OnEditorDrop(object context)
         {
-            return new StaticModel { Model = FlaxEngine.Content.LoadAsync<Model>(ID) };
+            return new StaticModel { Model = FlaxEngine.Content.Load<Model>(ID) };
         }
 
         /// <inheritdoc />
@@ -171,7 +171,7 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public override Actor OnEditorDrop(object context)
         {
-            return new AnimatedModel { SkinnedModel = FlaxEngine.Content.LoadAsync<SkinnedModel>(ID) };
+            return new AnimatedModel { SkinnedModel = FlaxEngine.Content.Load<SkinnedModel>(ID) };
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -37,6 +37,7 @@ public:
     // [CodeEditor]
     CodeEditorTypes GetType() const override;
     String GetName() const override;
+    String GetGenerateProjectCustomArgs() const override;
     void OpenFile(const String& path, int32 line) override;
     void OpenSolution() override;
     bool UseAsyncForOpen() const override;

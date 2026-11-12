@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
@@ -11,21 +11,34 @@ namespace FlaxEditor.Surface
     public interface IParametersDependantNode
     {
         /// <summary>
-        /// On new parameter created
+        /// On new parameter created.
         /// </summary>
         /// <param name="param">The parameter.</param>
         void OnParamCreated(SurfaceParameter param);
 
         /// <summary>
-        /// On new parameter renamed
+        /// On parameter renamed.
         /// </summary>
         /// <param name="param">The parameter.</param>
         void OnParamRenamed(SurfaceParameter param);
 
         /// <summary>
-        /// On new parameter deleted
+        /// On parameter modified (eg. type changed).
+        /// </summary>
+        /// <param name="param">The parameter.</param>
+        void OnParamEdited(SurfaceParameter param);
+
+        /// <summary>
+        /// On parameter deleted.
         /// </summary>
         /// <param name="param">The parameter.</param>
         void OnParamDeleted(SurfaceParameter param);
+
+        /// <summary>
+        /// Get if the parameter is referenced in a graph. Referenced in this case means in a graph and at least one node in-/output connected to another node.
+        /// </summary>
+        /// <param name="param">The parameter.</param>
+        /// <returns>If the parameter is referenced.</returns>
+        bool IsParamUsed(SurfaceParameter param);
     }
 }

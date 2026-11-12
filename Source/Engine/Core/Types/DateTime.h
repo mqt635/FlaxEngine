@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -23,14 +23,12 @@ DECLARE_ENUM_EX_12(MonthOfYear, int32, 1, January, February, March, April, May, 
 API_STRUCT(InBuild, Namespace="System") struct FLAXENGINE_API DateTime
 {
 public:
-
     /// <summary>
     /// Ticks in 100 nanoseconds resolution since January 1, 0001 A.D.
     /// </summary>
     int64 Ticks;
 
 public:
-
     /// <summary>
     /// Empty constructor.
     /// </summary>
@@ -60,7 +58,6 @@ public:
     DateTime(int32 year, int32 month, int32 day, int32 hour = 0, int32 minute = 0, int32 second = 0, int32 millisecond = 0);
 
 public:
-
     /// <summary>
     /// Gets the string.
     /// </summary>
@@ -72,7 +69,6 @@ public:
     String ToFileNameString() const;
 
 public:
-
     DateTime operator+(const TimeSpan& other) const;
     DateTime& operator+=(const TimeSpan& other);
     TimeSpan operator-(const DateTime& other) const;
@@ -110,7 +106,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the date part of this date. The time part is truncated and becomes 00:00:00.000.
     /// </summary>
@@ -204,13 +199,7 @@ public:
     /// </summary>
     int32 GetYear() const;
 
-    /// <summary>
-    /// Gets this date as the number of seconds since the Unix Epoch (January 1st of 1970).
-    /// </summary>
-    int32 ToUnixTimestamp() const;
-
 public:
-
     /// <summary>
     /// Gets the number of days in the year and month.
     /// </summary>
@@ -225,20 +214,6 @@ public:
     /// <param name="year">The year.</param>
     /// <returns>The number of days.</returns>
     static int32 DaysInYear(int32 year);
-
-    /// <summary>
-    /// Returns the proleptic Gregorian date for the given Julian Day.
-    /// </summary>
-    /// <param name="julianDay">The Julian Day.</param>
-    /// <returns>Gregorian date and time.</returns>
-    static DateTime FromJulianDay(double julianDay);
-
-    /// <summary>
-    /// Returns the date from Unix time (seconds from midnight 1970-01-01).
-    /// </summary>
-    /// <param name="unixTime">The Unix time (seconds from midnight 1970-01-01).</param>
-    /// <returns>The Gregorian date and time.</returns>
-    static DateTime FromUnixTimestamp(int32 unixTime);
 
     /// <summary>
     /// Determines whether the specified year is a leap year.
@@ -315,7 +290,7 @@ namespace fmt
         {
             int32 year, month, day;
             v.GetDate(year, month, day);
-            return format_to(ctx.out(), TEXT("{0}-{1:0>2}-{2:0>2} {3:0>2}:{4:0>2}:{5:0>2}"), year, month, day, v.GetHour(), v.GetMinute(), v.GetSecond());
+            return fmt::format_to(ctx.out(), basic_string_view<Char>(TEXT("{0}-{1:0>2}-{2:0>2} {3:0>2}:{4:0>2}:{5:0>2}")), year, month, day, v.GetHour(), v.GetMinute(), v.GetSecond());
         }
     };
 }

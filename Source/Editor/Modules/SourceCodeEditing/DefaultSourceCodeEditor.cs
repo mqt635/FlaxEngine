@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
@@ -38,10 +38,13 @@ namespace FlaxEditor.Modules.SourceCodeEditing
         private void UpdateCurrentEditor()
         {
             var codeEditing = Editor.Instance.CodeEditing;
+            var vsCode = codeEditing.GetInBuildEditor(CodeEditorTypes.VSCode);
+            var rider = codeEditing.GetInBuildEditor(CodeEditorTypes.Rider);
+            var clion = codeEditing.GetInBuildEditor(CodeEditorTypes.CLion);
 
-#if PLATFORM_WINDOW
+#if PLATFORM_WINDOWS
             // Favor the newest Visual Studio
-            for (int i = (int)CodeEditorTypes.VS2019; i >= (int)CodeEditorTypes.VS2008; i--)
+            for (int i = (int)CodeEditorTypes.VS2026; i >= (int)CodeEditorTypes.VS2008; i--)
             {
                 var visualStudio = codeEditing.GetInBuildEditor((CodeEditorTypes)i);
                 if (visualStudio != null)
@@ -52,7 +55,6 @@ namespace FlaxEditor.Modules.SourceCodeEditing
             }
 #elif PLATFORM_LINUX
             // Favor the VS Code
-            var vsCode = codeEditing.GetInBuildEditor(CodeEditorTypes.VSCode);
             if (vsCode != null)
             {
                 _currentEditor = vsCode;
@@ -60,15 +62,22 @@ namespace FlaxEditor.Modules.SourceCodeEditing
             }
 #endif
 
-            // Fallback default editor (always valid)
-            _currentEditor = codeEditing.GetInBuildEditor(CodeEditorTypes.SystemDefault);
+            // Code editor fallback sequence
+            if (vsCode != null)
+                _currentEditor = vsCode;
+            else if (rider != null)
+                _currentEditor = rider;
+            else if (clion != null)
+                _currentEditor = clion;
+            else
+                _currentEditor = codeEditing.GetInBuildEditor(CodeEditorTypes.SystemDefault);
         }
 
         /// <inheritdoc />
         public string Name => "Default";
 
         /// <inheritdoc />
-        public string GenerateProjectCustomArgs => null;
+        public string GenerateProjectCustomArgs => _currentEditor?.GenerateProjectCustomArgs;
 
         /// <inheritdoc />
         public void OpenSolution()

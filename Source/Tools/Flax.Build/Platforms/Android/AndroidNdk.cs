@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -22,6 +22,7 @@ namespace Flax.Build.Platforms
         {
             TargetPlatform.Windows,
             TargetPlatform.Linux,
+            TargetPlatform.Mac,
         };
 
         /// <summary>
@@ -34,35 +35,51 @@ namespace Flax.Build.Platforms
 
             // Find Android NDK folder path
             var sdkPath = Environment.GetEnvironmentVariable("ANDROID_NDK");
-            if (string.IsNullOrEmpty(sdkPath))
+            FindNDKVersion(sdkPath);
+            if (!IsValid)
             {
-                // Look for ndk installed side-by-side with an sdk
-                if (AndroidSdk.Instance.IsValid && Directory.Exists(Path.Combine(AndroidSdk.Instance.RootPath, "ndk")))
+                if (!string.IsNullOrEmpty(sdkPath))
                 {
-                    var subdirs = Directory.GetDirectories(Path.Combine(AndroidSdk.Instance.RootPath, "ndk"));
-                    if (subdirs.Length != 0)
-                    {
-                        Array.Sort(subdirs, (a, b) =>
-                        {
-                            Version va, vb;
-                            if (Version.TryParse(a, out va))
-                            {
-                                if (Version.TryParse(b, out vb))
-                                    return va.CompareTo(vb);
-                                return 1;
-                            }
-                            if (Version.TryParse(b, out vb))
-                                return -1;
-                            return 0;
-                        });
-                        sdkPath = subdirs.Last();
-                    }
+                    Log.Warning(string.Format("Specified Android NDK folder in ANDROID_NDK env variable doesn't contain valid NDK ({0})", sdkPath));
+                }
+
+                // Look for ndk installed side-by-side with a sdk
+                if (AndroidSdk.Instance.IsValid)
+                {
+                    sdkPath = Path.Combine(AndroidSdk.Instance.RootPath, "ndk");
+                    FindNDKVersion(sdkPath);
                 }
             }
-            else if (!Directory.Exists(sdkPath))
+        }
+
+        private void FindNDKVersion(string folder)
+        {
+            // Skip if folder is invalid or missing
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
+                return;
+
+            // Check that explicit folder
+            FindNDK(folder);
+            if (IsValid)
+                return;
+
+            // Check folders with versions
+            var subDirs = Directory.GetDirectories(folder);
+            if (subDirs.Length != 0)
             {
-                Log.Warning(string.Format("Specified Android NDK folder in ANDROID_NDK env variable doesn't exist ({0})", sdkPath));
+                Utilities.SortVersionDirectories(subDirs);
+                for (int i = subDirs.Length - 1; i >= 0 && !IsValid; i--)
+                    FindNDK(subDirs[i]);
             }
+
+            if (!IsValid)
+            {
+                Log.Warning(string.Format("Failed to detect Android NDK version ({0})", folder));
+            }
+        }
+
+        private void FindNDK(string sdkPath)
+        {
             if (!string.IsNullOrEmpty(sdkPath) && Directory.Exists(sdkPath))
             {
                 var sourceProperties = Path.Combine(sdkPath, "source.properties");
@@ -72,6 +89,13 @@ namespace Flax.Build.Platforms
                     if (lines.Length > 1)
                     {
                         var ver = lines[1].Substring(lines[1].IndexOf(" = ", StringComparison.Ordinal) + 2);
+                        if (ver.Contains('-'))
+                        {
+                            // Ignore any beta tags (eg. '29.0.13113456-beta1')
+                            var parts = ver.Split('-');
+                            if (parts.Length > 1)
+                                ver = parts[0];
+                        }
                         if (Version.TryParse(ver, out var v))
                         {
                             Version = v;
@@ -84,15 +108,18 @@ namespace Flax.Build.Platforms
                     Version = v;
                     IsValid = true;
                 }
-                else
-                {
-                    Log.Warning(string.Format("Failed to detect Android NDK version ({0})", sdkPath));
-                }
             }
             if (IsValid)
             {
+                var minVersion = new Version(27, 0); // NDK 27 (and newer) contains the libc++_shared.so with 16kb alignment
+                if (Version < minVersion)
+                {
+                    IsValid = false;
+                    Log.Verbose(RootPath);
+                    Log.Error(string.Format("Unsupported Android NDK version {0}. Minimum supported is {1}.", Version, minVersion));
+                    return;
+                }
                 RootPath = sdkPath;
-                IsValid = true;
                 Log.Info(string.Format("Found Android NDK {1} at {0}", RootPath, Version));
             }
         }

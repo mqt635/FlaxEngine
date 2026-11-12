@@ -1,11 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "RenderView.h"
+#include "Engine/Level/LargeWorlds.h"
 #include "Engine/Level/Actors/Camera.h"
+#include "Engine/Core/Math/Double4x4.h"
 #include "Engine/Renderer/RenderList.h"
-#include "Engine/Renderer/RendererPass.h"
 #include "RenderBuffers.h"
-#include "RenderTask.h"
+#include "RenderTools.h"
+#include "RenderContext.h"
 
 void RenderView::Prepare(RenderContext& renderContext)
 {
@@ -15,9 +17,10 @@ void RenderView::Prepare(RenderContext& renderContext)
     const float height = static_cast<float>(renderContext.Buffers->GetHeight());
 
     // Check if use TAA (need to modify the projection matrix)
-    Vector2 taaJitter;
+    Float2 taaJitter;
     NonJitteredProjection = Projection;
-    if (renderContext.List->Settings.AntiAliasing.Mode == AntialiasingMode::TemporalAntialiasing)
+    IsTaaResolved = false;
+    if (renderContext.List->Setup.UseTemporalAAJitter)
     {
         // Move to the next frame
         const int MaxSampleCount = 8;
@@ -26,9 +29,9 @@ void RenderView::Prepare(RenderContext& renderContext)
 
         // Calculate jitter
         const float jitterSpread = renderContext.List->Settings.AntiAliasing.TAA_JitterSpread;
-        const float jitterX = RendererUtils::TemporalHalton(TaaFrameIndex + 1, 2) * jitterSpread;
-        const float jitterY = RendererUtils::TemporalHalton(TaaFrameIndex + 1, 3) * jitterSpread;
-        taaJitter = Vector2(jitterX * 2.0f / width, jitterY * 2.0f / height);
+        const float jitterX = (RenderTools::TemporalHalton(TaaFrameIndex + 1, 2) - 0.5f) * jitterSpread;
+        const float jitterY = (RenderTools::TemporalHalton(TaaFrameIndex + 1, 3) - 0.5f) * jitterSpread;
+        taaJitter = Float2(jitterX * 2.0f / width, jitterY * 2.0f / height);
 
         // Modify projection matrix
         if (IsOrthographicProjection())
@@ -50,7 +53,7 @@ void RenderView::Prepare(RenderContext& renderContext)
     else
     {
         TaaFrameIndex = 0;
-        taaJitter = Vector2::Zero;
+        taaJitter = Float2::Zero;
     }
 
     renderContext.List->Init(renderContext);
@@ -59,41 +62,101 @@ void RenderView::Prepare(RenderContext& renderContext)
     PrepareCache(renderContext, width, height, taaJitter);
 }
 
-void RenderView::PrepareCache(RenderContext& renderContext, float width, float height, const Vector2& temporalAAJitter)
+void RenderView::PrepareCache(const RenderContext& renderContext, float width, float height, const Float2& temporalAAJitter, const RenderView* mainView)
 {
     // The same format used by the Flax common shaders and postFx materials
-    ViewInfo = Vector4(1.0f / Projection.M11, 1.0f / Projection.M22, Far / (Far - Near), (-Far * Near) / (Far - Near) / Far);
-    ScreenSize = Vector4(width, height, 1.0f / width, 1.0f / height);
+#if REVERSE_Z
+    ViewInfo = Float4(1.0f / Projection.M11, 1.0f / Projection.M22, -Near / (Far - Near), (Far * Near) / (Far - Near) / Far);
+#else
+    ViewInfo = Float4(1.0f / Projection.M11, 1.0f / Projection.M22, Far / (Far - Near), -(Far * Near) / (Far - Near) / Far);
+#endif
+    ScreenSize = Float4(width, height, 1.0f / width, 1.0f / height);
 
     TemporalAAJitter.Z = TemporalAAJitter.X;
     TemporalAAJitter.W = TemporalAAJitter.Y;
     TemporalAAJitter.X = temporalAAJitter.X;
     TemporalAAJitter.Y = temporalAAJitter.Y;
 
-    // Ortho views have issues with screen size LOD culling
-    const float modelLODDistanceFactor = (renderContext.LodProxyView ? renderContext.LodProxyView->IsOrthographicProjection() : IsOrthographicProjection()) ? 100.0f : ModelLODDistanceFactor;
-    ModelLODDistanceFactorSqrt = modelLODDistanceFactor * modelLODDistanceFactor;
+    WorldPosition = Origin + Position;
+
+    ModelLODDistanceFactorSqrt = ModelLODDistanceFactor * ModelLODDistanceFactor;
+
+    // Setup main view render info
+    if (!mainView)
+        mainView = this;
+    MainViewProjection = mainView->ViewProjection();
+    MainScreenSize = mainView->ScreenSize;
+}
+
+void RenderView::UpdateCachedData()
+{
+    Matrix::Invert(View, IV);
+    Matrix::Invert(Projection, IP);
+    Matrix viewProjection;
+    Matrix::Multiply(View, Projection, viewProjection);
+    Frustum.SetMatrix(viewProjection);
+    Matrix::Invert(viewProjection, IVP);
+    CullingFrustum = Frustum;
+    NonJitteredProjection = Projection;
+}
+
+void RenderView::SetUp(const Matrix& viewProjection)
+{
+    // Copy data
+    Matrix::Invert(viewProjection, IVP);
+    Frustum.SetMatrix(viewProjection);
+    CullingFrustum = Frustum;
+}
+
+void RenderView::SetUp(const Matrix& view, const Matrix& projection)
+{
+    // Copy data
+    Projection = projection;
+    NonJitteredProjection = projection;
+    View = view;
+    Matrix::Invert(View, IV);
+    Matrix::Invert(Projection, IP);
+
+    // Compute matrix
+    Matrix viewProjection;
+    Matrix::Multiply(View, Projection, viewProjection);
+    Matrix::Invert(viewProjection, IVP);
+    Frustum.SetMatrix(viewProjection);
+    CullingFrustum = Frustum;
+}
+
+void RenderView::SetUpCube(float nearPlane, float farPlane, const Float3& position, float fov)
+{
+    // Copy data
+    Near = nearPlane;
+    Far = farPlane;
+    Position = position;
+
+    // Create projection matrix
+    Matrix::PerspectiveFov(fov, 1.0f, nearPlane, farPlane, Projection);
+    NonJitteredProjection = Projection;
+    Matrix::Invert(Projection, IP);
 }
 
 void RenderView::SetFace(int32 faceIndex)
 {
-    static Vector3 directions[6] =
+    static Float3 directions[6] =
     {
-        { Vector3::Right },
-        { Vector3::Left },
-        { Vector3::Up },
-        { Vector3::Down },
-        { Vector3::Forward },
-        { Vector3::Backward },
+        { Float3::Right },
+        { Float3::Left },
+        { Float3::Up },
+        { Float3::Down },
+        { Float3::Forward },
+        { Float3::Backward },
     };
-    static Vector3 ups[6] =
+    static Float3 ups[6] =
     {
-        { Vector3::Up },
-        { Vector3::Up },
-        { Vector3::Backward },
-        { Vector3::Forward },
-        { Vector3::Up },
-        { Vector3::Up },
+        { Float3::Up },
+        { Float3::Up },
+        { Float3::Backward },
+        { Float3::Forward },
+        { Float3::Up },
+        { Float3::Up },
     };
     ASSERT(faceIndex >= 0 && faceIndex < 6);
 
@@ -108,31 +171,38 @@ void RenderView::SetFace(int32 faceIndex)
     CullingFrustum = Frustum;
 }
 
-void RenderView::CopyFrom(Camera* camera)
+void RenderView::SetProjector(float nearPlane, float farPlane, const Float3& position, const Float3& direction, const Float3& up, float angle)
 {
-    Position = camera->GetPosition();
-    Direction = camera->GetDirection();
-    Near = camera->GetNearPlane();
-    Far = camera->GetFarPlane();
-    View = camera->GetView();
-    Projection = camera->GetProjection();
+    // Copy data
+    Near = nearPlane;
+    Far = farPlane;
+    Position = position;
+
+    // Create projection matrix
+    Matrix::PerspectiveFov(angle * DegreesToRadians, 1.0f, nearPlane, farPlane, Projection);
     NonJitteredProjection = Projection;
-    Frustum = camera->GetFrustum();
-    Matrix::Invert(View, IV);
     Matrix::Invert(Projection, IP);
-    Frustum.GetInvMatrix(IVP);
+
+    // Create view matrix
+    Direction = direction;
+    Matrix::LookAt(Position, Position + Direction, up, View);
+    Matrix::Invert(View, IV);
+
+    // Compute frustum matrix
+    Frustum.SetMatrix(View, Projection);
+    Matrix::Invert(ViewProjection(), IVP);
     CullingFrustum = Frustum;
-    RenderLayersMask = camera->RenderLayersMask;
 }
 
-void RenderView::CopyFrom(Camera* camera, Viewport* viewport)
+void RenderView::CopyFrom(const Camera* camera, const Viewport* viewport)
 {
-    Position = camera->GetPosition();
-    Direction = camera->GetDirection();
+    const Vector3 cameraPos = camera->GetPosition();
+    LargeWorlds::UpdateOrigin(Origin, cameraPos);
+    Position = cameraPos - Origin;
+    Direction = camera->GetForward();
     Near = camera->GetNearPlane();
     Far = camera->GetFarPlane();
-    View = camera->GetView();
-    camera->GetMatrices(View, Projection, *viewport);
+    camera->GetMatrices(View, Projection, viewport ? *viewport : camera->GetViewport(), Origin);
     Frustum.SetMatrix(View, Projection);
     NonJitteredProjection = Projection;
     Matrix::Invert(View, IV);
@@ -140,21 +210,56 @@ void RenderView::CopyFrom(Camera* camera, Viewport* viewport)
     Frustum.GetInvMatrix(IVP);
     CullingFrustum = Frustum;
     RenderLayersMask = camera->RenderLayersMask;
+    Flags = camera->RenderFlags;
+    Mode = camera->RenderMode;
+    ViewportRect = camera->ViewportRect;
 }
 
-DrawPass RenderView::GetShadowsDrawPassMask(ShadowsCastingMode shadowsMode) const
+void RenderView::GetWorldMatrix(const Transform& transform, Matrix& world) const
 {
-    switch (shadowsMode)
+    const Float3 translation = transform.Translation - Origin;
+    Matrix::Transformation(transform.Scale, transform.Orientation, translation, world);
+}
+
+void RenderView::GetWorldMatrix(Double4x4& world) const
+{
+    world.M41 -= Origin.X;
+    world.M42 -= Origin.Y;
+    world.M43 -= Origin.Z;
+}
+
+void RenderView::GetLocalFrustum(BoundingFrustum& frustum) const
+{
+    frustum = Frustum;
+    if (!Origin.IsZero())
     {
-    case ShadowsCastingMode::All:
-        return DrawPass::All;
-    case ShadowsCastingMode::DynamicOnly:
-        return IsOfflinePass ? ~DrawPass::Depth : DrawPass::All;
-    case ShadowsCastingMode::StaticOnly:
-        return IsOfflinePass ? DrawPass::All : ~DrawPass::Depth;
-    case ShadowsCastingMode::None:
-        return ~DrawPass::Depth;
-    default:
-        return DrawPass::All;
+        // Translate frustum to the origin
+        Matrix m = frustum.GetMatrix();
+        m.SetTranslation(Origin - m.GetTranslation());
+        frustum.SetMatrix(m);
+    }
+}
+
+TaaJitterRemoveContext::TaaJitterRemoveContext(const RenderView& view)
+{
+    if (view.IsTaaResolved)
+    {
+        // Cancel-out sub-pixel jitter when drawing geometry after TAA has been resolved
+        _view = (RenderView*)&view;
+        _prevProjection = view.Projection;
+        _prevNonJitteredProjection = view.NonJitteredProjection;
+        _view->Projection = _prevNonJitteredProjection;
+        _view->UpdateCachedData();
+    }
+}
+
+TaaJitterRemoveContext::~TaaJitterRemoveContext()
+{
+    if (_view)
+    {
+        // Restore projection
+        _view->Projection = _prevProjection;
+        _view->UpdateCachedData();
+        _view->NonJitteredProjection = _prevNonJitteredProjection;
     }
 }

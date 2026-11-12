@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections;
@@ -365,7 +365,7 @@ namespace FlaxEngine.Collections
         public T[] ToArray()
         {
             if (Count == 0)
-                return Utils.GetEmptyArray<T>();
+                return Array.Empty<T>();
 
             var result = new T[Count];
             if (_backItem > _frontItem)

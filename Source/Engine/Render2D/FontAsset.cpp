@@ -1,19 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FontAsset.h"
 #include "Font.h"
 #include "FontManager.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Content/Content.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/Content/Upgraders/FontAssetUpgrader.h"
+#include "Engine/Engine/Engine.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Threading/Threading.h"
 #include "IncludeFreeType.h"
 #if USE_EDITOR
 #include "Engine/Platform/FileSystem.h"
 #endif
 
-REGISTER_BINARY_ASSET_WITH_UPGRADER(FontAsset, "FlaxEngine.FontAsset", FontAssetUpgrader, false);
+REGISTER_BINARY_ASSET_WITH_UPGRADER(FontAsset, "FlaxEngine.FontAsset", FontAssetUpgrader, true);
 
 FontAsset::FontAsset(const SpawnParams& params, const AssetInfo* info)
     : BinaryAsset(params, info)
@@ -40,15 +43,7 @@ Asset::LoadResult FontAsset::load()
     _fontFile.Swap(chunk0->Data);
 
     // Create font face
-    const FT_Error error = FT_New_Memory_Face(FontManager::GetLibrary(), _fontFile.Get(), static_cast<FT_Long>(_fontFile.Length()), 0, &_face);
-    if (error)
-    {
-        _face = nullptr;
-        LOG_FT_ERROR(error);
-        return LoadResult::Failed;
-    }
-
-    return LoadResult::Ok;
+    return Init() ? LoadResult::Failed : LoadResult::Ok;
 }
 
 void FontAsset::unload(bool isReloading)
@@ -56,7 +51,9 @@ void FontAsset::unload(bool isReloading)
     // Ensure to cleanup child font objects
     if (_fonts.HasItems())
     {
-        LOG(Warning, "Font asset {0} is unloading but has {1} remaining font objects created", ToString(), _fonts.Count());
+        // CreateFont caches every font in the asset and nothing deletes a cached font, so at exit every used font asset has some
+        if (!Engine::IsRequestingExit)
+            LOG(Warning, "Font asset {0} is unloading but has {1} remaining font objects created", ToString(), _fonts.Count());
         for (auto font : _fonts)
         {
             font->_asset = nullptr;
@@ -74,6 +71,9 @@ void FontAsset::unload(bool isReloading)
 
     // Cleanup data
     _fontFile.Release();
+    _virtualBold = nullptr;
+    _virtualItalic = nullptr;
+    _virtualRasterMode = nullptr;
 }
 
 AssetChunksFlag FontAsset::getChunksToPreload() const
@@ -81,14 +81,63 @@ AssetChunksFlag FontAsset::getChunksToPreload() const
     return GET_CHUNK_FLAG(0);
 }
 
-Font* FontAsset::CreateFont(int32 size)
+bool FontAsset::Init()
+{
+    const FT_Error error = FT_New_Memory_Face(FontManager::GetLibrary(), _fontFile.Get(), static_cast<FT_Long>(_fontFile.Length()), 0, &_face);
+    if (error)
+    {
+        _face = nullptr;
+        LOG_FT_ERROR(error);
+    }
+    return error;
+}
+
+FontFlags FontAsset::GetStyle() const
+{
+    FontFlags flags = FontFlags::None;
+    if ((_face->style_flags & FT_STYLE_FLAG_ITALIC) != 0)
+        flags |= FontFlags::Italic;
+    if ((_face->style_flags & FT_STYLE_FLAG_BOLD) != 0)
+        flags |= FontFlags::Bold;
+    return flags;
+}
+
+void FontAsset::SetOptions(const FontOptions& value)
+{
+    _options = value;
+    Invalidate();
+
+    if (_virtualBold)
+    {
+        auto options = _options;
+        options.Flags |= FontFlags::Bold;
+        _virtualBold->SetOptions(options);
+    }
+    if (_virtualItalic)
+    {
+        auto options = _options;
+        options.Flags |= FontFlags::Italic;
+        _virtualItalic->SetOptions(options);
+    }
+    if (_virtualRasterMode)
+    {
+        auto options = _options;
+        options.RasterMode = _options.RasterMode == FontRasterMode::MSDF ? FontRasterMode::Bitmap : FontRasterMode::MSDF;
+        _virtualRasterMode->SetOptions(options);
+    }
+}
+
+Font* FontAsset::CreateFont(float size)
 {
     PROFILE_CPU();
+    PROFILE_MEM(UIFonts);
 
     if (WaitForLoaded())
         return nullptr;
 
     ScopeLock lock(Locker);
+    if (_face == nullptr)
+        return nullptr;
 
     // Check if font with that size has already been created
     for (auto font : _fonts)
@@ -100,22 +149,69 @@ Font* FontAsset::CreateFont(int32 size)
     return New<Font>(this, size);
 }
 
+FontAsset* FontAsset::GetBold()
+{
+    ScopeLock lock(Locker);
+    if (EnumHasAnyFlags(_options.Flags, FontFlags::Bold))
+        return this;
+    if (!_virtualBold)
+    {
+        _virtualBold = Content::CreateVirtualAsset<FontAsset>();
+        _virtualBold->Init(_fontFile);
+        auto options = _options;
+        options.Flags |= FontFlags::Bold;
+        _virtualBold->SetOptions(options);
+    }
+    return _virtualBold;
+}
+
+FontAsset* FontAsset::GetItalic()
+{
+    ScopeLock lock(Locker);
+    if (EnumHasAnyFlags(_options.Flags, FontFlags::Italic))
+        return this;
+    if (!_virtualItalic)
+    {
+        _virtualItalic = Content::CreateVirtualAsset<FontAsset>();
+        _virtualItalic->Init(_fontFile);
+        auto options = _options;
+        options.Flags |= FontFlags::Italic;
+        _virtualItalic->SetOptions(options);
+    }
+    return _virtualItalic;
+}
+
+FontAsset* FontAsset::GetRasterMode(FontRasterMode rasterMode)
+{
+    ScopeLock lock(Locker);
+    if (_options.RasterMode == rasterMode)
+        return this;
+    if (!_virtualRasterMode)
+    {
+        _virtualRasterMode = Content::CreateVirtualAsset<FontAsset>();
+        _virtualRasterMode->Init(_fontFile);
+        auto options = _options;
+        options.RasterMode = rasterMode;
+        _virtualRasterMode->SetOptions(options);
+    }
+    return _virtualRasterMode;
+}
+
+bool FontAsset::Init(const BytesContainer& fontFile)
+{
+    PROFILE_MEM(UIFonts);
+    ScopeLock lock(Locker);
+    unload(true);
+    _fontFile.Copy(fontFile);
+    return Init();
+}
+
 #if USE_EDITOR
 
 bool FontAsset::Save(const StringView& path)
 {
-    // Validate state
-    if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave(path))
         return true;
-    }
-    if (IsVirtual() && path.IsEmpty())
-    {
-        LOG(Error, "To save virtual asset asset you need to specify the target asset path location.");
-        return true;
-    }
-
     ScopeLock lock(Locker);
 
     AssetInitData data;
@@ -136,24 +232,42 @@ bool FontAsset::Save(const StringView& path)
 
 #endif
 
+bool FontAsset::ContainsChar(Char c) const
+{
+    return FT_Get_Char_Index(_face, c) > 0;
+}
+
 void FontAsset::Invalidate()
 {
     ScopeLock lock(Locker);
 
+    // Invalidate cached characters (from atlas)
+    for (auto& entry : _characterCache)
+        FontManager::Invalidate(entry.Value);
+    _characterCache.Clear();
+
+    // Refresh cached metrics of all fonts created from this asset
     for (auto font : _fonts)
-    {
         font->Invalidate();
-    }
+}
+
+uint64 FontAsset::GetMemoryUsage() const
+{
+    Locker.Lock();
+    uint64 result = BinaryAsset::GetMemoryUsage();
+    result += sizeof(FontAsset) - sizeof(BinaryAsset);
+    result += sizeof(FT_FaceRec);
+    result += _fontFile.Length();
+    for (auto font : _fonts)
+        result += sizeof(Font);
+    Locker.Unlock();
+    return result;
 }
 
 bool FontAsset::init(AssetInitData& initData)
 {
-    // Validate
-    if (initData.SerializedVersion != SerializedVersion)
-    {
-        LOG(Error, "Invalid serialized font asset version.");
-        return true;
-    }
+    if (IsVirtual())
+        return false;
     if (initData.CustomData.Length() != sizeof(_options))
     {
         LOG(Error, "Missing font asset header.");

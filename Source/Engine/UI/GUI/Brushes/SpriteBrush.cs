@@ -1,4 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System;
 
 namespace FlaxEngine.GUI
 {
@@ -6,7 +8,7 @@ namespace FlaxEngine.GUI
     /// Implementation of <see cref="IBrush"/> for <see cref="FlaxEngine.Sprite"/>.
     /// </summary>
     /// <seealso cref="IBrush" />
-    public sealed class SpriteBrush : IBrush
+    public sealed class SpriteBrush : IBrush, IEquatable<SpriteBrush>
     {
         /// <summary>
         /// The sprite.
@@ -37,7 +39,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public Vector2 Size => Sprite.IsValid ? Sprite.Size : Vector2.Zero;
+        public Float2 Size => Sprite.IsValid ? Sprite.Size : Float2.Zero;
 
         /// <inheritdoc />
         public void Draw(Rectangle rect, Color color)
@@ -46,6 +48,30 @@ namespace FlaxEngine.GUI
                 Render2D.DrawSpritePoint(Sprite, rect, color);
             else
                 Render2D.DrawSprite(Sprite, rect, color);
+        }
+
+        /// <inheritdoc />
+        public bool Equals(SpriteBrush other)
+        {
+            return other != null && Sprite == other.Sprite && Filter == other.Filter;
+        }
+
+        /// <inheritdoc />
+        public override bool Equals(object obj)
+        {
+            return obj is SpriteBrush other && Equals(other);
+        }
+
+        /// <inheritdoc />
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Sprite, (int)Filter);
+        }
+
+        /// <inheritdoc />
+        public int CompareTo(object obj)
+        {
+            return Equals(obj) ? 1 : 0;
         }
     }
 
@@ -95,14 +121,16 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public Vector2 Size => Sprite.IsValid ? Sprite.Size : Vector2.Zero;
+        public Float2 Size => Sprite.IsValid ? Sprite.Size : Float2.Zero;
 
         /// <inheritdoc />
         public unsafe void Draw(Rectangle rect, Color color)
         {
+            if (!Sprite.IsValid)
+                return;
             var border = Border;
-            var borderUV = *(Vector4*)&border;
-            var borderSize = borderUV * new Vector4(BorderSize, BorderSize, BorderSize, BorderSize);
+            var borderUV = *(Float4*)&border;
+            var borderSize = new Float4(BorderSize, BorderSize, BorderSize, BorderSize);
             if (Filter == BrushFilter.Point)
                 Render2D.Draw9SlicingSpritePoint(Sprite, rect, borderSize, borderUV, color);
             else
@@ -118,6 +146,30 @@ namespace FlaxEngine.GUI
                 Render2D.DrawRectangle(bordersRect, Color.YellowGreen, 2.0f);
             }
 #endif
+        }
+
+        /// <inheritdoc />
+        public bool Equals(Sprite9SlicingBrush other)
+        {
+            return other != null && Sprite == other.Sprite && Filter == other.Filter;
+        }
+
+        /// <inheritdoc />
+        public override bool Equals(object obj)
+        {
+            return obj is Sprite9SlicingBrush other && Equals(other);
+        }
+
+        /// <inheritdoc />
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Sprite, (int)Filter);
+        }
+
+        /// <inheritdoc />
+        public int CompareTo(object obj)
+        {
+            return Equals(obj) ? 1 : 0;
         }
     }
 }

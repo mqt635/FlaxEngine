@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,7 +17,6 @@
 class UniformBufferUploaderVulkan : public GPUResourceVulkan<GPUResource>, public ResourceOwnerVulkan
 {
 public:
-
     struct Allocation
     {
         /// <summary>
@@ -42,7 +41,6 @@ public:
     };
 
 private:
-
     VkBuffer _buffer;
     VmaAllocation _allocation;
     uint64 _size;
@@ -53,7 +51,6 @@ private:
     uint64 _fenceCounter;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="UniformBufferUploaderVulkan"/> class.
     /// </summary>
@@ -61,15 +58,13 @@ public:
     UniformBufferUploaderVulkan(GPUDeviceVulkan* device);
 
 public:
-
     Allocation Allocate(uint64 size, uint32 alignment, GPUContextVulkan* context);
 
 public:
-
     // [GPUResourceVulkan]
-    ResourceType GetResourceType() const final override
+    GPUResourceType GetResourceType() const final override
     {
-        return ResourceType::Buffer;
+        return GPUResourceType::Buffer;
     }
 
     // [ResourceOwnerVulkan]
@@ -79,7 +74,6 @@ public:
     }
 
 protected:
-
     // [GPUResourceVulkan]
     void OnReleaseGPU() override;
 };
@@ -90,7 +84,6 @@ protected:
 class GPUConstantBufferVulkan : public GPUResourceVulkan<GPUConstantBuffer>, public DescriptorOwnerResourceVulkan
 {
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUConstantBufferVulkan"/> class.
     /// </summary>
@@ -103,14 +96,12 @@ public:
     }
 
 public:
-
     /// <summary>
     /// The last uploaded data inside the shared uniforms uploading ring buffer.
     /// </summary>
     UniformBufferUploaderVulkan::Allocation Allocation;
 
 public:
-
     // [DescriptorOwnerResourceVulkan]
     void DescriptorAsDynamicUniformBuffer(GPUContextVulkan* context, VkBuffer& buffer, VkDeviceSize& offset, VkDeviceSize& range, uint32& dynamicOffset) override
     {
@@ -126,12 +117,7 @@ public:
 /// </summary>
 class GPUShaderVulkan : public GPUResourceVulkan<GPUShader>
 {
-private:
-
-    Array<GPUConstantBufferVulkan, FixedAllocation<MAX_CONSTANT_BUFFER_SLOTS>> _cbs;
-
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUShaderVulkan"/> class.
     /// </summary>
@@ -143,11 +129,8 @@ public:
     }
 
 protected:
-
     // [GPUShader]
-    GPUShaderProgram* CreateGPUShaderProgram(ShaderStage type, const GPUShaderProgramInitializer& initializer, byte* cacheBytes, uint32 cacheSize, MemoryReadStream& stream) override;
-    GPUConstantBuffer* CreateCB(const String& name, uint32 size, MemoryReadStream& stream) override;
-    void OnReleaseGPU() override;
+    GPUShaderProgram* CreateGPUShaderProgram(ShaderStage type, const GPUShaderProgramInitializer& initializer, Span<byte> bytecode, MemoryReadStream& stream) override;
 };
 
 #endif

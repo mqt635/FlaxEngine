@@ -1,19 +1,21 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Flax.Build.Graph;
 using Flax.Build.NativeCpp;
 
 namespace Flax.Build
 {
-    partial class Configuration
+    partial class AndroidConfiguration
     {
         /// <summary>
         /// Specifies the Android API level to use (eg. 24).
         /// </summary>
-        [CommandLine("androidPlatformApi", "<version>", "Specifies the Android API level to use (eg. 24).")]
-        public static int AndroidPlatformApi = 24;
+        [CommandLine("platformApi", "<version>", "Specifies the Android API level to use (eg. 24).")]
+        public static int PlatformApi = 28;
     }
 }
 
@@ -36,10 +38,20 @@ namespace Flax.Build.Platforms
         : base(platform, architecture, toolchainRoot, null, string.Empty)
         {
             var toolchain = ToolsetRoot.Replace('\\', '/');
-            SystemIncludePaths.Add(Path.Combine(toolchain, "sources/usr/include/c++/v1").Replace('\\', '/'));
+            var cxxIncludePath = Path.Combine(toolchain, "sysroot/usr/include/c++/v1");
+            if (!Directory.Exists(cxxIncludePath))
+                cxxIncludePath = Path.Combine(toolchain, "sources/usr/include/c++/v1");
+            SystemIncludePaths.Add(cxxIncludePath.Replace('\\', '/'));
             SystemIncludePaths.Add(Path.Combine(toolchain, "sysroot/usr/include").Replace('\\', '/'));
             SystemIncludePaths.Add(Path.Combine(toolchain, "sysroot/usr/local/include").Replace('\\', '/'));
-            SystemIncludePaths.Add(Path.Combine(toolchain, "lib64/clang/9.0.8/include").Replace('\\', '/'));
+            var clangIncludeRoot = Path.Combine(toolchain, "lib/clang");
+            if (!Directory.Exists(clangIncludeRoot))
+                clangIncludeRoot = Path.Combine(toolchain, "lib64/clang");
+            var clangIncludePath = Directory.Exists(clangIncludeRoot)
+                ? Directory.GetDirectories(clangIncludeRoot).OrderBy(x => x).LastOrDefault()
+                : null;
+            if (clangIncludePath != null)
+                SystemIncludePaths.Add(Path.Combine(clangIncludePath, "include").Replace('\\', '/'));
         }
 
         /// <summary>
@@ -65,11 +77,12 @@ namespace Flax.Build.Platforms
             base.SetupEnvironment(options);
 
             options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_ANDROID");
-            options.CompileEnv.PreprocessorDefinitions.Add(string.Format("__ANDROID_API__={0}", Configuration.AndroidPlatformApi));
+            options.CompileEnv.PreprocessorDefinitions.Add(string.Format("__ANDROID_API__={0}", AndroidConfiguration.PlatformApi));
 
             options.LinkEnv.InputLibraries.Add("c");
             options.LinkEnv.InputLibraries.Add("z");
             options.LinkEnv.InputLibraries.Add("log");
+            options.LinkEnv.InputLibraries.Add("mediandk");
             options.LinkEnv.InputLibraries.Add("android");
         }
 
@@ -102,11 +115,14 @@ namespace Flax.Build.Platforms
                 args.Add("-fno-function-sections");
             }
 
+            // Support 16kb pages
+            args.Add("-D__BIONIC_NO_PAGE_SIZE_MACRO");
+
             switch (Architecture)
             {
             case TargetArchitecture.x86:
                 args.Add("-march=atom");
-                if (Configuration.AndroidPlatformApi < 24)
+                if (AndroidConfiguration.PlatformApi < 24)
                     args.Add("-mstackrealign");
                 break;
             case TargetArchitecture.x64:
@@ -135,8 +151,12 @@ namespace Flax.Build.Platforms
             args.Add("-Wl,--build-id=sha1");
             args.Add("-Wl,-gc-sections");
 
+            // Support 16kb pages
+            args.Add("-Wl,-z,max-page-size=16384");
+
             if (options.LinkEnv.Output == LinkerOutput.Executable)
             {
+                // Prevent linker from stripping the entry point for the Android Native Activity
                 args.Add("-u ANativeActivity_onCreate");
             }
 
@@ -161,7 +181,7 @@ namespace Flax.Build.Platforms
             var toolchain = ToolsetRoot.Replace('\\', '/');
             args.Add(string.Format("--sysroot=\"{0}/sysroot\"", toolchain));
             args.Add(string.Format("--gcc-toolchain=\"{0}\"", toolchain));
-            args.Add("--target=" + target + Configuration.AndroidPlatformApi);
+            args.Add("--target=" + target + AndroidConfiguration.PlatformApi);
         }
 
         /// <inheritdoc />
@@ -187,7 +207,16 @@ namespace Flax.Build.Platforms
             // Bundle STL library for the executable files for runtime
             if (options.LinkEnv.Output == LinkerOutput.Executable)
             {
-                graph.AddCopyFile(Path.Combine(Path.GetDirectoryName(outputFilePath), "libc++_shared.so"), Path.Combine(AndroidNdk.Instance.RootPath, "sources/cxx-stl/llvm-libc++/libs/", GetAbiName(Architecture), "libc++_shared.so"));
+                // https://android.googlesource.com/platform/ndk/+/master/docs/BuildSystemMaintainers.md#libc
+                var ndkPath = AndroidNdk.Instance.RootPath;
+                var libCppSharedPath = Path.Combine(ndkPath, "toolchains/llvm/prebuilt", AndroidSdk.GetHostName(), "sysroot/usr/lib/", GetToolchainName(TargetPlatform.Android, Architecture), "libc++_shared.so"); // NDK25+ location
+                if (!File.Exists(libCppSharedPath))
+                {
+                    libCppSharedPath = Path.Combine(ndkPath, "sources/cxx-stl/llvm-libc++/libs/", GetAbiName(Architecture), "libc++_shared.so"); // NDK24 (and older) location
+                    if (!File.Exists(libCppSharedPath))
+                        throw new Exception($"Missing Android NDK `libc++_shared.so` for architecture {Architecture}.");
+                }
+                graph.AddCopyFile(Path.Combine(Path.GetDirectoryName(outputFilePath), "libc++_shared.so"), libCppSharedPath);
             }
 
             var task = base.CreateBinary(graph, options, outputFilePath);

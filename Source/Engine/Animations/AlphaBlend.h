@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -86,7 +86,6 @@ API_ENUM() enum class AlphaBlendMode : byte
 class AlphaBlend
 {
 public:
-
     /// <summary>
     /// Converts the input alpha value from a linear 0-1 value into the output alpha described by blend mode.
     /// </summary>

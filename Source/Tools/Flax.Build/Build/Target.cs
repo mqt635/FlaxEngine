@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Collections.Generic;
 using System.IO;
+using System.Collections.Generic;
 using Flax.Build.Graph;
 using Flax.Build.NativeCpp;
 
@@ -19,9 +19,14 @@ namespace Flax.Build
         NativeCpp,
 
         /// <summary>
-        /// The C# project.
+        /// The C# Mono project.
         /// </summary>
         DotNet,
+
+        /// <summary>
+        /// The C# .NET SDK project.
+        /// </summary>
+        DotNetCore,
     }
 
     /// <summary>
@@ -203,6 +208,16 @@ namespace Flax.Build
         }
 
         /// <summary>
+        /// Checks if this target can be built for a given build options. Can be used to skip compiling for unsupported platforms or unused configurations (eg. development-only plugins).
+        /// </summary>
+        /// <param name="options">The build options.</param>
+        /// <returns>True if can build target, otherwise false.</returns>
+        public virtual bool CanBuild(BuildOptions options)
+        {
+            return true;
+        }
+
+        /// <summary>
         /// Gets the output file path.
         /// </summary>
         /// <param name="options">The build options.</param>
@@ -243,18 +258,49 @@ namespace Flax.Build
                 Modules.Add("Main");
             }
 
-            options.CompileEnv.EnableExceptions = true; // TODO: try to disable this!
+            switch (options.CompileEnv.CpuArchitecture)
+            {
+            case CpuArchitecture.AVX:
+            case CpuArchitecture.SSE2:
+                // Basic SEE2
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_SSE2=1"); break;
+            case CpuArchitecture.AVX2:
+            case CpuArchitecture.SSE4_2:
+                // Assume full support of SEE4.2 and older
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_SSE2=1");
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_SSE3=1");
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_SSE4_1=1");
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_SSE4_2=1");
+                break;
+            case CpuArchitecture.NEON:
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SIMD_NEON=1");
+                break;
+            }
+
+            switch (options.Platform.Target)
+            {
+            case TargetPlatform.Windows:
+            case TargetPlatform.XboxOne:
+            case TargetPlatform.XboxScarlett:
+            case TargetPlatform.UWP:
+            case TargetPlatform.Linux:
+            case TargetPlatform.iOS:
+            case TargetPlatform.Mac:
+                options.CompileEnv.EnableExceptions = true;
+                break;
+            }
+            options.CompileEnv.RuntimeTypeInfo = true; // TODO: try migrating from dynamic_cast to casting via ScriptingType and skip RTTI
+            options.CompileEnv.Sanitizers |= Configuration.Sanitizers;
             switch (options.Configuration)
             {
             case TargetConfiguration.Debug:
                 options.CompileEnv.PreprocessorDefinitions.Add("BUILD_DEBUG");
                 options.CompileEnv.FunctionLevelLinking = false;
                 options.CompileEnv.Optimization = false;
-                options.CompileEnv.FavorSizeOrSpeed = FavorSizeOrSpeed.Neither;
                 options.CompileEnv.DebugInformation = true;
                 options.CompileEnv.RuntimeChecks = true;
                 options.CompileEnv.StringPooling = false;
-                options.CompileEnv.IntrinsicFunctions = false;
+                options.CompileEnv.IntrinsicFunctions = true;
                 options.CompileEnv.BufferSecurityCheck = true;
                 options.CompileEnv.Inlining = false;
                 options.CompileEnv.WholeProgramOptimization = false;
@@ -268,7 +314,8 @@ namespace Flax.Build
                 options.CompileEnv.PreprocessorDefinitions.Add("BUILD_DEVELOPMENT");
                 options.CompileEnv.FunctionLevelLinking = true;
                 options.CompileEnv.Optimization = true;
-                options.CompileEnv.FavorSizeOrSpeed = FavorSizeOrSpeed.FastCode;
+                if (options.CompileEnv.FavorSizeOrSpeed == FavorSizeOrSpeed.Neither)
+                    options.CompileEnv.FavorSizeOrSpeed = FavorSizeOrSpeed.FastCode;
                 options.CompileEnv.DebugInformation = true;
                 options.CompileEnv.RuntimeChecks = false;
                 options.CompileEnv.StringPooling = true;
@@ -286,7 +333,8 @@ namespace Flax.Build
                 options.CompileEnv.PreprocessorDefinitions.Add("BUILD_RELEASE");
                 options.CompileEnv.FunctionLevelLinking = true;
                 options.CompileEnv.Optimization = true;
-                options.CompileEnv.FavorSizeOrSpeed = FavorSizeOrSpeed.FastCode;
+                if (options.CompileEnv.FavorSizeOrSpeed == FavorSizeOrSpeed.Neither)
+                    options.CompileEnv.FavorSizeOrSpeed = FavorSizeOrSpeed.FastCode;
                 options.CompileEnv.DebugInformation = false;
                 options.CompileEnv.RuntimeChecks = false;
                 options.CompileEnv.StringPooling = true;

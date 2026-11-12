@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
+using FlaxEditor.Utilities;
 using FlaxEngine.Utilities;
 
 namespace FlaxEditor.States
@@ -31,6 +32,9 @@ namespace FlaxEditor.States
 
         /// <inheritdoc />
         public override bool CanReloadScripts => true;
+
+        /// <inheritdoc />
+        public override bool CanCookGame => true;
 
         /// <inheritdoc />
         public override string Status => AutoSaveStatus;

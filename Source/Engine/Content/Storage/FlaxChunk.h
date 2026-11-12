@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,7 +11,7 @@
 enum class FlaxChunkFlags
 {
     /// <summary>
-    /// The none.
+    /// Nothing.
     /// </summary>
     None = 0,
 
@@ -19,6 +19,11 @@ enum class FlaxChunkFlags
     /// Compress chunk data using LZ4 algorithm.
     /// </summary>
     CompressedLZ4 = 1,
+
+    /// <summary>
+    /// Prevents chunk file data from being unloaded if unused for a certain amount of time. Runtime-only flag, not saved with the asset.
+    /// </summary>
+    KeepInMemory = 2,
 };
 
 DECLARE_ENUM_OPERATORS(FlaxChunkFlags);
@@ -29,7 +34,6 @@ DECLARE_ENUM_OPERATORS(FlaxChunkFlags);
 class FLAXENGINE_API FlaxChunk
 {
 public:
-
     /// <summary>
     /// Chunk of data location info
     /// </summary>
@@ -68,7 +72,6 @@ public:
     };
 
 public:
-
     /// <summary>
     /// The chunk location in file.
     /// </summary>
@@ -80,9 +83,14 @@ public:
     FlaxChunkFlags Flags = FlaxChunkFlags::None;
 
     /// <summary>
-    /// The last usage time (atomic, ticks of DateTime in UTC).
+    /// The last usage time.
     /// </summary>
-    int64 LastAccessTime = 0;
+    double LastAccessTime = 0.0;
+
+    /// <summary>
+    /// Flag set to indicate that chunk is during loading (atomic access to sync multiple reading threads).
+    /// </summary>
+    int64 IsLoading = 0;
 
     /// <summary>
     /// The chunk data.
@@ -90,7 +98,6 @@ public:
     BytesContainer Data;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="FlaxChunk"/> class.
     /// </summary>
@@ -106,7 +113,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets this chunk data pointer.
     /// </summary>
@@ -145,7 +151,7 @@ public:
     /// </summary>
     FORCE_INLINE bool IsLoaded() const
     {
-        return Data.IsValid();
+        return Data.IsValid() && Platform::AtomicRead(&IsLoading) == 0;
     }
 
     /// <summary>
@@ -153,7 +159,7 @@ public:
     /// </summary>
     FORCE_INLINE bool IsMissing() const
     {
-        return Data.IsInvalid();
+        return !IsLoaded();
     }
 
     /// <summary>
@@ -181,10 +187,5 @@ public:
     /// Clones this chunk data (doesn't copy location in file).
     /// </summary>
     /// <returns>The cloned chunk.</returns>
-    FlaxChunk* Clone() const
-    {
-        auto chunk = New<FlaxChunk>();
-        chunk->Data.Copy(Data);
-        return chunk;
-    }
+    FlaxChunk* Clone() const;
 };

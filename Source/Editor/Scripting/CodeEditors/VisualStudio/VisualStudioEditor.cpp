@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if USE_VISUAL_STUDIO_DTE
 
@@ -40,11 +40,35 @@ VisualStudioEditor::VisualStudioEditor(VisualStudioVersion version, const String
     case VisualStudioVersion::VS2019:
         _type = CodeEditorTypes::VS2019;
         break;
+    case VisualStudioVersion::VS2022:
+        _type = CodeEditorTypes::VS2022;
+        break;
+    case VisualStudioVersion::VS2026:
+        _type = CodeEditorTypes::VS2026;
+        break;
     default: CRASH;
         break;
     }
-    _solutionPath = Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln");
+    // Initialize with the preferred extension; GetSolutionPath() will check both at runtime
+    const Char* ext = (_version >= VisualStudioVersion::VS2022) ? TEXT(".slnx") : TEXT(".sln");
+    _solutionPath = Globals::ProjectFolder / Editor::Project->Name + ext;
     _solutionPath.Replace('/', '\\'); // Use Windows-style path separators
+}
+
+String VisualStudioEditor::GetSolutionPath() const
+{
+    // VS2022+ prefers .slnx; older versions prefer .sln. Fall back to the other if preferred is missing.
+    const String base = Globals::ProjectFolder / Editor::Project->Name;
+    const bool preferSlnx = (_version >= VisualStudioVersion::VS2022);
+    String preferred = base + (preferSlnx ? TEXT(".slnx") : TEXT(".sln"));
+    preferred.Replace('/', '\\');
+    if (FileSystem::FileExists(preferred))
+        return preferred;
+    String fallback = base + (preferSlnx ? TEXT(".sln") : TEXT(".slnx"));
+    fallback.Replace('/', '\\');
+    if (FileSystem::FileExists(fallback))
+        return fallback;
+    return preferred; // Neither exists yet; return preferred so generation targets the right format
 }
 
 void VisualStudioEditor::FindEditors(Array<CodeEditor*>* output)
@@ -65,16 +89,26 @@ void VisualStudioEditor::FindEditors(Array<CodeEditor*>* output)
     {
         auto& info = infos[i];
         VisualStudioVersion version;
-        switch (info.VersionMajor)
+        if (info.VersionMajor >= 18)
         {
-        case 16:
-            version = VisualStudioVersion::VS2019;
-            break;
-        case 15:
-            version = VisualStudioVersion::VS2017;
-            break;
-        default:
-            break;
+            version = VisualStudioVersion::VS2026;
+        }
+        else
+        {
+            switch (info.VersionMajor)
+            {
+            case 17:
+                version = VisualStudioVersion::VS2022;
+                break;
+            case 16:
+                version = VisualStudioVersion::VS2019;
+                break;
+            case 15:
+                version = VisualStudioVersion::VS2017;
+                break;
+            default:
+                continue;
+            }
         }
 
         String executablePath(info.ExecutablePath);
@@ -133,19 +167,62 @@ CodeEditorTypes VisualStudioEditor::GetType() const
 
 String VisualStudioEditor::GetName() const
 {
-    return String(ToString(_version));
+    const Char* name;
+    switch (_version)
+    {
+    case VisualStudioVersion::VS2008:
+        name = TEXT("Visual Studio 2008");
+        break;
+    case VisualStudioVersion::VS2010:
+        name = TEXT("Visual Studio 2010");
+        break;
+    case VisualStudioVersion::VS2012:
+        name = TEXT("Visual Studio 2012");
+        break;
+    case VisualStudioVersion::VS2013:
+        name = TEXT("Visual Studio 2013");
+        break;
+    case VisualStudioVersion::VS2015:
+        name = TEXT("Visual Studio 2015");
+        break;
+    case VisualStudioVersion::VS2017:
+        name = TEXT("Visual Studio 2017");
+        break;
+    case VisualStudioVersion::VS2019:
+        name = TEXT("Visual Studio 2019");
+        break;
+    case VisualStudioVersion::VS2022:
+        name = TEXT("Visual Studio 2022");
+        break;
+    case VisualStudioVersion::VS2026:
+        name = TEXT("Visual Studio 2026");
+        break;
+    default:
+        name = ToString(_version);
+        break;
+    }
+    return String(name);
+}
+
+String VisualStudioEditor::GetGenerateProjectCustomArgs() const
+{
+    if (_version >= VisualStudioVersion::VS2022)
+        return TEXT("-vs2026");
+    return String::Format(TEXT("-{0}"), String(ToString(_version)).ToLower());
 }
 
 void VisualStudioEditor::OpenFile(const String& path, int32 line)
 {
     // Generate project files if solution is missing
-    if (!FileSystem::FileExists(_solutionPath))
+    String solutionPath = GetSolutionPath();
+    if (!FileSystem::FileExists(solutionPath))
     {
-        ScriptsBuilder::GenerateProject();
+        ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
+        solutionPath = GetSolutionPath();
     }
 
     // Open file
-    const VisualStudio::Connection connection(*_CLSID, *_solutionPath);
+    const VisualStudio::Connection connection(*_CLSID, *solutionPath);
     String tmp = path;
     tmp.Replace('/', '\\'); // Use Windows-style path separators
     const auto result = connection.OpenFile(*tmp, line);
@@ -158,13 +235,15 @@ void VisualStudioEditor::OpenFile(const String& path, int32 line)
 void VisualStudioEditor::OpenSolution()
 {
     // Generate project files if solution is missing
-    if (!FileSystem::FileExists(_solutionPath))
+    String solutionPath = GetSolutionPath();
+    if (!FileSystem::FileExists(solutionPath))
     {
-        ScriptsBuilder::GenerateProject();
+        ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
+        solutionPath = GetSolutionPath();
     }
 
     // Open solution
-    const VisualStudio::Connection connection(*_CLSID, *_solutionPath);
+    const VisualStudio::Connection connection(*_CLSID, *solutionPath);
     const auto result = connection.OpenSolution();
     if (result.Failed())
     {
@@ -175,36 +254,18 @@ void VisualStudioEditor::OpenSolution()
 void VisualStudioEditor::OnFileAdded(const String& path)
 {
     // TODO: finish dynamic files adding to the project - for now just regenerate it
-    ScriptsBuilder::GenerateProject();
-    return;
-    if (!FileSystem::FileExists(_solutionPath))
-    {
-        return;
-    }
-
-    // Edit solution
-    const VisualStudio::Connection connection(*_CLSID, *_solutionPath);
-    if (connection.IsActive())
-    {
-        String tmp = path;
-        tmp.Replace('/', '\\');
-        String tmp2 = tmp.Substring(Globals::ProjectSourceFolder.Length() + 1);
-        const auto result = connection.AddFile(*tmp, *tmp2);
-        if (result.Failed())
-        {
-            LOG(Warning, "Cannot add file to project. {0}", String(result.Message.c_str()));
-        }
-    }
+    ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
 }
 
 bool VisualStudioEditor::UseAsyncForOpen() const
 {
     // Need to generate project files if missing first
-    if (!FileSystem::FileExists(_solutionPath))
+    String solutionPath = GetSolutionPath();
+    if (!FileSystem::FileExists(solutionPath))
         return true;
 
     // Open in async only when no solution opened
-    const VisualStudio::Connection connection(*_CLSID, *_solutionPath);
+    const VisualStudio::Connection connection(*_CLSID, *solutionPath);
     return !connection.IsActive();
 }
 

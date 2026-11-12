@@ -1,9 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Flax.Build.Graph;
 using Flax.Build.NativeCpp;
@@ -62,22 +63,34 @@ namespace Flax.Build.Platforms
         protected string LdPath;
 
         /// <summary>
+        /// The type of the linker.
+        /// </summary>
+        protected string LdKind;
+
+        /// <summary>
         /// The clang tool version.
         /// </summary>
         protected Version ClangVersion;
+
+        /// <summary>
+        /// The C++ standard library version.
+        /// </summary>
+        protected string LibStdCppVersion;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="UnixToolchain"/> class.
         /// </summary>
         /// <param name="platform">The platform.</param>
         /// <param name="architecture">The target architecture.</param>
-        /// <param name="toolchainRoots">The root folder for the toolchains installation.</param>
+        /// <param name="toolchainRoots">The root folder for the toolchains installation. If null, then platform must specify tools paths manually.</param>
         /// <param name="systemCompiler">The system compiler to use. Null if use toolset root.</param>
-        /// <param name="toolchainSubDir">The custom toolchain folder location in <paramref name="toolchainRoots"/> directory. If nul the architecture name will be sued.</param>
-        protected UnixToolchain(UnixPlatform platform, TargetArchitecture architecture, string toolchainRoots, string systemCompiler, string toolchainSubDir = null)
+        /// <param name="toolchainSubDir">The custom toolchain folder location in <paramref name="toolchainRoots"/> directory. If nul the architecture name will be used.</param>
+        protected UnixToolchain(UnixPlatform platform, TargetArchitecture architecture, string toolchainRoots = null, string systemCompiler = null, string toolchainSubDir = null)
         : base(platform, architecture)
         {
             ArchitectureName = GetToolchainName(platform.Target, architecture);
+            if (toolchainRoots == null)
+                return;
 
             // Build paths
             if (systemCompiler != null)
@@ -89,7 +102,19 @@ namespace Flax.Build.Platforms
                 RanlibPath = UnixPlatform.Which("ranlib");
                 StripPath = UnixPlatform.Which("strip");
                 ObjcopyPath = UnixPlatform.Which("objcopy");
-                LdPath = UnixPlatform.Which("ld");
+
+                LdPath = UnixPlatform.Which("ld.lld");
+                LdKind = "lld";
+                if (LdPath == null)
+                {
+                    LdPath = UnixPlatform.Which("ld.gold");
+                    LdKind = "gold";
+                }
+                if (LdPath == null)
+                {
+                    LdPath = UnixPlatform.Which("ld"); // ld.bfd
+                    LdKind = "bfd";
+                }
             }
             else
             {
@@ -97,67 +122,91 @@ namespace Flax.Build.Platforms
                 ToolsetRoot = toolchainSubDir == null ? Path.Combine(toolchainRoots, ArchitectureName) : Path.Combine(toolchainRoots, toolchainSubDir);
                 ClangPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "clang++"))) + exeExtension;
                 if (!File.Exists(ClangPath))
+                    ClangPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "clang"))) + exeExtension;
+                if (!File.Exists(ClangPath))
                     ClangPath = Path.Combine(ToolsetRoot, "bin/clang++") + exeExtension;
+                if (!File.Exists(ClangPath))
+                    ClangPath = Path.Combine(ToolsetRoot, "bin/clang") + exeExtension;
                 ArPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "ar"))) + exeExtension;
                 LlvmArPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}", "llvm-ar"))) + exeExtension;
                 RanlibPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "ranlib"))) + exeExtension;
                 StripPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "strip"))) + exeExtension;
                 ObjcopyPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "objcopy"))) + exeExtension;
                 LdPath = Path.Combine(Path.Combine(ToolsetRoot, string.Format("bin/{0}-{1}", ArchitectureName, "ld"))) + exeExtension;
+
+                // Fix possibly invalid path
+                if (!File.Exists(StripPath))
+                    StripPath = Path.Combine(Path.Combine(ToolsetRoot, "bin/llvm-strip")) + exeExtension;
             }
 
             // Determinate compiler version
-            if (!File.Exists(ClangPath))
-                throw new Exception(string.Format("Missing Clang ({0})", ClangPath));
-            using (var process = new Process())
-            {
-                process.StartInfo.UseShellExecute = false;
-                process.StartInfo.CreateNoWindow = true;
-                process.StartInfo.RedirectStandardOutput = true;
-                process.StartInfo.RedirectStandardError = true;
-                process.StartInfo.FileName = ClangPath;
-                process.StartInfo.Arguments = "--version";
-
-                process.Start();
-                process.WaitForExit();
-
-                if (process.ExitCode == 0)
-                {
-                    // Parse the version
-                    string data = process.StandardOutput.ReadLine();
-                    Regex versionPattern = new Regex("version \\d+(\\.\\d+)+");
-                    Match versionMatch = versionPattern.Match(data);
-                    if (versionMatch.Value.StartsWith("version "))
-                    {
-                        var versionString = versionMatch.Value.Replace("version ", "");
-                        string[] parts = versionString.Split('.');
-                        int major = 0, minor = 0, patch = 0;
-                        if (parts.Length >= 1)
-                            major = Convert.ToInt32(parts[0]);
-                        if (parts.Length >= 2)
-                            minor = Convert.ToInt32(parts[1]);
-                        if (parts.Length >= 3)
-                            patch = Convert.ToInt32(parts[2]);
-                        ClangVersion = new Version(major, minor, patch);
-                    }
-                }
-                else
-                {
-                    throw new Exception(string.Format("Failed to get Clang version ({0})", ClangPath));
-                }
-            }
+            ClangVersion = GetClangVersion(platform.Target, ClangPath);
+            LibStdCppVersion = GetLibStdCppVersion(ClangPath) ?? ClangVersion.ToString();
 
             // Check version
             if (ClangVersion.Major < 6)
                 throw new Exception(string.Format("Unsupported Clang version {0}. Minimum supported is 6.", ClangVersion));
         }
 
-        private static string GetLibName(string path)
+        public static string GetLibName(string path)
         {
             var libName = Path.GetFileNameWithoutExtension(path);
             if (libName.StartsWith("lib"))
                 libName = libName.Substring(3);
             return libName;
+        }
+
+        public static Version GetClangVersion(TargetPlatform platform, string path)
+        {
+            if (!File.Exists(path))
+                throw new Exception(string.Format("Missing Clang ({0})", path));
+
+            // Parse the version
+            string arg = "--version -dumpversion";
+            if (platform == TargetPlatform.PS4)
+                arg = "--version";
+            string output = Utilities.ReadProcessOutput(path, arg);
+            Regex versionPattern = new Regex("\\d+(\\.\\d+)+");
+            Match versionMatch = versionPattern.Match(output);
+            if (versionMatch.Success)
+            {
+                string[] parts = versionMatch.Value.Split('.');
+                int major = 0, minor = 0, patch = 0;
+                if (parts.Length >= 1)
+                    major = Convert.ToInt32(parts[0]);
+                if (parts.Length >= 2)
+                    minor = Convert.ToInt32(parts[1]);
+                if (parts.Length >= 3)
+                    patch = Convert.ToInt32(parts[2]);
+                return new Version(major, minor, patch);
+            }
+            throw new Exception(string.Format("Failed to get Clang version ({0})", path));
+        }
+
+        public static string GetLibStdCppVersion(string path)
+        {
+            if (!File.Exists(path))
+                return null;
+
+            using (var process = new Process())
+            {
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.FileName = path;
+                process.StartInfo.Arguments = "-v";
+
+                process.Start();
+                process.WaitForExit();
+
+                Regex versionPattern = new Regex("Selected GCC installation: .*\\/(\\d+(\\.\\d+)*)");
+                Match versionMatch = versionPattern.Match(process.StandardError.ReadToEnd().Trim());
+                if (versionMatch.Success)
+                    return versionMatch.Groups[1].Value;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -182,6 +231,7 @@ namespace Flax.Build.Platforms
                 default: throw new InvalidArchitectureException(architecture);
                 }
             case TargetPlatform.PS4: return (string)Utilities.GetStaticValue("Flax.Build.Platforms.PS4Toolchain", "ToolchainName");
+            case TargetPlatform.PS5: return (string)Utilities.GetStaticValue("Flax.Build.Platforms.PS5Toolchain", "ToolchainName");
             case TargetPlatform.Android:
                 switch (architecture)
                 {
@@ -189,6 +239,19 @@ namespace Flax.Build.Platforms
                 case TargetArchitecture.x64: return "x86_64-linux-android";
                 case TargetArchitecture.ARM: return "armv7a-linux-androideabi";
                 case TargetArchitecture.ARM64: return "aarch64-linux-android";
+                default: throw new InvalidArchitectureException(architecture);
+                }
+            case TargetPlatform.Mac:
+                switch (architecture)
+                {
+                case TargetArchitecture.x64: return "x86_64-apple-macos" + MacConfiguration.MacOSXMinVer;
+                case TargetArchitecture.ARM64: return "aarch64-apple-macos" + MacConfiguration.MacOSXMinVer;
+                default: throw new InvalidArchitectureException(architecture);
+                }
+            case TargetPlatform.iOS:
+                switch (architecture)
+                {
+                case TargetArchitecture.ARM64: return "aarch64-apple-ios" + iOSConfiguration.MinVer;
                 default: throw new InvalidArchitectureException(architecture);
                 }
             default: throw new InvalidPlatformException(platform);
@@ -200,6 +263,12 @@ namespace Flax.Build.Platforms
 
         /// <inheritdoc />
         public override string DllImport => "";
+
+        /// <inheritdoc />
+        public override TargetCompiler Compiler => TargetCompiler.Clang;
+
+        /// <inheritdoc />
+        public override string NativeCompilerPath => ClangPath;
 
         /// <inheritdoc />
         public override void LogInfo()
@@ -251,6 +320,17 @@ namespace Flax.Build.Platforms
         {
         }
 
+        /// <summary>
+        /// Gets linker argument to reference a specific shared library file.
+        /// </summary>
+        /// <param name="graph">The graph.</param>
+        /// <param name="options">The options.</param>
+        /// <param name="library">The shared library file path.</param>
+        protected virtual string GetSharedLibraryLinkArg(TaskGraph graph, BuildOptions options, string library)
+        {
+            return string.Format("\"-l{0}\"", GetLibName(library));
+        }
+
         /// <inheritdoc />
         public override CompileOutput CompileCppFiles(TaskGraph graph, BuildOptions options, List<string> sourceFiles, string outputPath)
         {
@@ -259,13 +339,11 @@ namespace Flax.Build.Platforms
 
             // Setup arguments shared by all source files
             var commonArgs = new List<string>();
+            commonArgs.AddRange(options.CompileEnv.CustomArgs);
             SetupCompileCppFilesArgs(graph, options, commonArgs, outputPath);
             {
                 commonArgs.Add("-c");
                 commonArgs.Add("-pipe");
-                commonArgs.Add("-x");
-                commonArgs.Add("c++");
-                commonArgs.Add("-std=c++14");
 
                 commonArgs.Add("-Wdelete-non-virtual-dtor");
                 commonArgs.Add("-fno-math-errno");
@@ -282,28 +360,22 @@ namespace Flax.Build.Platforms
                 if (compileEnvironment.TreatWarningsAsErrors)
                     commonArgs.Add("-Wall -Werror");
 
-                // TODO: compileEnvironment.IntrinsicFunctions
-                // TODO: compileEnvironment.FunctionLevelLinking
-                // TODO: compileEnvironment.FavorSizeOrSpeed
-                // TODO: compileEnvironment.RuntimeChecks
-                // TODO: compileEnvironment.StringPooling
-                // TODO: compileEnvironment.BufferSecurityCheck
-
                 if (compileEnvironment.DebugInformation)
-                {
                     commonArgs.Add("-glldb");
-                }
 
                 commonArgs.Add("-pthread");
 
+                if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.FastCode)
+                    commonArgs.Add("-Ofast");
+                else if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.SmallCode)
+                    commonArgs.Add("-Os");
                 if (compileEnvironment.Optimization)
-                {
                     commonArgs.Add("-O2");
-                }
                 else
-                {
                     commonArgs.Add("-O0");
-                }
+
+                if (compileEnvironment.BufferSecurityCheck)
+                    commonArgs.Add("-fstack-protector");
 
                 if (!compileEnvironment.Inlining)
                 {
@@ -312,13 +384,9 @@ namespace Flax.Build.Platforms
                 }
 
                 if (compileEnvironment.EnableExceptions)
-                {
                     commonArgs.Add("-fexceptions");
-                }
                 else
-                {
                     commonArgs.Add("-fno-exceptions");
-                }
             }
 
             // Add preprocessor definitions
@@ -333,7 +401,7 @@ namespace Flax.Build.Platforms
                 commonArgs.Add(string.Format("-I\"{0}\"", includePath.Replace('\\', '/')));
             }
 
-            // Compile all C++ files
+            // Compile all C/C++ files
             var args = new List<string>();
             foreach (var sourceFile in sourceFiles)
             {
@@ -343,6 +411,30 @@ namespace Flax.Build.Platforms
                 // Use shared arguments
                 args.Clear();
                 args.AddRange(commonArgs);
+
+                // Language for the file
+                args.Add("-x");
+                if (sourceFile.EndsWith(".c", StringComparison.OrdinalIgnoreCase))
+                    args.Add("c");
+                else
+                {
+                    args.Add("c++");
+
+                    // C++ version
+                    switch (compileEnvironment.CppVersion)
+                    {
+                    case CppVersion.Cpp14:
+                        args.Add("-std=c++14");
+                        break;
+                    case CppVersion.Cpp17:
+                    case CppVersion.Latest:
+                        args.Add("-std=c++17");
+                        break;
+                    case CppVersion.Cpp20:
+                        args.Add("-std=c++20");
+                        break;
+                    }
+                }
 
                 // Object File Name
                 var objFile = Path.Combine(outputPath, sourceFilename + ".o");
@@ -431,8 +523,9 @@ namespace Flax.Build.Platforms
 
             // Setup arguments
             var args = new List<string>();
+            args.AddRange(options.LinkEnv.CustomArgs);
             {
-                args.Add(string.Format("-o \"{0}\"", outputFilePath));
+                args.Add(string.Format("-o \"{0}\"", outputFilePath.Replace('\\', '/')));
 
                 if (!options.LinkEnv.DebugInformation)
                 {
@@ -442,6 +535,9 @@ namespace Flax.Build.Platforms
                 // TODO: linkEnvironment.LinkTimeCodeGeneration
                 // TODO: linkEnvironment.Optimization
                 // TODO: linkEnvironment.UseIncrementalLinking
+
+                if (!string.IsNullOrEmpty(LdKind))
+                    args.Add(string.Format("-fuse-ld={0}", LdKind));
             }
             SetupLinkFilesArgs(graph, options, args, outputFilePath);
 
@@ -449,7 +545,8 @@ namespace Flax.Build.Platforms
 
             // Input libraries
             var libraryPaths = new HashSet<string>();
-            foreach (var library in linkEnvironment.InputLibraries)
+            var dynamicLibExt = Platform.SharedLibraryFileExtension;
+            foreach (var library in linkEnvironment.InputLibraries.Concat(options.Libraries))
             {
                 var dir = Path.GetDirectoryName(library);
                 var ext = Path.GetExtension(library);
@@ -461,37 +558,12 @@ namespace Flax.Build.Platforms
                 {
                     // Skip executable
                 }
-                else if (ext == ".so")
+                else if (ext == dynamicLibExt)
                 {
                     // Link against dynamic library
                     task.PrerequisiteFiles.Add(library);
                     libraryPaths.Add(dir);
-                    args.Add(string.Format("\"-l{0}\"", GetLibName(library)));
-                }
-                else
-                {
-                    task.PrerequisiteFiles.Add(library);
-                    args.Add(string.Format("\"{0}\"", GetLibName(library)));
-                }
-            }
-            foreach (var library in options.Libraries)
-            {
-                var dir = Path.GetDirectoryName(library);
-                var ext = Path.GetExtension(library);
-                if (string.IsNullOrEmpty(dir))
-                {
-                    args.Add(string.Format("\"-l{0}\"", library));
-                }
-                else if (string.IsNullOrEmpty(ext))
-                {
-                    // Skip executable
-                }
-                else if (ext == ".so")
-                {
-                    // Link against dynamic library
-                    task.PrerequisiteFiles.Add(library);
-                    libraryPaths.Add(dir);
-                    args.Add(string.Format("\"-l{0}\"", GetLibName(library)));
+                    args.Add(GetSharedLibraryLinkArg(graph, options, library));
                 }
                 else
                 {
@@ -500,9 +572,9 @@ namespace Flax.Build.Platforms
                 }
             }
 
-            // Input files
+            // Input files (link static libraries last)
             task.PrerequisiteFiles.AddRange(linkEnvironment.InputFiles);
-            foreach (var file in linkEnvironment.InputFiles)
+            foreach (var file in linkEnvironment.InputFiles.Where(x => !x.EndsWith(".a")).Concat(linkEnvironment.InputFiles.Where(x => x.EndsWith(".a"))))
             {
                 args.Add(string.Format("\"{0}\"", file.Replace('\\', '/')));
             }
@@ -540,7 +612,7 @@ namespace Flax.Build.Platforms
         /// <inheritdoc />
         public override void LinkFiles(TaskGraph graph, BuildOptions options, string outputFilePath)
         {
-            outputFilePath = outputFilePath.Replace('\\', '/');
+            outputFilePath = Utilities.NormalizePath(outputFilePath);
 
             Task linkTask;
             switch (options.LinkEnv.Output)

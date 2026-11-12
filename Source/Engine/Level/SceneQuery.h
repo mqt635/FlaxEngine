@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,16 +17,14 @@
 class FLAXENGINE_API SceneQuery
 {
 public:
-
     /// <summary>
-    /// Try to find actor hit by the given ray
+    /// Try to find actor hit by the given ray.
     /// </summary>
     /// <param name="ray">Ray to test</param>
     /// <returns>Hit actor or nothing</returns>
     static Actor* RaycastScene(const Ray& ray);
 
 public:
-
     /// <summary>
     /// Gets all scene objects from the actor into linear list. Appends them (without the given actor).
     /// </summary>
@@ -55,22 +53,18 @@ public:
     static void GetAllActors(Array<Actor*>& actors);
 
 public:
-
     /// <summary>
     /// Execute custom action on actors tree.
-    /// Action should returns false to stop calling deeper.
-    /// First action argument is current actor object.
     /// </summary>
     /// <param name="action">Actor to call on every actor in the tree. Returns true if keep calling deeper.</param>
     /// <param name="args">Custom arguments for the function</param>
     template<typename... Params>
-    static void TreeExecute(Function<bool(Actor*, Params ...)>& action, Params ... args)
+    static void TreeExecute(Function<bool(Actor*, Params...)>& action, Params... args)
     {
 #if SCENE_QUERIES_WITH_LOCK
-		ScopeLock lock(Level::ScenesLock);
+        ScopeLock lock(Level::ScenesLock);
 #endif
-
         for (int32 i = 0; i < Level::Scenes.Count(); i++)
-            Level::Scenes[i]->TreeExecute<Params...>(action, args...);
+            Level::Scenes.Get()[i]->TreeExecute<Params...>(action, args...);
     }
 };

@@ -1,15 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.IO;
 using System.Linq;
+using System.IO;
 using Flax.Build;
 using Flax.Build.NativeCpp;
 
 /// <summary>
 /// Target that builds standalone, native tests.
 /// </summary>
-public class FlaxTestsTarget : EngineTarget
+public class FlaxTestsTarget : FlaxEditor
 {
     /// <inheritdoc />
     public override void Init()
@@ -20,11 +20,12 @@ public class FlaxTestsTarget : EngineTarget
         OutputName = "FlaxTests";
         ConfigurationName = "Tests";
         IsPreBuilt = false;
-        UseSymbolsExports = false;
+        UseSymbolsExports = true;
         Platforms = new[]
         {
             TargetPlatform.Windows,
             TargetPlatform.Linux,
+            TargetPlatform.Mac,
         };
         Architectures = new[]
         {
@@ -34,8 +35,9 @@ public class FlaxTestsTarget : EngineTarget
         {
             TargetConfiguration.Development,
         };
+        GlobalDefinitions.Add("FLAX_TESTS");
+        Win32ResourceFile = null;
 
-        Modules.Remove("Main");
         Modules.Add("Tests");
     }
 
@@ -44,13 +46,14 @@ public class FlaxTestsTarget : EngineTarget
     {
         base.SetupTargetEnvironment(options);
 
-        options.LinkEnv.LinkAsConsoleProgram = true;
+        // Setup C# scripts environment
+        options.ScriptingAPI.IgnoreMissingDocumentationWarnings = true;
+        options.ScriptingAPI.Defines.Add("FLAX_TESTS");
+        var nunitFramework = Path.Combine(Globals.EngineRoot, "Source/Platforms/DotNet/NUnit/framework/nunit.framework.dll");
+        options.ScriptingAPI.FileReferences.Add(nunitFramework);
 
-        // Setup output folder for Test binaries
-        var platformName = options.Platform.Target.ToString();
-        var architectureName = options.Architecture.ToString();
-        var configurationName = options.Configuration.ToString();
-        options.OutputFolder = Path.Combine(options.WorkingDirectory, "Binaries", "Tests", platformName, architectureName, configurationName);
+        // Produce console program
+        options.LinkEnv.LinkAsConsoleProgram = true;
     }
 
     /// <inheritdoc />

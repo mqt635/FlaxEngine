@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,13 +14,11 @@
 class GPUUploadBufferTask : public GPUTask
 {
 protected:
-
     BufferReference _buffer;
     int32 _offset;
     BytesContainer _data;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUUploadBufferTask"/> class.
     /// </summary>
@@ -33,7 +31,7 @@ public:
         , _buffer(buffer)
         , _offset(offset)
     {
-        _buffer.OnUnload.Bind<GPUUploadBufferTask, &GPUUploadBufferTask::OnResourceUnload>(this);
+        _buffer.Released.Bind<GPUUploadBufferTask, &GPUUploadBufferTask::OnResourceReleased>(this);
 
         if (copyData)
             _data.Copy(data);
@@ -42,14 +40,12 @@ public:
     }
 
 private:
-
-    void OnResourceUnload(BufferReference* ref)
+    void OnResourceReleased()
     {
         Cancel();
     }
 
 public:
-
     // [GPUTask]
     bool HasReference(Object* resource) const override
     {
@@ -57,18 +53,14 @@ public:
     }
 
 protected:
-
     // [GPUTask]
     Result run(GPUTasksContext* context) override
     {
-        if (_buffer.IsMissing())
+        if (!_buffer)
             return Result::MissingResources;
-
         context->GPU->UpdateBuffer(_buffer, _data.Get(), _data.Length(), _offset);
-
         return Result::Ok;
     }
-
     void OnEnd() override
     {
         _buffer.Unlink();

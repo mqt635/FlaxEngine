@@ -1,11 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
 namespace FlaxEditor.Content
 {
     /// <summary>
-    /// Content item that contains C# script file with source code.
+    /// Content item that contains C# file with source code.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.ScriptItem" />
     public class CSharpScriptItem : ScriptItem
@@ -18,7 +18,10 @@ namespace FlaxEditor.Content
         : base(path)
         {
         }
-        
+
+        /// <inheritdoc />
+        public override string TypeDescription => "C# Source Code";
+
         /// <inheritdoc />
         public override SpriteHandle DefaultThumbnail => Editor.Instance.Icons.CSharpScript128;
     }

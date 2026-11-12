@@ -1,8 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Core/Types/CommonValue.h"
 #include "Engine/Visject/GraphParameter.h"
 
 class ParticleSystemInstance;
@@ -18,26 +17,9 @@ class GPUBuffer;
 class FLAXENGINE_API ParticleSystemParameter : public GraphParameter
 {
 public:
-
     ParticleSystemParameter()
         : GraphParameter(SpawnParams(Guid::New(), TypeInitializer))
     {
-    }
-
-    ParticleSystemParameter(const ParticleSystemParameter& other)
-        : ParticleSystemParameter()
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-    }
-
-    ParticleSystemParameter& operator=(const ParticleSystemParameter& other)
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-        return *this;
     }
 };
 
@@ -47,7 +29,6 @@ public:
 class FLAXENGINE_API ParticleEmitterInstance
 {
 public:
-
     struct SpawnerData
     {
         /// <summary>
@@ -62,7 +43,6 @@ public:
     };
 
 public:
-
     /// <summary>
     /// The instance data version number. Used to sync the Particle Emitter Graph data with the instance state. Handles Particle Emitter reloads to enure data is valid.
     /// </summary>
@@ -83,10 +63,16 @@ public:
     /// </summary>
     Array<SpawnerData> SpawnModulesData;
 
-    // Custom per-node data (eg. position on spiral module for arc progress tracking)
+    /// <summary>
+    /// Custom per-node data (eg. position on spiral module for arc progress tracking)
+    /// </summary>
     Array<byte> CustomData;
 
-#if COMPILE_WITH_GPU_PARTICLES
+    /// <summary>
+    /// The external amount of the particles to spawn.
+    /// </summary>
+    int32 CustomSpawnCount = 0;
+
     struct
     {
         /// <summary>
@@ -99,7 +85,6 @@ public:
         /// </summary>
         int32 SpawnCount;
     } GPU;
-#endif
 
     /// <summary>
     /// The buffer for the particles simulation.
@@ -107,7 +92,6 @@ public:
     ParticleBuffer* Buffer = nullptr;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ParticleEmitterInstance"/> class.
     /// </summary>
@@ -138,7 +122,6 @@ public:
 class FLAXENGINE_API ParticleSystemInstance
 {
 public:
-
     /// <summary>
     /// The instance data version number. Used to sync the Particle System data with the instance state. Handles Particle System reloads to enure data is valid.
     /// </summary>
@@ -170,7 +153,6 @@ public:
     mutable GPUBuffer* GPUParticlesCountReadback = nullptr;
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="ParticleSystemInstance"/> class.
     /// </summary>

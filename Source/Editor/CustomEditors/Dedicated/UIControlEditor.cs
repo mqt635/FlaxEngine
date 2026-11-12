@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Linq;
@@ -7,6 +7,7 @@ using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -32,7 +33,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                     if (_presets != value)
                     {
                         _presets = value;
-                        TooltipText = CustomEditorsUtil.GetPropertyNameUI(_presets.ToString());
+                        TooltipText = Utilities.Utils.GetPropertyNameUI(_presets.ToString());
                     }
                 }
             }
@@ -44,7 +45,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             public override void Draw()
             {
                 // Cache data
-                var rect = new Rectangle(Vector2.Zero, Size);
+                var rect = new Rectangle(Float2.Zero, Size);
                 if (rect.Width >= rect.Height)
                 {
                     rect.X = (rect.Width - rect.Height) * 0.5f;
@@ -159,49 +160,49 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 // Draw pivot point
                 if (SupportsShiftModulation && Input.GetKey(KeyboardKeys.Control))
                 {
-                    Vector2 pivotPoint;
+                    Float2 pivotPoint;
                     switch (_presets)
                     {
                     case AnchorPresets.Custom:
-                        pivotPoint = Vector2.Minimum;
+                        pivotPoint = Float2.Minimum;
                         break;
                     case AnchorPresets.TopLeft:
-                        pivotPoint = new Vector2(0, 0);
+                        pivotPoint = new Float2(0, 0);
                         break;
                     case AnchorPresets.TopCenter:
                     case AnchorPresets.HorizontalStretchTop:
-                        pivotPoint = new Vector2(rect.Width / 2, 0);
+                        pivotPoint = new Float2(rect.Width / 2, 0);
                         break;
                     case AnchorPresets.TopRight:
-                        pivotPoint = new Vector2(rect.Width, 0);
+                        pivotPoint = new Float2(rect.Width, 0);
                         break;
                     case AnchorPresets.MiddleLeft:
                     case AnchorPresets.VerticalStretchLeft:
-                        pivotPoint = new Vector2(0, rect.Height / 2);
+                        pivotPoint = new Float2(0, rect.Height / 2);
                         break;
                     case AnchorPresets.MiddleCenter:
                     case AnchorPresets.VerticalStretchCenter:
                     case AnchorPresets.HorizontalStretchMiddle:
                     case AnchorPresets.StretchAll:
-                        pivotPoint = new Vector2(rect.Width / 2, rect.Height / 2);
+                        pivotPoint = new Float2(rect.Width / 2, rect.Height / 2);
                         break;
                     case AnchorPresets.MiddleRight:
                     case AnchorPresets.VerticalStretchRight:
-                        pivotPoint = new Vector2(rect.Width, rect.Height / 2);
+                        pivotPoint = new Float2(rect.Width, rect.Height / 2);
                         break;
                     case AnchorPresets.BottomLeft:
-                        pivotPoint = new Vector2(0, rect.Height);
+                        pivotPoint = new Float2(0, rect.Height);
                         break;
                     case AnchorPresets.BottomCenter:
                     case AnchorPresets.HorizontalStretchBottom:
-                        pivotPoint = new Vector2(rect.Width / 2, rect.Height);
+                        pivotPoint = new Float2(rect.Width / 2, rect.Height);
                         break;
                     case AnchorPresets.BottomRight:
-                        pivotPoint = new Vector2(rect.Width, rect.Height);
+                        pivotPoint = new Float2(rect.Width, rect.Height);
                         break;
                     default: throw new ArgumentOutOfRangeException();
                     }
-                    var pivotPointSize = new Vector2(3.0f);
+                    var pivotPointSize = new Float2(3.0f);
                     Render2D.DrawRectangle(new Rectangle(pivotPoint - pivotPointSize * 0.5f, pivotPointSize), style.ProgressNormal, 1.1f);
                 }
             }
@@ -234,7 +235,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
 
                 var style = FlaxEngine.GUI.Style.Current;
                 Tag = presets;
-                Size = new Vector2(DialogWidth, DialogHeight);
+                Size = new Float2(DialogWidth, DialogHeight);
 
                 // Title
                 var title = new Label(2, 2, DialogWidth - 4, TitleHeight)
@@ -346,7 +347,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
 
         private void OnButtonClicked()
         {
-            var location = _button.Center + new Vector2(3.0f);
+            var location = _button.Center + new Float2(3.0f);
             var editor = new AnchorPresetsEditorPopup(_button.Presets, true);
             editor.VisibleChanged += OnEditorVisibleChanged;
             editor.Show(_button.Parent, location);
@@ -406,26 +407,23 @@ namespace FlaxEditor.CustomEditors.Dedicated
     /// <seealso cref="FlaxEditor.CustomEditors.Editors.GenericEditor" />
     public class UIControlControlEditor : GenericEditor
     {
-        private Type _cachedType;
+        private ScriptType[] _valueTypes;
+        private bool _anchorDropDownClosed = true;
+        private Button _pivotRelativeButton;
 
         /// <inheritdoc />
         public override void Initialize(LayoutElementsContainer layout)
         {
-            _cachedType = null;
-            if (HasDifferentTypes)
-            {
-                // TODO: support stable editing multiple different control types (via generic way or for transform-only)
-                return;
-            }
-
             // Set control type button
             var space = layout.Space(20);
-            float setTypeButtonWidth = 60.0f;
+            var buttonText = "Set Type";
+            var textSize = FlaxEngine.GUI.Style.Current.FontMedium.MeasureText(buttonText);
+            float setTypeButtonWidth = (textSize.X < 60.0f) ? 60.0f : textSize.X + 4;
             var setTypeButton = new Button
             {
                 TooltipText = "Sets the control to the given type",
                 AnchorPreset = AnchorPresets.MiddleCenter,
-                Text = "Set Type",
+                Text = buttonText,
                 Parent = space.Spacer,
                 Bounds = new Rectangle((space.Spacer.Width - setTypeButtonWidth) / 2, 1, setTypeButtonWidth, 18),
             };
@@ -440,24 +438,67 @@ namespace FlaxEditor.CustomEditors.Dedicated
             }
 
             // Add control type helper label
+            if (!Values.HasDifferentTypes)
             {
-                var type = Values[0].GetType();
-                _cachedType = type;
                 var label = layout.AddPropertyItem("Type", "The type of the created control.");
-                label.Label(type.FullName);
+                label.Label(Values[0].GetType().FullName);
             }
+            _valueTypes = Values.ValuesTypes;
 
             // Show control properties
             base.Initialize(layout);
 
             for (int i = 0; i < layout.Children.Count; i++)
             {
-                if (layout.Children[i] is GroupElement group && group.Panel.HeaderText == "Transform")
+                if (layout.Children[i] is GroupElement group && group.Panel.HeaderText.Equals("Transform", StringComparison.Ordinal))
                 {
-                    VerticalPanelElement mainHor = VerticalPanelWithoutMargin(group);
-                    CreateTransformElements(mainHor, ValuesTypes);
-                    group.ContainerControl.ChangeChildIndex(mainHor.Control, 0);
+                    layout.Children.Remove(group);
+                    layout.ContainerControl.Children.Remove(group.Panel);
                     break;
+                }
+            }
+
+            // Setup transform
+            if (Presenter is LayoutElementsContainer l)
+            {
+                for (int i = 0; i < l.Children.Count; i++)
+                {
+                    if (l.Children[i] is GroupElement g && g.Panel.HeaderText.Equals("Transform", StringComparison.Ordinal))
+                    {
+                        l.Children.Remove(g);
+                        l.ContainerControl.Children.Remove(g.Panel);
+                        break;
+                    }
+                }
+
+                var transformGroup = l.Group("Transform");
+                VerticalPanelElement mainHor = VerticalPanelWithoutMargin(transformGroup);
+                CreateTransformElements(mainHor, ValuesTypes);
+
+                ScriptMemberInfo scaleInfo = ValuesTypes[0].GetProperty("Scale");
+                ItemInfo scaleItem = new ItemInfo(scaleInfo);
+                transformGroup.Property("Scale", scaleItem.GetValues(Values));
+
+                ScriptMemberInfo pivotInfo = ValuesTypes[0].GetProperty("Pivot");
+                ItemInfo pivotItem = new ItemInfo(pivotInfo);
+                transformGroup.Property("Pivot", pivotItem.GetValues(Values));
+
+                ScriptMemberInfo shearInfo = ValuesTypes[0].GetProperty("Shear");
+                ItemInfo shearItem = new ItemInfo(shearInfo);
+                transformGroup.Property("Shear", shearItem.GetValues(Values));
+
+                ScriptMemberInfo rotationInfo = ValuesTypes[0].GetProperty("Rotation");
+                ItemInfo rotationItem = new ItemInfo(rotationInfo);
+                transformGroup.Property("Rotation", rotationItem.GetValues(Values));
+
+                // Get position of general tab
+                for (int i = 0; i < l.Children.Count; i++)
+                {
+                    if (l.Children[i] is GroupElement g && g.Panel.HeaderText.Equals("General", StringComparison.Ordinal) && i + 1 <= l.Children.Count)
+                    {
+                        Presenter.ContainerControl.ChangeChildIndex(transformGroup.Control, i + 1);
+                        break;
+                    }
                 }
             }
         }
@@ -483,11 +524,52 @@ namespace FlaxEditor.CustomEditors.Dedicated
             horDown.CustomControl.Height = TextBoxBase.DefaultHeight;
 
             GetAnchorEquality(out _cachedXEq, out _cachedYEq, valueTypes);
-
             BuildLocationSizeOffsets(horUp, horDown, _cachedXEq, _cachedYEq, valueTypes);
+            BuildExtraButtons(group);
 
             main.Space(10);
             BuildAnchorsDropper(main, valueTypes);
+        }
+
+        private void BuildExtraButtons(VerticalPanelElement group)
+        {
+            var control = (Control)Values[0];
+            var pivotRelative = Editor.Instance.Windows.PropertiesWin.UIPivotRelative;
+            control.PivotRelative = pivotRelative;
+
+            var panel = group.CustomContainer<Panel>();
+            panel.CustomControl.Height = TextBoxBase.DefaultHeight;
+            panel.CustomControl.ClipChildren = false;
+            panel.CustomControl.Parent = group.ContainerControl;
+
+            _pivotRelativeButton = new Button
+            {
+                TooltipText = "Toggles UI control resizing based on where the pivot is rather than just the top-left.",
+                Size = new Float2(18),
+                Parent = panel.ContainerControl,
+                BackgroundBrush = new SpriteBrush(Editor.Instance.Icons.Scale32),
+                AnchorPreset = AnchorPresets.TopRight,
+                X = 77,
+            };
+
+            SetStyle(pivotRelative);
+            _pivotRelativeButton.Clicked += PivotRelativeClicked;
+        }
+
+        private void PivotRelativeClicked()
+        {
+            var control = (Control)Values[0];
+            var pivotRelative = control.PivotRelative;
+            control.PivotRelative = !pivotRelative;
+            Editor.Instance.Windows.PropertiesWin.UIPivotRelative = !pivotRelative;
+            SetStyle(control.PivotRelative);
+        }
+
+        private void SetStyle(bool current)
+        {
+            var style = FlaxEngine.GUI.Style.Current;
+            var backgroundColor = current ? style.Foreground : style.ForegroundDisabled;
+            _pivotRelativeButton.SetColors(backgroundColor);
         }
 
         private void BuildAnchorsDropper(LayoutElementsContainer main, ScriptType[] valueTypes)
@@ -498,7 +580,8 @@ namespace FlaxEditor.CustomEditors.Dedicated
             ItemInfo maxItem = new ItemInfo(maxInfo);
 
             GroupElement ng = main.Group("Anchors", true);
-            ng.Panel.Close(false);
+            ng.Panel.IsClosed = _anchorDropDownClosed;
+            ng.Panel.IsClosedChanged += panel => _anchorDropDownClosed = panel.IsClosed;
             ng.Property("Min", minItem.GetValues(Values));
             ng.Property("Max", maxItem.GetValues(Values));
         }
@@ -543,63 +626,85 @@ namespace FlaxEditor.CustomEditors.Dedicated
             LayoutElementsContainer yEl;
             LayoutElementsContainer hEl;
             LayoutElementsContainer vEl;
+            Color axisColorX = ActorTransformEditor.AxisColorX;
+            Color axisColorY = ActorTransformEditor.AxisColorY;
+            FloatValueBox xV, yV, wV, hV;
             if (xEq)
             {
-                xEl = UniformPanelCapsuleForObjectWithText(horUp, "X: ", xItem.GetValues(Values));
-                vEl = UniformPanelCapsuleForObjectWithText(horDown, "Width: ", widthItem.GetValues(Values));
+                xEl = UniformPanelCapsuleForObjectWithText(horUp, "X: ", xItem.GetValues(Values), axisColorX, out xV);
+                vEl = UniformPanelCapsuleForObjectWithText(horDown, "Width: ", widthItem.GetValues(Values), axisColorX, out wV);
             }
             else
             {
-                xEl = UniformPanelCapsuleForObjectWithText(horUp, "Left: ", leftItem.GetValues(Values));
-                vEl = UniformPanelCapsuleForObjectWithText(horDown, "Right: ", rightItem.GetValues(Values));
+                xEl = UniformPanelCapsuleForObjectWithText(horUp, "Left: ", leftItem.GetValues(Values), axisColorX, out xV);
+                vEl = UniformPanelCapsuleForObjectWithText(horDown, "Right: ", rightItem.GetValues(Values), axisColorX, out wV);
             }
             if (yEq)
             {
-                yEl = UniformPanelCapsuleForObjectWithText(horUp, "Y: ", yItem.GetValues(Values));
-                hEl = UniformPanelCapsuleForObjectWithText(horDown, "Height: ", heightItem.GetValues(Values));
+                yEl = UniformPanelCapsuleForObjectWithText(horUp, "Y: ", yItem.GetValues(Values), axisColorY, out yV);
+                hEl = UniformPanelCapsuleForObjectWithText(horDown, "Height: ", heightItem.GetValues(Values), axisColorY, out hV);
             }
             else
             {
-                yEl = UniformPanelCapsuleForObjectWithText(horUp, "Top: ", topItem.GetValues(Values));
-                hEl = UniformPanelCapsuleForObjectWithText(horDown, "Bottom: ", bottomItem.GetValues(Values));
+                yEl = UniformPanelCapsuleForObjectWithText(horUp, "Top: ", topItem.GetValues(Values), axisColorY, out yV);
+                hEl = UniformPanelCapsuleForObjectWithText(horDown, "Bottom: ", bottomItem.GetValues(Values), axisColorY, out hV);
             }
-            xEl.Control.AnchorMin = new Vector2(0, xEl.Control.AnchorMin.Y);
-            xEl.Control.AnchorMax = new Vector2(0.5f, xEl.Control.AnchorMax.Y);
 
-            vEl.Control.AnchorMin = new Vector2(0, xEl.Control.AnchorMin.Y);
-            vEl.Control.AnchorMax = new Vector2(0.5f, xEl.Control.AnchorMax.Y);
+            // Anchors
+            xEl.Control.AnchorMin = new Float2(0, xEl.Control.AnchorMin.Y);
+            xEl.Control.AnchorMax = new Float2(0.5f, xEl.Control.AnchorMax.Y);
 
-            yEl.Control.AnchorMin = new Vector2(0.5f, xEl.Control.AnchorMin.Y);
-            yEl.Control.AnchorMax = new Vector2(1, xEl.Control.AnchorMax.Y);
+            vEl.Control.AnchorMin = new Float2(0, xEl.Control.AnchorMin.Y);
+            vEl.Control.AnchorMax = new Float2(0.5f, xEl.Control.AnchorMax.Y);
 
-            hEl.Control.AnchorMin = new Vector2(0.5f, xEl.Control.AnchorMin.Y);
-            hEl.Control.AnchorMax = new Vector2(1, xEl.Control.AnchorMax.Y);
+            yEl.Control.AnchorMin = new Float2(0.5f, xEl.Control.AnchorMin.Y);
+            yEl.Control.AnchorMax = new Float2(1, xEl.Control.AnchorMax.Y);
+
+            hEl.Control.AnchorMin = new Float2(0.5f, xEl.Control.AnchorMin.Y);
+            hEl.Control.AnchorMax = new Float2(1, xEl.Control.AnchorMax.Y);
+
+            // Navigation path
+            xV.NavTargetRight = yV;
+            yV.NavTargetRight = wV;
+            wV.NavTargetRight = hV;
+
+            yV.NavTargetLeft = xV;
+            wV.NavTargetLeft = yV;
+            hV.NavTargetLeft = wV;
         }
 
         private VerticalPanelElement VerticalPanelWithoutMargin(LayoutElementsContainer cont)
         {
-            var horUp = cont.VerticalPanel();
-            horUp.Panel.Margin = Margin.Zero;
-            return horUp;
+            var panel = cont.VerticalPanel();
+            panel.Panel.Margin = Margin.Zero;
+            return panel;
         }
 
         private CustomElementsContainer<UniformGridPanel> UniformGridTwoByOne(LayoutElementsContainer cont)
         {
-            var horUp = cont.CustomContainer<UniformGridPanel>();
-            horUp.CustomControl.SlotsHorizontally = 2;
-            horUp.CustomControl.SlotsVertically = 1;
-            horUp.CustomControl.SlotPadding = Margin.Zero;
-            horUp.CustomControl.ClipChildren = false;
-            return horUp;
+            var grid = cont.UniformGrid();
+            grid.CustomControl.SlotsHorizontally = 2;
+            grid.CustomControl.SlotsVertically = 1;
+            grid.CustomControl.SlotPadding = Margin.Zero;
+            grid.CustomControl.ClipChildren = false;
+            return grid;
         }
 
-        private CustomElementsContainer<UniformGridPanel> UniformPanelCapsuleForObjectWithText(LayoutElementsContainer el, string text, ValueContainer values)
+        private CustomElementsContainer<UniformGridPanel> UniformPanelCapsuleForObjectWithText(LayoutElementsContainer el, string text, ValueContainer values, Color highlightColor, out FloatValueBox valueBox)
         {
-            CustomElementsContainer<UniformGridPanel> hor = UniformGridTwoByOne(el);
-            hor.CustomControl.SlotPadding = new Margin(5, 5, 0, 0);
-            LabelElement lab = hor.Label(text);
-            hor.Object(values);
-            return hor;
+            valueBox = null;
+            var grid = UniformGridTwoByOne(el);
+            grid.CustomControl.SlotPadding = new Margin(5, 5, 1, 1);
+            var label = grid.Label(text, TextAlignment.Far);
+            var editor = grid.Object(values);
+            if (editor is FloatEditor floatEditor && floatEditor.Element is FloatValueElement floatEditorElement)
+            {
+                valueBox = floatEditorElement.ValueBox;
+                var back = FlaxEngine.GUI.Style.Current.TextBoxBackground;
+                valueBox.HighlightColor = highlightColor;
+                valueBox.BorderSelectedColor = highlightColor;
+            }
+            return grid;
         }
 
         private bool _cachedXEq;
@@ -608,17 +713,18 @@ namespace FlaxEditor.CustomEditors.Dedicated
         /// <inheritdoc />
         public override void Refresh()
         {
-            if (_cachedType != null)
+            // Automatic layout rebuild if control type gets changed
+            if (_valueTypes != null && 
+                !Values.HasNull && 
+                !Utils.ArraysEqual(_valueTypes, Values.ValuesTypes))
             {
-                // Automatic layout rebuild if control type gets changed
-                var type = Values.HasNull ? null : Values[0].GetType();
-                if (type != _cachedType)
-                {
-                    RebuildLayout();
-                    return;
-                }
+                RebuildLayout();
+                return;
+            }
 
-                // Refresh anchors
+            // Refresh anchors
+            if (Values != null && Values[0] != null)
+            {
                 GetAnchorEquality(out bool xEq, out bool yEq, ValuesTypes);
                 if (xEq != _cachedXEq || yEq != _cachedYEq)
                 {
@@ -642,18 +748,54 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 cm.AddItem(new TypeSearchPopup.TypeItemView(controlTypes[i]));
             }
             cm.ItemClicked += controlType => SetType((ScriptType)controlType.Tag);
-            cm.SortChildren();
-            cm.Show(button.Parent, button.BottomLeft);
+            cm.SortItems();
+            cm.Show(button.Parent, button.BottomLeft - new Float2((cm.Width - button.Width) / 2, 0));
         }
 
         private void SetType(ref ScriptType controlType, UIControl uiControl)
         {
             string previousName = uiControl.Control?.GetType().Name ?? nameof(UIControl);
-            uiControl.Control = (Control)controlType.CreateInstance();
+
+            var oldControlType = (Control)uiControl.Control;
+            var newControlType = (Control)controlType.CreateInstance();
+
+            // copy old control data to new control
+            if (oldControlType != null)
+            {
+                newControlType.Visible = oldControlType.Visible;
+                newControlType.Enabled = oldControlType.Enabled;
+                newControlType.AutoFocus = oldControlType.AutoFocus;
+
+                newControlType.AnchorMin = oldControlType.AnchorMin;
+                newControlType.AnchorMax = oldControlType.AnchorMax;
+                newControlType.Offsets = oldControlType.Offsets;
+
+                newControlType.LocalLocation = oldControlType.LocalLocation;
+                newControlType.Scale = oldControlType.Scale;
+                newControlType.Bounds = oldControlType.Bounds;
+                newControlType.Width = oldControlType.Width;
+                newControlType.Height = oldControlType.Height;
+                newControlType.Center = oldControlType.Center;
+                newControlType.PivotRelative = oldControlType.PivotRelative;
+
+                newControlType.Pivot = oldControlType.Pivot;
+                newControlType.Shear = oldControlType.Shear;
+                newControlType.Rotation = oldControlType.Rotation;
+            }
+            if (oldControlType is ContainerControl oldContainer && newControlType is ContainerControl newContainer)
+            {
+                newContainer.CullChildren = oldContainer.CullChildren;
+                newContainer.ClipChildren = oldContainer.ClipChildren;
+            }
+
+            uiControl.Control = newControlType;
+
             if (uiControl.Name.StartsWith(previousName))
             {
                 string newName = controlType.Name + uiControl.Name.Substring(previousName.Length);
-                uiControl.Name = StringUtils.IncrementNameNumber(newName, x => uiControl.Parent.GetChild(x) == null);
+                if (uiControl.Parent != null)
+                    newName = Utilities.Utils.IncrementNameNumber(newName, x => uiControl.Parent.GetChild(x) == null);
+                uiControl.Name = newName;
             }
         }
 

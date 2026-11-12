@@ -1,10 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Flax.Build;
 using Flax.Build.Platforms;
+using Flax.Build.Projects.VisualStudio;
+using Flax.Deploy;
 
 namespace Flax.Deps
 {
@@ -37,6 +40,11 @@ namespace Flax.Deps
             /// The target platforms to build dependency for (contains only platforms supported by the dependency itself).
             /// </summary>
             public TargetPlatform[] Platforms;
+
+            /// <summary>
+            /// The target architectures to build dependency for (contains only platforms supported by the dependency itself).
+            /// </summary>
+            public TargetArchitecture[] Architectures;
         }
 
         /// <summary>
@@ -44,10 +52,130 @@ namespace Flax.Deps
         /// </summary>
         protected static TargetPlatform BuildPlatform => Platform.BuildPlatform.Target;
 
+        private static Version? _cmakeVersion;
+        protected static Version CMakeVersion
+        {
+            get
+            {
+                if (_cmakeVersion == null)
+                {
+                    try
+                    {
+                        var versionOutput = Utilities.ReadProcessOutput("cmake", "--version");
+                        var versionStart = versionOutput.IndexOf("cmake version ") + "cmake version ".Length;
+                        var versionEnd = versionOutput.IndexOfAny(['-', '\n', '\r'], versionStart); // End of line or dash before Git hash
+                        var versionString = versionOutput.Substring(versionStart, versionEnd - versionStart);
+                        _cmakeVersion = new Version(versionString);
+                    }
+                    catch (Exception)
+                    {
+                        // Assume old version by default (in case of errors)
+                        _cmakeVersion = new Version(3, 0);
+                    }
+                }
+                return _cmakeVersion;
+            }
+        }
+
         /// <summary>
         /// Gets the platforms list supported by this dependency to build on the current build platform (based on <see cref="Platform.BuildPlatform"/>).
         /// </summary>
-        public abstract TargetPlatform[] Platforms { get; }
+        public virtual TargetPlatform[] Platforms
+        {
+            get
+            {
+                // The most common build setup
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetPlatform.Windows,
+                        TargetPlatform.XboxOne,
+                        TargetPlatform.XboxScarlett,
+                        TargetPlatform.PS4,
+                        TargetPlatform.PS5,
+                        TargetPlatform.Android,
+                        TargetPlatform.Switch,
+                        TargetPlatform.Web,
+                    };
+                case TargetPlatform.Linux:
+                    return new[]
+                    {
+                        TargetPlatform.Linux,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetPlatform.Mac,
+                        TargetPlatform.iOS,
+                    };
+                default: return new TargetPlatform[0];
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the architectures list supported by this dependency to build on the current build platform (based on <see cref="Platform.BuildPlatform"/>).
+        /// </summary>
+        public virtual TargetArchitecture[] Architectures
+        {
+            get
+            {
+                // Default value returns all supported architectures for all supported platforms
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetArchitecture.x86,
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Linux:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        //TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.XboxOne:
+                case TargetPlatform.XboxScarlett:
+                case TargetPlatform.PS4:
+                case TargetPlatform.PS5:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                    };
+                case TargetPlatform.Switch:
+                    return new[]
+                    {
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Android:
+                    return new[]
+                    {
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.iOS:
+                    return new[]
+                    {
+                        TargetArchitecture.ARM64,
+                    };
+                default: return new TargetArchitecture[0];
+                }
+            }
+        }
+
+        /// <summary>
+        /// True if build dependency by default, otherwise only when explicitly specified via command line.
+        /// </summary>
+        public virtual bool BuildByDefault => true;
 
         /// <summary>
         /// Builds the dependency package using the specified options.
@@ -56,15 +184,31 @@ namespace Flax.Deps
         public abstract void Build(BuildOptions options);
 
         /// <summary>
+        /// Logs build process start.
+        /// </summary>
+        /// <param name="platform">Target platform.</param>
+        /// <param name="architecture">Target architecture.</param>
+        /// <returns>True if build for the target platform, otherwise false if that architecture should be skipped.</returns>
+        protected bool BuildStarted(TargetPlatform platform, TargetArchitecture architecture)
+        {
+            Log.Info($"Building {GetType().Name} for {platform}{(architecture != TargetArchitecture.AnyCPU ? $" ({architecture})" : "")}");
+            return Platform.IsPlatformSupported(platform, architecture);
+        }
+
+        /// <summary>
         /// Gets the dependency third-party packages binaries folder.
         /// </summary>
         /// <param name="options">The options.</param>
         /// <param name="platform">The target platform.</param>
         /// <param name="architecture">The target architecture.</param>
+        /// <param name="createIfMissing">Auto-create directory if it's missing.</param>
         /// <returns>The absolute path to the deps folder for the given platform and architecture configuration.</returns>
-        public static string GetThirdPartyFolder(BuildOptions options, TargetPlatform platform, TargetArchitecture architecture)
+        public static string GetThirdPartyFolder(BuildOptions options, TargetPlatform platform, TargetArchitecture architecture, bool createIfMissing = true)
         {
-            return Path.Combine(options.PlatformsFolder, platform.ToString(), "Binaries", "ThirdParty", architecture.ToString());
+            var path = Path.Combine(options.PlatformsFolder, platform.ToString(), "Binaries", "ThirdParty", architecture.ToString());
+            if (createIfMissing && !Directory.Exists(path))
+                Directory.CreateDirectory(path);
+            return path;
         }
 
         /// <summary>
@@ -100,44 +244,124 @@ namespace Flax.Deps
         }
 
         /// <summary>
+        /// Clones the directory.
+        /// </summary>
+        /// <param name="src">The source folder path.</param>
+        /// <param name="dst">The destination folder path.</param>
+        public static void CloneDirectory(string src, string dst)
+        {
+            if (Directory.Exists(dst))
+                Utilities.DirectoryDelete(dst);
+            Utilities.DirectoryCopy(src, dst);
+        }
+
+        /// <summary>
+        /// Copies the library to the deps files (handles platform specific switches). Matches <see cref="DepsModule.AddLib"/>.
+        /// </summary>
+        /// <param name="platform">The build platform.</param>
+        /// <param name="srcFolder">The path fo the source folder with library (build output).</param>
+        /// <param name="dstFolder">The path fo the source folder with library.</param>
+        /// <param name="name">The library name.</param>
+        public static void CopyLib(TargetPlatform platform, string srcFolder, string dstFolder, string name)
+        {
+            string filename, pdbPath;
+            switch (platform)
+            {
+            case TargetPlatform.Windows:
+            case TargetPlatform.XboxOne:
+            case TargetPlatform.UWP:
+            case TargetPlatform.XboxScarlett:
+                filename = string.Format("{0}.lib", name);
+                pdbPath = Path.Combine(srcFolder, string.Format("{0}.pdb", name));
+                if (File.Exists(pdbPath))
+                    Utilities.FileCopy(pdbPath, Path.Combine(dstFolder, string.Format("{0}.pdb", name)), true);
+                break;
+            case TargetPlatform.Linux:
+            case TargetPlatform.PS4:
+            case TargetPlatform.PS5:
+            case TargetPlatform.Android:
+            case TargetPlatform.Switch:
+            case TargetPlatform.Mac:
+            case TargetPlatform.iOS:
+            case TargetPlatform.Web:
+                filename = string.Format("lib{0}.a", name);
+                break;
+            default: throw new InvalidPlatformException(platform);
+            }
+            Utilities.FileCopy(Path.Combine(srcFolder, filename), Path.Combine(dstFolder, filename), true);
+        }
+
+        /// <summary>
+        /// Checks if git repository exists at given path.
+        /// </summary>
+        /// <param name="path">The path.</param>
+        public static bool GitRepositoryExists(string path)
+        {
+            Console.WriteLine(path);
+            string dotGitPath = Path.Combine(path, ".git");
+            return Directory.Exists(dotGitPath) ||
+                File.Exists(dotGitPath); // Worktree repository
+        }
+
+        /// <summary>
         /// Clones the git repository from the remote url (full repository).
         /// </summary>
         /// <param name="path">The local path for close.</param>
         /// <param name="url">The remote url.</param>
         /// <param name="commit">The commit to checkout.</param>
         /// <param name="args">The custom arguments to add to the clone command.</param>
-        public static void CloneGitRepo(string path, string url, string commit = null, string args = null)
+        /// <param name="submodules">True if initialize submodules of the repository (recursive).</param>
+        public static void CloneGitRepo(string path, string url, string commit = null, string args = null, bool submodules = false)
         {
-            if (!Directory.Exists(Path.Combine(path, Path.GetFileNameWithoutExtension(url), ".git")))
+            if (!GitRepositoryExists(path))
             {
                 string cmdLine = string.Format("clone \"{0}\" \"{1}\"", url, path);
                 if (args != null)
                     cmdLine += " " + args;
+                if (submodules)
+                    cmdLine += " --recurse-submodules";
 
-                Utilities.Run("git", cmdLine, null, null, Utilities.RunOptions.None);
+                Utilities.Run("git", cmdLine, null, path, Utilities.RunOptions.DefaultTool);
+                if (submodules)
+                    Utilities.Run("git", "submodule update --init --recursive", null, path, Utilities.RunOptions.DefaultTool);
             }
-
             if (commit != null)
-            {
-                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, null, Utilities.RunOptions.None);
-            }
+                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, path, Utilities.RunOptions.DefaultTool);
         }
 
         /// <summary>
-        /// Clones the git repository from the remote url.
+        /// Clones the git repository from the remote url (shallow clone).
         /// </summary>
         /// <param name="path">The local path for close.</param>
         /// <param name="url">The remote url.</param>
         /// <param name="args">The custom arguments to add to the clone command.</param>
-        public static void CloneGitRepoFast(string path, string url, string args = null)
+        /// <param name="submodules">True if initialize submodules of the repository (recursive).</param>
+        public static void CloneGitRepoFast(string path, string url, string args = null, bool submodules = false)
         {
-            if (!Directory.Exists(Path.Combine(path, Path.GetFileNameWithoutExtension(url), ".git")))
+            if (!GitRepositoryExists(path))
             {
                 string cmdLine = string.Format("clone \"{0}\" \"{1}\" --depth 1", url, path);
                 if (args != null)
                     cmdLine += " " + args;
+                if (submodules)
+                    cmdLine += " --recurse-submodules";
 
-                Utilities.Run("git", cmdLine, null, null, Utilities.RunOptions.None);
+                Utilities.Run("git", cmdLine, null, path, Utilities.RunOptions.DefaultTool);
+                if (submodules)
+                    Utilities.Run("git", "submodule update --init --recursive", null, path, Utilities.RunOptions.DefaultTool);
+            }
+        }
+
+        /// <summary>
+        /// Fetches the git repository from remote url.
+        /// </summary>
+        /// <param name="path">The git repository path</param>
+        /// <param name="url">The remote url</param>
+        public static void GitFetch(string path)
+        {
+            if (GitRepositoryExists(path))
+            {
+                Utilities.Run("git", $"fetch \"{path}\"", null, path, Utilities.RunOptions.DefaultTool);
             }
         }
 
@@ -149,22 +373,27 @@ namespace Flax.Deps
         /// <param name="branch">The name of the branch to checkout.</param>
         /// <param name="commit">The commit to checkout.</param>
         /// <param name="args">The custom arguments to add to the clone command.</param>
-        public static void CloneGitRepoSingleBranch(string path, string url, string branch, string commit = null, string args = null)
+        /// <param name="submodules">True if initialize submodules of the repository (recursive).</param>
+        public static void CloneGitRepoSingleBranch(string path, string url, string branch, string commit = null, string args = null, bool submodules = false)
         {
-            if (!Directory.Exists(Path.Combine(path, Path.GetFileNameWithoutExtension(url), ".git")))
+            if (!GitRepositoryExists(path))
             {
                 string cmdLine = string.Format("clone --single-branch --branch {2} \"{0}\" \"{1}\"", url, path, branch);
                 if (commit == null)
                     cmdLine += " --depth 1";
                 if (args != null)
                     cmdLine += " " + args;
+                if (submodules)
+                    cmdLine += " --recurse-submodules";
 
-                Utilities.Run("git", cmdLine, null, null, Utilities.RunOptions.None);
+                Utilities.Run("git", cmdLine, null, path, Utilities.RunOptions.DefaultTool);
+                if (submodules)
+                    Utilities.Run("git", "submodule update --init --recursive", null, path, Utilities.RunOptions.DefaultTool);
             }
 
             if (commit != null)
             {
-                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, path, Utilities.RunOptions.None);
+                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, path, Utilities.RunOptions.DefaultTool);
             }
         }
 
@@ -175,17 +404,22 @@ namespace Flax.Deps
         /// <param name="branch">The name of the branch to checkout.</param>
         /// <param name="commit">The commit to checkout.</param>
         /// <param name="args">The custom arguments to add to the clone command.</param>
-        public static void GitCheckout(string path, string branch, string commit = null, string args = null)
+        /// <param name="submodules">True if initialize submodules of the repository (recursive).</param>
+        public static void GitCheckout(string path, string branch, string commit = null, string args = null, bool submodules = false)
         {
             string cmdLine = string.Format("checkout -B {0} origin/{0}", branch);
             if (args != null)
                 cmdLine += " " + args;
+            if (submodules)
+                cmdLine += " --recurse-submodules";
 
-            Utilities.Run("git", cmdLine, null, path, Utilities.RunOptions.None);
+            Utilities.Run("git", cmdLine, null, path, Utilities.RunOptions.DefaultTool);
+            if (submodules)
+                Utilities.Run("git", "submodule update --init --recursive", null, path, Utilities.RunOptions.DefaultTool);
 
             if (commit != null)
             {
-                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, path, Utilities.RunOptions.None);
+                Utilities.Run("git", string.Format("reset --hard {0}", commit), null, path, Utilities.RunOptions.DefaultTool);
             }
         }
 
@@ -195,7 +429,51 @@ namespace Flax.Deps
         /// <param name="path">The local path that contains git repository.</param>
         public static void GitResetLocalChanges(string path)
         {
-            Utilities.Run("git", "reset --hard", null, path, Utilities.RunOptions.None);
+            Utilities.Run("git", "reset --hard", null, path, Utilities.RunOptions.DefaultTool);
+        }
+
+        /// <summary>
+        /// Resets to the specific commit, optionally fetching the commit from remote.
+        /// Note: Fetching requires server-side support, may not work with all servers.
+        /// </summary>
+        /// <param name="path">The local path that contains git repository.</param>
+        /// <param name="commit">The full hash of the commit.</param>
+        /// <param name="fetch">Fetch the commit from remote.</param>
+        public static void GitResetToCommit(string path, string commit, bool fetch = false)
+        {
+            if (fetch)
+            {
+                // This requires server-side configuration uploadpack.allowReachableSHA1InWant to be enabled
+                Utilities.Run("git", $"fetch --depth=1 \"{path}\" {commit}", null, path, Utilities.RunOptions.ConsoleLogOutput);
+            }
+            Utilities.Run("git", $"reset --hard {commit}", null, path, Utilities.RunOptions.DefaultTool);
+        }
+
+        /// <summary>
+        /// Gets the maximum concurrency level for a cmake command. See CMAKE_BUILD_PARALLEL_LEVEL or -j docs.
+        /// </summary>
+        public static string CmakeBuildParallel => Math.Min(Math.Max(1, (int)(Environment.ProcessorCount * Configuration.ConcurrencyProcessorScale)), Configuration.MaxConcurrency).ToString();
+
+        /// <summary>
+        /// Builds the cmake project.
+        /// </summary>
+        /// <param name="path">The path.</param>
+        /// <param name="envVars">Custom environment variables to pass to the child process.</param>
+        public static void BuildCmake(string path, Dictionary<string, string> envVars)
+        {
+            BuildCmake(path, "Release", envVars);
+        }
+
+        /// <summary>
+        /// Builds the cmake project.
+        /// </summary>
+        /// <param name="path">The path.</param>
+        /// <param name="config">The configuration preset.</param>
+        /// <param name="envVars">Custom environment variables to pass to the child process.</param>
+        /// <param name="options">Defines the options how to run. See RunOptions.</param>
+        public static void BuildCmake(string path, string config = "Release", Dictionary<string, string> envVars = null, Utilities.RunOptions options = Utilities.RunOptions.DefaultTool)
+        {
+            Utilities.Run("cmake", $"--build .  --config {config}", null, path, options, envVars);
         }
 
         /// <summary>
@@ -220,31 +498,48 @@ namespace Flax.Deps
                 switch (architecture)
                 {
                 case TargetArchitecture.x86:
-                    arch = string.Empty;
+                    arch = "Win32";
                     break;
                 case TargetArchitecture.x64:
-                    arch = " Win64";
+                    arch = "x64";
                     break;
                 case TargetArchitecture.ARM:
-                    arch = " ARM";
+                    arch = "ARM";
                     break;
                 case TargetArchitecture.ARM64:
-                    arch = " ARM64";
+                    arch = "ARM64";
                     break;
                 default: throw new InvalidArchitectureException(architecture);
                 }
-                cmdLine = string.Format("CMakeLists.txt -G \"Visual Studio 14 2015{0}\"", arch);
+                if (CMakeVersion.Major > 4 || (CMakeVersion.Major == 4 && CMakeVersion.Minor >= 2))
+                {
+                    // This generates both .sln and .slnx solution files
+                    cmdLine = string.Format("CMakeLists.txt -G \"Visual Studio 17 2022\" -G \"Visual Studio 18 2026\" -A {0}", arch);
+                }
+                else
+                    cmdLine = string.Format("CMakeLists.txt -G \"Visual Studio 17 2022\" -A {0}", arch);
                 break;
             }
-            case TargetPlatform.Linux:
             case TargetPlatform.PS4:
-            {
+                if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2017))
+                    cmdLine = "CMakeLists.txt -DCMAKE_GENERATOR_PLATFORM=ORBIS -G \"Visual Studio 15 2017\"";
+                else
+                    cmdLine = string.Format("CMakeLists.txt -G \"Ninja\" -DCMAKE_TOOLCHAIN_FILE=\"{0}/Source/Platforms/PS4/Binaries/Data/nethost/src/ps4/PS4Toolchain.txt\"", Globals.EngineRoot);
+                break;
+            case TargetPlatform.PS5:
+                if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2019))
+                    cmdLine = "CMakeLists.txt -DCMAKE_GENERATOR_PLATFORM=PROSPERO -G \"Visual Studio 16 2019\"";
+                else
+                    cmdLine = string.Format("CMakeLists.txt -G \"Ninja\" -DCMAKE_TOOLCHAIN_FILE=\"{0}/Source/Platforms/PS5/Binaries/Data/nethost/src/ps5/PS5Toolchain.txt\"", Globals.EngineRoot);
+                break;
+            case TargetPlatform.Linux:
                 cmdLine = "CMakeLists.txt";
                 break;
-            }
             case TargetPlatform.Switch:
             {
-                cmdLine = string.Format("-DCMAKE_TOOLCHAIN_FILE=\"{1}\\Source\\Platforms\\Switch\\Data\\Switch.cmake\" -G \"NMake Makefiles\" -DCMAKE_MAKE_PROGRAM=\"{0}..\\..\\VC\\bin\\nmake.exe\"", Environment.GetEnvironmentVariable("VS140COMNTOOLS"), Globals.EngineRoot);
+                var nmakeSubdir = "bin\\Hostx64\\x64\\nmake.exe";
+                var toolset = WindowsPlatform.GetToolsets().First(e => File.Exists(Path.Combine(e.Value, nmakeSubdir)));
+                cmdLine = string.Format("-DCMAKE_TOOLCHAIN_FILE=\"{1}\\Source\\Platforms\\Switch\\Binaries\\Data\\Switch.cmake\" -G \"NMake Makefiles\" -DCMAKE_MAKE_PROGRAM=\"{0}\"", Path.Combine(toolset.Value, nmakeSubdir), Globals.EngineRoot);
                 break;
             }
             case TargetPlatform.Android:
@@ -252,7 +547,26 @@ namespace Flax.Deps
                 var ndk = AndroidNdk.Instance.RootPath;
                 var abi = AndroidToolchain.GetAbiName(architecture);
                 var hostName = AndroidSdk.GetHostName();
-                cmdLine = string.Format("-DCMAKE_TOOLCHAIN_FILE=\"{0}/build/cmake/android.toolchain.cmake\" -DANDROID_NDK=\"{0}\" -DANDROID_STL=c++_shared -DANDROID_ABI={1} -DANDROID_PLATFORM=android-{2} -G \"MinGW Makefiles\" -DCMAKE_MAKE_PROGRAM=\"{0}/prebuilt/{3}/bin/make.exe\"", ndk, abi, Configuration.AndroidPlatformApi, hostName);
+                cmdLine = string.Format("-DCMAKE_TOOLCHAIN_FILE=\"{0}/build/cmake/android.toolchain.cmake\" -DANDROID_NDK=\"{0}\" -DANDROID_STL=c++_shared -DANDROID_ABI={1} -DANDROID_PLATFORM=android-{2} -G \"MinGW Makefiles\" -DCMAKE_MAKE_PROGRAM=\"{0}/prebuilt/{3}/bin/make.exe\"", ndk, abi, AndroidConfiguration.PlatformApi, hostName);
+                break;
+            }
+            case TargetPlatform.Mac:
+            {
+                var arch = GetAppleArchName(architecture);
+                cmdLine = string.Format("CMakeLists.txt -DCMAKE_OSX_DEPLOYMENT_TARGET=\"{0}\" -DCMAKE_OSX_ARCHITECTURES={1}", MacConfiguration.MacOSXMinVer, arch);
+                break;
+            }
+            case TargetPlatform.iOS:
+            {
+                var arch = GetAppleArchName(architecture);
+                cmdLine = string.Format("CMakeLists.txt -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=\"{0}\" -DCMAKE_OSX_ARCHITECTURES={1}", iOSConfiguration.MinVer, arch);
+                break;
+            }
+            case TargetPlatform.Web:
+            {
+                cmdLine = $"CMakeLists.txt -DCMAKE_TOOLCHAIN_FILE=\"{EmscriptenSdk.Instance.CMakeToolchainPath}\"";
+                if (BuildPlatform == TargetPlatform.Windows)
+                    cmdLine += " -G \"Ninja\"";
                 break;
             }
             default: throw new InvalidPlatformException(platform);
@@ -261,7 +575,32 @@ namespace Flax.Deps
             if (customArgs != null)
                 cmdLine += " " + customArgs;
 
-            Utilities.Run("cmake", cmdLine, null, path, Utilities.RunOptions.None, envVars);
+            Utilities.Run("cmake", cmdLine, null, path, Utilities.RunOptions.DefaultTool, envVars);
+        }
+
+        /// <summary>
+        /// Gets the Apple architecture name (for toolchain).
+        /// </summary>
+        public static string GetAppleArchName(TargetArchitecture architecture)
+        {
+            string arch;
+            switch (architecture)
+            {
+            case TargetArchitecture.x86:
+                arch = "i386";
+                break;
+            case TargetArchitecture.x64:
+                arch = "x86_64";
+                break;
+            case TargetArchitecture.ARM:
+                arch = "arm";
+                break;
+            case TargetArchitecture.ARM64:
+                arch = "arm64";
+                break;
+            default: throw new InvalidArchitectureException(architecture);
+            }
+            return arch;
         }
 
         /// <summary>
@@ -269,30 +608,113 @@ namespace Flax.Deps
         /// </summary>
         /// <param name="path">The path.</param>
         /// <param name="workspace">The workspace folder.</param>
-        /// <param name="envVars">Custom environment variables to pass to the child process.</param>
-        public static void RunCygwin(string path, string workspace = null, Dictionary<string, string> envVars = null)
+        public static void RunCygwin(string path, string workspace = null)
         {
-            string app;
+            RunBash(path, string.Empty, workspace);
+        }
+
+        /// <summary>
+        /// Runs the bash script (executes natively on Unix platforms, uses Cygwin on Windows).
+        /// </summary>
+        /// <param name="path">The script or command path.</param>
+        /// <param name="args">The arguments.</param>
+        /// <param name="workspace">The workspace folder.</param>
+        /// <param name="envVars">Custom environment variables to pass to the child process.</param>
+        public static void RunBash(string path, string args = null, string workspace = null, Dictionary<string, string> envVars = null)
+        {
             switch (BuildPlatform)
             {
             case TargetPlatform.Windows:
             {
+                // Find Cygwin
                 var cygwinFolder = Environment.GetEnvironmentVariable("CYGWIN");
                 if (string.IsNullOrEmpty(cygwinFolder) || !Directory.Exists(cygwinFolder))
                 {
                     cygwinFolder = "C:\\cygwin";
                     if (!Directory.Exists(cygwinFolder))
-                        throw new Exception("Missing Cygwin. Install Cygwin64 to C:\\cygwin or set CYGWIN env variable to install location folder.");
+                    {
+                        cygwinFolder = "C:\\cygwin64";
+                        if (!Directory.Exists(cygwinFolder))
+                            throw new Exception("Missing Cygwin. Install Cygwin64 to C:\\cygwin or set CYGWIN env variable to install location folder.");
+                    }
                 }
-                app = Path.Combine(cygwinFolder, "bin\\bash.exe");
+                var cygwinBinFolder = Path.Combine(cygwinFolder, "bin");
+
+                // Ensure that Cygwin binaries folder is in a PATH
+                string envPath = null;
+                envVars?.TryGetValue("PATH", out envPath);
+                if (envPath == null || envPath.IndexOf(cygwinBinFolder, StringComparison.OrdinalIgnoreCase) == -1)
+                {
+                    if (envVars == null)
+                        envVars = new Dictionary<string, string>();
+                    envVars["PATH"] = cygwinBinFolder;
+                    if (envPath != null)
+                        envVars["PATH"] += ";" + envPath;
+                }
+
+                // Get the executable file path
+                if (path.EndsWith(".sh", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Bash script
+                    if (args == null)
+                        args = path.Replace('\\', '/');
+                    else
+                        args = path.Replace('\\', '/') + " " + args;
+                    path = Path.Combine(cygwinBinFolder, "bash.exe");
+                }
+                else if (File.Exists(Path.Combine(cygwinBinFolder, path + ".exe")))
+                {
+                    // Tool (eg. make)
+                    path = Path.Combine(cygwinBinFolder, path + ".exe");
+                }
+                else
+                {
+                    throw new Exception("Cannot execute command " + path + " with args " + args);
+                }
                 break;
             }
             case TargetPlatform.Linux:
-                app = "bash";
-                break;
+            case TargetPlatform.Mac: break;
             default: throw new InvalidPlatformException(BuildPlatform);
             }
-            Utilities.Run(app, path, null, workspace, Utilities.RunOptions.None, envVars);
+            Utilities.Run(path, args, null, workspace, Utilities.RunOptions.DefaultTool, envVars);
+        }
+
+        internal bool GetMsBuildForPlatform(TargetPlatform targetPlatform, out VisualStudioVersion vsVersion, out string msBuildPath)
+        {
+            // Some consoles don't support the latest Visual Studio 2022
+            vsVersion = VisualStudioVersion.VisualStudio2022;
+            switch (targetPlatform)
+            {
+            case TargetPlatform.PS4:
+                vsVersion = VisualStudioVersion.VisualStudio2017;
+                break;
+            case TargetPlatform.PS5:
+            case TargetPlatform.Switch:
+                vsVersion = VisualStudioVersion.VisualStudio2019;
+                break;
+            }
+            if (vsVersion != VisualStudioVersion.VisualStudio2022)
+            {
+                var visualStudioInstances = VisualStudioInstance.GetInstances();
+                foreach (var visualStudioInstance in visualStudioInstances)
+                {
+                    if (visualStudioInstance.Version <= vsVersion)
+                    {
+                        var toolPath = Path.Combine(visualStudioInstance.Path, "MSBuild\\Current\\Bin\\MSBuild.exe");
+                        if (!File.Exists(toolPath))
+                            toolPath = Path.Combine(visualStudioInstance.Path, "MSBuild\\15.0\\Bin\\MSBuild.exe");
+                        if (File.Exists(toolPath))
+                        {
+                            vsVersion = visualStudioInstance.Version;
+                            msBuildPath = toolPath;
+                            return true;
+                        }
+                    }
+                }
+            }
+            msBuildPath = VCEnvironment.MSBuildPath;
+            return false;
         }
     }
 }

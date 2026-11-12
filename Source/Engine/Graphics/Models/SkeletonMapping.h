@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,11 +12,9 @@ template<typename T>
 class SkeletonMapping
 {
 public:
-
     typedef Array<T> Items;
 
 public:
-
     /// <summary>
     /// The amount of the nodes (from the source skeleton).
     /// </summary>
@@ -33,13 +31,12 @@ public:
     Array<int32> SourceToSource;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="SkeletonMapping"/> class.
     /// </summary>
     /// <param name="sourceSkeleton">The source model skeleton.</param>
     /// <param name="targetSkeleton">The target skeleton. May be null to disable nodes mapping.</param>
-    SkeletonMapping(Items& sourceSkeleton, Items* targetSkeleton)
+    SkeletonMapping(const Items& sourceSkeleton, const Items* targetSkeleton)
     {
         Size = sourceSkeleton.Count();
         SourceToTarget.Resize(Size); // model => skeleton mapping
@@ -69,7 +66,7 @@ public:
             const auto parentModelIndex = node.ParentIndex;
 
             // Find matching node in skeleton (or map to best parent)
-            const std::function<bool(const T&)> f = [node](const T& x) -> bool
+            const Function<bool(const T&)> f = [node](const T& x) -> bool
             {
                 return x.Name == node.Name;
             };

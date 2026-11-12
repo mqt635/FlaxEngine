@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@
 class CreateSkeletonMask
 {
 public:
-
     /// <summary>
     /// Creates the asset.
     /// </summary>
@@ -23,7 +22,7 @@ public:
     static CreateAssetResult Create(CreateAssetContext& context)
     {
         // Base
-        IMPORT_SETUP(SkeletonMask, 1);
+        IMPORT_SETUP(SkeletonMask, 2);
 
         // Chunk 0
         if (context.AllocateChunk(0))

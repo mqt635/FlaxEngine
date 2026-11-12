@@ -140,7 +140,7 @@
 #else
     #include <sys/types.h>
     #include <sys/socket.h>
-    #if PLATFORM_PS4
+    #if PLATFORM_PS4 || PLATFORM_PS5
     #define ENET_IPV6 0
     #include <netinet/in.h>
     in_addr in4addr_any = { 0 };
@@ -5002,7 +5002,7 @@ extern "C" {
             tv->tv_nsec = t.QuadPart % 1000000 * 1000;
             return (0);
         }
-    #elif __APPLE__ && __MAC_OS_X_VERSION_MIN_REQUIRED < 101200
+    #elif __APPLE__ && defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 101200
         #define CLOCK_MONOTONIC 0
 
         int clock_gettime(int X, struct timespec *ts) {

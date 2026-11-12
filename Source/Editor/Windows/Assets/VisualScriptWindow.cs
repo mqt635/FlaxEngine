@@ -1,8 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Xml;
@@ -16,6 +15,8 @@ using FlaxEditor.Surface;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
+using FlaxEngine.Windows.Search;
 
 #pragma warning disable 649
 
@@ -30,12 +31,243 @@ namespace FlaxEditor.Windows.Assets
     /// </summary>
     /// <seealso cref="VisualScript" />
     /// <seealso cref="VisualScriptSurface" />
-    public sealed class VisualScriptWindow : AssetEditorWindowBase<VisualScript>, IVisjectSurfaceWindow
+    public sealed class VisualScriptWindow : AssetEditorWindowBase<VisualScript>, IVisjectSurfaceWindow, ISearchWindow
     {
         private struct BreakpointData
         {
             public uint NodeId;
             public bool Enabled;
+        }
+
+        private sealed class EditParamAccessAction : IUndoAction
+        {
+            public IVisjectSurfaceWindow Window;
+            public int Index;
+            public bool Before;
+            public bool After;
+
+            public string ActionString => "Edit parameter access";
+
+            public void Do()
+            {
+                Set(After);
+            }
+
+            public void Undo()
+            {
+                Set(Before);
+            }
+
+            private void Set(bool value)
+            {
+                var param = Window.VisjectSurface.Parameters[Index];
+                param.IsPublic = value;
+                Window.VisjectSurface.OnParamEdited(param);
+            }
+
+            public void Dispose()
+            {
+                Window = null;
+            }
+        }
+
+        private sealed class EditParamTypeAction : IUndoAction
+        {
+            private struct BrokenConnection
+            {
+                public uint ANode;
+                public int ABox;
+                public uint BNode;
+                public int BBox;
+            }
+
+            private List<BrokenConnection> _connectionsToRestore = new List<BrokenConnection>();
+            private List<BrokenConnection> _connectionsToRestorePrev = new List<BrokenConnection>();
+
+            public IVisjectSurfaceWindow Window;
+            public int Index;
+            public ScriptType BeforeType;
+            public object BeforeValue;
+            public ScriptType AfterType;
+            public object AfterValue;
+
+            public string ActionString => "Edit parameter type";
+
+            public void Do()
+            {
+                Set(AfterType, AfterValue);
+            }
+
+            public void Undo()
+            {
+                Set(BeforeType, BeforeValue);
+            }
+
+            private void Set(ScriptType type, object value)
+            {
+                _connectionsToRestore.Clear();
+                Window.VisjectSurface.NodesDisconnected += OnNodesDisconnected;
+                var param = Window.VisjectSurface.Parameters[Index];
+                param.Type = type;
+                param.Value = value;
+                Window.VisjectSurface.OnParamEdited(param);
+                Window.VisjectSurface.NodesDisconnected -= OnNodesDisconnected;
+
+                // Restore connections broken previously
+                foreach (var connection in _connectionsToRestorePrev)
+                {
+                    var aNode = Window.VisjectSurface.FindNode(connection.ANode);
+                    var bNode = Window.VisjectSurface.FindNode(connection.BNode);
+                    var aBox = aNode?.GetBox(connection.ABox) ?? null;
+                    var bBox = bNode?.GetBox(connection.BBox) ?? null;
+                    if (aBox != null && bBox != null)
+                        aBox.CreateConnection(bBox);
+                }
+                _connectionsToRestorePrev.Clear();
+                _connectionsToRestorePrev.AddRange(_connectionsToRestore);
+            }
+
+            private void OnNodesDisconnected(IConnectionInstigator a, IConnectionInstigator b)
+            {
+                // Capture any auto-disconnected boxes after parameter type change to restore them back on undo
+                if (a is Surface.Elements.Box aBox && b is Surface.Elements.Box bBox)
+                {
+                    _connectionsToRestore.Add(new BrokenConnection
+                    {
+                        ANode = aBox.ParentNode.ID, ABox = aBox.ID,
+                        BNode = bBox.ParentNode.ID, BBox = bBox.ID,
+                    });
+                }
+            }
+
+            public void Dispose()
+            {
+                _connectionsToRestore = null;
+                _connectionsToRestorePrev = null;
+                Window = null;
+            }
+        }
+
+        private sealed class VisualParametersEditor : ParametersEditor
+        {
+            public VisualParametersEditor()
+            {
+                ShowOnlyPublic = false;
+            }
+
+            protected override void OnParamContextMenu(int index, ContextMenu menu)
+            {
+                var window = (VisualScriptWindow)Values[0];
+                var param = window.Surface.Parameters[index];
+
+                // Parameter access level editing
+                var cmAccess = menu.AddChildMenu("Access");
+                {
+                    var b = cmAccess.ContextMenu.AddButton("Public", () => window.SetParamAccess(index, true));
+                    b.Checked = param.IsPublic;
+                    b.Enabled = window._canEdit;
+                    b.TooltipText = "Sets the parameter access level to Public. It will be accessible and visible everywhere.";
+                    b = cmAccess.ContextMenu.AddButton("Private", () => window.SetParamAccess(index, false));
+                    b.Checked = !param.IsPublic;
+                    b.Enabled = window._canEdit;
+                    b.TooltipText = "Sets the parameter access level to Private. It will be accessible only within this script and won't be visible outside (eg. in script properties panel).";
+                }
+
+                // Parameter type editing
+                var cmType = menu.AddChildMenu("Type");
+                {
+                    var isArray = param.Type.IsArray;
+                    var isDictionary = !isArray && param.Type.IsDictionary;
+                    ScriptType singleValueType, arrayType, dictionaryType;
+                    ContextMenuButton b;
+                    if (isDictionary)
+                    {
+                        var args = param.Type.GetGenericArguments();
+                        singleValueType = new ScriptType(args[0]);
+                        arrayType = singleValueType.MakeArrayType();
+                        dictionaryType = param.Type;
+                        var keyName = window.Surface.GetTypeName(new ScriptType(args[0]));
+                        var valueName = window.Surface.GetTypeName(new ScriptType(args[1]));
+
+                        b = cmType.ContextMenu.AddButton($"Dictionary<{keyName}, {valueName}>");
+                        b.Enabled = false;
+
+                        b = cmType.ContextMenu.AddButton($"Edit key type: {keyName}...", () => OnChangeType(item => window.SetParamType(index, ScriptType.MakeDictionaryType((ScriptType)item.Tag, new ScriptType(args[1])))));
+                        b.Enabled = window._canEdit;
+                        b.TooltipText = "Opens the type picker window to change the parameter type.";
+
+                        b = cmType.ContextMenu.AddButton($"Edit value type: {valueName}...", () => OnChangeType(item => window.SetParamType(index, ScriptType.MakeDictionaryType(new ScriptType(args[0]), (ScriptType)item.Tag))));
+                        b.Enabled = window._canEdit;
+                        b.TooltipText = "Opens the type picker window to change the parameter type.";
+                    }
+                    else
+                    {
+                        if (param.Type == ScriptType.Null)
+                        {
+                            b = cmType.ContextMenu.AddButton(window.Surface.GetTypeName(param.Type) + "...", () => OnChangeType(item => window.SetParamType(index, (ScriptType)item.Tag)));
+                            return;
+                        }
+                        else if (isArray)
+                        {
+                            singleValueType = param.Type.GetElementType();
+                            arrayType = param.Type;
+                            dictionaryType = ScriptType.MakeDictionaryType(new ScriptType(typeof(int)), singleValueType);
+                            b = cmType.ContextMenu.AddButton(window.Surface.GetTypeName(singleValueType) + "[]...", () => OnChangeType(item => window.SetParamType(index, ((ScriptType)item.Tag).MakeArrayType())));
+                        }
+                        else
+                        {
+                            singleValueType = param.Type;
+                            arrayType = param.Type.MakeArrayType();
+                            dictionaryType = ScriptType.MakeDictionaryType(new ScriptType(typeof(int)), singleValueType);
+                            b = cmType.ContextMenu.AddButton(window.Surface.GetTypeName(param.Type) + "...", () => OnChangeType(item => window.SetParamType(index, (ScriptType)item.Tag)));
+                        }
+                        b.Enabled = window._canEdit;
+                        b.TooltipText = "Opens the type picker window to change the parameter type.";
+                    }
+                    cmType.ContextMenu.AddSeparator();
+
+                    b = cmType.ContextMenu.AddButton("Value", () => window.SetParamType(index, singleValueType));
+                    b.Checked = param.Type == singleValueType;
+                    b.Enabled = window._canEdit;
+                    b.TooltipText = "Changes parameter type to a single value.";
+                    b = cmType.ContextMenu.AddButton("Array", () => window.SetParamType(index, arrayType));
+                    b.Checked = param.Type == arrayType;
+                    b.Enabled = window._canEdit;
+                    b.TooltipText = "Changes parameter type to an array.";
+                    b = cmType.ContextMenu.AddButton("Dictionary", () => window.SetParamType(index, dictionaryType));
+                    b.Checked = param.Type == dictionaryType;
+                    b.Enabled = window._canEdit;
+                    b.TooltipText = "Changes parameter type to a dictionary.";
+                }
+
+                menu.AddSeparator();
+                menu.AddButton("Find references...", () => OnFindReferences(index));
+            }
+
+            private void OnChangeType(Action<ItemsListContextMenu.Item> itemClicked)
+            {
+                // Show context menu with list of parameter types to use
+                var cm = new ItemsListContextMenu(180);
+                var window = (VisualScriptWindow)Values[0];
+                var newParameterTypes = window.NewParameterTypes;
+                foreach (var newParameterType in newParameterTypes)
+                {
+                    var item = new TypeSearchPopup.TypeItemView(newParameterType);
+                    if (newParameterType.Type != null)
+                        item.Name = window.VisjectSurface.GetTypeName(newParameterType);
+                    cm.AddItem(item);
+                }
+                cm.ItemClicked += itemClicked;
+                cm.SortItems();
+                cm.Show(window, window.PointFromScreen(Input.MouseScreenPosition));
+            }
+
+            private void OnFindReferences(int index)
+            {
+                var window = (VisualScriptWindow)Values[0];
+                var param = window.Surface.Parameters[index];
+                Editor.Instance.ContentFinding.ShowSearch(window, '\"' + window.Asset.ScriptTypeName + '.' + param.Name + '\"');
+            }
         }
 
         private sealed class PropertiesProxy
@@ -58,7 +290,7 @@ namespace FlaxEditor.Windows.Assets
             [EditorOrder(900), CustomEditor(typeof(FunctionsEditor)), NoSerialize]
             public VisualScriptWindow Window1;
 
-            [EditorOrder(1000), EditorDisplay("Parameters"), CustomEditor(typeof(ParametersEditor)), NoSerialize]
+            [EditorOrder(1000), EditorDisplay("Parameters"), CustomEditor(typeof(VisualParametersEditor)), NoSerialize]
             public VisualScriptWindow Window;
 
             [HideInEditor]
@@ -139,7 +371,7 @@ namespace FlaxEditor.Windows.Assets
                 var cm = new ContextMenu();
                 cm.AddButton("Copy typename", () => Clipboard.Text = ((VisualScriptWindow)Values[0]).Asset.ScriptTypeName);
                 cm.AddButton("Edit attributes...", OnEditAttributes);
-                cm.Show(image, new Vector2(0, image.Height));
+                cm.Show(image, new Float2(0, image.Height));
             }
 
             private void OnEditAttributes(ContextMenuButton button)
@@ -180,13 +412,13 @@ namespace FlaxEditor.Windows.Assets
                 var group = layout.Group("Functions");
                 var nodes = window.VisjectSurface.Nodes;
 
-                var grid = group.CustomContainer<UniformGridPanel>();
+                var grid = layout.UniformGrid();
                 var gridControl = grid.CustomControl;
                 gridControl.ClipChildren = false;
                 gridControl.Height = Button.DefaultHeight;
                 gridControl.SlotsHorizontally = 2;
                 gridControl.SlotsVertically = 1;
-                
+
                 var addOverride = grid.Button("Add Override");
                 addOverride.Button.Clicked += OnOverrideMethodClicked;
                 // TODO: Add sender arg to button clicked action?
@@ -223,22 +455,22 @@ namespace FlaxEditor.Windows.Assets
                 var cm = new ContextMenu();
                 cm.AddButton("Show", () => ((VisualScriptWindow)Values[0]).Surface.FocusNode(node)).Icon = Editor.Instance.Icons.Search12;
                 cm.AddButton("Delete", () => ((VisualScriptWindow)Values[0]).Surface.Delete(node)).Icon = Editor.Instance.Icons.Cross12;
-                node.OnShowSecondaryContextMenu(cm, Vector2.Zero);
-                cm.Show(label, new Vector2(0, label.Height));
+                node.OnShowSecondaryContextMenu(cm, Float2.Zero);
+                cm.Show(label, new Float2(0, label.Height));
             }
 
             private void OnAddNewFunctionClicked()
             {
                 var surface = ((VisualScriptWindow)Values[0]).Surface;
                 var surfaceBounds = surface.AllNodesBounds;
-                surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Vector2(200, 150)).MakeExpanded(400.0f));
-                var node = surface.Context.SpawnNode(16, 6, surfaceBounds.BottomLeft + new Vector2(0, 50));
+                surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Float2(200, 150)).MakeExpanded(400.0f));
+                var node = surface.Context.SpawnNode(16, 6, surfaceBounds.BottomLeft + new Float2(0, 50));
                 surface.Select(node);
             }
 
             private void OnOverrideMethodClicked()
             {
-                var cm = new ContextMenu();
+                var cm = new ItemsListContextMenu(235);
                 var window = (VisualScriptWindow)Values[0];
                 var scriptMeta = window.Asset.Meta;
                 var baseType = TypeUtils.GetType(scriptMeta.BaseTypename);
@@ -266,31 +498,40 @@ namespace FlaxEditor.Windows.Assets
                         if (isAlreadyAdded)
                             continue;
 
-                        var cmButton = cm.AddButton($"{name} (in {member.DeclaringType.Name})");
-                        var attributes = member.GetAttributes(true);
-                        var tooltipAttribute = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
-                        if (tooltipAttribute != null)
-                            cmButton.TooltipText = tooltipAttribute.Text;
-                        cmButton.Clicked += () =>
+                        var item = new ItemsListContextMenu.Item
                         {
-                            var surface = ((VisualScriptWindow)Values[0]).Surface;
-                            var surfaceBounds = surface.AllNodesBounds;
-                            surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Vector2(200, 150)).MakeExpanded(400.0f));
-                            var node = surface.Context.SpawnNode(16, 3, surfaceBounds.BottomLeft + new Vector2(0, 50), new object[]
-                            {
-                                name,
-                                parameters.Length,
-                                Utils.GetEmptyArray<byte>()
-                            });
-                            surface.Select(node);
+                            Name = $"{name} (in {member.DeclaringType.Name})",
+                            TooltipText = Editor.Instance.CodeDocs.GetTooltip(member),
+                            Tag = new object[] { name, parameters.Length, Array.Empty<byte>() },
+                            // Do some basic sorting based on if the method is defined directly in the script base class
+                            SortScore = member.DeclaringType == member.Type.ReflectedType ? 1 : 0,
                         };
+                        cm.AddItem(item);
                     }
                 }
-                if (!cm.Items.Any())
+
+                cm.ItemClicked += (item) =>
                 {
-                    cm.AddButton("Nothing to override");
+                    var surface = ((VisualScriptWindow)Values[0]).Surface;
+                    var surfaceBounds = surface.AllNodesBounds;
+                    surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Float2(200, 150)).MakeExpanded(400.0f));
+                    var node = surface.Context.SpawnNode(16, 3, surfaceBounds.BottomLeft + new Float2(0, 50), item.Tag as object[]);
+                    surface.Select(node);
+                };
+
+                if (cm.ItemsPanel.ChildrenCount == 0)
+                {
+                    var item = new ItemsListContextMenu.Item
+                    {
+                        Name = "Nothing to override"
+                    };
+                    item.Enabled = false;
+
+                    cm.AddItem(item);
                 }
-                cm.Show(_overrideButton, new Vector2(0, _overrideButton.Height));
+
+                cm.SortItems();
+                cm.Show(_overrideButton, new Float2(0, _overrideButton.Height));
             }
         }
 
@@ -331,6 +572,7 @@ namespace FlaxEditor.Windows.Assets
         : base(editor, item)
         {
             var isPlayMode = Editor.IsPlayMode;
+            var inputOptions = Editor.Options.Options.Input;
 
             // Undo
             _undo = new Undo();
@@ -359,28 +601,24 @@ namespace FlaxEditor.Windows.Assets
 
             // Properties editor
             _propertiesEditor = new CustomEditorPresenter(_undo);
+            _propertiesEditor.Features = FeatureFlags.None;
             _propertiesEditor.Panel.Parent = _split.Panel2;
             _propertiesEditor.Modified += OnPropertyEdited;
             _properties = new PropertiesProxy();
             _propertiesEditor.Select(_properties);
 
             // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Save64, Save).LinkTooltip("Save");
-            _toolstrip.AddSeparator();
-            _undoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo (Ctrl+Z)");
-            _redoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo (Ctrl+Y)");
-            _toolstrip.AddSeparator();
-            _toolstrip.AddButton(editor.Icons.CenterView64, ShowWholeGraph).LinkTooltip("Show whole graph");
+            SurfaceUtils.PerformCommonSetup(this, _toolstrip, _surface, out _saveButton, out _undoButton, out _redoButton);
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/scripting/visual/index.html")).LinkTooltip("See documentation to learn more");
             _debugToolstripControls = new[]
             {
                 _toolstrip.AddSeparator(),
-                _toolstrip.AddButton(editor.Icons.Play64, OnDebuggerContinue).LinkTooltip("Continue (F5)"),
+                _toolstrip.AddButton(editor.Icons.Play64, OnDebuggerContinue).LinkTooltip("Continue", ref inputOptions.DebuggerContinue),
                 _toolstrip.AddButton(editor.Icons.Search64, OnDebuggerNavigateToCurrentNode).LinkTooltip("Navigate to the current stack trace node"),
-                _toolstrip.AddButton(editor.Icons.Right64, OnDebuggerStepOver).LinkTooltip("Step Over (F10)"),
-                _toolstrip.AddButton(editor.Icons.Down64, OnDebuggerStepInto).LinkTooltip("Step Into (F11)"),
-                _toolstrip.AddButton(editor.Icons.Up64, OnDebuggerStepOut).LinkTooltip("Step Out (Shift+F11)"),
+                _toolstrip.AddButton(editor.Icons.Right64, OnDebuggerStepOver).LinkTooltip("Step Over", ref inputOptions.DebuggerStepOver),
+                _toolstrip.AddButton(editor.Icons.Down64, OnDebuggerStepInto).LinkTooltip("Step Into", ref inputOptions.DebuggerStepInto),
+                _toolstrip.AddButton(editor.Icons.Up64, OnDebuggerStepOut).LinkTooltip("Step Out", ref inputOptions.DebuggerStepOut),
                 _toolstrip.AddButton(editor.Icons.Stop64, OnDebuggerStop).LinkTooltip("Stop debugging"),
             };
             foreach (var control in _debugToolstripControls)
@@ -394,24 +632,22 @@ namespace FlaxEditor.Windows.Assets
                 VerticalAlignment = TextAlignment.Center,
                 HorizontalAlignment = TextAlignment.Far,
                 Parent = debugObjectPickerContainer,
-                Size = new Vector2(60.0f, _toolstrip.Height),
+                Size = new Float2(60.0f, _toolstrip.Height),
                 Text = "Debug:",
                 TooltipText = "The Visual Script object instance to debug. Can be used to filter the logic to debug a specific instance.",
             };
             _debugObjectPicker = new FlaxObjectRefPickerControl
             {
-                Location = new Vector2(debugObjectPickerLabel.Right + 4.0f, 8.0f),
+                Location = new Float2(debugObjectPickerLabel.Right + 4.0f, 8.0f),
                 Width = 140.0f,
                 Type = item.ScriptType,
                 Parent = debugObjectPickerContainer,
             };
             debugObjectPickerContainer.Enabled = debugObjectPickerContainer.Visible = isPlayMode;
-            debugObjectPickerContainer.Size = new Vector2(_debugObjectPicker.Right + 2.0f, _toolstrip.Height);
+            debugObjectPickerContainer.Size = new Float2(_debugObjectPicker.Right + 2.0f, _toolstrip.Height);
             debugObjectPickerContainer.Parent = _toolstrip;
 
             // Setup input actions
-            InputActions.Add(options => options.Undo, _undo.PerformUndo);
-            InputActions.Add(options => options.Redo, _undo.PerformRedo);
             InputActions.Add(options => options.DebuggerContinue, OnDebuggerContinue);
             InputActions.Add(options => options.DebuggerStepOver, OnDebuggerStepOver);
             InputActions.Add(options => options.DebuggerStepOut, OnDebuggerStepOut);
@@ -530,15 +766,12 @@ namespace FlaxEditor.Windows.Assets
             {
                 _debugStepOutNodesIds.Clear();
                 var item = Editor.ContentDatabase.Find(flowInfo.Script.ID);
-                if (item != null)
+                var editor = Editor.ContentEditing.Open(item);
+                if (editor is VisualScriptWindow vsWindow)
                 {
-                    var editor = Editor.ContentEditing.Open(item);
-                    if (editor is VisualScriptWindow vsWindow)
-                    {
-                        lock (vsWindow._debugFlows)
-                            vsWindow._debugFlows.Add(flowInfo);
-                        vsWindow.OnDebugBreakpointHit(ref flowInfo, vsWindow.Surface.FindNode(flowInfo.NodeId));
-                    }
+                    lock (vsWindow._debugFlows)
+                        vsWindow._debugFlows.Add(flowInfo);
+                    vsWindow.OnDebugBreakpointHit(ref flowInfo, vsWindow.Surface.FindNode(flowInfo.NodeId));
                 }
                 return;
             }
@@ -563,11 +796,12 @@ namespace FlaxEditor.Windows.Assets
             }
 
             // Check if any breakpoint was hit
-            for (int i = 0; i < Surface.Breakpoints.Count; i++)
+            var breakpoints = Surface.Breakpoints;
+            for (int i = 0; i < breakpoints.Count; i++)
             {
-                if (Surface.Breakpoints[i].ID == flowInfo.NodeId)
+                if (breakpoints[i].ID == flowInfo.NodeId)
                 {
-                    OnDebugBreakpointHit(ref flowInfo, Surface.Breakpoints[i]);
+                    OnDebugBreakpointHit(ref flowInfo, breakpoints[i]);
                     break;
                 }
             }
@@ -586,7 +820,7 @@ namespace FlaxEditor.Windows.Assets
             var state = (BreakpointHangState)Editor.Instance.Simulation.BreakpointHangTag;
             if (state.Locals == null)
             {
-                state.Locals = Editor.Internal_GetVisualScriptLocals();
+                state.Locals = Editor.GetVisualScriptLocals();
                 Editor.Instance.Simulation.BreakpointHangTag = state;
             }
             return state;
@@ -597,7 +831,7 @@ namespace FlaxEditor.Windows.Assets
             var state = (BreakpointHangState)Editor.Instance.Simulation.BreakpointHangTag;
             if (state.StackFrames == null)
             {
-                state.StackFrames = Editor.Internal_GetVisualScriptStackFrames();
+                state.StackFrames = Editor.GetVisualScriptStackFrames();
                 Editor.Instance.Simulation.BreakpointHangTag = state;
             }
             return state;
@@ -742,7 +976,7 @@ namespace FlaxEditor.Windows.Assets
                 return;
 
             // Break on any of the output connects from the previous scope node
-            var frame = Editor.Internal_GetVisualScriptPreviousScopeFrame();
+            var frame = Editor.GetVisualScriptPreviousScopeFrame();
             if (frame.Script != null)
             {
                 if (_debugStepOutNodesIds == null)
@@ -760,11 +994,7 @@ namespace FlaxEditor.Windows.Assets
                     }
                 }
                 if (vsWindow == null)
-                {
-                    var item = Editor.Instance.ContentDatabase.FindAsset(frame.Script.ID);
-                    if (item != null)
-                        vsWindow = Editor.Instance.ContentEditing.Open(item) as VisualScriptWindow;
-                }
+                    vsWindow = Editor.Instance.ContentEditing.Open(frame.Script) as VisualScriptWindow;
                 var node = vsWindow?.Surface.FindNode(frame.NodeId);
                 _debugStepOutNodesIds.Add(new KeyValuePair<VisualScript, uint>(frame.Script, frame.NodeId));
                 if (node != null)
@@ -796,7 +1026,7 @@ namespace FlaxEditor.Windows.Assets
             try
             {
                 // Try to restore the cached breakpoints from the last session
-                if (Editor.ProjectCache.TryGetCustomData(_asset.ScriptTypeName + ".Breakpoints", out var breakpointsData))
+                if (Editor.ProjectCache.TryGetCustomData(_asset.ScriptTypeName + ".Breakpoints", out string breakpointsData))
                 {
                     var data = JsonSerializer.Deserialize<BreakpointData[]>(breakpointsData);
                     if (data != null)
@@ -877,6 +1107,9 @@ namespace FlaxEditor.Windows.Assets
         }
 
         /// <inheritdoc />
+        public Asset SurfaceAsset => Asset;
+
+        /// <inheritdoc />
         public string SurfaceName => "Visual Script";
 
         /// <inheritdoc />
@@ -899,9 +1132,8 @@ namespace FlaxEditor.Windows.Assets
                 // Save data to the asset
                 if (_asset.SaveSurface(value, ref meta))
                 {
-                    // Error
                     _surface.MarkAsEdited();
-                    Editor.LogError("Failed to save Visual Script surface data");
+                    Editor.LogError("Failed to save surface data");
                 }
                 _asset.Reload();
                 SaveBreakpoints();
@@ -911,6 +1143,9 @@ namespace FlaxEditor.Windows.Assets
                 Editor.CodeEditing.OnTypesChanged();
             }
         }
+
+        /// <inheritdoc />
+        public VisjectSurfaceContext ParentContext => null;
 
         /// <inheritdoc />
         public void OnContextCreated(VisjectSurfaceContext context)
@@ -957,7 +1192,6 @@ namespace FlaxEditor.Windows.Assets
             // Load surface graph
             if (_surface.Load())
             {
-                // Error
                 Editor.LogError("Failed to load Visual Script surface.");
                 return true;
             }
@@ -967,7 +1201,8 @@ namespace FlaxEditor.Windows.Assets
 
         private bool SaveSurface()
         {
-            _surface.Save();
+            if (_surface.Save())
+                return true;
 
             // Reselect actors to prevent issues after Visual Script properties were modified
             Editor.Windows.PropertiesWin.Presenter.BuildLayoutOnUpdate();
@@ -982,12 +1217,58 @@ namespace FlaxEditor.Windows.Assets
             _canEdit = canEdit;
             _undo.Enabled = canEdit;
             _surface.CanEdit = canEdit;
-            foreach (var child in _propertiesEditor.Panel.Children)
-            {
-                if (!(child is ScrollBar))
-                    child.Enabled = canEdit;
-            }
+            _propertiesEditor.ReadOnly = !canEdit;
             UpdateToolstrip();
+        }
+
+        private void SetParamAccess(int index, bool isPublic)
+        {
+            var param = Surface.Parameters[index];
+            if (param.IsPublic == isPublic)
+                return;
+            var action = new EditParamAccessAction
+            {
+                Window = this,
+                Index = index,
+                Before = param.IsPublic,
+                After = isPublic,
+            };
+            _undo.AddAction(action);
+            action.Do();
+        }
+
+        private void SetParamType(int index, ScriptType type)
+        {
+            var param = Surface.Parameters[index];
+            if (param.Type == type)
+                return;
+            var action = new EditParamTypeAction
+            {
+                Window = this,
+                Index = index,
+                BeforeType = param.Type,
+                BeforeValue = param.Value,
+                AfterType = type,
+                AfterValue = TypeUtils.GetDefaultValue(type),
+            };
+            if (action.BeforeValue != null)
+            {
+                // Try to maintain existing value
+                var beforeType = TypeUtils.GetObjectType(action.BeforeValue);
+                if (type.IsArray && beforeType.IsArray && type.GetElementType().IsAssignableFrom(beforeType.GetElementType()))
+                {
+                    var beforeArray = (Array)action.BeforeValue;
+                    var afterArray = TypeUtils.CreateArrayInstance(type.GetElementType(), beforeArray.Length);
+                    Array.Copy(beforeArray, afterArray, beforeArray.Length);
+                    action.AfterValue = afterArray;
+                }
+                else if (type.IsAssignableFrom(beforeType))
+                {
+                    action.AfterValue = action.BeforeValue;
+                }
+            }
+            _undo.AddAction(action);
+            action.Do();
         }
 
         /// <inheritdoc />
@@ -1053,6 +1334,7 @@ namespace FlaxEditor.Windows.Assets
                     _surface.ShowWholeGraph();
                 }
                 LoadBreakpoints();
+                SurfaceLoaded?.Invoke();
                 Editor.VisualScriptingDebugFlow += OnDebugFlow;
             }
             else if (_refreshPropertiesOnLoad && _asset.IsLoaded)
@@ -1081,14 +1363,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />
@@ -1100,17 +1381,25 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            if (IsDisposing)
+                return;
+            base.OnDestroy();
+
             _undo.Enabled = false;
             _propertiesEditor.Deselect();
             _undo.Clear();
             _debugObjectPicker = null;
             _debugToolstripControls = null;
-
-            base.OnDestroy();
         }
 
         /// <inheritdoc />
         public IEnumerable<ScriptType> NewParameterTypes => Editor.CodeEditing.VisualScriptPropertyTypes.Get();
+
+        /// <inheritdoc />
+        public int ParamToRename { get; set; } = -1;
+
+        /// <inheritdoc />
+        public event Action SurfaceLoaded;
 
         /// <inheritdoc />
         public void OnParamRenameUndo()
@@ -1156,5 +1445,8 @@ namespace FlaxEditor.Windows.Assets
 
         /// <inheritdoc />
         public VisjectSurface VisjectSurface => _surface;
+
+        /// <inheritdoc />
+        public SearchAssetTypes AssetType => SearchAssetTypes.VisualScript;
     }
 }

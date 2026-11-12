@@ -1,10 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.ContextMenu;
-using FlaxEditor.GUI.Input;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using FlaxEngine.Utilities;
+using FlaxEditor.Viewport.Widgets;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Viewport.Previews
@@ -15,10 +15,27 @@ namespace FlaxEditor.Viewport.Previews
     /// <seealso cref="AssetPreview" />
     public class ModelPreview : AssetPreview
     {
-        private ContextMenuButton _showBoundsButton, _showCurrentLODButton, _showNormalsButton, _showTangentsButton, _showFloorButton;
+        private ContextMenuButton _showBoundsButton, _showCurrentLODButton, _showNormalsButton, _showTangentsButton, _showBitangentsButton, _showFloorButton;
+        private ContextMenu _previewLODsWidgetButtonMenu;
         private StaticModel _previewModel, _floorModel;
-        private bool _showBounds, _showCurrentLOD, _showNormals, _showTangents, _showFloor;
+        private bool _showBounds, _showCurrentLOD, _showNormals, _showTangents, _showBitangents, _showFloor, _autoAdjustCamera = true;
         private MeshDataCache _meshDatas;
+
+        /// <summary>
+        /// Gets or sets a value that shows LOD statistics
+        /// </summary>
+        public bool ShowCurrentLOD
+        {
+            get => _showCurrentLOD;
+            set
+            {
+                if (_showCurrentLOD == value)
+                    return;
+                _showCurrentLOD = value;
+                if (_showCurrentLODButton != null)
+                    _showCurrentLODButton.Checked = value;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the model asset to preview.
@@ -111,6 +128,29 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <summary>
+        /// Gets or sets a value indicating whether show model geometry bitangent vectors (aka binormals) debug view.
+        /// </summary>
+        public bool ShowBitangents
+        {
+            get => _showBitangents;
+            set
+            {
+                if (_showBitangents == value)
+                    return;
+                _showBitangents = value;
+                if (value)
+                {
+                    ShowDebugDraw = true;
+                    if (_meshDatas == null)
+                        _meshDatas = new MeshDataCache();
+                    _meshDatas.RequestMeshData(_previewModel.Model);
+                }
+                if (_showBitangentsButton != null)
+                    _showBitangentsButton.Checked = value;
+            }
+        }
+
+        /// <summary>
         /// Gets or sets a value indicating whether show floor model.
         /// </summary>
         public bool ShowFloor
@@ -126,7 +166,7 @@ namespace FlaxEditor.Viewport.Previews
                     _floorModel = new StaticModel
                     {
                         Position = new Vector3(0, -25, 0),
-                        Scale = new Vector3(5, 0.5f, 5),
+                        Scale = new Float3(5, 0.5f, 5),
                         Model = FlaxEngine.Content.LoadAsync<Model>(StringUtils.CombinePaths(Globals.EngineContentFolder, "Editor/Primitives/Cube.flax")),
                     };
                 }
@@ -158,18 +198,19 @@ namespace FlaxEditor.Viewport.Previews
 
             if (useWidgets)
             {
-                // Show Bounds
                 _showBoundsButton = ViewWidgetShowMenu.AddButton("Bounds", () => ShowBounds = !ShowBounds);
-
-                // Show Normals
+                _showBoundsButton.CloseMenuOnClick = false;
                 _showNormalsButton = ViewWidgetShowMenu.AddButton("Normals", () => ShowNormals = !ShowNormals);
-
-                // Show Tangents
+                _showNormalsButton.CloseMenuOnClick = false;
                 _showTangentsButton = ViewWidgetShowMenu.AddButton("Tangents", () => ShowTangents = !ShowTangents);
+                _showTangentsButton.CloseMenuOnClick = false;
+                _showBitangentsButton = ViewWidgetShowMenu.AddButton("Bitangents", () => ShowBitangents = !ShowBitangents);
+                _showBitangentsButton.CloseMenuOnClick = false;
 
                 // Show Floor
                 _showFloorButton = ViewWidgetShowMenu.AddButton("Floor", button => ShowFloor = !ShowFloor);
                 _showFloorButton.IndexInParent = 1;
+                _showFloorButton.CloseMenuOnClick = false;
 
                 // Show current LOD widget
                 _showCurrentLODButton = ViewWidgetShowMenu.AddButton("Current LOD", button =>
@@ -178,25 +219,67 @@ namespace FlaxEditor.Viewport.Previews
                     _showCurrentLODButton.Icon = _showCurrentLOD ? Style.Current.CheckBoxTick : SpriteHandle.Invalid;
                 });
                 _showCurrentLODButton.IndexInParent = 2;
+                _showCurrentLODButton.CloseMenuOnClick = false;
 
-                // Preview LOD
+                // Preview LOD mode widget
+                var previewLODsMode = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
+                _previewLODsWidgetButtonMenu = new ContextMenu();
+                _previewLODsWidgetButtonMenu.VisibleChanged += control =>
                 {
-                    var previewLOD = ViewWidgetButtonMenu.AddButton("Preview LOD");
-                    var previewLODValue = new IntValueBox(-1, 90, 2, 70.0f, -1, 10, 0.02f)
+                    if (!control.Visible)
+                        return;
+                    var model = _previewModel.Model;
+                    if (model && !model.WaitForLoaded())
                     {
-                        Parent = previewLOD
-                    };
-                    previewLODValue.ValueChanged += () => _previewModel.ForcedLOD = previewLODValue.Value;
-                    ViewWidgetButtonMenu.VisibleChanged += control => previewLODValue.Value = _previewModel.ForcedLOD;
-                }
+                        _previewLODsWidgetButtonMenu.ItemsContainer.DisposeChildren();
+                        var lods = model.LODs.Length;
+                        for (int i = -1; i < lods; i++)
+                        {
+                            var index = i;
+                            var button = _previewLODsWidgetButtonMenu.AddButton("LOD " + (index == -1 ? "Auto" : index));
+                            button.ButtonClicked += _ => _previewModel.ForcedLOD = index;
+                            button.Checked = _previewModel.ForcedLOD == index;
+                            button.Tag = index;
+                            if (lods <= 1)
+                                break;
+                        }
+                    }
+                };
+                new ViewportWidgetButton("Preview LOD", SpriteHandle.Invalid, _previewLODsWidgetButtonMenu)
+                {
+                    TooltipText = "Preview LOD properties",
+                    Parent = previewLODsMode,
+                };
+                previewLODsMode.Parent = this;
+
+                // Hide not needed buttons
+                ViewWidgetButtonMenu.GetChildMenu("View Layers").Visible = false;
+            }
+        }
+
+        internal static void AdjustCamera(AssetPreview preview, BoundingBox box)
+        {
+            if (box.Size.MaxValue < preview.NearPlane)
+            {
+                // Very small object
+                preview.NearPlane = Mathf.Min(preview.NearPlane, (float)box.Size.MaxValue * 0.5f + 0.01f);
+                preview.FarPlane *= 0.5f;
+                preview.MovementSpeed = 0.1f;
             }
         }
 
         private void OnBegin(RenderTask task, GPUContext context)
         {
+            if (_autoAdjustCamera && Model && Model.IsLoaded)
+            {
+                // Control camera's near/far planes to properly cover object
+                _autoAdjustCamera = false;
+                AdjustCamera(this, Model.GetBox());
+            }
+
             if (!ScaleToFit)
             {
-                _previewModel.Scale = Vector3.One;
+                _previewModel.Scale = Float3.One;
                 _previewModel.Position = Vector3.Zero;
                 return;
             }
@@ -207,9 +290,9 @@ namespace FlaxEditor.Viewport.Previews
             {
                 float targetSize = 50.0f;
                 BoundingBox box = model.GetBox();
-                float maxSize = Mathf.Max(0.001f, box.Size.MaxValue);
+                float maxSize = Mathf.Max(0.001f, (float)box.Size.MaxValue);
                 float scale = targetSize / maxSize;
-                _previewModel.Scale = new Vector3(scale);
+                _previewModel.Scale = new Float3(scale);
                 _previewModel.Position = box.Center * (-0.5f * scale) + new Vector3(0, -10, 0);
             }
         }
@@ -222,22 +305,30 @@ namespace FlaxEditor.Viewport.Previews
             // Draw bounds
             if (_showBounds)
             {
-                DebugDraw.DrawWireBox(_previewModel.Box, Color.Violet.RGBMultiplied(0.8f), 0, false);
+                DebugDrawBounds(_previewModel.BoundingBox);
             }
 
             // Draw normals
             if (_showNormals && _meshDatas.RequestMeshData(Model))
             {
                 var meshDatas = _meshDatas.MeshDatas;
-                var lodIndex = ComputeLODIndex(Model);
+                var lodIndex = ComputeLODIndex(Model, out _);
                 var lod = meshDatas[lodIndex];
                 for (int meshIndex = 0; meshIndex < lod.Length; meshIndex++)
                 {
                     var meshData = lod[meshIndex];
-                    for (int i = 0; i < meshData.VertexBuffer.Length; i++)
+                    var positionStream = meshData.VertexAccessor.Position();
+                    var normalStream = meshData.VertexAccessor.Normal();
+                    if (positionStream.IsValid && normalStream.IsValid)
                     {
-                        ref var v = ref meshData.VertexBuffer[i];
-                        DebugDraw.DrawLine(v.Position, v.Position + v.Normal * 4.0f, Color.Green);
+                        var count = positionStream.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            var position = positionStream.GetFloat3(i);
+                            var normal = normalStream.GetFloat3(i);
+                            MeshAccessor.UnpackNormal(ref normal);
+                            DebugDraw.DrawLine(position, position + normal * 4.0f, Color.Blue);
+                        }
                     }
                 }
             }
@@ -246,33 +337,72 @@ namespace FlaxEditor.Viewport.Previews
             if (_showTangents && _meshDatas.RequestMeshData(Model))
             {
                 var meshDatas = _meshDatas.MeshDatas;
-                var lodIndex = ComputeLODIndex(Model);
+                var lodIndex = ComputeLODIndex(Model, out _);
                 var lod = meshDatas[lodIndex];
                 for (int meshIndex = 0; meshIndex < lod.Length; meshIndex++)
                 {
                     var meshData = lod[meshIndex];
-                    for (int i = 0; i < meshData.VertexBuffer.Length; i++)
+                    var positionStream = meshData.VertexAccessor.Position();
+                    var tangentStream = meshData.VertexAccessor.Tangent();
+                    if (positionStream.IsValid && tangentStream.IsValid)
                     {
-                        ref var v = ref meshData.VertexBuffer[i];
-                        DebugDraw.DrawLine(v.Position, v.Position + v.Tangent * 4.0f, Color.Blue);
+                        var count = positionStream.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            var position = positionStream.GetFloat3(i);
+                            var tangent = tangentStream.GetFloat3(i);
+                            MeshAccessor.UnpackNormal(ref tangent);
+                            DebugDraw.DrawLine(position, position + tangent * 4.0f, Color.Red);
+                        }
+                    }
+                }
+            }
+
+            // Draw bitangents
+            if (_showBitangents && _meshDatas.RequestMeshData(Model))
+            {
+                var meshDatas = _meshDatas.MeshDatas;
+                var lodIndex = ComputeLODIndex(Model, out _);
+                var lod = meshDatas[lodIndex];
+                for (int meshIndex = 0; meshIndex < lod.Length; meshIndex++)
+                {
+                    var meshData = lod[meshIndex];
+                    var positionStream = meshData.VertexAccessor.Position();
+                    var normalStream = meshData.VertexAccessor.Normal();
+                    var tangentStream = meshData.VertexAccessor.Tangent();
+                    if (positionStream.IsValid && normalStream.IsValid && tangentStream.IsValid)
+                    {
+                        var count = positionStream.Count;
+                        for (int i = 0; i < count; i++)
+                        {
+                            var position = positionStream.GetFloat3(i);
+                            var normal = normalStream.GetFloat3(i);
+                            var tangent = tangentStream.GetFloat4(i);
+                            MeshAccessor.UnpackNormal(ref normal);
+                            MeshAccessor.UnpackNormal(ref tangent, out var bitangentSign);
+                            var bitangent = Float3.Cross(normal, new Float3(tangent)) * bitangentSign;
+                            DebugDraw.DrawLine(position, position + bitangent * 4.0f, Color.Green);
+                        }
                     }
                 }
             }
         }
 
 
-        private int ComputeLODIndex(Model model)
+        private int ComputeLODIndex(Model model, out float screenSize)
         {
+            screenSize = 1.0f;
             if (PreviewActor.ForcedLOD != -1)
                 return PreviewActor.ForcedLOD;
 
             // Based on RenderTools::ComputeModelLOD
             CreateProjectionMatrix(out var projectionMatrix);
             float screenMultiple = 0.5f * Mathf.Max(projectionMatrix.M11, projectionMatrix.M22);
-            var sphere = PreviewActor.Sphere;
+            var sphere = PreviewActor.BoundingSphere;
             var viewOrigin = ViewPosition;
-            float distSqr = Vector3.DistanceSquared(ref sphere.Center, ref viewOrigin);
+            var distSqr = Vector3.DistanceSquared(ref sphere.Center, ref viewOrigin);
             var screenRadiusSquared = Mathf.Square(screenMultiple * sphere.Radius) / Mathf.Max(1.0f, distSqr);
+            screenSize = Mathf.Sqrt((float)screenRadiusSquared) * 2.0f;
 
             // Check if model is being culled
             if (Mathf.Square(model.MinScreenSize * 0.5f) > screenRadiusSquared)
@@ -304,11 +434,14 @@ namespace FlaxEditor.Viewport.Previews
         {
             base.Draw();
 
-            if (_showCurrentLOD)
+            if (_showCurrentLOD && Model)
             {
                 var asset = Model;
-                var lodIndex = ComputeLODIndex(asset);
-                string text = string.Format("Current LOD: {0}", lodIndex);
+                var lodIndex = ComputeLODIndex(asset, out var screenSize);
+                var auto = _previewModel.ForcedLOD == -1;
+                string text = auto ? "LOD Automatic" : "";
+                text += auto ? string.Format("\nScreen Size: {0:F2}", screenSize) : "";
+                text += string.Format("\nCurrent LOD: {0}", lodIndex);
                 if (lodIndex != -1)
                 {
                     var lods = asset.LODs;
@@ -324,10 +457,18 @@ namespace FlaxEditor.Viewport.Previews
                     text += string.Format("\nTriangles: {0:N0}\nVertices: {1:N0}", triangleCount, vertexCount);
                 }
                 var font = Style.Current.FontMedium;
-                var pos = new Vector2(10, 50);
-                Render2D.DrawText(font, text, new Rectangle(pos + Vector2.One, Size), Color.Black);
+                var pos = new Float2(10, 50);
+                Render2D.DrawText(font, text, new Rectangle(pos + Float2.One, Size), Color.Black);
                 Render2D.DrawText(font, text, new Rectangle(pos, Size), Color.White);
             }
+        }
+
+        /// <summary>
+        /// Resets the camera to focus on an object.
+        /// </summary>
+        public void ResetCamera()
+        {
+            ViewportCamera.SetArcBallView(_previewModel.BoundingBox);
         }
 
         /// <inheritdoc />
@@ -336,8 +477,7 @@ namespace FlaxEditor.Viewport.Previews
             switch (key)
             {
             case KeyboardKeys.F:
-                // Pay respect..
-                ViewportCamera.SetArcBallView(_previewModel.Box);
+                ResetCamera();
                 break;
             }
             return base.OnKeyDown(key);
@@ -350,8 +490,10 @@ namespace FlaxEditor.Viewport.Previews
             Object.Destroy(ref _previewModel);
             _showBoundsButton = null;
             _showCurrentLODButton = null;
+            _previewLODsWidgetButtonMenu = null;
             _showNormalsButton = null;
             _showTangentsButton = null;
+            _showBitangentsButton = null;
             _showFloorButton = null;
             _meshDatas?.Dispose();
             _meshDatas = null;

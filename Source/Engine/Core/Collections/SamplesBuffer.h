@@ -1,23 +1,21 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "../Types/BaseTypes.h"
 #include "Engine/Platform/Platform.h"
 
-/// <summanry>
+/// <summary>
 /// Small buffer for samples used to calculate min/max/avg values.
-/// </summanry>
+/// </summary>
 template<typename T, int32 Size>
 class SamplesBuffer
 {
 protected:
-
     int32 _count = 0;
     T _data[Size];
 
 public:
-
     /// <summary>
     /// Gets amount of elements in the collection.
     /// </summary>
@@ -110,7 +108,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Adds the specified value to the buffer.
     /// </summary>
@@ -146,7 +143,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the minimum value in the buffer.
     /// </summary>

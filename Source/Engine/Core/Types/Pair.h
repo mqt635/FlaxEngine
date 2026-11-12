@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,7 +12,6 @@ template<typename T, typename U>
 class Pair
 {
 public:
-
     /// <summary>
     /// The first element.
     /// </summary>
@@ -24,7 +23,6 @@ public:
     U Second;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Pair"/> class.
     /// </summary>
@@ -64,7 +62,6 @@ public:
     }
 
 public:
-
     Pair& operator=(const Pair& other)
     {
         if (this == &other)
@@ -84,14 +81,14 @@ public:
         return *this;
     }
 
-    friend bool operator==(const Pair& a, const Pair& b)
+    bool operator==(const Pair& other) const
     {
-        return a.First == b.First && a.Second == b.Second;
+        return First == other.First && Second == other.Second;
     }
 
-    friend bool operator!=(const Pair& a, const Pair& b)
+    bool operator!=(const Pair& other) const
     {
-        return a.First != b.First || a.Second != b.Second;
+        return First != other.First || Second != other.Second;
     }
 };
 

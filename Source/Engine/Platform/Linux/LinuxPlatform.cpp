@@ -1,12 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_LINUX
 
 #include "LinuxPlatform.h"
 #include "LinuxWindow.h"
+#include "LinuxInput.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Types/Guid.h"
 #include "Engine/Core/Types/String.h"
+#include "Engine/Core/Types/Version.h"
 #include "Engine/Core/Collections/HashFunctions.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Collections/Dictionary.h"
@@ -18,9 +20,12 @@
 #include "Engine/Platform/MemoryStats.h"
 #include "Engine/Platform/StringUtils.h"
 #include "Engine/Platform/MessageBox.h"
+#include "Engine/Platform/File.h"
 #include "Engine/Platform/WindowsManager.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Platform/Clipboard.h"
 #include "Engine/Platform/IGuiData.h"
+#include "Engine/Platform/Base/PlatformUtils.h"
 #include "Engine/Utilities/StringConverter.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Engine/Engine.h"
@@ -28,12 +33,14 @@
 #include "Engine/Input/Input.h"
 #include "Engine/Input/Mouse.h"
 #include "Engine/Input/Keyboard.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "IncludeX11.h"
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sched.h>
@@ -46,11 +53,15 @@
 #include <pwd.h>
 #include <inttypes.h>
 #include <dlfcn.h>
+#if CRASH_LOG_ENABLE
+#include <signal.h>
+#include <execinfo.h>
+#endif
 
-CPUInfo UnixCpu;
 int ClockSource;
+uint64 ProgramSizeMemory;
 Guid DeviceId;
-String UserLocale, ComputerName, UserName, HomeDir;
+String UserLocale, ComputerName, HomeDir;
 byte MacAddress[6];
 
 #define UNIX_APP_BUFF_SIZE 256
@@ -78,13 +89,17 @@ X11::Atom xAtomClipboard;
 X11::Atom xDnDRequested = 0;
 X11::Window xDndSourceWindow = 0;
 DragDropEffect xDndResult;
-Vector2 xDndPos;
+Float2 xDndPos;
 int32 xDnDVersion = 0;
 int32 SystemDpi = 96;
 X11::Cursor Cursors[(int32)CursorType::MAX];
 X11::XcursorImage* CursorsImg[(int32)CursorType::MAX];
 Dictionary<StringAnsi, X11::KeyCode> KeyNameMap;
 Array<KeyboardKeys> KeyCodeMap;
+#if !PLATFORM_SDL
+Delegate<void*> LinuxPlatform::xEventReceived;
+#endif
+Window* MouseTrackingWindow = nullptr;
 
 // Message boxes configuration
 #define LINUX_DIALOG_MIN_BUTTON_WIDTH 64
@@ -211,7 +226,8 @@ static int X11_MessageBoxInit(MessageBoxData* data)
 	if (data->font_set == nullptr)
 	{
 		LINUX_DIALOG_PRINT("Couldn't load font %s", MessageBoxFont);
-		return 1;
+		data->font_set = X11::XCreateFontSet(data->display, "fixed", &missing, &num_missing, NULL);
+		if (missing != nullptr) X11::XFreeStringList(missing);
 	}
 
 	return 0;
@@ -427,8 +443,11 @@ static int X11_MessageBoxCreateWindow(MessageBoxData* data)
 	}
 	else
 	{
-		x = (X11_DisplayWidth(display, data->screen) - data->dialog_width) / 2;
-		y = (X11_DisplayHeight(display, data->screen) - data->dialog_height) / 3;
+		int screenCount;
+		X11::XineramaScreenInfo* xsi = X11::XineramaQueryScreens(xDisplay, &screenCount);
+		ASSERT(data->screen < screenCount);
+		x = (float)xsi[data->screen].x_org + ((float)xsi[data->screen].width - data->dialog_width) / 2;
+		y = (float)xsi[data->screen].y_org + ((float)xsi[data->screen].height - data->dialog_height) / 2;
 	}
 	X11::XMoveWindow(display, data->window, x, y);
 
@@ -637,9 +656,13 @@ static int X11_MessageBoxLoop(MessageBoxData* data)
 	return 0;
 }
 
+#if !PLATFORM_SDL
 DialogResult MessageBox::Show(Window* parent, const StringView& text, const StringView& caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+#else
+DialogResult MessageBox::ShowFallback(Window* parent, const StringView& text, const StringView& caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+#endif
 {
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
         return DialogResult::None;
 
 	// Setup for simple popup
@@ -824,6 +847,8 @@ DialogResult MessageBox::Show(Window* parent, const StringView& text, const Stri
 	return data.resultButtonIndex == -1 ? DialogResult::None : data.buttons[data.resultButtonIndex].result;
 }
 
+#if !PLATFORM_SDL
+
 int X11ErrorHandler(X11::Display* display, X11::XErrorEvent* event)
 {
     if (event->error_code == 5)
@@ -834,19 +859,21 @@ int X11ErrorHandler(X11::Display* display, X11::XErrorEvent* event)
 	return 0;
 }
 
+#endif
+
 int32 CalculateDpi()
 {
-	Vector2 size = Platform::GetDesktopSize();
+	int dpi = 96;
+	char* resourceString = X11::XResourceManagerString(xDisplay);
+	if (resourceString == NULL)
+		return dpi;
 
-	int screenIdx = 0;
-	int widthMM = X11_DisplayWidthMM(xDisplay, screenIdx);
-	int heightMM = X11_DisplayHeightMM(xDisplay, screenIdx);
-	double xdpi = (widthMM ? size.X / (double)widthMM * 25.4 : 0);
-	double ydpi = (heightMM ? size.Y / (double)heightMM * 25.4 : 0);
-	if (xdpi || ydpi)
-		return (int32)Math::Ceil((xdpi + ydpi) / (xdpi && ydpi ? 2 : 1));
-	
-	return 96;
+	char* type = NULL;
+	X11::XrmValue value;
+	X11::XrmDatabase database = X11::XrmGetStringDatabase(resourceString);
+	if (X11::XrmGetResource(database, "Xft.dpi", "String", &type, &value) == 1 && value.addr != NULL)
+		dpi = (int)atof(value.addr);
+	return dpi;
 }
 
 // Maps Flax key codes to X11 names for physical key locations.
@@ -936,7 +963,7 @@ const char* ButtonCodeToKeyName(KeyboardKeys code)
 		// Row #6
 	case KeyboardKeys::Control:	return "LCTL"; // Left Control
 	case KeyboardKeys::LeftWindows: return "LWIN";
-	case KeyboardKeys::LeftMenu: return "LALT";
+	case KeyboardKeys::Alt: return "LALT";
 	case KeyboardKeys::Spacebar: return "SPCE";
 	case KeyboardKeys::RightMenu: return "RALT";
 	case KeyboardKeys::RightWindows: return "RWIN";
@@ -1181,7 +1208,7 @@ public:
 public:
 
     // [Mouse]
-    void SetMousePosition(const Vector2& newPosition) final override
+    void SetMousePosition(const Float2& newPosition) final override
     {
         LinuxPlatform::SetMousePosition(newPosition);
 
@@ -1189,17 +1216,20 @@ public:
     }
 };
 
+#if !PLATFORM_SDL
 struct Property
 {
-	unsigned char* data;
-	int format, nitems;
-	X11::Atom type;
+    unsigned char* data;
+    int format, nitems;
+    X11::Atom type;
 };
+#endif
 
 namespace Impl
 {
 	LinuxKeyboard* Keyboard;
 	LinuxMouse* Mouse;
+#if !PLATFORM_SDL
     StringAnsi ClipboardText;
 
     void ClipboardGetText(String& result, X11::Atom source, X11::Atom atom, X11::Window window)
@@ -1314,8 +1344,37 @@ namespace Impl
         X11::XQueryPointer(display, w, &wtmp, &child, &tmp, &tmp, &tmp, &tmp, &utmp);
         return FindAppWindow(display, child);
     }
+#endif
+
+    Dictionary<String, String> LoadConfigFile(StringView path)
+	{
+        Dictionary<String, String> results;
+        String data;
+        File::ReadAllText(path, data);
+        Array<String> lines, parts;
+        data.Split('\n', lines);
+		for (String& line : lines)
+		{
+		    line = line.TrimTrailing();
+			if (line.StartsWith('#'))
+                continue; // Skip comments
+		    line.Split('=', parts);
+            if (parts.Count() == 2)
+            {
+                String key = parts[0].TrimTrailing();
+                String value = parts[1].TrimTrailing();
+                if (key.StartsWith('\"'))
+                    key = key.Substring(1, key.Length() - 2);
+                if (value.StartsWith('\"'))
+                    value = value.Substring(1, value.Length() - 2);
+                results[key] = value;
+			}
+		}
+		return results;
+	}
 }
 
+#if !PLATFORM_SDL
 class LinuxDropFilesData : public IGuiData
 {
 public:
@@ -1353,9 +1412,9 @@ public:
     }
 };
 
-DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
+DragDropEffect Window::DoDragDrop(const StringView& data)
 {
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
         return DragDropEffect::None;
 	auto cursorWrong = X11::XCreateFontCursor(xDisplay, 54);
 	auto cursorTransient = X11::XCreateFontCursor(xDisplay, 24);
@@ -1367,13 +1426,14 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
     StringAnsi dataAnsi(data);
     LinuxDropTextData dropData;
     dropData.Text = data;
+    unsigned long mainWindow = _window;
 
     // Begin dragging
 	auto screen = X11::XDefaultScreen(xDisplay);
 	auto rootWindow = X11::XRootWindow(xDisplay, screen);
-    if (X11::XGrabPointer(xDisplay, _window, 1, Button1MotionMask | ButtonReleaseMask, GrabModeAsync, GrabModeAsync, rootWindow, cursorWrong, CurrentTime) != GrabSuccess)
+    if (X11::XGrabPointer(xDisplay, mainWindow, 1, Button1MotionMask | ButtonReleaseMask, GrabModeAsync, GrabModeAsync, rootWindow, cursorWrong, CurrentTime) != GrabSuccess)
 	    return DragDropEffect::None;
-    X11::XSetSelectionOwner(xDisplay, xAtomXdndSelection, _window, CurrentTime);
+    X11::XSetSelectionOwner(xDisplay, xAtomXdndSelection, mainWindow, CurrentTime);
 
     // Process events
     X11::XEvent event;
@@ -1453,7 +1513,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
             	status = Unreceptive;
             else if(version == -1)
             	status = Unaware;
-            xDndPos = Vector2((float)event.xmotion.x_root, (float)event.xmotion.y_root);
+            xDndPos = Float2((float)event.xmotion.x_root, (float)event.xmotion.y_root);
 
             // Update mouse grab
             if (status == Unaware)
@@ -1481,7 +1541,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
                     m.window = previousWindow;
                     m.message_type = xAtomXdndLeave;
                     m.format = 32;
-                    m.data.l[0] = _window;
+                    m.data.l[0] = mainWindow;
                     m.data.l[1] = 0;
                     m.data.l[2] = 0;
                     m.data.l[3] = 0;
@@ -1510,7 +1570,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
                     m.window = window;
                     m.message_type = xAtomXdndEnter;
                     m.format = 32;
-                    m.data.l[0] = _window;
+                    m.data.l[0] = mainWindow;
                     m.data.l[1] = Math::Min(5, version) << 24  | (formats.Count() > 3);
                     m.data.l[2] = formats.Count() > 0 ? formats[0] : 0;
                     m.data.l[3] = formats.Count() > 1 ? formats[1] : 0;
@@ -1545,7 +1605,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
                     m.window = window;
                     m.message_type = xAtomXdndPosition;
                     m.format = 32;
-                    m.data.l[0] = _window;
+                    m.data.l[0] = mainWindow;
                     m.data.l[1] = 0;
                     m.data.l[2] = (x << 16) | y;
                     m.data.l[3] = CurrentTime;
@@ -1588,7 +1648,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
                     m.window = previousWindow;
                     m.message_type = xAtomXdndDrop;
                     m.format = 32;
-                    m.data.l[0] = _window;
+                    m.data.l[0] = mainWindow;
                     m.data.l[1] = 0;
                     m.data.l[2] = CurrentTime;
                     m.data.l[3] = 0;
@@ -1635,7 +1695,7 @@ DragDropEffect LinuxWindow::DoDragDrop(const StringView& data)
             m.window = previousWindow;
             m.message_type = xAtomXdndLeave;
             m.format = 32;
-            m.data.l[0] = _window;
+            m.data.l[0] = mainWindow;
             m.data.l[1] = 0;
             m.data.l[2] = 0;
             m.data.l[3] = 0;
@@ -1659,9 +1719,9 @@ void LinuxClipboard::Clear()
 
 void LinuxClipboard::SetText(const StringView& text)
 {
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
         return;
-    auto mainWindow = (LinuxWindow*)Engine::MainWindow;
+    auto mainWindow = Engine::MainWindow;
     if (!mainWindow)
         return;
     X11::Window window = (X11::Window)mainWindow->GetNativePtr();
@@ -1681,10 +1741,10 @@ void LinuxClipboard::SetFiles(const Array<String>& files)
 
 String LinuxClipboard::GetText()
 {
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
         return String::Empty;
     String result;
-    auto mainWindow = (LinuxWindow*)Engine::MainWindow;
+    auto mainWindow = Engine::MainWindow;
     if (!mainWindow)
         return result;
     X11::Window window = (X11::Window)mainWindow->GetNativePtr();
@@ -1713,9 +1773,11 @@ Array<String> LinuxClipboard::GetFiles()
     return Array<String>();
 }
 
+#endif
+
 void* LinuxPlatform::GetXDisplay()
 {
-	return xDisplay;
+    return xDisplay;
 }
 
 bool LinuxPlatform::CreateMutex(const Char* name)
@@ -1738,6 +1800,15 @@ const String& LinuxPlatform::GetHomeDirectory()
     return HomeDir;
 }
 
+String LinuxPlatform::GetDisplayServer()
+{
+#if PLATFORM_SDL
+    return SDLPlatform::GetDisplayServer();
+#else
+    return xDisplay ? TEXT("X11") : TEXT("");
+#endif
+}
+
 bool LinuxPlatform::Is64BitPlatform()
 {
 #ifdef PLATFORM_64BITS
@@ -1747,50 +1818,28 @@ bool LinuxPlatform::Is64BitPlatform()
 #endif
 }
 
-CPUInfo LinuxPlatform::GetCPUInfo()
-{
-    return UnixCpu;
-}
-
-int32 LinuxPlatform::GetCacheLineSize()
-{
-    return UnixCpu.CacheLineSize;
-}
-
 MemoryStats LinuxPlatform::GetMemoryStats()
 {
-    // Get memory usage
     const uint64 pageSize = getpagesize();
     const uint64 totalPages = get_phys_pages();
     const uint64 availablePages = get_avphys_pages();
-
-    // Fill result data
     MemoryStats result;
     result.TotalPhysicalMemory = totalPages * pageSize;
     result.UsedPhysicalMemory = (totalPages - availablePages) * pageSize;
     result.TotalVirtualMemory = result.TotalPhysicalMemory;
     result.UsedVirtualMemory = result.UsedPhysicalMemory;
-
+    result.ProgramSizeMemory = ProgramSizeMemory;
     return result;
 }
 
 ProcessMemoryStats LinuxPlatform::GetProcessMemoryStats()
 {
-    // Get memory usage
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
-
-    // Fill result data
     ProcessMemoryStats result;
     result.UsedPhysicalMemory = usage.ru_maxrss;
     result.UsedVirtualMemory = result.UsedPhysicalMemory;
-
     return result;
-}
-
-uint64 LinuxPlatform::GetCurrentThreadID()
-{
-    return static_cast<uint64>(pthread_self());
 }
 
 void LinuxPlatform::SetThreadPriority(ThreadPriority priority)
@@ -1806,6 +1855,11 @@ void LinuxPlatform::SetThreadAffinityMask(uint64 affinityMask)
 void LinuxPlatform::Sleep(int32 milliseconds)
 {
     usleep(milliseconds * 1000);
+}
+
+void LinuxPlatform::Yield()
+{
+    sched_yield();
 }
 
 double LinuxPlatform::GetTimeSeconds()
@@ -1864,11 +1918,50 @@ void LinuxPlatform::GetUTCTime(int32& year, int32& month, int32& dayOfWeek, int3
     millisecond = time.tv_usec / 1000;
 }
 
+#if !BUILD_RELEASE
+
+bool LinuxPlatform::IsDebuggerPresent()
+{
+	static int32 CachedState = -1;
+	if (CachedState == -1)
+	{
+		CachedState = 0;
+
+    	// Reference: https://stackoverflow.com/questions/3596781/how-to-detect-if-the-current-process-is-being-run-by-gdb
+		char buf[4096];
+		const int status_fd = open("/proc/self/status", O_RDONLY);
+		if (status_fd == -1)
+			return false;
+		const ssize_t num_read = read(status_fd, buf, sizeof(buf) - 1);
+		close(status_fd);
+		if (num_read <= 0)
+			return false;
+		buf[num_read] = '\0';
+		constexpr char tracerPidString[] = "TracerPid:";
+		const auto tracer_pid_ptr = strstr(buf, tracerPidString);
+		if (!tracer_pid_ptr)
+			return false;
+		for (const char* characterPtr = tracer_pid_ptr + sizeof(tracerPidString) - 1; characterPtr <= buf + num_read; ++characterPtr)
+		{
+			if (StringUtils::IsWhitespace(*characterPtr))
+				continue;
+			else
+			{
+				if (StringUtils::IsDigit(*characterPtr) && *characterPtr != '0')
+					CachedState = 1;
+				return CachedState == 1;
+			}
+		}
+	}
+	return CachedState == 1;
+}
+
+#endif
+
 bool LinuxPlatform::Init()
 {
     if (PlatformBase::Init())
         return true;
-
     char fileNameBuffer[1024];
 
     // Init timing
@@ -1882,13 +1975,17 @@ bool LinuxPlatform::Init()
         ClockSource = CLOCK_MONOTONIC;
     }
 
+	// Estimate program size by checking physical memory usage on start
+	ProgramSizeMemory = Platform::GetProcessMemoryStats().UsedPhysicalMemory;
+
     // Set info about the CPU
+    extern CPUInfo CpuInfo;
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) == 0)
     {
         int32 numberOfCores = 0;
-        struct CpuInfo
+        struct CpuData
         {
             int32 Core;
             int32 Package;
@@ -1958,21 +2055,21 @@ bool LinuxPlatform::Init()
             Allocator::Free(pairs);
         }
 
-        UnixCpu.ProcessorPackageCount = packagesCount;
-        UnixCpu.ProcessorCoreCount = Math::Max(numberOfCores, 1);
-        UnixCpu.LogicalProcessorCount = CPU_COUNT(&cpus);
+        CpuInfo.ProcessorPackageCount = packagesCount;
+        CpuInfo.ProcessorCoreCount = Math::Max(numberOfCores, 1);
+        CpuInfo.LogicalProcessorCount = CPU_COUNT(&cpus);
     }
     else
     {
-        UnixCpu.ProcessorPackageCount = 1;
-        UnixCpu.ProcessorCoreCount = 1;
-        UnixCpu.LogicalProcessorCount = 1;
+        CpuInfo.ProcessorPackageCount = 1;
+        CpuInfo.ProcessorCoreCount = 1;
+        CpuInfo.LogicalProcessorCount = 1;
     }
 
     // Get cache sizes
-    UnixCpu.L1CacheSize = 0;
-    UnixCpu.L2CacheSize = 0;
-    UnixCpu.L3CacheSize = 0;
+    CpuInfo.L1CacheSize = 0;
+    CpuInfo.L2CacheSize = 0;
+    CpuInfo.L3CacheSize = 0;
     for (int32 cacheLevel = 1; cacheLevel <= 3; cacheLevel++)
     {
         sprintf(fileNameBuffer, "/sys/devices/system/cpu/cpu0/cache/index%d/size", cacheLevel);
@@ -1990,13 +2087,13 @@ bool LinuxPlatform::Init()
             switch (cacheLevel)
             {
             case 1:
-                UnixCpu.L1CacheSize = res;
+                CpuInfo.L1CacheSize = res;
                 break;
             case 2:
-                UnixCpu.L2CacheSize = res;
+                CpuInfo.L2CacheSize = res;
                 break;
             case 3:
-                UnixCpu.L3CacheSize = res;
+                CpuInfo.L3CacheSize = res;
                 break;
             }
             fclose(file);
@@ -2004,16 +2101,50 @@ bool LinuxPlatform::Init()
     }
 
     // Get page size
-    UnixCpu.PageSize = sysconf(_SC_PAGESIZE);
+    CpuInfo.PageSize = sysconf(_SC_PAGESIZE);
 
     // Get clock speed
-    UnixCpu.ClockSpeed = GetClockFrequency();
+    CpuInfo.ClockSpeed = GetClockFrequency();
 
     // Get cache line size
-    UnixCpu.CacheLineSize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-    ASSERT(UnixCpu.CacheLineSize && Math::IsPowerOfTwo(UnixCpu.CacheLineSize));
+    CpuInfo.CacheLineSize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    ASSERT(CpuInfo.CacheLineSize && Math::IsPowerOfTwo(CpuInfo.CacheLineSize));
+
+    // Get user name string
+    char buffer[UNIX_APP_BUFF_SIZE];
+    getlogin_r(buffer, UNIX_APP_BUFF_SIZE);
+    OnPlatformUserAdd(New<User>(String(buffer)));
 
     UnixGetMacAddress(MacAddress);
+
+#if !PLATFORM_SDL
+    // Get user locale string
+    setlocale(LC_ALL, "");
+    const char* locale = setlocale(LC_CTYPE, NULL);
+    UserLocale = String(locale);
+    if (UserLocale.FindLast('.') != -1)
+        UserLocale = UserLocale.Left(UserLocale.Find('.'));
+    UserLocale.Replace('_', '-');
+    if (UserLocale == TEXT("C"))
+        UserLocale = TEXT("en");
+#endif
+
+    // Get computer name string
+    gethostname(buffer, UNIX_APP_BUFF_SIZE);
+    ComputerName = String(buffer);
+
+    // Get home dir
+    struct passwd pw;
+    struct passwd* result = NULL;
+    if (getpwuid_r(getuid(), &pw, buffer, UNIX_APP_BUFF_SIZE, &result) == 0 && result)
+    {
+        HomeDir = pw.pw_dir;
+    }
+    if (HomeDir.IsEmpty())
+        HomeDir = TEXT("/");
+
+	Platform::MemoryClear(Cursors, sizeof(Cursors));
+	Platform::MemoryClear(CursorsImg, sizeof(CursorsImg));
 
     // Generate unique device ID
     {
@@ -2034,46 +2165,17 @@ bool LinuxPlatform::Init()
         DeviceId.C = (uint32)Platform::GetMemoryStats().TotalPhysicalMemory;
 
         // D - cpuid
-        DeviceId.D = (uint32)UnixCpu.ClockSpeed * UnixCpu.LogicalProcessorCount * UnixCpu.ProcessorCoreCount * UnixCpu.CacheLineSize;
+        DeviceId.D = (uint32)CpuInfo.ClockSpeed * CpuInfo.LogicalProcessorCount * CpuInfo.ProcessorCoreCount * CpuInfo.CacheLineSize;
     }
-
-    char buffer[UNIX_APP_BUFF_SIZE];
-
-    // Get user locale string
-    setlocale(LC_ALL, "");
-    const char* locale = setlocale(LC_CTYPE, NULL);
-    if (strcmp(locale, "C") == 0)
-        locale = "";
-    UserLocale = String(locale);
-    if (UserLocale.FindLast('.') != -1)
-        UserLocale = UserLocale.Left(UserLocale.Find('.'));
-    UserLocale.Replace('_', '-');
-
-    // Get computer name string
-    gethostname(buffer, UNIX_APP_BUFF_SIZE);
-    ComputerName = String(buffer);
-
-    // Get user name string
-    getlogin_r(buffer, UNIX_APP_BUFF_SIZE);
-    UserName = String(buffer);
-
-    // Get home dir
-    struct passwd pw;
-    struct passwd* result = NULL;
-    if (getpwuid_r(getuid(), &pw, buffer, UNIX_APP_BUFF_SIZE, &result) == 0 && result)
-    {
-        HomeDir = pw.pw_dir;
-    }
-    if (HomeDir.IsEmpty())
-        HomeDir = TEXT("/");
-
-	Platform::MemoryClear(Cursors, sizeof(Cursors));
-	Platform::MemoryClear(CursorsImg, sizeof(CursorsImg));
 
     // Skip setup if running in headless mode (X11 might not be available on servers)
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
         return false;
-
+#if PLATFORM_SDL
+    xDisplay = X11::XOpenDisplay(nullptr);
+#endif
+    
+#if !PLATFORM_SDL
 	X11::XInitThreads();
 
 	xDisplay = X11::XOpenDisplay(nullptr);
@@ -2103,6 +2205,7 @@ bool LinuxPlatform::Init()
 	xAtomWmName = X11::XInternAtom(xDisplay, "_NET_WM_NAME", 0);
 	xAtomClipboard = X11::XInternAtom(xDisplay, "CLIPBOARD", 0);
 
+	X11::XrmInitialize();
 	SystemDpi = CalculateDpi();
 
 	int cursorSize = X11::XcursorGetDefaultSize(xDisplay);
@@ -2187,6 +2290,7 @@ bool LinuxPlatform::Init()
 
 	// Initialize "X11 keycode" -> "Flax KeyboardKeys" map
 	KeyCodeMap.Resize(desc->max_key_code + 1);
+    Platform::MemoryClear(KeyCodeMap.Get(), KeyCodeMap.Count() * sizeof(KeyboardKeys));
 	XkbFreeNames(desc, XkbKeyNamesMask, 1);
 	X11::XkbFreeKeyboard(desc, 0, 1);
 	for (int32 keyIdx = (int32)KeyboardKeys::None; keyIdx < MAX_uint8; keyIdx++)
@@ -2204,9 +2308,13 @@ bool LinuxPlatform::Init()
 		}
 	}
 
+	//Patch in numpad enter to normal enter, just like on windows.
+	KeyCodeMap[104] = KeyboardKeys::Return;
+
     Input::Mouse = Impl::Mouse = New<LinuxMouse>();
     Input::Keyboard = Impl::Keyboard = New<LinuxKeyboard>();
-
+	LinuxInput::Init();
+#endif
     return false;
 }
 
@@ -2216,7 +2324,10 @@ void LinuxPlatform::BeforeRun()
 
 void LinuxPlatform::Tick()
 {
+#if !PLATFORM_SDL
 	UnixPlatform::Tick();
+
+	LinuxInput::UpdateState();
 
     if (!xDisplay)
         return;
@@ -2226,11 +2337,13 @@ void LinuxPlatform::Tick()
 	{
 		X11::XEvent event;
 		X11::XNextEvent(xDisplay, &event);
-
 		if (X11::XFilterEvent(&event, 0))
 			continue;
 
-		LinuxWindow* window;
+        // External event handling
+		xEventReceived(&event);
+
+		Window* window;
 		switch (event.type)
 		{
 			case ClientMessage:
@@ -2277,7 +2390,7 @@ void LinuxPlatform::Tick()
                     m.data.l[4] = xAtomXdndActionCopy;
                     X11::XSendEvent(xDisplay, event.xclient.data.l[0], 0, NoEventMask, (X11::XEvent*)&m);
                     X11::XFlush(xDisplay);
-                    xDndPos = Vector2((float)(event.xclient.data.l[2]  >> 16), (float)(event.xclient.data.l[2] & 0xffff));
+                    xDndPos = Float2((float)(event.xclient.data.l[2]  >> 16), (float)(event.xclient.data.l[2] & 0xffff));
                     window = WindowsManager::GetByNativePtr((void*)event.xany.window);
                     if (window)
                     {
@@ -2285,12 +2398,12 @@ void LinuxPlatform::Tick()
                         xDndResult = DragDropEffect::None;
                         if (window->_dragOver)
                         {
-                            window->OnDragEnter(&dropData, xDndPos, xDndResult);
+                            window->OnDragOver(&dropData, xDndPos, xDndResult);
                         }
                         else
                         {
                             window->_dragOver = true;
-                            window->OnDragOver(&dropData, xDndPos, xDndResult);
+                            window->OnDragEnter(&dropData, xDndPos, xDndResult);
                         }
                     }
                 }
@@ -2344,7 +2457,7 @@ void LinuxPlatform::Tick()
 				// Update input context focus
 				X11::XSetICFocus(IC);
 				window = WindowsManager::GetByNativePtr((void*)event.xfocus.window);
-				if (window)
+				if (window && MouseTrackingWindow == nullptr)
 				{
 					window->OnGotFocus();
 				}
@@ -2353,7 +2466,7 @@ void LinuxPlatform::Tick()
 				// Update input context focus
 				X11::XUnsetICFocus(IC);
 				window = WindowsManager::GetByNativePtr((void*)event.xfocus.window);
-				if (window)
+				if (window && MouseTrackingWindow == nullptr)
 				{
 					window->OnLostFocus();
 				}
@@ -2460,23 +2573,32 @@ void LinuxPlatform::Tick()
 				break;
 			case ButtonPress:
 				window = WindowsManager::GetByNativePtr((void*)event.xbutton.window);
-				if (window)
+		        if (MouseTrackingWindow)
+		            MouseTrackingWindow->OnButtonPress(&event.xbutton);
+				else if (window)
 					window->OnButtonPress(&event.xbutton);
 				break;
 			case ButtonRelease:
 				window = WindowsManager::GetByNativePtr((void*)event.xbutton.window);
-				if (window)
+		        if (MouseTrackingWindow)
+		            MouseTrackingWindow->OnButtonRelease(&event.xbutton);
+				else if (window)
 					window->OnButtonRelease(&event.xbutton);
 				break;
 			case MotionNotify:
 				window = WindowsManager::GetByNativePtr((void*)event.xmotion.window);
-				if (window)
+		        if (MouseTrackingWindow)
+		            MouseTrackingWindow->OnMotionNotify(&event.xmotion);
+				else if (window)
 					window->OnMotionNotify(&event.xmotion);
 				break;
 			case EnterNotify:
+			    // nothing?
 				break;
 			case LeaveNotify:
 				window = WindowsManager::GetByNativePtr((void*)event.xcrossing.window);
+		        if (MouseTrackingWindow)
+		            MouseTrackingWindow->OnLeaveNotify(&event.xcrossing);
 				if (window)
 					window->OnLeaveNotify(&event.xcrossing);
 				break;
@@ -2527,6 +2649,7 @@ void LinuxPlatform::Tick()
                             for (auto& e : dropData.Files)
                             {
                                 e.Replace(TEXT("file://"), TEXT(""));
+                                e.Replace(TEXT("%20"), TEXT(" "));
                                 e = e.TrimTrailing();
                             }
                             xDndResult = DragDropEffect::None;
@@ -2552,6 +2675,7 @@ void LinuxPlatform::Tick()
 	}
 
 	//X11::XFlush(xDisplay);
+#endif
 }
 
 void LinuxPlatform::BeforeExit()
@@ -2560,6 +2684,7 @@ void LinuxPlatform::BeforeExit()
 
 void LinuxPlatform::Exit()
 {
+#if !PLATFORM_SDL
 	for (int32 i = 0; i < (int32)CursorType::MAX; i++)
 	{
 		if (Cursors[i])
@@ -2585,8 +2710,29 @@ void LinuxPlatform::Exit()
 		X11::XCloseDisplay(xDisplay);
 		xDisplay = nullptr;
 	}
+#endif
 }
 
+String LinuxPlatform::GetSystemName()
+{
+    Dictionary<String, String> configs = Impl::LoadConfigFile(TEXT("/etc/os-release"));
+    String str;
+    if (configs.TryGet(TEXT("NAME"), str))
+        return str;
+    return TEXT("Linux");
+}
+
+Version LinuxPlatform::GetSystemVersion()
+{
+    Dictionary<String, String> configs = Impl::LoadConfigFile(TEXT("/etc/os-release"));
+    String str;
+    Version version;
+    if (configs.TryGet(TEXT("VERSION_ID"), str) && !Version::Parse(str, &version))
+        return version;
+    return Version(0, 0);
+}
+
+#if !PLATFORM_SDL
 int32 LinuxPlatform::GetDpi()
 {
     return SystemDpi;
@@ -2596,15 +2742,11 @@ String LinuxPlatform::GetUserLocaleName()
 {
     return UserLocale;
 }
+#endif
 
 String LinuxPlatform::GetComputerName()
 {
     return ComputerName;
-}
-
-String LinuxPlatform::GetUserName()
-{
-    return UserName;
 }
 
 bool LinuxPlatform::GetHasFocus()
@@ -2616,9 +2758,7 @@ bool LinuxPlatform::GetHasFocus()
 		if (window->IsFocused())
 			return true;
 	}
-
-	// Default to true if has no windows open
-    return WindowsManager::Windows.IsEmpty();
+	return false;
 }
 
 bool LinuxPlatform::CanOpenUrl(const StringView& url)
@@ -2634,14 +2774,12 @@ void LinuxPlatform::OpenUrl(const StringView& url)
     system(cmd);
 }
 
-Vector2 LinuxPlatform::GetMousePosition()
+Float2 LinuxPlatform::GetMousePosition()
 {
     if (!xDisplay)
-        return Vector2::Zero;
-
-	int32 x, y;
+        return Float2::Zero;
+	int32 x = 0, y = 0;
 	uint32 screenCount = (uint32)X11::XScreenCount(xDisplay);
-
 	for (uint32 i = 0; i < screenCount; i++)
 	{
 		X11::Window outRoot, outChild;
@@ -2650,11 +2788,10 @@ Vector2 LinuxPlatform::GetMousePosition()
 		if (X11::XQueryPointer(xDisplay, X11::XRootWindow(xDisplay, i), &outRoot, &outChild, &x, &y, &childX, &childY, &mask))
 			break;
 	}
-
-	return Vector2((float)x, (float)y);
+	return Float2((float)x, (float)y);
 }
 
-void LinuxPlatform::SetMousePosition(const Vector2& pos)
+void LinuxPlatform::SetMousePosition(const Float2& pos)
 {
     if (!xDisplay)
         return;
@@ -2681,44 +2818,106 @@ void LinuxPlatform::SetMousePosition(const Vector2& pos)
 	}
 }
 
-Vector2 LinuxPlatform::GetDesktopSize()
+Float2 LinuxPlatform::GetDesktopSize()
 {
     if (!xDisplay)
-        return Vector2::Zero;
+        return Float2::Zero;
 
 	int event, err;
 	const bool ok = X11::XineramaQueryExtension(xDisplay, &event, &err);
 	if (!ok)
-		return Vector2::Zero;
+		return Float2::Zero;
 
 	int count;
 	int screenIdx = 0;
 	X11::XineramaScreenInfo* xsi = X11::XineramaQueryScreens(xDisplay, &count);
 	if (screenIdx >= count)
-		return Vector2::Zero;
+		return Float2::Zero;
 
-	Vector2 size((float)xsi[screenIdx].width, (float)xsi[screenIdx].height);
+    // this function is used as a fallback to place a window at the center of
+    // a screen so we report only one screen instead of the real desktop
+	Float2 size((float)xsi[screenIdx].width, (float)xsi[screenIdx].height);
 	X11::XFree(xsi);
 	return size;
 }
 
-Rectangle LinuxPlatform::GetMonitorBounds(const Vector2& screenPos)
+Rectangle LinuxPlatform::GetMonitorBounds(const Float2& screenPos)
 {
-	// TODO: do it in a proper way
-	return Rectangle(Vector2::Zero, GetDesktopSize());
+    if (!xDisplay)
+        return Rectangle::Empty;
+
+    int event, err;
+    const bool ok = X11::XineramaQueryExtension(xDisplay, &event, &err);
+    if (!ok)
+        return Rectangle::Empty;
+
+    int count;
+    int screenIdx = 0;
+    X11::XineramaScreenInfo* xsi = X11::XineramaQueryScreens(xDisplay, &count);
+    if (screenIdx >= count)
+        return Rectangle::Empty;
+    // find the screen for this screenPos
+    for (int i = 0; i < count; i++)
+    {
+        if (screenPos.X >= xsi[i].x_org && screenPos.X < xsi[i].x_org+xsi[i].width
+            && screenPos.Y >= xsi[i].y_org && screenPos.Y < xsi[i].y_org+xsi[i].height)
+        {
+            screenIdx = i;
+            break;
+        }
+    }
+
+    Float2 org((float)xsi[screenIdx].x_org, (float)xsi[screenIdx].y_org);
+    Float2 size((float)xsi[screenIdx].width, (float)xsi[screenIdx].height);
+    X11::XFree(xsi);
+	return Rectangle(org, size);
 }
 
 Rectangle LinuxPlatform::GetVirtualDesktopBounds()
 {
-	// TODO: do it in a proper way
-	return Rectangle(Vector2::Zero, GetDesktopSize());
+    if (!xDisplay)
+        return Rectangle::Empty;
+
+    int event, err;
+    const bool ok = X11::XineramaQueryExtension(xDisplay, &event, &err);
+    if (!ok)
+        return Rectangle::Empty;
+
+    int count;
+    X11::XineramaScreenInfo* xsi = X11::XineramaQueryScreens(xDisplay, &count);
+    if (count <= 0)
+        return Rectangle::Empty;
+    // get all screen dimensions and assume the monitors form a rectangle
+    // as you can arrange monitors to your liking this is not necessarily the case
+    int minX = INT32_MAX, minY = INT32_MAX;
+    int maxX = 0, maxY = 0;
+    for (int i = 0; i < count; i++)
+    {
+        int maxScreenX = xsi[i].x_org + xsi[i].width;
+        int maxScreenY = xsi[i].y_org + xsi[i].height;
+        if (maxScreenX > maxX)
+            maxX = maxScreenX;
+        if (maxScreenY > maxY)
+            maxY = maxScreenY;
+        if (minX > xsi[i].x_org)
+            minX = xsi[i].x_org;
+        if (minY > xsi[i].y_org)
+            minY = xsi[i].y_org;
+    }
+
+    Float2 org(static_cast<float>(minX), static_cast<float>(minY));
+    Float2 size(static_cast<float>(maxX - minX), static_cast<float>(maxY - minY));
+    X11::XFree(xsi);
+    return Rectangle(org, size);
 }
 
 String LinuxPlatform::GetMainDirectory()
 {
     char buffer[UNIX_APP_BUFF_SIZE];
-    readlink("/proc/self/exe", buffer, UNIX_APP_BUFF_SIZE);
-    const String str(buffer);
+    const int32 len = readlink("/proc/self/exe", buffer, UNIX_APP_BUFF_SIZE);
+	if (len <= 0)
+		return String::Empty;
+    const String str(buffer, len);
     int32 pos = str.FindLast(TEXT('/'));
     if (pos != -1 && ++pos < str.Length())
         return str.Left(pos);
@@ -2728,8 +2927,10 @@ String LinuxPlatform::GetMainDirectory()
 String LinuxPlatform::GetExecutableFilePath()
 {
     char buffer[UNIX_APP_BUFF_SIZE];
-    readlink("/proc/self/exe", buffer, UNIX_APP_BUFF_SIZE);
-    return String(buffer);
+    const int32 len = readlink("/proc/self/exe", buffer, UNIX_APP_BUFF_SIZE);
+	if (len <= 0)
+		return String::Empty;
+    return String(buffer, len);
 }
 
 Guid LinuxPlatform::GetUniqueDeviceId()
@@ -2749,9 +2950,35 @@ bool LinuxPlatform::SetWorkingDirectory(const String& path)
     return chdir(StringAsANSI<>(*path).Get()) != 0;
 }
 
+#if !PLATFORM_SDL
 Window* LinuxPlatform::CreateWindow(const CreateWindowSettings& settings)
 {
     return New<LinuxWindow>(settings);
+}
+#endif
+
+extern char **environ;
+
+void LinuxPlatform::GetEnvironmentVariables(Dictionary<String, String, HeapAllocation>& result)
+{
+	char **s = environ;
+	for (; *s; s++)
+	{
+		char* var = *s;
+		int32 split = -1;
+		for (int32 i = 0; var[i]; i++)
+		{
+			if (var[i] == '=')
+			{
+				split = i;
+				break;
+			}
+		}
+		if (split == -1)
+			result[String(var)] = String::Empty;
+		else
+			result[String(var, split)] = String(var + split + 1);
+	}
 }
 
 bool LinuxPlatform::GetEnvironmentVariable(const String& name, String& value)
@@ -2770,84 +2997,126 @@ bool LinuxPlatform::SetEnvironmentVariable(const String& name, const String& val
     return setenv(StringAsANSI<>(*name).Get(), StringAsANSI<>(*value).Get(), true) != 0;
 }
 
-int32 LinuxPlatform::StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow, bool waitForEnd)
+#if !PLATFORM_SDL
+int32 LinuxPlatform::CreateProcess(CreateProcessSettings& settings)
 {
-	String command(filename);
-	if (args.HasChars())
-		command += TEXT(" ") + String(args);
-    LOG(Info, "Command: {0}", command);
-    if (workingDir.HasChars())
+    LOG(Info, "Command: {0} {1}", settings.FileName, settings.Arguments);
+    if (settings.WorkingDirectory.HasChars())
     {
-        LOG(Info, "Working directory: {0}", workingDir);
+        LOG(Info, "Working directory: {0}", settings.WorkingDirectory);
     }
+    const bool captureStdOut = settings.LogOutput || settings.SaveOutput;
+    const String cmdLine = String::Format(TEXT("\"{0}\" {1}"), settings.FileName, settings.Arguments);
 
-	// TODO: support workingDir
-	// TODO: support hiddenWindow
-	// TODO: support waitForEnd
-
-	StringAnsi commandAnsi(command);
-	system(commandAnsi.GetText());
-    return 0;
-}
-
-int32 LinuxPlatform::RunProcess(const StringView& cmdLine, const StringView& workingDir, bool hiddenWindow)
-{
-    return RunProcess(cmdLine, workingDir, Dictionary<String, String>(), hiddenWindow);
-}
-
-int32 LinuxPlatform::RunProcess(const StringView& cmdLine, const StringView& workingDir, const Dictionary<String, String>& environment, bool hiddenWindow)
-{
-    LOG(Info, "Command: {0}", cmdLine);
-    if (workingDir.HasChars())
+	int fildes[2];
+	int32 returnCode = 0;
+	if (captureStdOut && pipe(fildes) < 0)
     {
-        LOG(Info, "Working directory: {0}", workingDir);
-    }
-
-	// TODO: support environment
-	// TODO: support hiddenWindow
-
-	String dir = GetWorkingDirectory();
-	StringAnsi cmdLineAnsi;
-	if (workingDir.HasChars())
-	{
-		cmdLineAnsi += "chmod ";
-		cmdLineAnsi += StringAnsi(workingDir);
-		cmdLineAnsi += "; ";
-	}
-	cmdLineAnsi += StringAnsi(cmdLine);
-
-    FILE* pipe = popen(cmdLineAnsi.GetText(), "r");
-    if (!pipe)
-	{
-        LOG(Warning, "Cannot start process '{0}'", cmdLine);
-        return 1;
+		LOG(Warning, "Failed to create a pipe, errno={}", errno);
 	}
 
-	char rawData[256];
-	StringAnsi pathAnsi;
-	Array<Char> logData;
-	while (fgets(rawData, sizeof(rawData), pipe) != NULL)
-	{
-		logData.Clear();
-		int32 rawDataLength = StringUtils::Length(rawData);
-		if (rawDataLength == 0)
-			continue;
-		if (rawData[rawDataLength - 1] == '\0')
-			rawDataLength--;
-		if (rawData[rawDataLength - 1] == '\n')
-			rawDataLength--;
-		logData.Resize(rawDataLength + 1);
-		StringUtils::ConvertANSI2UTF16(rawData, logData.Get(), rawDataLength);
-		logData.Last() = '\0';
-		Log::Logger::Write(LogType::Info, StringView(logData.Get(), rawDataLength));
+	pid_t pid = fork();
+	if (pid < 0)
+    {
+		LOG(Warning, "Failed to fork a process, errno={}", errno);
+		return errno;
+	}
+    else if (pid == 0)
+    {
+		// child process
+		int ret;
+		const char* const cmd[] = { "sh", "-c", StringAnsi(cmdLine).GetText(), (char *)0 };
+		// we could use the execve and supply a list of variable assignments but as we would have to build
+		// and quote the values there is hardly any benefit over using setenv() calls
+        for (auto& e : settings.Environment)
+        {
+            setenv(StringAnsi(e.Key).GetText(), StringAnsi(e.Value).GetText(), 1);
+        }
+
+        if (settings.WorkingDirectory.HasChars() && chdir(StringAnsi(settings.WorkingDirectory).GetText()) != 0)
+        {
+            LOG(Warning, "Failed to set working directory to {}, errno={}", settings.WorkingDirectory, errno);
+        }
+		if (captureStdOut)
+        {
+			close(fildes[0]); // close the reading end of the pipe
+			dup2(fildes[1], STDOUT_FILENO); // redirect stdout to pipe
+			close(fildes[1]);
+			dup2(STDOUT_FILENO, STDERR_FILENO); // redirect stderr to stdout
+		}
+
+		ret = execv("/bin/sh", (char **)cmd);
+		if (ret < 0)
+        {
+			LOG(Warning, " failed, errno={}", errno);
+		}
+		fflush(stdout);
+		_exit(1);
+	}
+    else
+    {
+		// parent process
+		LOG(Info, "{} started, pid={}", cmdLine, pid);
+		if (settings.WaitForEnd)
+        {
+			if (captureStdOut)
+            {
+				char lineBuffer[1024];
+				close(fildes[1]); // close the writing end of the pipe
+				FILE* stdPipe = fdopen(fildes[0], "r");
+				while (fgets(lineBuffer, sizeof(lineBuffer), stdPipe) != NULL)
+                {
+					char *p = lineBuffer + strlen(lineBuffer) - 1;
+					if (*p == '\n') *p = 0;
+                    String line(lineBuffer);
+                    if (settings.SaveOutput)
+                        settings.Output.Add(line.Get(), line.Length());
+#if LOG_ENABLE
+                    if (settings.LogOutput)
+                        Log::Logger::Write(LogType::Info, line);
+#endif
+				}
+			}
+			int stat_loc;
+			if (waitpid(pid, &stat_loc, 0) < 0)
+            {
+				LOG(Warning, "Waiting for pid {} failed, errno={}", pid, errno);
+				returnCode = errno;
+			}
+            else
+            {
+				if (WIFEXITED(stat_loc))
+                {
+					int error = WEXITSTATUS(stat_loc);
+					if (error != 0)
+                    {
+						LOG(Warning, "Command exited with error code={}", error);
+						returnCode = error;
+					}
+				}
+                else if (WIFSIGNALED(stat_loc))
+                {
+					LOG(Warning, "Command was killed by signal#{}", WTERMSIG(stat_loc));
+					returnCode = EPIPE;
+				}
+                else if (WIFSTOPPED(stat_loc))
+                {
+					LOG(Warning, "Command was stopped by signal#{}", WSTOPSIG(stat_loc));
+					returnCode = EPIPE;
+				}
+			}
+			close(fildes[0]);
+		}
 	}
 
-	int32 result = pclose(pipe);
-    return result;
+	return returnCode;
 }
+#endif
 
 void* LinuxPlatform::LoadLibrary(const Char* filename)
 {
+    PROFILE_CPU();
+    ZoneText(filename, StringUtils::Length(filename));
     const StringAsANSI<> filenameANSI(filename);
     void* result = dlopen(filenameANSI.Get(), RTLD_LAZY | RTLD_LOCAL);
     if (!result)
@@ -2866,5 +3135,193 @@ void* LinuxPlatform::GetProcAddress(void* handle, const char* symbol)
 {
     return dlsym(handle, symbol);
 }
+
+Array<LinuxPlatform::StackFrame> LinuxPlatform::GetStackFrames(int32 skipCount, int32 maxDepth, void* context)
+{
+    Array<StackFrame> result;
+#if CRASH_LOG_ENABLE
+    void* callstack[120];
+    skipCount = Math::Min<int32>(skipCount, ARRAY_COUNT(callstack));
+    int32 maxCount = Math::Min<int32>(ARRAY_COUNT(callstack), skipCount + maxDepth);
+    int32 count = backtrace(callstack, maxCount);
+    int32 useCount = count - skipCount;
+    if (useCount > 0)
+    {
+        char** names = backtrace_symbols(callstack + skipCount, useCount);
+        result.Resize(useCount);
+        for (int32 i = 0; i < useCount; i++)
+        {
+            char* name = names[i];
+            StackFrame& frame = result[i];
+            frame.ProgramCounter = callstack[skipCount + i];
+            frame.ModuleName[0] = 0;
+            frame.FileName[0] = 0;
+            frame.LineNumber = 0;
+            int32 nameLen = Math::Min<int32>(StringUtils::Length(name), ARRAY_COUNT(frame.FunctionName) - 1);
+            Platform::MemoryCopy(frame.FunctionName, name, nameLen);
+            frame.FunctionName[nameLen] = 0;
+            
+        }
+        free(names);
+    }
+#endif
+    return result;
+}
+
+#if USE_EDITOR
+
+#include "Engine/Core/Math/Vector2.h"
+#include "Engine/Core/Math/Vector4.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Platform/Linux/LinuxPlatform.h"
+#include "Engine/Platform/Linux/IncludeX11.h"
+
+#if PLATFORM_SDL
+#include <portal-enums.h>
+#include <libportal/screenshot.h>
+
+namespace PortalImpl
+{
+    XdpPortal* Portal = nullptr;
+    int64 MainLoopReady = 0;
+
+    gpointer GLibMainLoop(gpointer data);
+    void PickColorCallback(GObject* source, GAsyncResult* result, gpointer data);
+}
+#endif
+
+Color32 LinuxPlatform::GetScreenColorAt(const Float2& pos)
+{
+    X11::Display* display = (X11::Display*)Platform::GetXDisplay();
+    if (display)
+    {
+        int defaultScreen = X11::XDefaultScreen(display);
+        X11::Window rootWindow = X11::XRootWindow(display, defaultScreen);
+        X11::XImage* image = X11::XGetImage(display, rootWindow, (int)pos.X, (int)pos.Y, 1, 1, AllPlanes, XYPixmap);
+        if (image)
+        {
+            X11::XColor color;
+            color.pixel = XGetPixel(image, 0, 0);
+            X11::XFree(image);
+
+            X11::XQueryColor(display, X11::XDefaultColormap(display, defaultScreen), &color);
+
+            Color32 outputColor;
+            outputColor.R = color.red / 256;
+            outputColor.G = color.green / 256;
+            outputColor.B = color.blue / 256;
+            outputColor.A = 255;
+            return outputColor;
+        }
+        else
+        {
+            // XWayland doesn't support XGetImage
+        }
+    }
+
+    return Color32::Transparent;
+}
+
+void OnScreenUtilsXEventCallback(void* eventPtr)
+{
+    X11::XEvent* event = (X11::XEvent*)eventPtr;
+    X11::Display* display = (X11::Display*)Platform::GetXDisplay();
+    if (event->type == ButtonPress)
+    {
+        const Float2 cursorPos = Platform::GetMousePosition();
+        const Color32 colorPicked = LinuxPlatform::GetScreenColorAt(cursorPos);
+        X11::XUngrabPointer(display, CurrentTime);
+        PlatformBase::PickScreenColorDone(colorPicked);
+        LinuxPlatform::xEventReceived.Unbind(OnScreenUtilsXEventCallback);
+    }
+}
+
+void LinuxPlatform::PickScreenColor()
+{
+    PROFILE_CPU();
+    X11::Display* display = (X11::Display*)Platform::GetXDisplay();
+    if (display)
+    {
+        X11::Window rootWindow = X11::XRootWindow(display, X11::XDefaultScreen(display));
+        X11::Cursor cursor = XCreateFontCursor(display, 130);
+        int grabbedPointer = X11::XGrabPointer(display, rootWindow, 0, ButtonPressMask, GrabModeAsync, GrabModeAsync, rootWindow, cursor, CurrentTime);
+        if (grabbedPointer != GrabSuccess)
+        {
+            LOG(Error, "Failed to grab cursor for events.");
+            X11::XFreeCursor(display, cursor);
+            return;
+        }
+
+        X11::XFreeCursor(display, cursor);
+        LinuxPlatform::xEventReceived.Bind(OnScreenUtilsXEventCallback);
+        return;
+    }
+#if PLATFORM_SDL
+    if (PortalImpl::MainLoopReady == 0)
+    {
+        // Initialize portal
+        GError* error = nullptr;
+        PortalImpl::Portal = xdp_portal_initable_new(&error);
+        if (error != nullptr)
+        {
+            PortalImpl::MainLoopReady = 2;
+            LOG(Error, "Failed to initialize XDP Portal");
+            return;
+        }
+
+        // Run the GLib main loop in other thread in order to process asynchronous callbacks
+        g_thread_new(nullptr, PortalImpl::GLibMainLoop, nullptr);
+        while (Platform::AtomicRead(&PortalImpl::MainLoopReady) != 1)
+            Platform::Sleep(1);
+    }
+
+    if (PortalImpl::Portal != nullptr)
+    {
+        // Enter color picking mode, the callback receives the final color
+        xdp_portal_pick_color(PortalImpl::Portal, nullptr, nullptr, PortalImpl::PickColorCallback, nullptr);
+    }
+#endif
+}
+
+#if PLATFORM_SDL
+
+gpointer PortalImpl::GLibMainLoop(gpointer data)
+{
+    GMainContext* mainContext = g_main_context_get_thread_default();
+    GMainLoop* mainLoop = g_main_loop_new(mainContext, false);
+
+    Platform::AtomicStore(&PortalImpl::MainLoopReady, 1);
+
+    g_main_loop_run(mainLoop);
+    g_main_loop_unref(mainLoop);
+    return nullptr;
+}
+
+void PortalImpl::PickColorCallback(GObject* source, GAsyncResult* result, gpointer data)
+{
+    GError* error = nullptr;
+    GVariant* variant = xdp_portal_pick_color_finish(PortalImpl::Portal, result, &error);
+    if (error)
+    {
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+            LOG(Info, "XDP Portal pick color cancelled");
+        else
+            LOG(Error, "XDP Portal pick color failed: {}", String(error->message));
+        return;
+    }
+
+    // The color is stored in a triple double variant, extract the values
+    Double4 colorDouble;
+    g_variant_get(variant, "(ddd)", &colorDouble.X, &colorDouble.Y, &colorDouble.Z);
+    g_variant_unref(variant);
+    colorDouble.W = 1.0f;
+    Vector4 colorVector = colorDouble;
+    Color32 color = Color32(colorVector);
+
+    PlatformBase::PickScreenColorDone(color);
+}
+#endif
+
+#endif
 
 #endif

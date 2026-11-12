@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "../Enums.h"
-#include "Engine/Core/Math/Math.h"
 
 /// <summary>
 /// Material domain type. Material domain defines the target usage of the material shader.
@@ -49,6 +48,9 @@ API_ENUM() enum class MaterialDomain : byte
     /// The particle shader used for volumetric effects rendering such as Volumetric Fog.
     /// </summary>
     VolumeParticle = 7,
+
+    API_ENUM(Attributes="HideInEditor")
+    MAX
 };
 
 /// <summary>
@@ -83,7 +85,7 @@ API_ENUM() enum class MaterialBlendMode : byte
 API_ENUM() enum class MaterialShadingModel : byte
 {
     /// <summary>
-    /// The unlit material. Emissive channel is used as an output color. Can perform custom lighting operations or just glow. Won't be affected by the lighting pipeline.
+    /// The unlit material. The emissive channel is used as an output color. Can perform custom lighting operations or just glow. Won't be affected by the lighting pipeline.
     /// </summary>
     Unlit = 0,
 
@@ -93,7 +95,7 @@ API_ENUM() enum class MaterialShadingModel : byte
     Lit = 1,
 
     /// <summary>
-    /// The subsurface material. Intended for materials like vax or skin that need light scattering to transport simulation through the object.
+    /// The subsurface material. Intended for materials like wax or skin that need light scattering to transport simulation through the object.
     /// </summary>
     Subsurface = 2,
 
@@ -101,6 +103,11 @@ API_ENUM() enum class MaterialShadingModel : byte
     /// The foliage material. Intended for foliage materials like leaves and grass that need light scattering to transport simulation through the thin object.
     /// </summary>
     Foliage = 3,
+
+    /// <summary>
+    /// The custom lit shader that calculates own lighting such as Cel Shading. It has access to the scene lights data during both GBuffer and Forward pass rendering.
+    /// </summary>
+    CustomLit = 5,
 };
 
 /// <summary>
@@ -269,6 +276,21 @@ API_ENUM(Attributes="Flags") enum class MaterialFeaturesFlags : uint32
     /// The flag used to enable refraction offset based on the difference between the per-pixel normal and the per-vertex normal. Useful for large water-like surfaces.
     /// </summary>
     PixelNormalOffsetRefraction = 1 << 9,
+
+    /// <summary>
+    /// The flag used to enable high-quality reflections based on the screen space raytracing. Useful for large water-like surfaces. The Forward Pass materials option.
+    /// </summary>
+    ScreenSpaceReflections = 1 << 10,
+
+    /// <summary>
+    /// The flag used to enable sampling Global Illumination in material (eg. light probes or volumetric lightmap). The Forward Pass materials option.
+    /// </summary>
+    GlobalIllumination = 1 << 11,
+
+    /// <summary>
+    /// The flag used to disable shadow maps sampling when shading object with a light. The Forward Pass materials option.
+    /// </summary>
+    DisableShadows = 1 << 12,
 };
 
 DECLARE_ENUM_OPERATORS(MaterialFeaturesFlags);
@@ -348,6 +370,22 @@ API_ENUM() enum class MaterialDecalBlendingMode : byte
 };
 
 /// <summary>
+/// Transparent material lighting modes.
+/// </summary>
+API_ENUM() enum class MaterialTransparentLightingMode : byte
+{
+    /// <summary>
+    /// Default directional lighting evaluated per-pixel at the material surface. Use it for semi-transparent surfaces - with both diffuse and specular lighting components active.
+    /// </summary>
+    Surface = 0,
+
+    /// <summary>
+    /// Non-directional lighting evaluated per-pixel at material surface. Use it for volumetric objects such as smoke, rain or dust - only the diffuse lighting term is active (no specular highlights).
+    /// </summary>
+    SurfaceNonDirectional = 1,
+};
+
+/// <summary>
 /// Material input scene textures. Special inputs from the graphics pipeline.
 /// </summary>
 API_ENUM() enum class MaterialSceneTextures
@@ -406,6 +444,21 @@ API_ENUM() enum class MaterialSceneTextures
     /// The material shading mode.
     /// </summary>
     ShadingModel = 10,
+
+    /// <summary>
+    /// The scene world-space position (relative to the render view origin).
+    /// </summary>
+    WorldPosition = 11,
+
+    /// <summary>
+    /// The scene stencil.
+    /// </summary>
+    SceneStencil = 12,
+
+    /// <summary>
+    /// The object layer index.
+    /// </summary>
+    ObjectLayer = 13,
 };
 
 /// <summary>
@@ -434,11 +487,38 @@ struct MaterialInfo8
 };
 
 /// <summary>
+/// Material info structure - version 9
+/// [Deprecated on 13.07.2022, expires on 13.07.2024]
+/// </summary>
+struct MaterialInfo9
+{
+    MaterialDomain Domain;
+    MaterialBlendMode BlendMode;
+    MaterialShadingModel ShadingModel;
+    MaterialUsageFlags UsageFlags;
+    MaterialFeaturesFlags FeaturesFlags;
+    MaterialDecalBlendingMode DecalBlendingMode;
+    MaterialPostFxLocation PostFxLocation;
+    CullMode CullMode;
+    float MaskThreshold;
+    float OpacityThreshold;
+    TessellationMethod TessellationMode;
+    int32 MaxTessellationFactor;
+
+    MaterialInfo9()
+    {
+    }
+
+    MaterialInfo9(const MaterialInfo8& other);
+    bool operator==(const MaterialInfo9& other) const;
+};
+
+/// <summary>
 /// Structure with basic information about the material surface. It describes how material is reacting on light and which graphical features of it requires to render.
 /// </summary>
 API_STRUCT() struct FLAXENGINE_API MaterialInfo
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(MaterialInfo);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(MaterialInfo);
 
     /// <summary>
     /// The material shader domain.
@@ -469,6 +549,11 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(MaterialInfo);
     /// The decal material blending mode.
     /// </summary>
     API_FIELD() MaterialDecalBlendingMode DecalBlendingMode;
+
+    /// <summary>
+    /// The transparent material lighting mode.
+    /// </summary>
+    API_FIELD() MaterialTransparentLightingMode TransparentLightingMode;
 
     /// <summary>
     /// The post fx material rendering location.
@@ -504,10 +589,10 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(MaterialInfo);
     {
     }
 
-    MaterialInfo(const MaterialInfo8& other);
+    MaterialInfo(const MaterialInfo9& other);
     bool operator==(const MaterialInfo& other) const;
 };
 
 // The current material info descriptor version used by the material pipeline
-typedef MaterialInfo MaterialInfo9;
-#define MaterialInfo_Version 9
+typedef MaterialInfo MaterialInfo10;
+#define MaterialInfo_Version 10

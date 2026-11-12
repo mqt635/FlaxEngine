@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -17,8 +17,9 @@ namespace FlaxEditor.Surface.Undo
         private uint _nodeId;
         private ushort _groupId;
         private ushort _typeId;
-        private Vector2 _nodeLocation;
+        private Float2 _nodeLocation;
         private object[] _nodeValues;
+        private SurfaceNodeActions _actionType = SurfaceNodeActions.User; // Action usage flow is first to apply user effect such as removing/adding node, then we use Undo type so node can react to this
 
         public AddRemoveNodeAction(SurfaceNode node, bool isAdd)
         {
@@ -38,6 +39,7 @@ namespace FlaxEditor.Surface.Undo
                 Add();
             else
                 Remove();
+            _actionType = SurfaceNodeActions.Undo;
         }
 
         /// <inheritdoc />
@@ -64,11 +66,13 @@ namespace FlaxEditor.Surface.Undo
             // Initialize
             if (node.Values != null && node.Values.Length == _nodeValues.Length)
                 Array.Copy(_nodeValues, node.Values, _nodeValues.Length);
+            else if (_nodeValues != null && (node.Archetype.Flags & NodeFlags.VariableValuesSize) != 0)
+                node.Values = (object[])_nodeValues.Clone();
             else if (_nodeValues != null && _nodeValues.Length != 0)
                 throw new InvalidOperationException("Invalid node values.");
             node.Location = _nodeLocation;
-            context.OnControlLoaded(node);
-            node.OnSurfaceLoaded();
+            context.OnControlLoaded(node, _actionType);
+            node.OnSurfaceLoaded(_actionType);
 
             context.MarkAsModified();
         }
@@ -89,7 +93,7 @@ namespace FlaxEditor.Surface.Undo
 
             // Remove node
             context.Nodes.Remove(node);
-            context.OnControlDeleted(node);
+            context.OnControlDeleted(node, _actionType);
 
             context.MarkAsModified();
         }

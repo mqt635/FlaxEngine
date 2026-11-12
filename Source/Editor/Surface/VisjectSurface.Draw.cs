@@ -1,5 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.Collections.Generic;
+using FlaxEditor.Surface.Elements;
 using FlaxEngine;
 
 namespace FlaxEditor.Surface
@@ -13,7 +15,7 @@ namespace FlaxEditor.Surface
             var currentScale = _rootControl.Scale.X;
             if (Mathf.Abs(_targetScale - currentScale) > 0.001f)
             {
-                var scale = new Vector2(Mathf.Lerp(currentScale, _targetScale, deltaTime * 10.0f));
+                var scale = new Float2(Mathf.Lerp(currentScale, _targetScale, deltaTime * 10.0f));
                 _rootControl.Scale = scale;
             }
 
@@ -21,7 +23,7 @@ namespace FlaxEditor.Surface
             bool isMovingWithMouse = false;
             if (IsMovingSelection || (IsConnecting && !IsPrimaryMenuOpened))
             {
-                Vector2 moveVector = Vector2.Zero;
+                var moveVector = Float2.Zero;
                 float edgeDetectDistance = 22.0f;
                 if (_mousePos.X < edgeDetectDistance)
                 {
@@ -49,6 +51,13 @@ namespace FlaxEditor.Surface
             _moveViewWithMouseDragSpeed = isMovingWithMouse ? Mathf.Clamp(_moveViewWithMouseDragSpeed + deltaTime * 20.0f, 1.0f, 8.0f) : 1.0f;
 
             base.Update(deltaTime);
+
+            // Batch undo actions
+            if (_batchedUndoActions != null && _batchedUndoActions.Count != 0)
+            {
+                Undo.AddAction(_batchedUndoActions.Count == 1 ? _batchedUndoActions[0] : new MultiUndoAction(_batchedUndoActions));
+                _batchedUndoActions.Clear();
+            }
         }
 
         /// <summary>
@@ -56,27 +65,68 @@ namespace FlaxEditor.Surface
         /// </summary>
         protected virtual void DrawBackground()
         {
-            var background = Style.Background;
+            DrawBackgroundDefault(Style.Background, Size, _rootControl.Location);
+            //DrawBackgroundSolidColor(Style.BackgroundColor, Width, Height);
+            DrawGridBackground();
+        }
+
+        internal static void DrawBackgroundSolidColor(Color color, float width, float height)
+        {
+            Rectangle backgroundRect = new Rectangle(0f, 0f, width, height);
+            Render2D.FillRectangle(backgroundRect, color);
+        }
+
+        internal void DrawGridBackground()
+        {
+            var viewRect = GetClientArea();
+            var upperLeft = _rootControl.PointFromParent(viewRect.Location);
+            var bottomRight = _rootControl.PointFromParent(viewRect.Size);
+            var min = Float2.Min(upperLeft, bottomRight);
+            var max = Float2.Max(upperLeft, bottomRight);
+            var pixelRange = (max - min) * ViewScale * 2.75f;
+            Render2D.PushClip(ref viewRect);
+            DrawAxis(Float2.UnitX, viewRect, min.X, max.X, pixelRange.X);
+            DrawAxis(Float2.UnitY, viewRect, min.Y, max.Y, pixelRange.Y);
+            Render2D.PopClip();
+        }
+
+        private void DrawAxis(Float2 axis, Rectangle viewRect, float min, float max, float pixelRange)
+        {
+            var linesColor = Style.BackgroundColor.RGBMultiplied(1.2f);
+            float[] gridTickStrengths = null;
+            Utilities.Utils.DrawCurveTicks((decimal tick, double step, float strength) =>
+            {
+                var p = _rootControl.PointToParent(axis * (float)tick); ;
+
+                // Draw line
+                var lineRect = new Rectangle
+                (
+                 viewRect.Location + (p - 0.5f) * axis,
+                 Float2.Lerp(viewRect.Size, Float2.One, axis)
+                );
+                Render2D.FillRectangle(lineRect, linesColor.AlphaMultiplied(strength));
+
+            }, Utilities.Utils.CurveTickSteps, ref gridTickStrengths, min, max, pixelRange);
+        }
+
+        internal static void DrawBackgroundDefault(Texture background, Float2 size, Float2 offset)
+        {
             if (background && background.ResidentMipLevels > 0)
             {
                 var bSize = background.Size;
-                float bw = bSize.X;
-                float bh = bSize.Y;
-                Vector2 pos = Vector2.Mod(bSize);
+                var pos = Float2.Mod(offset / bSize) * bSize;
+                var max = Float2.Ceil(size / bSize + 1.0f);
 
                 if (pos.X > 0)
-                    pos.X -= bw;
+                    pos.X -= bSize.X;
                 if (pos.Y > 0)
-                    pos.Y -= bh;
+                    pos.Y -= bSize.Y;
 
-                int maxI = Mathf.CeilToInt(Width / bw + 1.0f);
-                int maxJ = Mathf.CeilToInt(Height / bh + 1.0f);
-
-                for (int i = 0; i < maxI; i++)
+                for (int i = 0; i < max.X; i++)
                 {
-                    for (int j = 0; j < maxJ; j++)
+                    for (int j = 0; j < max.Y; j++)
                     {
-                        Render2D.DrawTexture(background, new Rectangle(pos.X + i * bw, pos.Y + j * bh, bw, bh), Color.White);
+                        Render2D.DrawTexture(background, new Rectangle(pos.X + i * bSize.X, pos.Y + j * bSize.Y, bSize), Color.White);
                     }
                 }
             }
@@ -88,16 +138,17 @@ namespace FlaxEditor.Surface
         /// <remarks>Called only when user is selecting nodes using rectangle tool.</remarks>
         protected virtual void DrawSelection()
         {
+            var style = FlaxEngine.GUI.Style.Current;
             var selectionRect = Rectangle.FromPoints(_leftMouseDownPos, _mousePos);
-            Render2D.FillRectangle(selectionRect, Color.Orange * 0.4f);
-            Render2D.DrawRectangle(selectionRect, Color.Orange);
+            Render2D.FillRectangle(selectionRect, style.Selection);
+            Render2D.DrawRectangle(selectionRect, style.SelectionBorder);
         }
 
         /// <summary>
         /// Draws all the connections between surface nodes.
         /// </summary>
         /// <param name="mousePosition">The current mouse position (in surface-space).</param>
-        protected virtual void DrawConnections(ref Vector2 mousePosition)
+        protected virtual void DrawConnections(ref Float2 mousePosition)
         {
             // Draw all connections at once to boost batching process
             for (int i = 0; i < Nodes.Count; i++)
@@ -113,23 +164,45 @@ namespace FlaxEditor.Surface
         /// <remarks>Called only when user is connecting nodes.</remarks>
         protected virtual void DrawConnectingLine()
         {
-            // Get start position
-            Vector2 startPos = _connectionInstigator.ConnectionOrigin;
-
-            // Check if mouse is over any of box
             var cmVisible = _activeVisjectCM != null && _activeVisjectCM.Visible;
-            Vector2 endPos = cmVisible ? _rootControl.PointFromParent(ref _cmStartPos) : _rootControl.PointFromParent(ref _mousePos);
+            var endPos = cmVisible ? _rootControl.PointFromParent(ref _cmStartPos) : _rootControl.PointFromParent(ref _mousePos);
             Color lineColor = Style.Colors.Connecting;
-            if (_lastInstigatorUnderMouse != null && !cmVisible)
-            {
-                // Check if can connect objects
-                bool canConnect = _connectionInstigator.CanConnectWith(_lastInstigatorUnderMouse);
-                lineColor = canConnect ? Style.Colors.ConnectingValid : Style.Colors.ConnectingInvalid;
-                endPos = _lastInstigatorUnderMouse.ConnectionOrigin;
-            }
 
-            // Draw connection
-            _connectionInstigator.DrawConnectingLine(ref startPos, ref endPos, ref lineColor);
+            List<IConnectionInstigator> instigators = new List<IConnectionInstigator>(_connectionInstigators);
+            for (int i = 0; i < instigators.Count; i++)
+            {
+                IConnectionInstigator currentInstigator = instigators[i];
+                Float2 currentStartPosition = currentInstigator.ConnectionOrigin;
+
+                // Check if mouse is over any box
+                if (_lastInstigatorUnderMouse != null && !cmVisible)
+                {
+                    // Check if can connect objects
+                    bool canConnect = currentInstigator.CanConnectWith(_lastInstigatorUnderMouse);
+                    lineColor = canConnect ? Style.Colors.ConnectingValid : Style.Colors.ConnectingInvalid;
+                    endPos = _lastInstigatorUnderMouse.ConnectionOrigin;
+                }
+
+                Float2 actualStartPos = currentStartPosition;
+                Float2 actualEndPos = endPos;
+
+                if (currentInstigator is Archetypes.Tools.RerouteNode)
+                {
+                    if (endPos.X < currentStartPosition.X && _lastInstigatorUnderMouse is null or Box { IsOutput: true })
+                    {
+                        actualStartPos = endPos;
+                        actualEndPos = currentStartPosition;
+                    }
+                }
+                else if (currentInstigator is Box { IsOutput: false })
+                {
+                    actualStartPos = endPos;
+                    actualEndPos = currentStartPosition;
+                }
+
+                // Draw connection
+                currentInstigator.DrawConnectingLine(ref actualStartPos, ref actualEndPos, ref lineColor);
+            }
         }
 
         /// <summary>
@@ -142,39 +215,77 @@ namespace FlaxEditor.Surface
             foreach (var inputBracket in _inputBrackets)
             {
                 // Draw brackets
-                Vector2 upperLeft = _rootControl.PointToParent(inputBracket.Area.UpperLeft);
-                Vector2 bottomRight = _rootControl.PointToParent(inputBracket.Area.BottomRight);
+                var upperLeft = _rootControl.PointToParent(inputBracket.Area.UpperLeft);
+                var bottomRight = _rootControl.PointToParent(inputBracket.Area.BottomRight);
 
-                Vector2 upperRight = new Vector2(bottomRight.X, upperLeft.Y);
-                Vector2 bottomLeft = new Vector2(upperLeft.X, bottomRight.Y);
+                var upperRight = new Float2(bottomRight.X, upperLeft.Y);
+                var bottomLeft = new Float2(upperLeft.X, bottomRight.Y);
 
                 // Calculate control points
                 float height = bottomLeft.Y - upperLeft.Y;
                 float offsetX = height / 10f;
-                Vector2 leftControl1 = new Vector2(bottomLeft.X - offsetX, bottomLeft.Y);
-                Vector2 leftControl2 = new Vector2(upperLeft.X - offsetX, upperLeft.Y);
+                var leftControl1 = new Float2(bottomLeft.X - offsetX, bottomLeft.Y);
+                var leftControl2 = new Float2(upperLeft.X - offsetX, upperLeft.Y);
 
                 // Draw left bracket
                 Render2D.DrawBezier(bottomLeft, leftControl1, leftControl2, upperLeft, style.Foreground, 2.2f);
 
                 // Calculate control points
-                Vector2 rightControl1 = new Vector2(bottomRight.X + offsetX, bottomRight.Y);
-                Vector2 rightControl2 = new Vector2(upperRight.X + offsetX, upperRight.Y);
+                var rightControl1 = new Float2(bottomRight.X + offsetX, bottomRight.Y);
+                var rightControl2 = new Float2(upperRight.X + offsetX, upperRight.Y);
 
                 // Draw right bracket
                 Render2D.DrawBezier(bottomRight, rightControl1, rightControl2, upperRight, fadedColor, 2.2f);
 
                 // Draw connection bezier
                 // X-offset at 75%
-                Vector2 bezierStartPoint = new Vector2(upperRight.X + offsetX * 0.75f, (upperRight.Y + bottomRight.Y) * 0.5f);
-                Vector2 bezierEndPoint = inputBracket.Box.ParentNode.PointToParent(_rootControl.Parent, inputBracket.Box.Center);
+                var bezierStartPoint = new Float2(upperRight.X + offsetX * 0.75f, (upperRight.Y + bottomRight.Y) * 0.5f);
+                var bezierEndPoint = inputBracket.Box.ParentNode.PointToParent(_rootControl.Parent, inputBracket.Box.Center);
 
-                Elements.OutputBox.DrawConnection(ref bezierStartPoint, ref bezierEndPoint, ref fadedColor);
+                Elements.OutputBox.DrawConnection(Style, ref bezierStartPoint, ref bezierEndPoint, ref fadedColor);
 
                 // Debug Area
                 //Rectangle drawRect = Rectangle.FromPoints(upperLeft, bottomRight);
                 //Render2D.FillRectangle(drawRect, Color.Green * 0.5f);
             }
+        }
+
+        /// <summary>
+        /// Draw connection hints for lazy connect feature.
+        /// </summary>
+        protected virtual void DrawLazyConnect()
+        {
+            var style = FlaxEngine.GUI.Style.Current;
+
+            if (_lazyConnectStartNode != null)
+            {
+                Float2 upperLeft = _rootControl.PointToParent(_lazyConnectStartNode.UpperLeft);
+                Rectangle startNodeOutline = new Rectangle(upperLeft + 1f, _lazyConnectStartNode.Size - 1f);
+                startNodeOutline.Size *= ViewScale;
+                Render2D.DrawRectangle(startNodeOutline.MakeExpanded(4f), style.BackgroundSelected, 4f);
+            }
+
+            if (_lazyConnectEndNode != null)
+            {
+                Float2 upperLeft = _rootControl.PointToParent(_lazyConnectEndNode.UpperLeft);
+                Rectangle startNodeOutline = new Rectangle(upperLeft + 1f, _lazyConnectEndNode.Size - 1f);
+                startNodeOutline.Size *= ViewScale;
+                Render2D.DrawRectangle(startNodeOutline.MakeExpanded(4f), style.BackgroundSelected, 4f);
+            }
+
+            Rectangle startRect = new Rectangle(_rightMouseDownPos - 6f, new Float2(12f));
+            Rectangle endRect = new Rectangle(_mousePos - 6f, new Float2(12f));
+
+            // Start and end shadows/ outlines
+            Render2D.FillRectangle(startRect.MakeExpanded(2.5f), Color.Black);
+            Render2D.FillRectangle(endRect.MakeExpanded(2.5f), Color.Black);
+
+            Render2D.DrawLine(_rightMouseDownPos, _mousePos, Color.Black, 7.5f);
+            Render2D.DrawLine(_rightMouseDownPos, _mousePos, style.ForegroundGrey, 5f);
+
+            // Draw start and end boxes over the lines to hide ugly artifacts at the ends
+            Render2D.FillRectangle(startRect, style.ForegroundGrey);
+            Render2D.FillRectangle(endRect, style.ForegroundGrey);
         }
 
         /// <summary>
@@ -189,11 +300,15 @@ namespace FlaxEditor.Surface
         public override void Draw()
         {
             var style = FlaxEngine.GUI.Style.Current;
-            var rect = new Rectangle(Vector2.Zero, Size);
+            var rect = new Rectangle(Float2.Zero, Size);
 
             DrawBackground();
 
             _rootControl.DrawComments();
+
+            // Reset input flags here because this is the closest to Update we have
+            WasSelecting = IsSelecting;
+            WasMovingSelection = IsMovingSelection;
 
             if (IsSelecting)
             {
@@ -219,6 +334,9 @@ namespace FlaxEditor.Surface
             DrawInputBrackets();
 
             DrawContents();
+
+            if (_isLazyConnecting)
+                DrawLazyConnect();
 
             //Render2D.DrawText(style.FontTitle, string.Format("Scale: {0}", _rootControl.Scale), rect, Enabled ? Color.Red : Color.Black);
 

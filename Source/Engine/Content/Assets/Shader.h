@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,20 +12,17 @@ class GPUShader;
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API Shader : public ShaderAssetTypeBase<BinaryAsset>
 {
-DECLARE_BINARY_ASSET_HEADER(Shader, ShadersSerializedVersion);
+    DECLARE_BINARY_ASSET_HEADER(Shader, ShadersSerializedVersion);
 private:
-
     GPUShader* _shader;
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="Shader"/> class.
     /// </summary>
     ~Shader();
 
 public:
-
     /// <summary>
     /// The GPU shader object (not null).
     /// </summary>
@@ -33,14 +30,14 @@ public:
 
     /// <summary>
     /// Gets the GPU shader object.
+    /// [Deprecated in v1.10]
     /// </summary>
-    FORCE_INLINE GPUShader* GetShader() const
+    DEPRECATED("Use GPU field directly.") FORCE_INLINE GPUShader* GetShader() const
     {
         return GPU;
     }
 
 protected:
-
     // [BinaryAsset]
     LoadResult load() override;
     void unload(bool isReloading) override;

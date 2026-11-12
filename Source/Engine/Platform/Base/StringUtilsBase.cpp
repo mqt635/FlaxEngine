@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Engine/Platform/StringUtils.h"
 #include "Engine/Platform/FileSystem.h"
@@ -6,14 +6,39 @@
 #include "Engine/Core/Types/BaseTypes.h"
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Math/Math.h"
+#include "Engine/Core/Math/Mathd.h"
 #include "Engine/Core/Collections/Array.h"
 #if PLATFORM_TEXT_IS_CHAR16
 #include <string>
 #endif
 
-const char DirectorySeparatorChar = '\\';
-const char AltDirectorySeparatorChar = '/';
-const char VolumeSeparatorChar = ':';
+constexpr char DirectorySeparatorChar = '\\';
+constexpr char AltDirectorySeparatorChar = '/';
+constexpr char VolumeSeparatorChar = ':';
+
+int32 StringUtils::Copy(char* dst, const Char* src, int32 count)
+{
+    int32 i = 0;
+    while (i < count && src[i])
+    {
+        dst[i] = (char)src[i];
+        i++;
+    }
+    dst[i] = 0;
+    return i;
+}
+
+int32 StringUtils::Copy(Char* dst, const char* src, int32 count)
+{
+    int32 i = 0;
+    while (i < count && src[i])
+    {
+        dst[i] = (Char)src[i];
+        i++;
+    }
+    dst[i] = 0;
+    return i;
+}
 
 const Char* StringUtils::FindIgnoreCase(const Char* str, const Char* toFind)
 {
@@ -61,6 +86,20 @@ const char* StringUtils::FindIgnoreCase(const char* str, const char* toFind)
     }
 
     return nullptr;
+}
+
+void StringUtils::ConvertUTF162ASCII(const Char* from, char* to, int32 len)
+{
+    if (!from || !to)
+        return;
+    for (int32 i = 0; i < len; i++)
+    {
+        Char c = from[i];
+        if ((c == 0x09 || c == 0x0A || c == 0x0D || (0x20 <= c && c <= 0x7F)))
+            to[i] = (char)c;
+        else
+            to[i] = ' ';
+    }
 }
 
 void PrintUTF8Error(const char* from, uint32 fromLength)
@@ -332,22 +371,29 @@ StringView StringUtils::GetPathWithoutExtension(const StringView& path)
 void StringUtils::PathRemoveRelativeParts(String& path)
 {
     FileSystem::NormalizePath(path);
+    if (path.Length() == 1 && path[0] == TEXT('/'))
+        return;
 
     Array<String> components;
     path.Split(TEXT('/'), components);
 
-    Array<String> stack;
-    for (auto& bit : components)
+    Array<String, InlinedAllocation<16>> stack;
+    for (String& bit : components)
     {
         if (bit == TEXT(".."))
         {
             if (stack.HasItems())
             {
-                auto popped = stack.Pop();
+                String popped = stack.Pop();
+                const int32 windowsDriveStart = popped.Find('\\');
                 if (popped == TEXT(".."))
                 {
                     stack.Push(popped);
                     stack.Push(bit);
+                }
+                else if (windowsDriveStart != -1)
+                {
+                    stack.Add(MoveTemp(popped.Left(windowsDriveStart + 1)));
                 }
             }
             else
@@ -361,42 +407,99 @@ void StringUtils::PathRemoveRelativeParts(String& path)
         }
         else
         {
-            stack.Push(bit);
+            stack.Add(MoveTemp(bit));
         }
     }
 
-    const bool isRooted = path.StartsWith(TEXT('/'));
+    const bool isRooted = path.StartsWith(TEXT('/')) || (path.Length() >= 2 && path[0] == '.' && path[1] == '/');
     path.Clear();
-    for (auto& e : stack)
+    for (const String& e : stack)
         path /= e;
-    if (isRooted && path[0] != '/')
+    if (isRooted && path.HasChars() && path[0] != '/')
         path.Insert(0, TEXT("/"));
 }
 
-const char DigitPairs[201] = {
-    "00010203040506070809"
-    "10111213141516171819"
-    "20212223242526272829"
-    "30313233343536373839"
-    "40414243444546474849"
-    "50515253545556575859"
-    "60616263646566676869"
-    "70717273747576777879"
-    "80818283848586878889"
-    "90919293949596979899"
-};
+int32 StringUtils::HexDigit(Char c)
+{
+    int32 result = 0;
+    if (c >= '0' && c <= '9')
+        result = c - '0';
+    else if (c >= 'a' && c <= 'f')
+        result = c + 10 - 'a';
+    else if (c >= 'A' && c <= 'F')
+        result = c + 10 - 'A';
+    return result;
+}
 
-#define STRING_UTILS_ITOSTR_BUFFER_SIZE 15
+template<typename C, typename T>
+bool ParseFloat(const C* str, T* ret)
+{
+    // [Reference: https://stackoverflow.com/a/44741229]
+    T result = 0;
+    T sign = *str == '-' ? str++, (T)-1.0 : (T)1.0;
+    while (*str >= '0' && *str <= '9')
+    {
+        result *= 10;
+        result += *str - '0';
+        str++;
+    }
+    if (*str == ',' || *str == '.')
+    {
+        str++;
+        T multiplier = 0.1;
+        while (*str >= '0' && *str <= '9')
+        {
+            result += (*str - '0') * multiplier;
+            multiplier /= 10;
+            str++;
+        }
+    }
+    result *= sign;
+    if (*str == 'e' || *str == 'E')
+    {
+        str++;
+        T powerer = (T)10;
+        if (*str == '-')
+        {
+            powerer = (T)0.1;
+            str++;
+        }
+        else if (*str == '+')
+        {
+            str++;
+        }
+        T power = 0;
+        while (*str >= '0' && *str <= '9')
+        {
+            power *= 10;
+            power += *str - '0';
+            str++;
+        }
+        result *= Math::Pow(powerer, power);
+    }
+    if (*str)
+        return true;
+    *ret = result;
+    return false;
+}
 
 bool StringUtils::Parse(const Char* str, float* result)
 {
-#if PLATFORM_TEXT_IS_CHAR16
-    std::u16string u16str = str;
-    std::wstring wstr(u16str.begin(), u16str.end());
-    float v = wcstof(wstr.c_str(), nullptr);
-#else
-    float v = wcstof(str, nullptr);
-#endif
+#if 0
+    // Convert '.' into ','
+    char buffer[64];
+    char* ptr = buffer;
+    char* end = buffer + ARRAY_COUNT(buffer);
+    while (str && *str && ptr != end)
+    {
+        Char c = *str++;
+        if (c == '.')
+            c = ',';
+        *ptr++ = (char)c;
+    }
+    *ptr = 0;
+
+    float v = (float)atof(buffer);
     *result = v;
     if (v == 0)
     {
@@ -404,112 +507,61 @@ bool StringUtils::Parse(const Char* str, float* result)
         return !(str[0] == '0' && ((len == 1) || (len == 3 && (str[1] == ',' || str[1] == '.') && str[2] == '0')));
     }
     return false;
+#else
+    return ParseFloat(str, result);
+#endif
+}
+
+bool StringUtils::Parse(const char* str, float* result)
+{
+#if 0
+    *result = (float)atof(str);
+    return false;
+#else
+    return ParseFloat(str, result);
+#endif
+}
+
+bool StringUtils::Parse(const Char* str, int32 length, bool* result)
+{
+    if ((length == 1 && CompareIgnoreCase(str, TEXT("1"), length) == 0) ||
+        (length == 4 && CompareIgnoreCase(str, TEXT("true"), length) == 0))
+    {
+        *result = true;
+        return false;
+    }
+    if ((length == 1 && CompareIgnoreCase(str, TEXT("0"), length) == 0) ||
+        (length == 5 && CompareIgnoreCase(str, TEXT("false"), length) == 0))
+    {
+        *result = false;
+        return false;
+    }
+    return true;
+}
+
+String StringUtils::ToString(bool value)
+{
+    return value ? TEXT("true") : TEXT("false");
 }
 
 String StringUtils::ToString(int32 value)
 {
-    char buf[STRING_UTILS_ITOSTR_BUFFER_SIZE];
-    char* it = &buf[STRING_UTILS_ITOSTR_BUFFER_SIZE - 2];
-    int32 div = value / 100;
-    if (value >= 0)
-    {
-        while (div)
-        {
-            Platform::MemoryCopy(it, &DigitPairs[2 * (value - div * 100)], 2);
-            value = div;
-            it -= 2;
-            div = value / 100;
-        }
-        Platform::MemoryCopy(it, &DigitPairs[2 * value], 2);
-        if (value < 10)
-            it++;
-    }
-    else
-    {
-        while (div)
-        {
-            Platform::MemoryCopy(it, &DigitPairs[-2 * (value - div * 100)], 2);
-            value = div;
-            it -= 2;
-            div = value / 100;
-        }
-        Platform::MemoryCopy(it, &DigitPairs[-2 * value], 2);
-        if (value <= -10)
-            it--;
-        *it = '-';
-    }
-    return String(it, (int32)(&buf[STRING_UTILS_ITOSTR_BUFFER_SIZE] - it));
+    return String::Format(TEXT("{}"), value);
 }
 
 String StringUtils::ToString(int64 value)
 {
-    char buf[STRING_UTILS_ITOSTR_BUFFER_SIZE];
-    char* it = &buf[STRING_UTILS_ITOSTR_BUFFER_SIZE - 2];
-    int64 div = value / 100;
-    if (value >= 0)
-    {
-        while (div)
-        {
-            Platform::MemoryCopy(it, &DigitPairs[2 * (value - div * 100)], 2);
-            value = div;
-            it -= 2;
-            div = value / 100;
-        }
-        Platform::MemoryCopy(it, &DigitPairs[2 * value], 2);
-        if (value < 10)
-            it++;
-    }
-    else
-    {
-        while (div)
-        {
-            Platform::MemoryCopy(it, &DigitPairs[-2 * (value - div * 100)], 2);
-            value = div;
-            it -= 2;
-            div = value / 100;
-        }
-        Platform::MemoryCopy(it, &DigitPairs[-2 * value], 2);
-        if (value <= -10)
-            it--;
-        *it = '-';
-    }
-    return String(it, (int32)(&buf[STRING_UTILS_ITOSTR_BUFFER_SIZE] - it));
+    return String::Format(TEXT("{}"), value);
 }
 
 String StringUtils::ToString(uint32 value)
 {
-    char buf[STRING_UTILS_ITOSTR_BUFFER_SIZE];
-    char* it = &buf[STRING_UTILS_ITOSTR_BUFFER_SIZE - 2];
-    int32 div = value / 100;
-    while (div)
-    {
-        Platform::MemoryCopy(it, &DigitPairs[2 * (value - div * 100)], 2);
-        value = div;
-        it -= 2;
-        div = value / 100;
-    }
-    Platform::MemoryCopy(it, &DigitPairs[2 * value], 2);
-    if (value < 10)
-        it++;
-    return String((char*)it, (int32)((char*)&buf[STRING_UTILS_ITOSTR_BUFFER_SIZE] - (char*)it));
+    return String::Format(TEXT("{}"), value);
 }
 
 String StringUtils::ToString(uint64 value)
 {
-    char buf[STRING_UTILS_ITOSTR_BUFFER_SIZE];
-    char* it = &buf[STRING_UTILS_ITOSTR_BUFFER_SIZE - 2];
-    int64 div = value / 100;
-    while (div)
-    {
-        Platform::MemoryCopy(it, &DigitPairs[2 * (value - div * 100)], 2);
-        value = div;
-        it -= 2;
-        div = value / 100;
-    }
-    Platform::MemoryCopy(it, &DigitPairs[2 * value], 2);
-    if (value < 10)
-        it++;
-    return String((char*)it, (int32)((char*)&buf[STRING_UTILS_ITOSTR_BUFFER_SIZE] - (char*)it));
+    return String::Format(TEXT("{}"), value);
 }
 
 String StringUtils::ToString(float value)
@@ -522,4 +574,14 @@ String StringUtils::ToString(double value)
     return String::Format(TEXT("{}"), value);
 }
 
-#undef STRING_UTILS_ITOSTR_BUFFER_SIZE
+String StringUtils::GetZZString(const Char* str)
+{
+    const Char* end = str;
+    while (*end != '\0')
+    {
+        end++;
+        if (*end == '\0')
+            end++;
+    }
+    return String(str, (int32)(end - str));
+}

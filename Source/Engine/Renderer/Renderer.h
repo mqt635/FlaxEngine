@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,6 +8,7 @@ class GPUContext;
 class GPUTexture;
 class GPUTextureView;
 struct RenderContext;
+struct RenderContextBatch;
 class RenderTask;
 class SceneRenderTask;
 class MaterialBase;
@@ -18,29 +19,18 @@ class Actor;
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Renderer
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Renderer);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Renderer);
 public:
-
     /// <summary>
     /// Determines whether the scene rendering system is ready (all shaders are loaded and helper resources are ready).
     /// </summary>
-    /// <returns><c>true</c> if this rendering service is ready for scene rendering; otherwise, <c>false</c>.</returns>
     static bool IsReady();
 
     /// <summary>
     /// Performs rendering for the input task.
     /// </summary>
     /// <param name="task">The scene rendering task.</param>
-    static void Render(SceneRenderTask* task);
-
-    /// <summary>
-    /// Determinates whenever any pass requires motion vectors rendering.
-    /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    /// <returns>True if need to render motion vectors, otherwise false.</returns>
-    static bool NeedMotionVectors(RenderContext& renderContext);
-
-public:
+    API_FUNCTION() static void Render(SceneRenderTask* task);
 
     /// <summary>
     /// Draws scene objects depth (to the output Z buffer). The output must be depth texture to write hardware depth to it.
@@ -60,4 +50,18 @@ public:
     /// <param name="output">The output texture. Must be valid and created.</param>
     /// <param name="input">The input texture. It's optional.</param>
     API_FUNCTION() static void DrawPostFxMaterial(GPUContext* context, API_PARAM(Ref) const RenderContext& renderContext, MaterialBase* material, GPUTexture* output, GPUTextureView* input);
+
+    /// <summary>
+    /// Invoked drawing of the scene objects (collects draw calls into RenderList for a given RenderContext).
+    /// </summary>
+    /// <param name="renderContext">The rendering context.</param>
+    /// <param name="customActors">The custom set of actors to render. If empty, the loaded scenes will be rendered.</param>
+    API_FUNCTION() static void DrawActors(API_PARAM(Ref) RenderContext& renderContext, API_PARAM(DefaultValue=null) const Array<Actor*, HeapAllocation>& customActors);
+
+    /// <summary>
+    /// Invoked drawing of the scene objects (collects draw calls into RenderList for all contexts in a batch).
+    /// </summary>
+    /// <param name="renderContextBatch">The rendering context batch.</param>
+    /// <param name="customActors">The custom set of actors to render. If empty, the loaded scenes will be rendered.</param>
+    API_FUNCTION() static void DrawActors(API_PARAM(Ref) RenderContextBatch& renderContextBatch, API_PARAM(DefaultValue=null) const Array<Actor*, HeapAllocation>& customActors);
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,17 +10,15 @@
 /// <summary>
 /// Assets Importing service allows to import or create new assets
 /// </summary>
-class AssetsExportingManager
+class FLAXENGINE_API AssetsExportingManager
 {
 public:
-
     /// <summary>
     /// The asset exporting callbacks. Identified by the asset typename.
     /// </summary>
     static Dictionary<String, ExportAssetFunction> Exporters;
 
 public:
-
     /// <summary>
     /// Gets the asset export for thee given asset typename.
     /// </summary>
@@ -36,7 +34,6 @@ public:
     static bool CanExport(const String& inputPath);
 
 public:
-
     /// <summary>
     /// Exports the asset.
     /// </summary>

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,34 +13,17 @@
 #include "Engine/Profiler/Profiler.h"
 #include "Config.h"
 
-class RendererUtils
-{
-public:
-
-    static float TemporalHalton(int32 index, int32 base)
-    {
-        float result = 0.0f;
-        const float invBase = 1.0f / base;
-        float fraction = invBase;
-        while (index > 0)
-        {
-            result += (index % base) * fraction;
-            index /= base;
-            fraction *= invBase;
-        }
-        return result;
-    }
-};
-
 /// <summary>
 /// Base class for renderer components called render pass.
 /// Each render pass supports proper resources initialization and disposing.
 /// </summary>
 /// <seealso cref="Object" />
-class RendererPassBase : public Object
+class FLAXENGINE_API RendererPassBase : public Object
 {
 protected:
-
+#if !GPU_ENABLE_PRELOADING_RESOURCES
+    bool _lazyInit = true;
+#endif
     bool _hasValidResources;
 
     /// <summary>
@@ -85,7 +68,13 @@ protected:
     {
         if (_hasValidResources)
             return false;
-
+#if !GPU_ENABLE_PRELOADING_RESOURCES
+        if (_lazyInit)
+        {
+            _lazyInit = false;
+            Init();
+        }
+#endif
         const bool setupFailed = setupResources();
         _hasValidResources = !setupFailed;
         return setupFailed;
@@ -112,4 +101,18 @@ class RendererPass : public Singleton<T>, public RendererPassBase
 {
 };
 
-#define REPORT_INVALID_SHADER_PASS_CB_SIZE(shader, index, dataType) LOG(Fatal, "Shader {0} has incorrect constant buffer {1} size: {2} bytes. Expected: {3} bytes", ToString(), index, shader->GetCB(index)->GetSize(), sizeof(dataType));
+#define REPORT_INVALID_SHADER_PASS_CB_SIZE(shader, index, dataType) LOG(Fatal, "Shader {0} has incorrect constant buffer {1} size: {2} bytes. Expected: {3} bytes", shader->ToString(), index, shader->GetCB(index)->GetSize(), sizeof(dataType));
+#define CHECK_INVALID_SHADER_PASS_CB_SIZE(shader, index, dataType) ASSERT(shader && shader->GetCB(index)); if (shader->GetCB(index)->GetSize() != sizeof(dataType) && shader->GetCB(index)->GetSize() != 0) { REPORT_INVALID_SHADER_PASS_CB_SIZE(shader, index, dataType); return true; }
+
+#if COMPILE_WITH_DEV_ENV
+#define BIND_SHADER_RELOADING(shader, pass, method) shader->Reloading.Bind<pass, &pass::method>(this)
+#else
+#define BIND_SHADER_RELOADING(shader, pass, method)
+#endif
+
+#if PLATFORM_WEB
+// Hack to fix WebGPU limitation that requires to specify different sampler type manually (eg. to sample depth texture without filtering)
+void SetWebGPUTextureViewSampler(GPUTextureView* view, uint32 samplerType);
+#define GPU_WEBGPU_SAMPLER_TYPE_UNFILTERABLE_FLOAT 0x00000003 // WGPUTextureSampleType_UnfilterableFloat
+#define GPU_WEBGPU_SAMPLER_TYPE_DEPTH 0x00000004 // WGPUTextureSampleType_Depth
+#endif

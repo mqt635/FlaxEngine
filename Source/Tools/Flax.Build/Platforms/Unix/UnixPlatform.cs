@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Diagnostics;
 using Flax.Build.Projects;
@@ -54,7 +54,7 @@ namespace Flax.Build.Platforms
                 StartInfo =
                 {
                     FileName = "/bin/sh",
-                    Arguments = string.Format("-c 'which {0}'", name),
+                    ArgumentList = { "-c", $"which {name}" },
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
@@ -68,8 +68,11 @@ namespace Flax.Build.Platforms
             string path = proc.StandardOutput.ReadLine();
             Log.Verbose(string.Format("which {0} exit code: {1}, result: {2}", name, proc.ExitCode, path));
 
-            if (proc.ExitCode == 0 && string.IsNullOrEmpty(proc.StandardError.ReadToEnd()))
+            if (proc.ExitCode == 0)
             {
+                string err = proc.StandardError.ReadToEnd();
+                if (!string.IsNullOrEmpty(err))
+                    Log.Verbose(string.Format("which stderr: {0}", err));
                 return path;
             }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,7 +13,6 @@
 class FLAXENGINE_API FoliageCluster
 {
 public:
-
     /// <summary>
     /// The cluster bounds (in world space). Made of subdivided parent node in quad-tree.
     /// </summary>
@@ -35,6 +34,11 @@ public:
     float MaxCullDistance;
 
     /// <summary>
+    /// Flag used by clusters that are not typical quad-tree nodes but have no volume (eg. lots of instances placed on top of each other).
+    /// </summary>
+    int32 IsMinor : 1;
+
+    /// <summary>
     /// The child clusters. If any element is valid then all are created.
     /// </summary>
     FoliageCluster* Children[4];
@@ -45,7 +49,6 @@ public:
     Array<FoliageInstance*, FixedAllocation<FOLIAGE_CLUSTER_CAPACITY>> Instances;
 
 public:
-
     /// <summary>
     /// Initializes this instance.
     /// </summary>
@@ -71,5 +74,5 @@ public:
     /// <param name="normal">When the method completes, contains the intersection surface normal vector (if any valid).</param>
     /// <param name="instance">When the method completes, contains pointer of the foliage instance that is the closest to the ray.</param>
     /// <returns>True whether the two objects intersected, otherwise false.</returns>
-    bool Intersects(Foliage* foliage, const Ray& ray, float& distance, Vector3& normal, FoliageInstance*& instance);
+    bool Intersects(Foliage* foliage, const Ray& ray, Real& distance, Vector3& normal, FoliageInstance*& instance);
 };

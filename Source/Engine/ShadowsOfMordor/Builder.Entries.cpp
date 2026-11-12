@@ -1,11 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Builder.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Level/Actors/BoxBrush.h"
 #include "Engine/Level/Actors/StaticModel.h"
-#include "Engine/ContentImporters/ImportTexture.h"
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Terrain/Terrain.h"
@@ -25,7 +24,7 @@ bool canUseMaterialWithLightmap(MaterialBase* material, ShadowsOfMordor::Builder
 bool cacheStaticGeometryTree(Actor* actor, ShadowsOfMordor::Builder::SceneBuildCache* scene)
 {
     ShadowsOfMordor::Builder::GeometryEntry entry;
-    const bool useLightmap = actor->GetIsActive() && (actor->GetStaticFlags() & StaticFlags::Lightmap);
+    const bool useLightmap = actor->GetIsActive() && actor->HasStaticFlag(StaticFlags::Lightmap);
     auto& results = scene->Entries;
 
     // Switch actor type
@@ -36,13 +35,9 @@ bool cacheStaticGeometryTree(Actor* actor, ShadowsOfMordor::Builder::SceneBuildC
         if (model && !model->WaitForLoaded())
         {
             entry.Type = ShadowsOfMordor::Builder::GeometryType::StaticModel;
-            entry.UVsBox = Rectangle(Vector2::Zero, Vector2::One);
+            entry.UVsBox = Rectangle(Float2::Zero, Float2::One);
             entry.AsStaticModel.Actor = staticModel;
             entry.Scale = Math::Clamp(staticModel->GetScaleInLightmap(), 0.0f, LIGHTMAP_SCALE_MAX);
-
-            // Spawn entry for each mesh
-            Matrix world;
-            staticModel->GetWorld(&world);
 
             // Use the first LOD
             const int32 lodIndex = 0;
@@ -61,18 +56,16 @@ bool cacheStaticGeometryTree(Actor* actor, ShadowsOfMordor::Builder::SceneBuildC
                     }
                     else
                     {
-                        LOG(Warning, "Model \'{0}\' mesh index {1} (lod: {2}) has missing lightmap UVs (at actor: {3})",
-                                   model->GetPath(),
-                                   meshIndex,
-                                   lodIndex,
-                                   staticModel->GetNamePath());
+                        LOG(Warning, "Model \'{0}\' mesh index {1} (lod: {2}) has missing lightmap UVs (at actor: {3})", model->GetPath(), meshIndex, lodIndex, staticModel->GetNamePath());
                     }
                 }
             }
 
             if (useLightmap && anyValid && entry.Scale > ZeroTolerance)
             {
-                entry.Box = model->GetBox(world);
+                Matrix worldMatrix;
+                staticModel->GetLocalToWorldMatrix(worldMatrix);
+                entry.Box = model->GetBox(worldMatrix);
                 results.Add(entry);
             }
             else
@@ -85,13 +78,13 @@ bool cacheStaticGeometryTree(Actor* actor, ShadowsOfMordor::Builder::SceneBuildC
     {
         entry.AsTerrain.Actor = terrain;
         entry.Type = ShadowsOfMordor::Builder::GeometryType::Terrain;
-        entry.UVsBox = Rectangle(Vector2::Zero, Vector2::One);
+        entry.UVsBox = Rectangle(Float2::Zero, Float2::One);
         entry.Scale = Math::Clamp(terrain->GetScaleInLightmap(), 0.0f, LIGHTMAP_SCALE_MAX);
         for (int32 patchIndex = 0; patchIndex < terrain->GetPatchesCount(); patchIndex++)
         {
             auto patch = terrain->GetPatch(patchIndex);
             entry.AsTerrain.PatchIndex = patchIndex;
-            for (int32 chunkIndex = 0; chunkIndex < TerrainPatch::CHUNKS_COUNT; chunkIndex++)
+            for (int32 chunkIndex = 0; chunkIndex < Terrain::ChunksCount; chunkIndex++)
             {
                 auto chunk = patch->Chunks[chunkIndex];
                 entry.AsTerrain.ChunkIndex = chunkIndex;
@@ -115,7 +108,7 @@ bool cacheStaticGeometryTree(Actor* actor, ShadowsOfMordor::Builder::SceneBuildC
     {
         entry.AsFoliage.Actor = foliage;
         entry.Type = ShadowsOfMordor::Builder::GeometryType::Foliage;
-        entry.UVsBox = Rectangle(Vector2::Zero, Vector2::One);
+        entry.UVsBox = Rectangle(Float2::Zero, Float2::One);
         for (auto i = foliage->Instances.Begin(); i.IsNotEnd(); ++i)
         {
             auto& instance = *i;
@@ -179,28 +172,24 @@ void ShadowsOfMordor::Builder::updateEntries()
         if (e.ChartIndex == INVALID_INDEX)
         {
             // Removed previously baked lightmap info
-            LightmapEntry emptyEntry;
             switch (e.Type)
             {
             case GeometryType::StaticModel:
             {
-                auto staticModel = e.AsStaticModel.Actor;
-                if (staticModel)
-                    staticModel->Lightmap = emptyEntry;
+                if (auto staticModel = e.AsStaticModel.Actor)
+                    staticModel->RemoveLightmap();
             }
             break;
             case GeometryType::Terrain:
             {
-                auto terrain = e.AsTerrain.Actor;
-                if (terrain)
-                    terrain->GetPatch(e.AsTerrain.PatchIndex)->Chunks[e.AsTerrain.ChunkIndex].Lightmap = emptyEntry;
+                if (auto terrain = e.AsTerrain.Actor)
+                    terrain->GetPatch(e.AsTerrain.PatchIndex)->Chunks[e.AsTerrain.ChunkIndex].RemoveLightmap();
             }
             break;
             case GeometryType::Foliage:
             {
-                auto foliage = e.AsFoliage.Actor;
-                if (foliage)
-                    foliage->Instances[e.AsFoliage.InstanceIndex].Lightmap = emptyEntry;
+                if (auto foliage = e.AsFoliage.Actor)
+                    foliage->Instances[e.AsFoliage.InstanceIndex].RemoveLightmap();
             }
             break;
             }
@@ -209,8 +198,10 @@ void ShadowsOfMordor::Builder::updateEntries()
         auto& chart = scene->Charts[e.ChartIndex];
 
         // Update result uvs by taking into account lightmap uvs box
-        chart.Result.UVsArea.Size /= e.UVsBox.Size;
-        chart.Result.UVsArea.Location += e.UVsBox.Location * chart.Result.UVsArea.Size;
+        Rectangle rect = chart.Result.UVsArea.ToFloat4();
+        rect.Size /= e.UVsBox.Size;
+        rect.Location += e.UVsBox.Location * rect.Size;
+        chart.Result.UVsArea = Half4(rect);
 
         switch (e.Type)
         {
@@ -250,7 +241,9 @@ void ShadowsOfMordor::Builder::updateEntries()
             if (foliage)
             {
                 // Update data
-                foliage->Instances[e.AsFoliage.InstanceIndex].Lightmap = chart.Result;
+                auto& instance = foliage->Instances[e.AsFoliage.InstanceIndex];
+                instance.LightmapTextureIndex = (int8)chart.Result.TextureIndex;
+                instance.LightmapUVsArea = chart.Result.UVsArea;
             }
             else
             {

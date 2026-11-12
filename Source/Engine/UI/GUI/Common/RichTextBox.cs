@@ -1,20 +1,24 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 
 namespace FlaxEngine.GUI
 {
     /// <summary>
     /// Rich text box control which can gather text input from the user and present text in highly formatted and stylized way.
     /// </summary>
-    public class RichTextBox : RichTextBoxBase
+    [ActorToolbox("UI")]
+    public partial class RichTextBox : RichTextBoxBase
     {
         private TextBlockStyle _textStyle;
+        private TextWrapping _wrapping = TextWrapping.NoWrap;
+        private float _baseLinesGapScale = 1.0f;
 
         /// <summary>
-        /// The text style applied to the whole text.
+        /// The default text style applied to the whole text.
         /// </summary>
-        [EditorOrder(20), Tooltip("The watermark text to show grayed when textbox is empty.")]
+        [EditorOrder(20)]
         public TextBlockStyle TextStyle
         {
             get => _textStyle;
@@ -24,6 +28,52 @@ namespace FlaxEngine.GUI
                 UpdateTextBlocks();
             }
         }
+
+        /// <summary>
+        /// Gets or sets the text wrapping within the control bounds.
+        /// </summary>
+        [DefaultValue(TextWrapping.NoWrap)]
+        [EditorOrder(30), Tooltip("The text wrapping within the control bounds.")]
+        public TextWrapping Wrapping
+        {
+            get => _wrapping;
+            set
+            {
+                if (_wrapping == value)
+                    return;
+                _wrapping = value;
+                UpdateTextBlocks();
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the gap between lines when wrapping and more than a single line is displayed.
+        /// </summary>
+        [DefaultValue(1.0f)]
+        [EditorOrder(40), Tooltip("The gap between lines when wrapping and more than a single line is displayed."), Limit(0f, 100.0f, 0.01f)]
+        public float BaseLinesGapScale
+        {
+            get => _baseLinesGapScale;
+            set
+            {
+                if (Mathf.NearEqual(_baseLinesGapScale, value))
+                    return;
+                _baseLinesGapScale = value;
+                UpdateTextBlocks();
+            }
+        }
+
+        /// <summary>
+        /// The collection of custom text styles to apply (named).
+        /// </summary>
+        [EditorOrder(50)]
+        public Dictionary<string, TextBlockStyle> Styles = new Dictionary<string, TextBlockStyle>();
+
+        /// <summary>
+        /// The collection of custom images/sprites that can be inlined in text (named).
+        /// </summary>
+        [EditorOrder(60)]
+        public Dictionary<string, IBrush> Images = new Dictionary<string, IBrush>();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RichTextBox"/> class.
@@ -40,35 +90,12 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        protected override void OnParseTextBlocks()
+        protected override void OnSizeChanged()
         {
-            if (ParseTextBlocks != null)
-            {
-                ParseTextBlocks(_text, _textBlocks);
-                return;
-            }
+            base.OnSizeChanged();
 
-            var font = _textStyle.Font.GetFont();
-            if (!font)
-                return;
-            var lines = font.ProcessText(_text);
-            _textBlocks.Capacity = Math.Max(_textBlocks.Capacity, lines.Length);
-
-            for (int i = 0; i < lines.Length; i++)
-            {
-                ref var line = ref lines[i];
-
-                _textBlocks.Add(new TextBlock
-                {
-                    Style = _textStyle,
-                    Range = new TextRange
-                    {
-                        StartIndex = line.FirstCharIndex,
-                        EndIndex = line.LastCharIndex,
-                    },
-                    Bounds = new Rectangle(line.Location, line.Size),
-                });
-            }
+            // Refresh textblocks since those might depend on control size (eg. align right)
+            UpdateTextBlocks();
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -8,6 +8,7 @@ namespace FlaxEngine.GUI
     /// A panel that divides up available space between all of its children.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public class GridPanel : ContainerControl
     {
         private Margin _slotPadding;
@@ -34,7 +35,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// The cells heights in container height percentage (from top to bottom). Use negative values to set fixed widths for the cells.
         /// </summary>
-        [EditorOrder(10), Tooltip("The cells heights in container height percentage (from top to bottom). Use negative values to set fixed height for the cells.")]
+        [EditorOrder(10), Limit(float.MinValue, float.MaxValue, 0.001f), Tooltip("The cells heights in container height percentage (from top to bottom). Use negative values to set fixed height for the cells.")]
         public float[] RowFill
         {
             get => _cellsV;
@@ -48,7 +49,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// The cells heights in container width percentage (from left to right). Use negative values to set fixed heights for the cells.
         /// </summary>
-        [EditorOrder(20), Tooltip("The cells heights in container width percentage (from left to right). Use negative values to set fixed width for the cells.")]
+        [EditorOrder(20), Limit(float.MinValue, float.MaxValue, 0.001f), Tooltip("The cells heights in container width percentage (from left to right). Use negative values to set fixed width for the cells.")]
         public float[] ColumnFill
         {
             get => _cellsH;
@@ -73,6 +74,7 @@ namespace FlaxEngine.GUI
         /// <param name="slotPadding">The slot padding.</param>
         public GridPanel(float slotPadding)
         {
+            AutoFocus = false;
             SlotPadding = new Margin(slotPadding);
             _cellsH = new[]
             {
@@ -92,7 +94,7 @@ namespace FlaxEngine.GUI
             base.PerformLayoutBeforeChildren();
 
             int i = 0;
-            Vector2 upperLeft = Vector2.Zero;
+            var upperLeft = Float2.Zero;
             float remainingHeight = Height;
             for (int rowIndex = 0; rowIndex < _cellsV.Length; rowIndex++)
             {

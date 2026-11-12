@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -10,13 +10,8 @@ namespace FlaxEditor.GUI.ContextMenu
     /// </summary>
     /// <seealso cref="ContextMenuItem" />
     [HideInEditor]
-    public class ContextMenuChildMenu : ContextMenuItem
+    public class ContextMenuChildMenu : ContextMenuButton
     {
-        /// <summary>
-        /// The item text.
-        /// </summary>
-        public string Text;
-
         /// <summary>
         /// The child context menu.
         /// </summary>
@@ -28,39 +23,42 @@ namespace FlaxEditor.GUI.ContextMenu
         /// <param name="parent">The parent context menu.</param>
         /// <param name="text">The text.</param>
         public ContextMenuChildMenu(ContextMenu parent, string text)
-        : base(parent, 8, 22)
+        : base(parent, text)
         {
             Text = text;
+            CloseMenuOnClick = false;
+        }
+
+        internal void ShowChild(ContextMenu parentContextMenu)
+        {
+            // Hide parent CM popups and set itself as child
+            var vAlign = parentContextMenu.ItemsAreaMargin.Top;
+            var location = new Float2(Width, -vAlign);
+            location = PointToParent(parentContextMenu, location);
+            parentContextMenu.ShowChild(ContextMenu, location);
         }
 
         /// <inheritdoc />
         public override void Draw()
         {
-            // Cache data
             var style = Style.Current;
             var backgroundRect = new Rectangle(-X + 3, 0, Parent.Width - 6, Height);
-            var clientRect = new Rectangle(Vector2.Zero, Size);
             bool isCMopened = ContextMenu.IsOpened;
 
             // Draw background
-            if (isCMopened || (IsMouseOver && Enabled))
+            if (isCMopened)
                 Render2D.FillRectangle(backgroundRect, style.LightBackground);
 
             base.Draw();
 
-            // Draw text
-            Render2D.DrawText(style.FontMedium, Text, clientRect, Enabled ? style.Foreground : style.ForegroundDisabled, TextAlignment.Near, TextAlignment.Center);
-
             // Draw arrow
             if (ContextMenu.HasChildren)
-                Render2D.DrawSprite(style.ArrowRight, new Rectangle(Width - 15, (Height - 12) / 2, 12, 12), Enabled ? isCMopened ? style.BackgroundSelected : style.Foreground : style.ForegroundDisabled);
+                Render2D.DrawSprite(style.ArrowRight, new Rectangle(Width - 15 + ExtraAdjustmentAmount, (Height - 12) / 2, 12, 12), Enabled ? isCMopened ? style.BackgroundSelected : style.Foreground : style.ForegroundDisabled);
         }
 
         /// <inheritdoc />
-        public override void OnMouseEnter(Vector2 location)
+        public override void OnMouseEnter(Float2 location)
         {
-            base.OnMouseEnter(location);
-
             // Skip if has no children
             if (ContextMenu.HasChildren == false)
                 return;
@@ -69,26 +67,26 @@ namespace FlaxEditor.GUI.ContextMenu
             var parentContextMenu = ParentContextMenu;
             if (parentContextMenu == ContextMenu)
                 return;
+            if (ContextMenu.IsOpened)
+                return;
 
-            // Hide parent CM popups and set itself as child
-            parentContextMenu.ShowChild(ContextMenu, PointToParent(ParentContextMenu, new Vector2(Width, 0)));
+            base.OnMouseEnter(location);
+
+            ShowChild(parentContextMenu);
         }
 
         /// <inheritdoc />
-        public override float MinimumWidth
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
-            get
-            {
-                var style = Style.Current;
-                float width = 16;
+            // Skip if already shown
+            var parentContextMenu = ParentContextMenu;
+            if (parentContextMenu == ContextMenu)
+                return true;
+            if (ContextMenu.IsOpened)
+                return true;
 
-                if (style.FontMedium)
-                {
-                    width += style.FontMedium.MeasureText(Text).X;
-                }
-
-                return Mathf.Max(width, base.MinimumWidth);
-            }
+            ShowChild(parentContextMenu);
+            return base.OnMouseUp(location, button);
         }
     }
 }

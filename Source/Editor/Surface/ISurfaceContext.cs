@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
@@ -11,6 +11,11 @@ namespace FlaxEditor.Surface
     public interface ISurfaceContext
     {
         /// <summary>
+        /// Gets the asset containing the surface (optional, null by default).
+        /// </summary>
+        Asset SurfaceAsset { get; }
+
+        /// <summary>
         /// Gets the name of the surface (for UI).
         /// </summary>
         string SurfaceName { get; }
@@ -19,6 +24,11 @@ namespace FlaxEditor.Surface
         /// Gets or sets the surface data. Used to load or save the surface to the data source.
         /// </summary>
         byte[] SurfaceData { get; set; }
+
+        /// <summary>
+        /// Gets the context which owns this surface context (null for root).
+        /// </summary>
+        VisjectSurfaceContext ParentContext { get; }
 
         /// <summary>
         /// Called when Visject Surface context gets created for this surface data source. Can be used to link for some events.

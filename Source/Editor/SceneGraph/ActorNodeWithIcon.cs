@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using FlaxEngine;
 
@@ -18,7 +24,7 @@ namespace FlaxEditor.SceneGraph
         }
 
         /// <inheritdoc />
-        public override bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+        public override bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             normal = Vector3.Up;
 
@@ -29,7 +35,8 @@ namespace FlaxEditor.SceneGraph
                 return false;
             }
 
-            BoundingSphere sphere = new BoundingSphere(Transform.Translation, 7.0f);
+            var center = _actor.Transform.Translation;
+            ViewportIconsRenderer.GetBounds(ref center, ref ray.Ray.Position, out var sphere);
             return CollisionsHelper.RayIntersectsSphere(ref ray.Ray, ref sphere, out distance);
         }
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,16 +10,14 @@
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API PixelFormatExtensions
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(PixelFormatExtensions);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(PixelFormatExtensions);
 public:
-
     /// <summary>
     /// Initializes cache.
     /// </summary>
     static void Init();
 
 public:
-
     /// <summary>
     /// Calculates the size of a <see cref="PixelFormat"/> in bytes.
     /// </summary>
@@ -74,7 +72,7 @@ public:
     /// <param name="format">The <see cref="PixelFormat"/>.</param>
     /// <param name="partialTypeless">Enable/disable partially typeless formats.</param>
     /// <returns><c>true</c> if the specified <see cref="PixelFormat"/> is Typeless; otherwise, <c>false</c>.</returns>
-    API_FUNCTION() static bool IsTypeless(PixelFormat format, bool partialTypeless);
+    API_FUNCTION() static bool IsTypeless(PixelFormat format, bool partialTypeless = true);
 
     /// <summary>
     /// Returns true if the <see cref="PixelFormat"/> is valid.
@@ -98,18 +96,11 @@ public:
     API_FUNCTION() static bool IsCompressedBC(PixelFormat format);
 
     /// <summary>
-    /// Determines whether the specified <see cref="PixelFormat"/> is packed.
+    /// Returns true if the <see cref="PixelFormat"/> is a compressed format from ASTC formats family (various block sizes).
     /// </summary>
-    /// <param name="format">The Pixel Format.</param>
-    /// <returns><c>true</c> if the specified <see cref="PixelFormat"/> is packed; otherwise, <c>false</c>.</returns>
-    API_FUNCTION() static bool IsPacked(PixelFormat format);
-
-    /// <summary>
-    /// Determines whether the specified <see cref="PixelFormat"/> is planar.
-    /// </summary>
-    /// <param name="format">The Pixel Format.</param>
-    /// <returns><c>true</c> if the specified <see cref="PixelFormat"/> is planar; otherwise, <c>false</c>.</returns>
-    API_FUNCTION() static bool IsPlanar(PixelFormat format);
+    /// <param name="format">The format to check for compressed.</param>
+    /// <returns>True if the <see cref="PixelFormat"/> is a compressed format from ASTC formats family.</returns>
+    API_FUNCTION() static bool IsCompressedASTC(PixelFormat format);
 
     /// <summary>
     /// Determines whether the specified <see cref="PixelFormat"/> is video.
@@ -126,10 +117,10 @@ public:
     API_FUNCTION() static bool IsSRGB(PixelFormat format);
 
     /// <summary>
-    /// Determines whether the specified <see cref="PixelFormat"/> is HDR (either 16 or 32bits Float)
+    /// Determines whether the specified <see cref="PixelFormat"/> is High Dynamic Range (HDR) - can store color values larger than 1.
     /// </summary>
     /// <param name="format">The format.</param>
-    /// <returns><c>true</c> if the specified pixel format is HDR (Floating poInt); otherwise, <c>false</c>.</returns>
+    /// <returns><c>true</c> if the specified pixel format is High Dynamic Range (HDR); otherwise, <c>false</c>.</returns>
     API_FUNCTION() static bool IsHDR(PixelFormat format);
 
     /// <summary>
@@ -161,19 +152,18 @@ public:
     API_FUNCTION() static bool IsInteger(PixelFormat format);
 
     /// <summary>
-    /// Computes the scanline count (number of scanlines).
-    /// </summary>
-    /// <param name="format">The <see cref="PixelFormat"/>.</param>
-    /// <param name="height">The height.</param>
-    /// <returns>The scanline count.</returns>
-    API_FUNCTION() static int ComputeScanlineCount(PixelFormat format, int32 height);
-
-    /// <summary>
     /// Computes the format components count (number of R, G, B, A channels).
     /// </summary>
     /// <param name="format">The <see cref="PixelFormat"/>.</param>
     /// <returns>The components count.</returns>
-    API_FUNCTION() static int ComputeComponentsCount(PixelFormat format);
+    API_FUNCTION() static int32 ComputeComponentsCount(PixelFormat format);
+
+    /// <summary>
+    /// Computes the amount of pixels per-axis stored in a single block of the format (eg. 4 for BC-family). Returns 1 for uncompressed formats.
+    /// </summary>
+    /// <param name="format">The <see cref="PixelFormat"/>.</param>
+    /// <returns>The block pixels count.</returns>
+    API_FUNCTION() static int32 ComputeBlockSize(PixelFormat format);
 
     /// <summary>
     /// Finds the equivalent sRGB format to the provided format.
@@ -211,8 +201,14 @@ public:
     API_FUNCTION() static PixelFormat MakeTypelessUNorm(PixelFormat format);
 
 public:
-
-    static PixelFormat FindShaderResourceFormat(PixelFormat format, bool bSRGB);
+    static PixelFormat FindShaderResourceFormat(PixelFormat format, bool sRGB);
     static PixelFormat FindUnorderedAccessFormat(PixelFormat format);
     static PixelFormat FindDepthStencilFormat(PixelFormat format);
+    static PixelFormat FindUncompressedFormat(PixelFormat format);
+
+private:
+    // Internal bindings
+#if !COMPILE_WITHOUT_CSHARP
+    API_FUNCTION(NoProxy) static void GetSamplerInternal(PixelFormat format, API_PARAM(Out) int32& pixelSize, API_PARAM(Out) void** read, API_PARAM(Out) void** write);
+#endif
 };

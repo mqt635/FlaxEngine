@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ScriptsBuilder.h"
 #include "CodeEditor.h"
@@ -10,19 +10,20 @@
 #include "Engine/Debug/Exceptions/FileNotFoundException.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/Globals.h"
+#include "Engine/Engine/EngineService.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Platform/FileSystemWatcher.h"
-#include "Engine/Threading/ThreadPool.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Threading/Threading.h"
-#include "Engine/Scripting/MainThreadManagedInvokeAction.h"
+#include "Engine/Scripting/Internal/MainThreadManagedInvokeAction.h"
 #include "Engine/Scripting/ScriptingType.h"
 #include "Engine/Scripting/BinaryModule.h"
 #include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/Script.h"
-#include "Engine/Engine/EngineService.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Level/Level.h"
 #include "FlaxEngine.Gen.h"
 
@@ -37,6 +38,7 @@ enum class EventType
     ReloadBegin = 5,
     Reload = 6,
     ReloadEnd = 7,
+    ScriptsLoaded = 8,
 };
 
 struct EventData
@@ -74,8 +76,9 @@ namespace ScriptsBuilderImpl
     void onScriptsReloadStart();
     void onScriptsReload();
     void onScriptsReloadEnd();
+    void onScriptsLoaded();
 
-    void GetClassName(const MString& fullname, MString& className);
+    void GetClassName(const StringAnsiView fullname, StringAnsi& className);
 
     void onCodeEditorAsyncOpenBegin()
     {
@@ -118,9 +121,13 @@ void ScriptsBuilderImpl::sourceDirEvent(const String& path, FileSystemAction act
     // Discard non-source files or generated files
     if ((!path.EndsWith(TEXT(".cs")) &&
         !path.EndsWith(TEXT(".cpp")) &&
+        !path.EndsWith(TEXT(".c")) &&
+        !path.EndsWith(TEXT(".hpp")) &&
         !path.EndsWith(TEXT(".h"))) ||
         path.EndsWith(TEXT(".Gen.cs")))
+    {
         return;
+    }
 
     ScopeLock scopeLock(_locker);
     _lastSourceCodeEdited = DateTime::Now();
@@ -130,6 +137,15 @@ int32 ScriptsBuilder::GetCompilationsCount()
 {
     Platform::MemoryBarrier();
     return _compilationsCount;
+}
+
+String ScriptsBuilder::GetBuildToolPath()
+{
+#if PLATFORM_WINDOWS_FAMILY
+    return Globals::StartupFolder / TEXT("Binaries/Tools/Flax.Build.exe");
+#else
+    return Globals::StartupFolder / TEXT("Binaries/Tools/Flax.Build");
+#endif
 }
 
 bool ScriptsBuilder::LastCompilationFailed()
@@ -156,10 +172,10 @@ bool ScriptsBuilder::IsSourceWorkspaceDirty()
     return _wasProjectStructureChanged;
 }
 
-bool ScriptsBuilder::IsSourceDirty(const TimeSpan& timeout)
+bool ScriptsBuilder::IsSourceDirtyFor(const TimeSpan& timeout)
 {
     ScopeLock scopeLock(_locker);
-    return _lastSourceCodeEdited > (_lastCompileAction + timeout);
+    return _lastSourceCodeEdited > _lastCompileAction && DateTime::Now() > _lastSourceCodeEdited + timeout;
 }
 
 bool ScriptsBuilder::IsCompiling()
@@ -203,6 +219,11 @@ void ScriptsBuilderImpl::onScriptsReloadEnd()
     CallEvent(EventType::ReloadEnd);
 }
 
+void ScriptsBuilderImpl::onScriptsLoaded()
+{
+    CallEvent(EventType::ScriptsLoaded);
+}
+
 void ScriptsBuilder::Compile()
 {
     ScopeLock scopeLock(_locker);
@@ -214,7 +235,7 @@ void ScriptsBuilder::Compile()
 bool ScriptsBuilder::RunBuildTool(const StringView& args, const StringView& workingDir)
 {
     PROFILE_CPU();
-    const String buildToolPath = Globals::StartupFolder / TEXT("Binaries/Tools/Flax.Build.exe");
+    const String buildToolPath = GetBuildToolPath();
     if (!FileSystem::FileExists(buildToolPath))
     {
         Log::FileNotFoundException(buildToolPath).SetLevel(LogType::Fatal);
@@ -223,38 +244,28 @@ bool ScriptsBuilder::RunBuildTool(const StringView& args, const StringView& work
 
     // Prepare build options
     StringBuilder cmdLine(args.Length() + buildToolPath.Length() + 200);
-#if PLATFORM_LINUX
-    const String monoPath = Globals::MonoPath / TEXT("bin/mono");
-    if (!FileSystem::FileExists(monoPath))
-    {
-        Log::FileNotFoundException(monoPath).SetLevel(LogType::Fatal);
-        return true;
-    }
-    //const String monoPath = TEXT("mono");
-    cmdLine.Append(TEXT("\""));
-    cmdLine.Append(monoPath);
-    cmdLine.Append(TEXT("\" "));
-#endif
-    cmdLine.Append(TEXT("\""));
     cmdLine.Append(buildToolPath);
-    cmdLine.Append(TEXT("\" "));
-    cmdLine.Append(args.Get(), args.Length());
-    // TODO: Set env var for the mono MONO_GC_PARAMS=nursery-size64m to boost build performance -> profile it
 
     // Call build tool
-    const int32 result = Platform::RunProcess(StringView(*cmdLine, cmdLine.Length()), workingDir);
+    CreateProcessSettings procSettings;
+    procSettings.FileName = StringView(*cmdLine, cmdLine.Length());
+    procSettings.Arguments = args.Get();
+    procSettings.WorkingDirectory = workingDir;
+    const int32 result = Platform::CreateProcess(procSettings);
+    if (result != 0)
+        LOG(Error, "Failed to run build tool, result: {0:x}", (uint32)result);
     return result != 0;
 }
 
 bool ScriptsBuilder::GenerateProject(const StringView& customArgs)
 {
-    String args(TEXT("-log -genproject "));
+    String args(TEXT("-log -mutex -genproject "));
     args += customArgs;
     _wasProjectStructureChanged = false;
     return RunBuildTool(args);
 }
 
-void ScriptsBuilderImpl::GetClassName(const MString& fullname, MString& className)
+void ScriptsBuilderImpl::GetClassName(const StringAnsiView fullname, StringAnsi& className)
 {
     const auto lastDotIndex = fullname.FindLast('.');
     if (lastDotIndex != -1)
@@ -271,7 +282,7 @@ void ScriptsBuilderImpl::GetClassName(const MString& fullname, MString& classNam
 MClass* ScriptsBuilder::FindScript(const StringView& scriptName)
 {
     PROFILE_CPU();
-    const MString scriptNameStd = scriptName.ToStringAnsi();
+    const StringAnsi scriptNameStd = scriptName.ToStringAnsi();
 
     const ScriptingTypeHandle scriptingType = Scripting::FindScriptingType(scriptNameStd);
     if (scriptingType)
@@ -285,7 +296,7 @@ MClass* ScriptsBuilder::FindScript(const StringView& scriptName)
 
     // Check all assemblies (ignoring the typename namespace)
     auto& modules = BinaryModule::GetModules();
-    MString className;
+    StringAnsi className;
     GetClassName(scriptNameStd, className);
     MClass* scriptClass = Script::GetStaticClass();
     for (int32 j = 0; j < modules.Count(); j++)
@@ -302,7 +313,7 @@ MClass* ScriptsBuilder::FindScript(const StringView& scriptName)
             // Managed scripts
             if (mclass->IsSubClassOf(scriptClass) && !mclass->IsStatic() && !mclass->IsAbstract() && !mclass->IsInterface())
             {
-                MString mclassName;
+                StringAnsi mclassName;
                 GetClassName(mclass->GetFullName(), mclassName);
                 if (className == mclassName)
                 {
@@ -364,6 +375,8 @@ void ScriptsBuilder::GetBinariesConfiguration(const Char*& target, const Char*& 
     platform = TEXT("Windows");
 #elif PLATFORM_LINUX
     platform = TEXT("Linux");
+#elif PLATFORM_MAC
+    platform = TEXT("Mac");
 #else
 #error "Unknown platform"
 #endif
@@ -372,6 +385,10 @@ void ScriptsBuilder::GetBinariesConfiguration(const Char*& target, const Char*& 
     architecture = TEXT("x64");
 #elif PLATFORM_ARCH_X86
     architecture = TEXT("x86");
+#elif PLATFORM_ARCH_ARM
+    architecture = TEXT("arm");
+#elif PLATFORM_ARCH_ARM64
+    architecture = TEXT("arm64");
 #else
 #error "Unknown architecture"
 #endif
@@ -389,6 +406,7 @@ void ScriptsBuilder::GetBinariesConfiguration(const Char*& target, const Char*& 
 
 bool ScriptsBuilderImpl::compileGameScriptsAsyncInner()
 {
+    PROFILE_MEM(Editor);
     LOG(Info, "Starting scripts compilation...");
     CallEvent(EventType::CompileStarted);
 
@@ -456,7 +474,7 @@ void ScriptsBuilderImpl::CallCompileEvent(EventData& data)
                 LOG(Fatal, "Invalid Editor assembly!");
             }
         }
-        /*MonoObject* exception = nullptr;
+        /*MObject* exception = nullptr;
         void* args[1];
         args[0] = &data.Type;
         Internal_OnEvent->Invoke(nullptr, args, &exception);
@@ -495,6 +513,8 @@ void ScriptsBuilderImpl::onEditorAssemblyUnloading(MAssembly* assembly)
 
 bool ScriptsBuilderImpl::compileGameScriptsAsync()
 {
+    PROFILE_MEM(Editor);
+
     // Start
     {
         ScopeLock scopeLock(_locker);
@@ -538,6 +558,7 @@ bool ScriptsBuilderService::Init()
     // Check flag
     if (_isInited)
         return false;
+    PROFILE_MEM(Editor);
     _isInited = true;
 
     // Link for Editor assembly unload event to clear cached Internal_OnCompilationEnd to prevent errors
@@ -548,6 +569,7 @@ bool ScriptsBuilderService::Init()
     Level::ScriptsReloadStart.Bind(onScriptsReloadStart);
     Level::ScriptsReload.Bind(onScriptsReload);
     Level::ScriptsReloadEnd.Bind(onScriptsReloadEnd);
+    Scripting::ScriptsLoaded.Bind(onScriptsLoaded);
 
     // Listen to code editors manager events
     CodeEditingManager::AsyncOpenBegin.Bind(onCodeEditorAsyncOpenBegin);
@@ -557,7 +579,7 @@ bool ScriptsBuilderService::Init()
     auto project = Editor::Project;
     HashSet<ProjectInfo*> projects;
     project->GetAllProjects(projects);
-    for (auto e : projects)
+    for (const auto& e : projects)
     {
         ProjectInfo* project = e.Item;
         if (project->Name == TEXT("Flax"))
@@ -585,6 +607,28 @@ bool ScriptsBuilderService::Init()
         const String targetOutput = Globals::ProjectFolder / TEXT("Binaries") / target / platform / architecture / configuration;
         Array<String> files;
         FileSystem::DirectoryGetFiles(files, targetOutput, TEXT("*.HotReload.*"), DirectorySearchOption::TopDirectoryOnly);
+
+        for (const auto& reference : Editor::Project->References)
+        {
+            if (reference.Project->Name == TEXT("Flax"))
+                continue;
+
+            String referenceTarget;
+            if (reference.Project->EditorTarget.HasChars())
+            {
+                referenceTarget = reference.Project->EditorTarget.Get();
+            }
+            else if (reference.Project->GameTarget.HasChars())
+            {
+                referenceTarget = reference.Project->GameTarget.Get();
+            }
+            if (referenceTarget.IsEmpty())
+                continue;
+
+            const String referenceTargetOutput = reference.Project->ProjectFolderPath / TEXT("Binaries") / referenceTarget / platform / architecture / configuration;
+            FileSystem::DirectoryGetFiles(files, referenceTargetOutput, TEXT("*.HotReload.*"), DirectorySearchOption::TopDirectoryOnly);
+        }
+
         if (files.HasItems())
             LOG(Info, "Removing {0} files from previous Editor run hot-reloads", files.Count());
         for (auto& file : files)
@@ -612,6 +656,9 @@ bool ScriptsBuilderService::Init()
 
 void ScriptsBuilderService::Update()
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Editor);
+
     // Send compilation events
     {
         ScopeLock scopeLock(_compileEventsLocker);
@@ -622,9 +669,9 @@ void ScriptsBuilderService::Update()
     }
 
     // Check if compile code (if has been edited)
-    const TimeSpan timeToCallCompileIfDirty = TimeSpan::FromMilliseconds(50);
+    const TimeSpan timeToCallCompileIfDirty = TimeSpan::FromMilliseconds(150);
     auto mainWindow = Engine::MainWindow;
-    if (ScriptsBuilder::IsSourceDirty(timeToCallCompileIfDirty) && mainWindow && mainWindow->IsFocused())
+    if (ScriptsBuilder::IsSourceDirtyFor(timeToCallCompileIfDirty) && mainWindow && mainWindow->IsFocused())
     {
         // Check if auto reload is enabled
         if (Editor::Managed->CanAutoReloadScripts())

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,24 +12,29 @@
 /// </summary>
 API_STRUCT(InBuild) struct FLAXENGINE_API BoundingFrustum
 {
+    friend CollisionsHelper;
 private:
-
     Matrix _matrix;
-    Plane _pNear;
-    Plane _pFar;
-    Plane _pLeft;
-    Plane _pRight;
-    Plane _pTop;
-    Plane _pBottom;
+
+    union
+    {
+        struct
+        {
+            Plane _pNear;
+            Plane _pFar;
+            Plane _pLeft;
+            Plane _pRight;
+            Plane _pTop;
+            Plane _pBottom;
+        };
+        Plane _planes[6];
+    };
 
 public:
-
     /// <summary>
     /// Empty constructor.
     /// </summary>
-    BoundingFrustum()
-    {
-    }
+    BoundingFrustum() = default;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="BoundingFrustum"/> struct.
@@ -41,25 +46,13 @@ public:
     }
 
 public:
-
     String ToString() const;
 
 public:
-
     /// <summary>
     /// Gets the matrix that describes this bounding frustum.
     /// </summary>
-    /// <returns>The matrix.</returns>
     FORCE_INLINE const Matrix& GetMatrix() const
-    {
-        return _matrix;
-    }
-
-    /// <summary>
-    /// Gets the matrix that describes this bounding frustum.
-    /// </summary>
-    /// <returns>The matrix.</returns>
-    FORCE_INLINE Matrix GetMatrix()
     {
         return _matrix;
     }
@@ -94,52 +87,46 @@ public:
     /// <summary>
     /// Gets the near.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetNear() const
     {
         return _pNear;
     }
 
     /// <summary>
-    /// Gets the far plane of the BoundingFrustum.
+    /// Gets the far plane of the frustum.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetFar() const
     {
         return _pFar;
     }
 
     /// <summary>
-    /// Gets the left plane of the BoundingFrustum.
+    /// Gets the left plane of the frustum.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetLeft() const
     {
         return _pLeft;
     }
 
     /// <summary>
-    /// Gets the right plane of the BoundingFrustum.
+    /// Gets the right plane of the frustum.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetRight() const
     {
         return _pRight;
     }
 
     /// <summary>
-    /// Gets the top plane of the BoundingFrustum.
+    /// Gets the top plane of the frustum.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetTop() const
     {
         return _pTop;
     }
 
     /// <summary>
-    /// Gets the bottom plane of the BoundingFrustum.
+    /// Gets the bottom plane of the frustum.
     /// </summary>
-    /// <returns>The plane.</returns>
     FORCE_INLINE Plane GetBottom() const
     {
         return _pBottom;
@@ -153,10 +140,16 @@ public:
     Plane GetPlane(int32 index) const;
 
     /// <summary>
-    /// Gets the the 8 corners of the frustum: Near1 (near right down corner), Near2 (near right top corner), Near3 (near Left top corner), Near4 (near Left down corner), Far1 (far right down corner), Far2 (far right top corner), Far3 (far left top corner), Far4 (far left down corner).
+    /// Gets the 8 corners of the frustum: Near1 (near right down corner), Near2 (near right top corner), Near3 (near Left top corner), Near4 (near Left down corner), Far1 (far right down corner), Far2 (far right top corner), Far3 (far left top corner), Far4 (far left down corner).
     /// </summary>
     /// <param name="corners">The corners.</param>
-    void GetCorners(Vector3 corners[8]) const;
+    void GetCorners(Float3 corners[8]) const;
+
+    /// <summary>
+    /// Gets the 8 corners of the frustum: Near1 (near right down corner), Near2 (near right top corner), Near3 (near Left top corner), Near4 (near Left down corner), Far1 (far right down corner), Far2 (far right top corner), Far3 (far left top corner), Far4 (far left down corner).
+    /// </summary>
+    /// <param name="corners">The corners.</param>
+    void GetCorners(Double3 corners[8]) const;
 
     /// <summary>
     /// Gets bounding box that contains whole frustum.
@@ -173,7 +166,6 @@ public:
     /// <summary>
     /// Determines whether this frustum is orthographic.
     /// </summary>
-    /// <returns><c>true</c> if this frustum is orthographic; otherwise, <c>false</c>.</returns>
     FORCE_INLINE bool IsOrthographic() const
     {
         return _pLeft.Normal == -_pRight.Normal && _pTop.Normal == -_pBottom.Normal;
@@ -194,7 +186,6 @@ public:
     float GetHeightAtDepth(float depth) const;
 
 public:
-
     FORCE_INLINE bool operator==(const BoundingFrustum& other) const
     {
         return _matrix == other._matrix;
@@ -206,7 +197,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Checks whether a point lays inside, intersects or lays outside the frustum.
     /// </summary>
@@ -232,33 +222,20 @@ public:
     ContainmentType Contains(const BoundingSphere& sphere) const;
 
     /// <summary>
-    /// Checks whether the current BoundingFrustum intersects a BoundingSphere.
+    /// Checks whether the current frustum intersects a sphere.
     /// </summary>
     /// <param name="sphere">The sphere.</param>
-    /// <returns>True if the current BoundingFrustum intersects a BoundingSphere, otherwise false.</returns>
-    FORCE_INLINE bool Intersects(const BoundingSphere& sphere) const
-    {
-        return Contains(sphere) != ContainmentType::Disjoint;
-    }
+    /// <returns>True if the current frustum intersects a sphere, otherwise false.</returns>
+    bool Intersects(const BoundingSphere& sphere) const;
 
     /// <summary>
-    /// Checks whether the current BoundingFrustum intersects a BoundingBox.
+    /// Checks whether the current frustum intersects a box.
     /// </summary>
     /// <param name="box">The box</param>
-    /// <returns>True if the current BoundingFrustum intersects a BoundingBox, otherwise false.</returns>
+    /// <returns>True if the current frustum intersects a box, otherwise false.</returns>
     FORCE_INLINE bool Intersects(const BoundingBox& box) const
     {
         return CollisionsHelper::FrustumContainsBox(*this, box) != ContainmentType::Disjoint;
-    }
-
-private:
-
-    static Vector3 Get3PlanesInterPoint(const Plane& p1, const Plane& p2, const Plane& p3)
-    {
-        // P = -d1 * N2xN3 / N1.N2xN3 - d2 * N3xN1 / N2.N3xN1 - d3 * N1xN2 / N3.N1xN2
-        return -p1.D * Vector3::Cross(p2.Normal, p3.Normal) / Vector3::Dot(p1.Normal, Vector3::Cross(p2.Normal, p3.Normal))
-                - p2.D * Vector3::Cross(p3.Normal, p1.Normal) / Vector3::Dot(p2.Normal, Vector3::Cross(p3.Normal, p1.Normal))
-                - p3.D * Vector3::Cross(p1.Normal, p2.Normal) / Vector3::Dot(p3.Normal, Vector3::Cross(p1.Normal, p2.Normal));
     }
 };
 

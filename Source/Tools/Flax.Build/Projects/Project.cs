@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using Flax.Build.NativeCpp;
@@ -16,6 +16,11 @@ namespace Flax.Build.Projects
         /// The project generator that created this project.
         /// </summary>
         public ProjectGenerator Generator;
+
+        /// <summary>
+        /// The project base name (might not be unique within solution - eg. Name = BaseName + '.CSharp' to prevent overlaps).
+        /// </summary>
+        public string BaseName;
 
         /// <summary>
         /// The project name.
@@ -224,6 +229,11 @@ namespace Flax.Build.Projects
             /// The .Net libraries references (dll or exe files paths).
             /// </summary>
             public HashSet<string> FileReferences;
+            
+            /// <summary>
+            /// The nuget references.
+            /// </summary>
+            public HashSet<NugetPackage> NugetPackageReferences;
 
             /// <summary>
             /// The output folder path (optional).
@@ -243,14 +253,15 @@ namespace Flax.Build.Projects
         {
             SystemReferences = new HashSet<string>(),
             FileReferences = new HashSet<string>(),
+            NugetPackageReferences = new HashSet<NugetPackage>(),
         };
 
         /// <summary>
         /// Generates the project.
         /// </summary>
-        public virtual void Generate()
+        public virtual void Generate(string solutionPath, bool isMainProject)
         {
-            Generator.GenerateProject(this);
+            Generator.GenerateProject(this, solutionPath, isMainProject);
         }
 
         /// <inheritdoc />

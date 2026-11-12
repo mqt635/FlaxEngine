@@ -1,10 +1,94 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ParticlesData.h"
 #include "ParticleEmitter.h"
 #include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/DynamicBuffer.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+
+int32 ParticleAttribute::GetSize() const
+{
+    switch (ValueType)
+    {
+    case ValueTypes::Float2:
+        return 8;
+    case ValueTypes::Float3:
+        return 12;
+    case ValueTypes::Float4:
+        return 16;
+    case ValueTypes::Float:
+    case ValueTypes::Int:
+    case ValueTypes::Uint:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+void ParticleLayout::Clear()
+{
+    Size = 0;
+    Attributes.Clear();
+}
+
+void ParticleLayout::UpdateLayout()
+{
+    Size = 0;
+    for (int32 i = 0; i < Attributes.Count(); i++)
+    {
+        Attributes[i].Offset = Size;
+        Size += Attributes[i].GetSize();
+    }
+}
+
+int32 ParticleLayout::FindAttribute(const StringView& name) const
+{
+    for (int32 i = 0; i < Attributes.Count(); i++)
+    {
+        if (name == Attributes[i].Name)
+            return i;
+    }
+    return -1;
+}
+
+int32 ParticleLayout::FindAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType) const
+{
+    for (int32 i = 0; i < Attributes.Count(); i++)
+    {
+        if (Attributes[i].ValueType == valueType && name == Attributes[i].Name)
+            return i;
+    }
+    return -1;
+}
+
+int32 ParticleLayout::FindAttributeOffset(const StringView& name, int32 fallbackValue) const
+{
+    for (int32 i = 0; i < Attributes.Count(); i++)
+    {
+        if (name == Attributes[i].Name)
+            return Attributes[i].Offset;
+    }
+    return fallbackValue;
+}
+
+int32 ParticleLayout::FindAttributeOffset(const StringView& name, ParticleAttribute::ValueTypes valueType, int32 fallbackValue) const
+{
+    for (int32 i = 0; i < Attributes.Count(); i++)
+    {
+        if (Attributes[i].ValueType == valueType && name == Attributes[i].Name)
+            return Attributes[i].Offset;
+    }
+    return fallbackValue;
+}
+
+int32 ParticleLayout::AddAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType)
+{
+    auto& a = Attributes.AddOne();
+    a.Name = String(*name, name.Length());
+    a.ValueType = valueType;
+    return Attributes.Count() - 1;
+}
 
 ParticleBuffer::ParticleBuffer()
 {
@@ -14,16 +98,15 @@ ParticleBuffer::~ParticleBuffer()
 {
     SAFE_DELETE_GPU_RESOURCE(GPU.Buffer);
     SAFE_DELETE_GPU_RESOURCE(GPU.BufferSecondary);
-    SAFE_DELETE_GPU_RESOURCE(GPU.IndirectDrawArgsBuffer);
-    SAFE_DELETE_GPU_RESOURCE(GPU.SortingKeysBuffer);
+    SAFE_DELETE_GPU_RESOURCE(GPU.SortingKeys);
     SAFE_DELETE_GPU_RESOURCE(GPU.SortedIndices);
     SAFE_DELETE(GPU.RibbonIndexBufferDynamic);
-    for (auto& e : GPU.RibbonSegmentDistances)
-        SAFE_DELETE_GPU_RESOURCE(e);
+    SAFE_DELETE(GPU.RibbonVertexBufferDynamic);
 }
 
 bool ParticleBuffer::Init(ParticleEmitter* emitter)
 {
+    PROFILE_MEM(Particles);
     ASSERT(emitter && emitter->IsLoaded());
 
     Version = emitter->Graph.Version;
@@ -62,7 +145,6 @@ bool ParticleBuffer::Init(ParticleEmitter* emitter)
         GPU.BufferSecondary = GPUDevice::Instance->CreateBuffer(TEXT("ParticleBuffer B"));
         if (GPU.BufferSecondary->Init(GPU.Buffer->GetDescription()))
             return true;
-        GPU.IndirectDrawArgsBuffer = GPUDevice::Instance->CreateBuffer(TEXT("ParticleIndirectDrawArgsBuffer"));
         GPU.PendingClear = true;
         GPU.HasValidCount = false;
         GPU.ParticleCounterOffset = size;
@@ -71,7 +153,7 @@ bool ParticleBuffer::Init(ParticleEmitter* emitter)
     }
 #endif
     default:
-    CRASH;
+        CRASH;
     }
 
     return false;
@@ -79,35 +161,46 @@ bool ParticleBuffer::Init(ParticleEmitter* emitter)
 
 bool ParticleBuffer::AllocateSortBuffer()
 {
-    ASSERT(Emitter && GPU.SortedIndices == nullptr && GPU.SortingKeysBuffer == nullptr);
+    ASSERT(Emitter && GPU.SortedIndices == nullptr && GPU.SortingKeys == nullptr);
     if (Emitter->Graph.SortModules.IsEmpty())
         return false;
+    const int32 sortedIndicesCount = Capacity * Emitter->Graph.SortModules.Count();
+    uint32 indexSize = sizeof(uint32);
+    PixelFormat indexFormat = PixelFormat::R32_UInt;
+    auto r16Support = GPUDevice::Instance->GetFormatFeatures(PixelFormat::R16_UInt).Support;
+    auto indexFormatRequirements = FormatSupport::Buffer | FormatSupport::UnorderedAccessReadOnly;
+    if (Mode == ParticlesSimulationMode::GPU)
+        indexFormatRequirements |= FormatSupport::UnorderedAccess;
+    if (Capacity <= MAX_uint16 &&  EnumHasAllFlags(r16Support, indexFormatRequirements))
+    {
+        // 16-bit indices
+        indexSize = sizeof(uint16);
+        indexFormat = PixelFormat::R16_UInt;
+    }
 
     switch (Mode)
     {
     case ParticlesSimulationMode::CPU:
     {
-        const int32 sortedIndicesSize = Capacity * sizeof(uint32) * Emitter->Graph.SortModules.Count();
-        GPU.SortedIndices = GPUDevice::Instance->CreateBuffer(TEXT("SortedIndices"));
-        if (GPU.SortedIndices->Init(GPUBufferDescription::Buffer(sortedIndicesSize, GPUBufferFlags::ShaderResource, PixelFormat::R32_UInt, nullptr, sizeof(uint32), GPUResourceUsage::Dynamic)))
+        GPU.SortedIndices = GPUDevice::Instance->CreateBuffer(TEXT("ParticleSortedIndices"));
+        if (GPU.SortedIndices->Init(GPUBufferDescription::Buffer(sortedIndicesCount * indexSize, GPUBufferFlags::ShaderResource, indexFormat, nullptr, indexSize, GPUResourceUsage::Dynamic)))
             return true;
         break;
     }
 #if COMPILE_WITH_GPU_PARTICLES
     case ParticlesSimulationMode::GPU:
     {
-        const int32 sortedIndicesSize = Capacity * sizeof(uint32) * Emitter->Graph.SortModules.Count();
-        GPU.SortingKeysBuffer = GPUDevice::Instance->CreateBuffer(TEXT("ParticleSortingKeysBuffer"));
-        if (GPU.SortingKeysBuffer->Init(GPUBufferDescription::Structured(Capacity, sizeof(float) + sizeof(uint32), true)))
+        GPU.SortingKeys = GPUDevice::Instance->CreateBuffer(TEXT("ParticleSortingKeys"));
+        if (GPU.SortingKeys->Init(GPUBufferDescription::Buffer(sortedIndicesCount * sizeof(float), GPUBufferFlags::ShaderResource | GPUBufferFlags::UnorderedAccess, PixelFormat::R32_Float, nullptr, sizeof(float))))
             return true;
-        GPU.SortedIndices = GPUDevice::Instance->CreateBuffer(TEXT("SortedIndices"));
-        if (GPU.SortedIndices->Init(GPUBufferDescription::Buffer(sortedIndicesSize, GPUBufferFlags::ShaderResource | GPUBufferFlags::UnorderedAccess, PixelFormat::R32_UInt, nullptr, sizeof(uint32))))
+        GPU.SortedIndices = GPUDevice::Instance->CreateBuffer(TEXT("ParticleSortedIndices"));
+        if (GPU.SortedIndices->Init(GPUBufferDescription::Buffer(sortedIndicesCount * indexSize, GPUBufferFlags::ShaderResource | GPUBufferFlags::UnorderedAccess, indexFormat, nullptr, indexSize)))
             return true;
         break;
     }
 #endif
     default:
-    CRASH;
+        CRASH;
         return true;
     }
 
@@ -133,6 +226,6 @@ void ParticleBuffer::Clear()
     }
 #endif
     default:
-    CRASH;
+        CRASH;
     }
 }

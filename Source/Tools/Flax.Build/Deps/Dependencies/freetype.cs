@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -16,42 +16,6 @@ namespace Flax.Deps.Dependencies
     class freetype : Dependency
     {
         /// <inheritdoc />
-        public override TargetPlatform[] Platforms
-        {
-            get
-            {
-                switch (BuildPlatform)
-                {
-                case TargetPlatform.Windows:
-                    return new[]
-                    {
-                        TargetPlatform.Windows,
-                        TargetPlatform.UWP,
-                        TargetPlatform.XboxOne,
-                        TargetPlatform.PS4,
-                        TargetPlatform.XboxScarlett,
-                        TargetPlatform.Android,
-                        TargetPlatform.Switch,
-                    };
-                case TargetPlatform.Linux:
-                    return new[]
-                    {
-                        TargetPlatform.Linux,
-                    };
-                default: return new TargetPlatform[0];
-                }
-            }
-        }
-
-        private void PatchWindowsTargetPlatformVersion(string vcxprojPath, string vcxprojContents, string windowsTargetPlatformVersion, string platformToolset)
-        {
-            // Fix the MSVC project settings for Windows
-            var contents = vcxprojContents.Replace("$(DefaultPlatformToolset)", string.Format("{0}", platformToolset));
-            contents = contents.Replace("</TargetName>", string.Format("</TargetName><WindowsTargetPlatformVersion>{0}</WindowsTargetPlatformVersion>", windowsTargetPlatformVersion));
-            File.WriteAllText(vcxprojPath, contents);
-        }
-
-        /// <inheritdoc />
         public override void Build(BuildOptions options)
         {
             var root = options.IntermediateFolder;
@@ -62,12 +26,16 @@ namespace Flax.Deps.Dependencies
             };
 
             // Get the source
-            Downloader.DownloadFileFromUrlToPath("https://sourceforge.net/projects/freetype/files/freetype2/2.10.0/ft2100.zip/download", packagePath);
+            if (!File.Exists(packagePath))
+                Downloader.DownloadFileFromUrlToPath("https://sourceforge.net/projects/freetype/files/freetype2/2.13.2/ft2132.zip/download", packagePath);
             using (ZipArchive archive = ZipFile.Open(packagePath, ZipArchiveMode.Read))
             {
-                archive.ExtractToDirectory(root);
-                root = Path.Combine(root, archive.Entries.First().FullName);
+                var newRoot = Path.Combine(root, archive.Entries.First().FullName);
+                if (!Directory.Exists(newRoot))
+                    archive.ExtractToDirectory(root);
+                root = newRoot;
             }
+            var buildDir = Path.Combine(root, "build");
 
             var configurationMsvc = "Release Static";
             var binariesToCopyMsvc = new[]
@@ -81,146 +49,178 @@ namespace Flax.Deps.Dependencies
             var libraryFileName = "libfreetype.a";
             vcxprojContents = vcxprojContents.Replace("<RuntimeLibrary>MultiThreaded</RuntimeLibrary>", "<RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>");
             vcxprojContents = vcxprojContents.Replace("<RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>", "<RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>");
+            vcxprojContents = vcxprojContents.Replace("<<PlatformToolset>v142</PlatformToolset>", "<PlatformToolset>v143</PlatformToolset>");
+            Utilities.ReplaceInFile(Path.Combine(root, "include", "freetype", "config", "ftoption.h"), "#define FT_CONFIG_OPTION_ENVIRONMENT_PROPERTIES", "");
+            var msvcProps = new Dictionary<string, string>
+            {
+                { "WindowsTargetPlatformVersion", "10.0" },
+                { "PlatformToolset", "v143" },
+                //{ "RuntimeLibrary", "MultiThreadedDLL" }
+            };
 
             foreach (var platform in options.Platforms)
             {
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-                {
-                    // Fix the MSVC project settings for Windows
-                    PatchWindowsTargetPlatformVersion(vcxprojPath, vcxprojContents, "8.1", "140");
-
-                    // Build for Win64
-                    Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64");
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    foreach (var filename in binariesToCopyMsvc)
-                        Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
-
-                    break;
-                }
-                case TargetPlatform.UWP:
-                {
-                    // Fix the MSVC project settings for UWP
-                    PatchWindowsTargetPlatformVersion(vcxprojPath, vcxprojContents, "10.0.17763.0", "v141");
-
-                    // Build for UWP x64
-                    Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64");
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    foreach (var filename in binariesToCopyMsvc)
-                        Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
-
-                    break;
-                }
-                case TargetPlatform.Linux:
-                {
-                    var envVars = new Dictionary<string, string>
+                    BuildStarted(platform, architecture);
+                    switch (platform)
                     {
-                        { "CC", "clang-7" },
-                        { "CC_FOR_BUILD", "clang-7" }
-                    };
-                    var buildDir = Path.Combine(root, "build");
+                    case TargetPlatform.Windows:
+                    {
+                        // Patch the RuntimeLibrary value
+                        File.WriteAllText(vcxprojPath, vcxprojContents);
 
-                    // Fix scripts
-                    Utilities.Run("sed", "-i -e \'s/\r$//\' autogen.sh", null, root, Utilities.RunOptions.None, envVars);
-                    Utilities.Run("sed", "-i -e \'s/\r$//\' configure", null, root, Utilities.RunOptions.None, envVars);
-                    Utilities.Run("chmod", "+x autogen.sh", null, root, Utilities.RunOptions.None);
-                    Utilities.Run("chmod", "+x configure", null, root, Utilities.RunOptions.None);
+                        // Build for Windows
+                        Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, architecture.ToString(), msvcProps);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        foreach (var filename in binariesToCopyMsvc)
+                            Utilities.FileCopy(Path.Combine(root, "objs", architecture.ToString(), configurationMsvc, filename), Path.Combine(depsFolder, filename));
+                        break;
+                    }
+                    case TargetPlatform.Linux:
+                    {
+                        var envVars = new Dictionary<string, string>
+                        {
+                            { "CC", "clang-" + LinuxConfiguration.ClangMinVer },
+                            { "CC_FOR_BUILD", "clang-" + LinuxConfiguration.ClangMinVer },
+                            { "CMAKE_BUILD_PARALLEL_LEVEL", CmakeBuildParallel },
+                        };
 
-                    Utilities.Run(Path.Combine(root, "autogen.sh"), null, null, root, Utilities.RunOptions.Default, envVars);
+                        // Fix scripts
+                        Utilities.Run("dos2unix", "autogen.sh", null, root, Utilities.RunOptions.ThrowExceptionOnError, envVars);
+                        Utilities.Run("dos2unix", "configure", null, root, Utilities.RunOptions.ThrowExceptionOnError, envVars);
+                        //Utilities.Run("sed", "-i -e \'s/\r$//\' autogen.sh", null, root, Utilities.RunOptions.ThrowExceptionOnError, envVars);
+                        //Utilities.Run("sed", "-i -e \'s/\r$//\' configure", null, root, Utilities.RunOptions.ThrowExceptionOnError, envVars);
+                        Utilities.Run("chmod", "+x autogen.sh", null, root, Utilities.RunOptions.ThrowExceptionOnError);
+                        Utilities.Run("chmod", "+x configure", null, root, Utilities.RunOptions.ThrowExceptionOnError);
 
-                    // Disable using libpng even if it's found on the system
-                    var cmakeFile = Path.Combine(root, "CMakeLists.txt");
-                    File.WriteAllText(cmakeFile,
-                                      File.ReadAllText(cmakeFile)
-                                          .Replace("find_package(PNG)", "")
-                                          .Replace("find_package(ZLIB)", "")
-                                          .Replace("find_package(BZip2)", "")
-                                     );
+                        Utilities.Run(Path.Combine(root, "autogen.sh"), null, null, root, Utilities.RunOptions.ThrowExceptionOnError, envVars);
 
-                    // Build for Linux
-                    SetupDirectory(buildDir, true);
-                    var toolchain = UnixToolchain.GetToolchainName(platform, TargetArchitecture.x64);
-                    Utilities.Run("cmake", string.Format("-G \"Unix Makefiles\" -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DFT_WITH_BZIP2=OFF -DFT_WITH_ZLIB=OFF -DFT_WITH_PNG=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_TARGET={0} ..", toolchain), null, buildDir, Utilities.RunOptions.None, envVars);
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None, envVars);
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        // Disable using libpng even if it's found on the system
+                        var cmakeFile = Path.Combine(root, "CMakeLists.txt");
+                        File.WriteAllText(cmakeFile,
+                                          File.ReadAllText(cmakeFile)
+                                              .Replace("find_package(PNG)", "")
+                                              .Replace("find_package(ZLIB)", "")
+                                              .Replace("find_package(BZip2)", "")
+                                         );
 
-                    break;
-                }
-                case TargetPlatform.PS4:
-                {
-                    // Get the build data files
-                    Utilities.DirectoryCopy(
-                                            Path.Combine(GetBinariesFolder(options, platform), "Data", "freetype"),
-                                            Path.Combine(root, "builds", "PS4"), false, true);
+                        // Build for Linux
+                        SetupDirectory(buildDir, true);
+                        var toolchain = UnixToolchain.GetToolchainName(platform, architecture);
+                        Utilities.Run("cmake", string.Format("-G \"Unix Makefiles\" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DFT_WITH_BZIP2=OFF -DFT_WITH_ZLIB=OFF -DFT_WITH_PNG=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_TARGET={0} ..", toolchain), null, buildDir, Utilities.RunOptions.DefaultTool, envVars);
+                        Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.DefaultTool, envVars);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        break;
+                    }
+                    case TargetPlatform.PS4:
+                    {
+                        // Get the build data files
+                        Utilities.DirectoryCopy(
+                                                Path.Combine(GetBinariesFolder(options, platform), "Data", "freetype"),
+                                                Path.Combine(root, "builds", "PS4"), false, true);
 
-                    // Build for PS4
-                    var solutionPath = Path.Combine(root, "builds", "PS4", "freetype.sln");
-                    Deploy.VCEnvironment.BuildSolution(solutionPath, "Release", "ORBIS");
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    Utilities.FileCopy(Path.Combine(root, "lib", "PS4", libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        // Build for PS4
+                        var solutionPath = Path.Combine(root, "builds", "PS4", "freetype.sln");
+                        Deploy.VCEnvironment.BuildSolution(solutionPath, "Release", "ORBIS");
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
+                        Utilities.FileCopy(Path.Combine(root, "lib", "PS4", libraryFileName), Path.Combine(depsFolder, libraryFileName));
 
-                    break;
-                }
-                case TargetPlatform.XboxOne:
-                {
-                    // Fix the MSVC project settings for Xbox One
-                    PatchWindowsTargetPlatformVersion(vcxprojPath, vcxprojContents, "10.0.19041.0", "v142");
+                        break;
+                    }
+                    case TargetPlatform.PS5:
+                    {
+                        // Get the build data files
+                        Utilities.DirectoryCopy(
+                                                Path.Combine(GetBinariesFolder(options, platform), "Data", "freetype"),
+                                                Path.Combine(root, "builds", "PS5"), false, true);
+                        Utilities.ReplaceInFile(Path.Combine(root, "include\\freetype\\config\\ftstdlib.h"), "#define ft_getenv  getenv", "char* ft_getenv(const char* n);");
 
-                    // Build for Xbox One x64
-                    Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64");
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    foreach (var filename in binariesToCopyMsvc)
-                        Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
+                        // Build for PS5
+                        var solutionPath = Path.Combine(root, "builds", "PS5", "freetype.sln");
+                        Deploy.VCEnvironment.BuildSolution(solutionPath, "Release", "PROSPERO");
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
+                        Utilities.FileCopy(Path.Combine(root, "lib", "PS5", libraryFileName), Path.Combine(depsFolder, libraryFileName));
 
-                    break;
-                }
-                case TargetPlatform.XboxScarlett:
-                {
-                    // Fix the MSVC project settings for Xbox Scarlett
-                    PatchWindowsTargetPlatformVersion(vcxprojPath, vcxprojContents, "10.0.19041.0", "v142");
+                        break;
+                    }
+                    case TargetPlatform.XboxOne:
+                    {
+                        // Build for Xbox One x64
+                        Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64", msvcProps);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
+                        foreach (var filename in binariesToCopyMsvc)
+                            Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
 
-                    // Build for Xbox Scarlett
-                    Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64");
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
-                    foreach (var filename in binariesToCopyMsvc)
-                        Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
+                        break;
+                    }
+                    case TargetPlatform.XboxScarlett:
+                    {
+                        // Build for Xbox Scarlett
+                        Deploy.VCEnvironment.BuildSolution(vsSolutionPath, configurationMsvc, "x64", msvcProps);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.x64);
+                        foreach (var filename in binariesToCopyMsvc)
+                            Utilities.FileCopy(Path.Combine(root, "objs", "x64", configurationMsvc, filename), Path.Combine(depsFolder, filename));
 
-                    break;
-                }
-                case TargetPlatform.Android:
-                {
-                    var buildDir = Path.Combine(root, "build");
+                        break;
+                    }
+                    case TargetPlatform.Android:
+                    {
+                        // Disable using libpng even if it's found on the system
+                        var cmakeFile = Path.Combine(root, "CMakeLists.txt");
+                        File.WriteAllText(cmakeFile,
+                                          File.ReadAllText(cmakeFile)
+                                              .Replace("find_package(PNG)", "")
+                                              .Replace("find_package(ZLIB)", "")
+                                              .Replace("find_package(BZip2)", "")
+                                         );
 
-                    // Disable using libpng even if it's found on the system
-                    var cmakeFile = Path.Combine(root, "CMakeLists.txt");
-                    File.WriteAllText(cmakeFile,
-                                      File.ReadAllText(cmakeFile)
-                                          .Replace("find_package(PNG)", "")
-                                          .Replace("find_package(ZLIB)", "")
-                                          .Replace("find_package(BZip2)", "")
-                                     );
+                        // Build for Android
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, TargetPlatform.Android, TargetArchitecture.ARM64, ".. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DFT_WITH_BZIP2=OFF -DFT_WITH_ZLIB=OFF -DFT_WITH_PNG=OFF -DCMAKE_BUILD_TYPE=Release");
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        break;
+                    }
+                    case TargetPlatform.Switch:
+                    {
+                        // Build for Switch
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release");
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        break;
+                    }
+                    case TargetPlatform.Mac:
+                    {
+                        // Build for Mac
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release");
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        break;
+                    }
+                    case TargetPlatform.iOS:
+                    {
+                        // Fix archive creation issue due to missing ar tool
+                        Utilities.ReplaceInFile(Path.Combine(root, "builds/cmake/iOS.cmake"), "set(CMAKE_SYSTEM_NAME Darwin)", "set(CMAKE_SYSTEM_NAME Darwin)\nset(CMAKE_AR ar CACHE FILEPATH \"\" FORCE)");
 
-                    // Build for Android
-                    SetupDirectory(buildDir, true);
-                    RunCmake(buildDir, TargetPlatform.Android, TargetArchitecture.ARM64, ".. -DFT_WITH_BZIP2=OFF -DFT_WITH_ZLIB=OFF -DFT_WITH_PNG=OFF -DCMAKE_BUILD_TYPE=Release");
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None);
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
-                    Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
-                    break;
-                }
-                case TargetPlatform.Switch:
-                {
-                    // Build for Switch
-                    var buildDir = Path.Combine(root, "build");
-                    SetupDirectory(buildDir, true);
-                    RunCmake(buildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release");
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None);
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
-                    Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
-                    break;
-                }
+                        // Fix freetype toolchain rejecting min iPhone version
+                        Utilities.ReplaceInFile(Path.Combine(root, "builds/cmake/iOS.cmake"), "set(CMAKE_OSX_DEPLOYMENT_TARGET \"\"", "set(CMAKE_OSX_DEPLOYMENT_TARGET \"${CMAKE_OSX_DEPLOYMENT_TARGET}\"");
+
+                        // Build for iOS
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DIOS_PLATFORM=OS -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_BUILD_TYPE=Release -DFT_WITH_BZIP2=OFF -DFT_WITH_ZLIB=OFF -DFT_WITH_PNG=OFF");
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        Utilities.FileCopy(Path.Combine(buildDir, libraryFileName), Path.Combine(depsFolder, libraryFileName));
+                        break;
+                    }
+                    }
                 }
             }
 
@@ -234,18 +234,25 @@ namespace Flax.Deps.Dependencies
                 Utilities.FileCopy(src, dst);
             }
 
-            // Setup headers directory
-            SetupDirectory(dstIncludePath, true);
-
-            // Deploy header files and restore files
-            Utilities.DirectoryCopy(srcIncludePath, dstIncludePath, true, true);
-            Utilities.FileCopy(Path.Combine(root, "include", "ft2build.h"), Path.Combine(dstIncludePath, "ft2build.h"));
-            Utilities.FileCopy(Path.Combine(root, "docs", "LICENSE.TXT"), Path.Combine(dstIncludePath, "LICENSE.TXT"));
-            foreach (var filename in filesToKeep)
+            try
             {
-                var src = Path.Combine(options.IntermediateFolder, filename + ".tmp");
-                var dst = Path.Combine(dstIncludePath, filename);
-                Utilities.FileCopy(src, dst);
+                // Setup headers directory
+                SetupDirectory(dstIncludePath, true);
+
+                // Deploy header files and restore files
+                Utilities.DirectoryCopy(srcIncludePath, dstIncludePath, true, true);
+                Utilities.FileCopy(Path.Combine(root, "include", "ft2build.h"), Path.Combine(dstIncludePath, "ft2build.h"));
+                Utilities.FileCopy(Path.Combine(root, "LICENSE.TXT"), Path.Combine(dstIncludePath, "LICENSE.TXT"));
+                Utilities.FileCopy(Path.Combine(root, "docs", "FTL.TXT"), Path.Combine(dstIncludePath, "FTL.TXT"));
+            }
+            finally
+            {
+                foreach (var filename in filesToKeep)
+                {
+                    var src = Path.Combine(options.IntermediateFolder, filename + ".tmp");
+                    var dst = Path.Combine(dstIncludePath, filename);
+                    Utilities.FileCopy(src, dst);
+                }
             }
         }
     }

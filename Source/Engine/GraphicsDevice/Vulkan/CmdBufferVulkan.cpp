@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
@@ -6,8 +6,12 @@
 #include "RenderToolsVulkan.h"
 #include "QueueVulkan.h"
 #include "GPUContextVulkan.h"
+#if VULKAN_USE_TIMER_QUERIES
 #include "GPUTimerQueryVulkan.h"
+#endif
 #include "DescriptorSetVulkan.h"
+#include "Engine/Engine/Engine.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 
 void CmdBufferVulkan::AddWaitSemaphore(VkPipelineStageFlags waitFlags, SemaphoreVulkan* waitSemaphore)
 {
@@ -18,6 +22,7 @@ void CmdBufferVulkan::AddWaitSemaphore(VkPipelineStageFlags waitFlags, Semaphore
 
 void CmdBufferVulkan::Begin()
 {
+    PROFILE_CPU();
     ASSERT(_state == State::ReadyForBegin);
 
     VkCommandBufferBeginInfo beginInfo;
@@ -28,7 +33,7 @@ void CmdBufferVulkan::Begin()
     // Acquire a descriptor pool set on
     if (_descriptorPoolSetContainer == nullptr)
     {
-        AcquirePoolSet();
+        _descriptorPoolSetContainer = _device->DescriptorPoolsManager->AcquirePoolSetContainer();
     }
 
     _state = State::IsInsideBegin;
@@ -41,12 +46,22 @@ void CmdBufferVulkan::Begin()
 
 void CmdBufferVulkan::End()
 {
+    PROFILE_CPU();
     ASSERT(IsOutsideRenderPass());
 
-#if GPU_ALLOW_PROFILE_EVENTS && VK_EXT_debug_utils
+#if GPU_ALLOW_PROFILE_EVENTS
     // End remaining events
     while (_eventsBegin--)
-        vkCmdEndDebugUtilsLabelEXT(GetHandle());
+    {
+#if VK_EXT_debug_utils
+        if (vkCmdEndDebugUtilsLabelEXT)
+            vkCmdEndDebugUtilsLabelEXT(GetHandle());
+#endif
+#if VULKAN_USE_TRACY_GPU
+        tracy::EndVkZoneScope(_tracyZones.Last().Data);
+        _tracyZones.RemoveLast();
+#endif
+    }
 #endif
 
     VALIDATE_VULKAN_RESULT(vkEndCommandBuffer(GetHandle()));
@@ -56,18 +71,16 @@ void CmdBufferVulkan::End()
 void CmdBufferVulkan::BeginRenderPass(RenderPassVulkan* renderPass, FramebufferVulkan* framebuffer, uint32 clearValueCount, VkClearValue* clearValues)
 {
     ASSERT(IsOutsideRenderPass());
-
     VkRenderPassBeginInfo info;
     RenderToolsVulkan::ZeroStruct(info, VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
-    info.renderPass = renderPass->GetHandle();
-    info.framebuffer = framebuffer->GetHandle();
+    info.renderPass = renderPass->Handle;
+    info.framebuffer = framebuffer->Handle;
     info.renderArea.offset.x = 0;
     info.renderArea.offset.y = 0;
     info.renderArea.extent.width = framebuffer->Extent.width;
     info.renderArea.extent.height = framebuffer->Extent.height;
     info.clearValueCount = clearValueCount;
     info.pClearValues = clearValues;
-
     vkCmdBeginRenderPass(_commandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
     _state = State::IsInsideRenderPass;
 }
@@ -79,77 +92,84 @@ void CmdBufferVulkan::EndRenderPass()
     _state = State::IsInsideBegin;
 }
 
-void CmdBufferVulkan::AcquirePoolSet()
-{
-    ASSERT(!_descriptorPoolSetContainer);
-    _descriptorPoolSetContainer = &_device->DescriptorPoolsManager->AcquirePoolSetContainer();
-}
-
 #if GPU_ALLOW_PROFILE_EVENTS
 
-void CmdBufferVulkan::BeginEvent(const Char* name)
+void CmdBufferVulkan::BeginEvent(const Char* name, void* tracyContext)
 {
-#if VK_EXT_debug_utils
-    if (!vkCmdBeginDebugUtilsLabelEXT)
-        return;
-
     _eventsBegin++;
 
-    // Convert to ANSI
-    char buffer[101];
-    int32 i = 0;
-    while (i < 100 && name[i])
-    {
-        buffer[i] = (char)name[i];
-        i++;
-    }
-    buffer[i] = 0;
+    char buffer[60];
+    int32 bufferSize = StringUtils::Copy(buffer, name, sizeof(buffer));
 
-    VkDebugUtilsLabelEXT label;
-    RenderToolsVulkan::ZeroStruct(label, VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT);
-    label.pLabelName = buffer;
-    vkCmdBeginDebugUtilsLabelEXT(GetHandle(), &label);
+#if VULKAN_USE_TRACY_GPU
+    auto& zone = _tracyZones.AddOne();
+    tracy::BeginVkZoneScope(zone.Data, tracyContext, GetHandle(), buffer, bufferSize);
+#endif
+
+#if VK_EXT_debug_utils
+    if (vkCmdBeginDebugUtilsLabelEXT)
+    {
+        VkDebugUtilsLabelEXT label;
+        RenderToolsVulkan::ZeroStruct(label, VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT);
+        label.pLabelName = buffer;
+        vkCmdBeginDebugUtilsLabelEXT(GetHandle(), &label);
+    }
 #endif
 }
 
 void CmdBufferVulkan::EndEvent()
 {
-#if VK_EXT_debug_utils
-    if (_eventsBegin == 0 || !vkCmdEndDebugUtilsLabelEXT)
+    if (_eventsBegin == 0)
         return;
     _eventsBegin--;
 
-    vkCmdEndDebugUtilsLabelEXT(GetHandle());
+#if VK_EXT_debug_utils
+    if (vkCmdEndDebugUtilsLabelEXT)
+        vkCmdEndDebugUtilsLabelEXT(GetHandle());
+#endif
+
+#if VULKAN_USE_TRACY_GPU
+    tracy::EndVkZoneScope(_tracyZones.Last().Data);
+    _tracyZones.RemoveLast();
 #endif
 }
 
 #endif
 
+void CmdBufferVulkan::Wait(float timeoutSeconds)
+{
+    if (!IsSubmitted())
+        return;
+    PROFILE_CPU();
+    const bool failed = _device->FenceManager.WaitForFence(GetFence(), timeoutSeconds);
+    ASSERT(!failed);
+    RefreshFenceStatus();
+}
+
 void CmdBufferVulkan::RefreshFenceStatus()
 {
     if (_state == State::Submitted)
     {
-        auto fenceManager = _fence->GetOwner();
-        if (fenceManager->IsFenceSignaled(_fence))
+        PROFILE_CPU();
+        if (_device->FenceManager.IsFenceSignaled(_fence))
         {
             _state = State::ReadyForBegin;
-
             _submittedWaitSemaphores.Clear();
 
             vkResetCommandBuffer(_commandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-            _fence->GetOwner()->ResetFence(_fence);
+            _device->FenceManager.ResetFence(_fence);
             _fenceSignaledCounter++;
 
             if (_descriptorPoolSetContainer)
             {
-                _device->DescriptorPoolsManager->ReleasePoolSet(*_descriptorPoolSetContainer);
+                _descriptorPoolSetContainer->LastFrameUsed = Engine::FrameCount;
                 _descriptorPoolSetContainer = nullptr;
             }
         }
     }
     else
     {
-        ASSERT(!_fence->IsSignaled());
+        ASSERT(!_fence->IsSignaled);
     }
 }
 
@@ -158,8 +178,8 @@ CmdBufferVulkan::CmdBufferVulkan(GPUDeviceVulkan* device, CmdBufferPoolVulkan* p
     , _commandBuffer(VK_NULL_HANDLE)
     , _state(State::ReadyForBegin)
     , _fence(nullptr)
-    , _fenceSignaledCounter(0)
     , _submittedFenceCounter(0)
+    , _fenceSignaledCounter(0)
     , _commandBufferPool(pool)
 {
     VkCommandBufferAllocateInfo createCmdBufInfo;
@@ -167,7 +187,6 @@ CmdBufferVulkan::CmdBufferVulkan(GPUDeviceVulkan* device, CmdBufferPoolVulkan* p
     createCmdBufInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     createCmdBufInfo.commandBufferCount = 1;
     createCmdBufInfo.commandPool = _commandBufferPool->GetHandle();
-
     VALIDATE_VULKAN_RESULT(vkAllocateCommandBuffers(_device->Device, &createCmdBufInfo, &_commandBuffer));
     _fence = _device->FenceManager.AllocateFence();
 }
@@ -177,9 +196,8 @@ CmdBufferVulkan::~CmdBufferVulkan()
     auto& fenceManager = _device->FenceManager;
     if (_state == State::Submitted)
     {
-        // Wait 60ms
-        const uint64 waitForCmdBufferInNanoSeconds = 60 * 1000 * 1000LL;
-        fenceManager.WaitAndReleaseFence(_fence, waitForCmdBufferInNanoSeconds);
+        // Wait
+        fenceManager.WaitAndReleaseFence(_fence);
     }
     else
     {
@@ -216,14 +234,11 @@ CmdBufferPoolVulkan::CmdBufferPoolVulkan(GPUDeviceVulkan* device)
 CmdBufferPoolVulkan::~CmdBufferPoolVulkan()
 {
     for (int32 i = 0; i < _cmdBuffers.Count(); i++)
-    {
         Delete(_cmdBuffers[i]);
-    }
-
     vkDestroyCommandPool(_device->Device, _handle, nullptr);
 }
 
-void CmdBufferPoolVulkan::RefreshFenceStatus(CmdBufferVulkan* skipCmdBuffer)
+void CmdBufferPoolVulkan::RefreshFenceStatus(const CmdBufferVulkan* skipCmdBuffer)
 {
     for (int32 i = 0; i < _cmdBuffers.Count(); i++)
     {
@@ -237,6 +252,7 @@ void CmdBufferPoolVulkan::RefreshFenceStatus(CmdBufferVulkan* skipCmdBuffer)
 
 CmdBufferManagerVulkan::CmdBufferManagerVulkan(GPUDeviceVulkan* device, GPUContextVulkan* context)
     : _device(device)
+    , _context(context)
     , _pool(device)
     , _queue(context->GetQueue())
     , _activeCmdBuffer(nullptr)
@@ -246,20 +262,35 @@ CmdBufferManagerVulkan::CmdBufferManagerVulkan(GPUDeviceVulkan* device, GPUConte
 
 void CmdBufferManagerVulkan::SubmitActiveCmdBuffer(SemaphoreVulkan* signalSemaphore)
 {
+    PROFILE_CPU();
     ASSERT(_activeCmdBuffer);
     if (!_activeCmdBuffer->IsSubmitted() && _activeCmdBuffer->HasBegun())
     {
         if (_activeCmdBuffer->IsInsideRenderPass())
-        {
             _activeCmdBuffer->EndRenderPass();
-        }
 
-#if VULKAN_USE_QUERIES
-        // Pause all active queries
-        for (int32 i = 0; i < _queriesInProgress.Count(); i++)
+#if VULKAN_USE_TIMER_QUERIES && GPU_VULKAN_PAUSE_QUERIES
+        // Pause all active timer queries
+        auto queries = _activeTimerQueries.Get();
+#if GPU_VULKAN_QUERY_NEW
+        for (int32 i = 0; i < _activeTimerQueries.Count(); i++)
         {
-            _queriesInProgress[i]->Interrupt(_activeCmdBuffer);
+            GPUQueryVulkan query;
+            query.Raw = queries[i];
+
+            // End active query to get time from start until submission
+            auto pool = _device->QueryPools[query.PoolIndex];
+            vkCmdWriteTimestamp(_activeCmdBuffer->GetHandle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool->GetHandle(), query.SecondQueryIndex);
+            pool->MarkQueryAsStarted(query.SecondQueryIndex);
+            // TODO: somehow handle ending this query properly by stopping split query instead
+            //_context->EndQuery(query.Raw);
+
+            // TODO: reimplement timer queries pause/resume to be more exact?
         }
+#else
+        for (int32 i = 0; i < _activeTimerQueries.Count(); i++)
+            queries[i]->Interrupt(_context);
+#endif
 #endif
 
         _activeCmdBuffer->End();
@@ -273,29 +304,21 @@ void CmdBufferManagerVulkan::SubmitActiveCmdBuffer(SemaphoreVulkan* signalSemaph
             _queue->Submit(_activeCmdBuffer);
         }
     }
-
     _activeCmdBuffer = nullptr;
 }
 
-void CmdBufferManagerVulkan::WaitForCmdBuffer(CmdBufferVulkan* cmdBuffer, float timeInSecondsToWait)
+void CmdBufferManagerVulkan::GetNewActiveCommandBuffer()
 {
-    ASSERT(cmdBuffer->IsSubmitted());
-    const bool failed = _device->FenceManager.WaitForFence(cmdBuffer->GetFence(), (uint64)(timeInSecondsToWait * 1e9));
-    ASSERT(!failed);
-    cmdBuffer->RefreshFenceStatus();
-}
-
-void CmdBufferManagerVulkan::PrepareForNewActiveCommandBuffer()
-{
+    PROFILE_CPU();
+    ASSERT_LOW_LAYER(_activeCmdBuffer == nullptr)
     for (int32 i = 0; i < _pool._cmdBuffers.Count(); i++)
     {
-        auto cmdBuffer = _pool._cmdBuffers[i];
+        auto cmdBuffer = _pool._cmdBuffers.Get()[i];
         cmdBuffer->RefreshFenceStatus();
         if (cmdBuffer->GetState() == CmdBufferVulkan::State::ReadyForBegin)
         {
             _activeCmdBuffer = cmdBuffer;
-            _activeCmdBuffer->Begin();
-            return;
+            break;
         }
         else
         {
@@ -303,31 +326,45 @@ void CmdBufferManagerVulkan::PrepareForNewActiveCommandBuffer()
         }
     }
 
-    // Always begin fresh command buffer for rendering
-    _activeCmdBuffer = _pool.Create();
+    if (_activeCmdBuffer == nullptr)
+    {
+        // Always begin fresh command buffer for rendering
+        _activeCmdBuffer = _pool.Create();
+    }
+
     _activeCmdBuffer->Begin();
 
-#if VULKAN_USE_QUERIES
-    // Resume any paused queries with the new command buffer
-    for (int32 i = 0; i < _queriesInProgress.Count(); i++)
+#if VULKAN_USE_TIMER_QUERIES && GPU_VULKAN_PAUSE_QUERIES
+    // Resume any paused timer queries with the new command buffer
+    auto queries = _activeTimerQueries.Get();
+#if GPU_VULKAN_QUERY_NEW
+    for (int32 i = 0; i < _activeTimerQueries.Count(); i++)
     {
-        _queriesInProgress[i]->Resume(_activeCmdBuffer);
+        GPUQueryVulkan query;
+        query.Raw = queries[i];
+        //_activeTimerQueries.Get()[i]->Resume(_activeCmdBuffer);
+    }
+#else
+    for (int32 i = 0; i < _activeTimerQueries.Count(); i++)
+    {
+        queries[i]->Resume(_context);
     }
 #endif
-}
-
-void CmdBufferManagerVulkan::OnQueryBegin(GPUTimerQueryVulkan* query)
-{
-#if VULKAN_USE_QUERIES
-    _queriesInProgress.Add(query);
 #endif
 }
 
-void CmdBufferManagerVulkan::OnQueryEnd(GPUTimerQueryVulkan* query)
+#if GPU_VULKAN_QUERY_NEW && GPU_VULKAN_PAUSE_QUERIES
+
+void CmdBufferManagerVulkan::OnTimerQueryBegin(QueryType query)
 {
-#if VULKAN_USE_QUERIES
-    _queriesInProgress.Remove(query);
-#endif
+    _activeTimerQueries.Add(query);
 }
+
+void CmdBufferManagerVulkan::OnTimerQueryEnd(QueryType query)
+{
+    _activeTimerQueries.Remove(query);
+}
+
+#endif
 
 #endif

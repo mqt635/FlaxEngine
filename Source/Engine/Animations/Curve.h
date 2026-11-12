@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -247,16 +247,18 @@ public:
     static void Interpolate(const BezierCurveKeyframe& a, const BezierCurveKeyframe& b, float alpha, float length, T& result)
     {
         T leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value, a.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value, b.TangentIn, length, rightTangent);
+        const float tangentScale = length / 3.0f;
+        AnimationUtils::GetTangent(a.Value, a.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value, b.TangentIn, tangentScale, rightTangent);
         AnimationUtils::Bezier(a.Value, leftTangent, rightTangent, b.Value, alpha, result);
     }
 
     static void InterpolateFirstDerivative(const BezierCurveKeyframe& a, const BezierCurveKeyframe& b, float alpha, float length, T& result)
     {
         T leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value, a.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value, b.TangentIn, length, rightTangent);
+        const float tangentScale = length / 3.0f;
+        AnimationUtils::GetTangent(a.Value, a.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value, b.TangentIn, tangentScale, rightTangent);
         AnimationUtils::BezierFirstDerivative(a.Value, leftTangent, rightTangent, b.Value, alpha, result);
     }
 
@@ -264,8 +266,9 @@ public:
     {
         result.Time = a.Time + length * alpha;
         T leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value, a.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value, b.TangentIn, length, rightTangent);
+        const float tangentScale = length / 3.0f;
+        AnimationUtils::GetTangent(a.Value, a.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value, b.TangentIn, tangentScale, rightTangent);
         AnimationUtils::Bezier(a.Value, leftTangent, rightTangent, b.Value, alpha, result.Value);
         result.TangentIn = a.TangentOut;
         result.TangentOut = b.TangentIn;
@@ -286,15 +289,12 @@ template<class T, typename KeyFrame = LinearCurveKeyframe<T>>
 class CurveBase
 {
 public:
-
     typedef Span<KeyFrame> KeyFrameData;
 
 protected:
-
     T _default;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Curve"/> class.
     /// </summary>
@@ -320,7 +320,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the default value for the keyframes.
     /// </summary>
@@ -338,7 +337,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Evaluates the animation curve value at the specified time.
     /// </summary>
@@ -355,7 +353,7 @@ public:
             return;
         }
 
-        const float start = 0;
+        const float start = Math::Min(data[0].Time, 0.0f);
         const float end = data[count - 1].Time;
         AnimationUtils::WrapTime(time, start, end, loop);
 
@@ -397,7 +395,7 @@ public:
             return;
         }
 
-        const float start = 0;
+        const float start = Math::Min(data[0].Time, 0.0f);
         const float end = data[count - 1].Time;
         AnimationUtils::WrapTime(time, start, end, loop);
 
@@ -439,7 +437,7 @@ public:
             return;
         }
 
-        const float start = 0;
+        const float start = Math::Min(data[0].Time, 0.0f);
         const float end = data[count - 1].Time;
         AnimationUtils::WrapTime(time, start, end, loop);
 
@@ -466,7 +464,6 @@ public:
     }
 
 protected:
-
     /// <summary>
     /// Returns a pair of keys that can be used for interpolating to field the value at the provided time.
     /// </summary>
@@ -504,19 +501,16 @@ protected:
 /// An animation spline represented by a set of keyframes, each representing an endpoint of a curve.
 /// </summary>
 template<class T, typename KeyFrame = LinearCurveKeyframe<T>>
-class Curve : public CurveBase<T, KeyFrame>
+API_CLASS(InBuild, Template, MarshalAs=Span<byte>) class Curve : public CurveBase<T, KeyFrame>
 {
 public:
-
     typedef CurveBase<T, KeyFrame> Base;
     using KeyFrameCollection = Array<KeyFrame>;
 
 private:
-
     KeyFrameCollection _keyframes;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Curve"/> class.
     /// </summary>
@@ -552,7 +546,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the length of the animation curve, from time zero to last keyframe.
     /// </summary>
@@ -627,7 +620,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Evaluates the animation curve value at the specified time.
     /// </summary>
@@ -741,11 +733,15 @@ public:
     void TransformTime(float timeScale, float timeOffset)
     {
         for (int32 i = 0; i < _keyframes.Count(); i++)
-            _keyframes[i].Time = _keyframes[i].Time * timeScale + timeOffset;;
+            _keyframes[i].Time = _keyframes[i].Time * timeScale + timeOffset;
+    }
+
+    uint64 GetMemoryUsage() const
+    {
+        return _keyframes.Capacity() * sizeof(KeyFrame);
     }
 
 public:
-
     FORCE_INLINE KeyFrame& operator[](int32 index)
     {
         return _keyframes[index];
@@ -767,22 +763,42 @@ public:
         }
         return true;
     }
+
+    // Raw memory copy (used by scripting bindings - see MarshalAs tag).
+    Curve& operator=(const Span<byte>& raw)
+    {
+        ASSERT((raw.Length() % sizeof(KeyFrame)) == 0);
+        const int32 count = raw.Length() / sizeof(KeyFrame);
+        _keyframes.Resize(count, false);
+        Platform::MemoryCopy(_keyframes.Get(), raw.Get(), sizeof(KeyFrame) * count);
+        return *this;
+    }
+    operator Span<byte>()
+    {
+        return Span<byte>((const byte*)_keyframes.Get(), _keyframes.Count() * sizeof(KeyFrame));
+    }
 };
+
+/// <summary>
+/// An animation spline represented by a set of keyframes, each representing a value point. 
+/// </summary>
+template<typename T>
+API_TYPEDEF() using StepCurve = Curve<T, StepCurveKeyframe<T>>;
 
 /// <summary>
 /// An animation spline represented by a set of keyframes, each representing an endpoint of a linear curve. 
 /// </summary>
 template<typename T>
-using LinearCurve = Curve<T, LinearCurveKeyframe<T>>;
+API_TYPEDEF() using LinearCurve = Curve<T, LinearCurveKeyframe<T>>;
 
 /// <summary>
 /// An animation spline represented by a set of keyframes, each representing an endpoint of a cubic hermite curve.
 /// </summary>
 template<typename T>
-using HermiteCurve = Curve<T, HermiteCurveKeyframe<T>>;
+API_TYPEDEF() using HermiteCurve = Curve<T, HermiteCurveKeyframe<T>>;
 
 /// <summary>
 /// An animation spline represented by a set of keyframes, each representing an endpoint of Bezier curve.
 /// </summary>
 template<typename T>
-using BezierCurve = Curve<T, BezierCurveKeyframe<T>>;
+API_TYPEDEF() using BezierCurve = Curve<T, BezierCurveKeyframe<T>>;

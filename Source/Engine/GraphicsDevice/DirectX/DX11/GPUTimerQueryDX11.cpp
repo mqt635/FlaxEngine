@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX11
 
@@ -92,9 +92,8 @@ float GPUTimerQueryDX11::GetResult()
 {
     if (!_finalized)
     {
-#if BUILD_DEBUG
-        ASSERT(HasResult());
-#endif
+        if (!HasResult())
+            return 0;
 
         UINT64 timeStart, timeEnd;
         auto context = _device->GetIM();

@@ -1,15 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "VisualStudioCodeEditor.h"
 #include "Engine/Platform/FileSystem.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Core/Log.h"
 #include "Editor/Editor.h"
 #include "Editor/ProjectInfo.h"
 #include "Editor/Scripting/ScriptsBuilder.h"
 #include "Engine/Engine/Globals.h"
-#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
 #if PLATFORM_LINUX
 #include <stdio.h>
+#elif PLATFORM_WINDOWS
+#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
+#elif PLATFORM_MAC
+#include "Engine/Platform/Apple/AppleUtils.h"
+#include <AppKit/AppKit.h>
 #endif
 
 VisualStudioCodeEditor::VisualStudioCodeEditor(const String& execPath, const bool isInsiders)
@@ -70,6 +75,46 @@ void VisualStudioCodeEditor::FindEditors(Array<CodeEditor*>* output)
             return;
         }
     }
+
+    // Detect Flatpak installations
+    {
+        CreateProcessSettings procSettings;
+        procSettings.FileName = TEXT("/bin/bash -c \"flatpak list --app --columns=application | grep com.visualstudio.code -c\"");
+        procSettings.HiddenWindow = true;
+        if (Platform::CreateProcess(procSettings) == 0)
+        {
+            const String runPath(TEXT("flatpak run com.visualstudio.code"));
+            output->Add(New<VisualStudioCodeEditor>(runPath, false));
+            return;
+        }
+    }
+#elif PLATFORM_MAC
+    // System installed app
+	NSURL* AppURL = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:@"com.microsoft.VSCode"];
+	if (AppURL != nullptr)
+	{
+        const String path = AppleUtils::ToString((CFStringRef)[AppURL path]);
+        output->Add(New<VisualStudioCodeEditor>(path, false));
+        return;
+	}
+
+    // Predefined locations
+    String userFolder;
+    FileSystem::GetSpecialFolderPath(SpecialFolder::Documents, userFolder);
+    String paths[3] =
+    {
+        TEXT("/Applications/Visual Studio Code.app"),
+        userFolder + TEXT("/../Visual Studio Code.app"),
+        userFolder + TEXT("/../Downloads/Visual Studio Code.app"),
+    };
+    for (const String& path : paths)
+    {
+        if (FileSystem::DirectoryExists(path))
+        {
+            output->Add(New<VisualStudioCodeEditor>(path, false));
+            break;
+        }
+    }
 #endif
 }
 
@@ -83,12 +128,18 @@ String VisualStudioCodeEditor::GetName() const
     return _isInsiders ? TEXT("Visual Studio Code - Insiders") : TEXT("Visual Studio Code");
 }
 
+String VisualStudioCodeEditor::GetGenerateProjectCustomArgs() const
+{
+    return TEXT("-vs2026 -vscode");
+}
+
 void VisualStudioCodeEditor::OpenFile(const String& path, int32 line)
 {
     // Generate VS solution files for intellisense
-    if (!FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln")))
+    if (!FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln")) &&
+        !FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".slnx")))
     {
-        ScriptsBuilder::GenerateProject(TEXT("-vs2019"));
+        ScriptsBuilder::GenerateProject(TEXT("-vs2026"));
     }
 
     // Generate project files if missing
@@ -100,16 +151,23 @@ void VisualStudioCodeEditor::OpenFile(const String& path, int32 line)
 
     // Open file
     line = line > 0 ? line : 1;
-    const String args = String::Format(TEXT("\"{0}\" -g \"{1}\":{2}"), _workspacePath, path, line);
-    Platform::StartProcess(_execPath, args, StringView::Empty);
+    CreateProcessSettings procSettings;
+    procSettings.FileName = _execPath;
+    procSettings.Arguments = String::Format(TEXT("\"{0}\" -g \"{1}:{2}\""), _workspacePath, path, line);
+    procSettings.HiddenWindow = false;
+    procSettings.WaitForEnd = false;
+    procSettings.LogOutput = false;
+    procSettings.ShellExecute = true;
+    Platform::CreateProcess(procSettings);
 }
 
 void VisualStudioCodeEditor::OpenSolution()
 {
     // Generate VS solution files for intellisense
-    if (!FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln")))
+    if (!FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln")) &&
+        !FileSystem::FileExists(Globals::ProjectFolder / Editor::Project->Name + TEXT(".slnx")))
     {
-        ScriptsBuilder::GenerateProject(TEXT("-vs2019"));
+        ScriptsBuilder::GenerateProject(TEXT("-vs2026"));
     }
 
     // Generate project files if solution is missing
@@ -120,8 +178,14 @@ void VisualStudioCodeEditor::OpenSolution()
     }
 
     // Open solution
-    const String args = String::Format(TEXT("\"{0}\""), _workspacePath);
-    Platform::StartProcess(_execPath, args, StringView::Empty);
+    CreateProcessSettings procSettings;
+    procSettings.FileName = _execPath;
+    procSettings.Arguments = String::Format(TEXT("\"{0}\""), _workspacePath);
+    procSettings.HiddenWindow = false;
+    procSettings.WaitForEnd = false;
+    procSettings.LogOutput = false;
+    procSettings.ShellExecute = true;
+    Platform::CreateProcess(procSettings);
 }
 
 bool VisualStudioCodeEditor::UseAsyncForOpen() const

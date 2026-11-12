@@ -1,18 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CharacterController.h"
-#include "Engine/Physics/Utilities.h"
 #include "Engine/Physics/Colliders/Collider.h"
 #include "Engine/Physics/Physics.h"
-#include "Engine/Serialization/Serialization.h"
+#include "Engine/Physics/PhysicsBackend.h"
+#include "Engine/Physics/PhysicsScene.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Engine/Time.h"
-#include "Engine/Physics/PhysicalMaterial.h"
-#include <ThirdParty/PhysX/PxRigidActor.h>
-#include <ThirdParty/PhysX/PxRigidDynamic.h>
-#include <ThirdParty/PhysX/PxPhysics.h>
-#include <ThirdParty/PhysX/characterkinematic/PxController.h>
-#include <ThirdParty/PhysX/characterkinematic/PxControllerManager.h>
-#include <ThirdParty/PhysX/characterkinematic//PxCapsuleController.h>
+
+#define CC_MIN_SIZE 0.001f
 
 CharacterController::CharacterController(const SpawnParams& params)
     : Collider(params)
@@ -24,10 +20,12 @@ CharacterController::CharacterController(const SpawnParams& params)
     , _minMoveDistance(0.0f)
     , _isUpdatingTransform(false)
     , _upDirection(Vector3::Up)
+    , _gravityDisplacement(Vector3::Zero)
     , _nonWalkableMode(NonWalkableModes::PreventClimbing)
+    , _originMode(OriginModes::CapsuleCenter)
     , _lastFlags(CollisionFlags::None)
 {
-    static_assert(sizeof(_filterData) == sizeof(PxFilterData), "Invalid filter data size.");
+    _contactOffset = 10.0f;
 }
 
 float CharacterController::GetRadius() const
@@ -37,11 +35,9 @@ float CharacterController::GetRadius() const
 
 void CharacterController::SetRadius(const float value)
 {
-    if (Math::NearEqual(value, _radius))
+    if (value == _radius)
         return;
-
     _radius = value;
-
     UpdateSize();
     UpdateBounds();
 }
@@ -53,11 +49,9 @@ float CharacterController::GetHeight() const
 
 void CharacterController::SetHeight(const float value)
 {
-    if (Math::NearEqual(value, _height))
+    if (value == _height)
         return;
-
     _height = value;
-
     UpdateSize();
     UpdateBounds();
 }
@@ -70,13 +64,11 @@ float CharacterController::GetSlopeLimit() const
 void CharacterController::SetSlopeLimit(float value)
 {
     value = Math::Clamp(value, 0.0f, 89.0f);
-    if (Math::NearEqual(value, _slopeLimit))
+    if (value == _slopeLimit)
         return;
-
     _slopeLimit = value;
-
     if (_controller)
-        _controller->setSlopeLimit(Math::Cos(value * DegreesToRadians));
+        PhysicsBackend::SetControllerSlopeLimit(_controller, value);
 }
 
 CharacterController::NonWalkableModes CharacterController::GetNonWalkableMode() const
@@ -86,10 +78,28 @@ CharacterController::NonWalkableModes CharacterController::GetNonWalkableMode() 
 
 void CharacterController::SetNonWalkableMode(NonWalkableModes value)
 {
+    if (_nonWalkableMode == value)
+        return;
     _nonWalkableMode = value;
-
     if (_controller)
-        _controller->setNonWalkableMode(static_cast<PxControllerNonWalkableMode::Enum>(value));
+        PhysicsBackend::SetControllerNonWalkableMode(_controller, (int32)value);
+}
+
+CharacterController::OriginModes CharacterController::GetOriginMode() const
+{
+    return _originMode;
+}
+
+void CharacterController::SetOriginMode(OriginModes value)
+{
+    if (_originMode == value)
+        return;
+    _originMode = value;
+    if (_controller)
+    {
+        DeleteController();
+        CreateController();
+    }
 }
 
 float CharacterController::GetStepOffset() const
@@ -99,27 +109,22 @@ float CharacterController::GetStepOffset() const
 
 void CharacterController::SetStepOffset(float value)
 {
-    if (Math::NearEqual(value, _stepOffset))
+    if (value == _stepOffset)
         return;
-
     _stepOffset = value;
-
     if (_controller)
     {
-        const float scaling = _cachedScale.GetAbsolute().MaxValue();
-        const float contactOffset = Math::Max(_contactOffset, ZeroTolerance);
-        const float minSize = 0.001f;
-        const float height = Math::Max(Math::Abs(_height) * scaling, minSize);
-        const float radius = Math::Max(Math::Abs(_radius) * scaling - contactOffset, minSize);
-        _controller->setStepOffset(Math::Min(value, height + radius * 2.0f - minSize));
+        float height, radius;
+        GetControllerSize(height, radius);
+        PhysicsBackend::SetControllerStepOffset(_controller, Math::Min(value, height + radius * 2.0f - CC_MIN_SIZE));
     }
 }
 
 void CharacterController::SetUpDirection(const Vector3& up)
 {
-    if (_controller)
-        _controller->setUpDirection(C2P(up));
     _upDirection = up;
+    if (_controller)
+        PhysicsBackend::SetControllerUpDirection(_controller, up);
 }
 
 float CharacterController::GetMinMoveDistance() const
@@ -129,7 +134,7 @@ float CharacterController::GetMinMoveDistance() const
 
 Vector3 CharacterController::GetUpDirection() const
 {
-    return _controller ? P2C(_controller->getUpDirection()) : _upDirection;
+    return _controller ? PhysicsBackend::GetControllerUpDirection(_controller) : _upDirection;
 }
 
 void CharacterController::SetMinMoveDistance(float value)
@@ -137,9 +142,14 @@ void CharacterController::SetMinMoveDistance(float value)
     _minMoveDistance = Math::Max(value, 0.0f);
 }
 
+void CharacterController::SetAutoGravity(bool value)
+{
+    _autoGravity = value;
+}
+
 Vector3 CharacterController::GetVelocity() const
 {
-    return _controller ? P2C(_controller->getActor()->getLinearVelocity()) : Vector3::Zero;
+    return _controller ? PhysicsBackend::GetRigidDynamicActorLinearVelocity(PhysicsBackend::GetControllerRigidDynamicActor(_controller)) : Vector3::Zero;
 }
 
 bool CharacterController::IsGrounded() const
@@ -155,37 +165,83 @@ CharacterController::CollisionFlags CharacterController::GetFlags() const
 CharacterController::CollisionFlags CharacterController::SimpleMove(const Vector3& speed)
 {
     const float deltaTime = Time::GetCurrentSafe()->DeltaTime.GetTotalSeconds();
-    Vector3 displacement = speed;
-    displacement += Physics::GetGravity() * deltaTime;
-    displacement *= deltaTime;
-
-    return Move(displacement);
+    Vector3 displacement = speed + _gravityDisplacement;
+    CollisionFlags result = Move(displacement * deltaTime);
+    if ((static_cast<int>(result) & static_cast<int>(CollisionFlags::Below)) != 0)
+    {
+        // Reset accumulated gravity acceleration when we touch the ground
+        _gravityDisplacement = Vector3::Zero;
+    }
+    else
+        _gravityDisplacement += GetPhysicsScene()->GetGravity() * deltaTime;
+    return result;
 }
 
 CharacterController::CollisionFlags CharacterController::Move(const Vector3& displacement)
 {
+    PROFILE_CPU();
     CollisionFlags result = CollisionFlags::None;
-
-    if (_controller)
+    if (_controller && !_isUpdatingTransform)
     {
+        // Perform move
         const float deltaTime = Time::GetCurrentSafe()->DeltaTime.GetTotalSeconds();
-        PxControllerFilters filters;
-        filters.mFilterData = (PxFilterData*)&_filterData;
-        filters.mFilterCallback = Physics::GetCharacterQueryFilterCallback();
-        filters.mFilterFlags = PxQueryFlag::eDYNAMIC | PxQueryFlag::eSTATIC | PxQueryFlag::ePREFILTER;
-
-        result = (CollisionFlags)(byte)_controller->move(C2P(displacement), _minMoveDistance, deltaTime, filters);
+        result = (CollisionFlags)PhysicsBackend::MoveController(_controller, _shape, displacement, _minMoveDistance, deltaTime);
         _lastFlags = result;
 
-        SetPosition(P2C(_controller->getPosition()));
+        // Update position
+        Vector3 position;
+        if (_originMode == OriginModes::Base)
+            position = PhysicsBackend::GetControllerBasePosition(_controller);
+        else
+            position = PhysicsBackend::GetControllerPosition(_controller);
+        position -= _center;
+        _isUpdatingTransform = true;
+        SetPosition(position);
+        _isUpdatingTransform = false;
     }
-
     return result;
 }
 
-PxRigidDynamic* CharacterController::GetPhysXRigidActor() const
+void CharacterController::Resize(float height, float radius)
 {
-    return _controller ? _controller->getActor() : nullptr;
+    const float heightDiff = height - _height;
+    const float radiusDiff = radius - _radius;
+    if (Math::IsZero(heightDiff) && Math::IsZero(radiusDiff))
+        return;
+    _height = height;
+    _radius = radius;
+    if (_controller)
+    {
+        float centerDiff = heightDiff * 0.5f + radiusDiff;
+
+        // Change physics size
+        GetControllerSize(height, radius);
+        PhysicsBackend::SetControllerSize(_controller, radius, height);
+        Vector3 positionDelta = _upDirection * centerDiff;
+
+        // Change physics position to maintain feet placement (base)
+        Vector3 position;
+        switch (_originMode)
+        {
+        case OriginModes::CapsuleCenter:
+            position = PhysicsBackend::GetControllerPosition(_controller);
+            position += positionDelta;
+            _center += positionDelta;
+            PhysicsBackend::SetControllerPosition(_controller, position);
+            break;
+        case OriginModes::Base:
+            position = PhysicsBackend::GetControllerBasePosition(_controller);
+            position += positionDelta;
+            PhysicsBackend::SetControllerBasePosition(_controller, position);
+            break;
+        }
+
+        // Change actor position
+        _isUpdatingTransform = true;
+        SetPosition(position - _center);
+        _isUpdatingTransform = false;
+    }
+    UpdateBounds();
 }
 
 #if USE_EDITOR
@@ -195,23 +251,38 @@ PxRigidDynamic* CharacterController::GetPhysXRigidActor() const
 
 void CharacterController::DrawPhysicsDebug(RenderView& view)
 {
-    const float scaling = _cachedScale.GetAbsolute().MaxValue();
-    const float minSize = 0.001f;
-    const float radius = Math::Max(Math::Abs(_radius) * scaling, minSize);
-    const float height = Math::Max(Math::Abs(_height) * scaling, minSize);
+    Quaternion rotation = Quaternion::Euler(90, 0, 0);
+    const Vector3 position = GetControllerPosition();
     if (view.Mode == ViewMode::PhysicsColliders)
-        DebugDraw::DrawTube(_transform.LocalToWorld(_center), Quaternion::Euler(90, 0, 0), radius, height, Color::LightYellow, 0, true);
+        DEBUG_DRAW_CAPSULE(position, rotation, _radius, _height, Color::LightYellow, 0, true);
     else
-        DebugDraw::DrawWireTube(_transform.LocalToWorld(_center), Quaternion::Euler(90, 0, 0), radius, height, Color::GreenYellow * 0.8f, 0, true);
+        DEBUG_DRAW_WIRE_CAPSULE(position, rotation, _radius, _height, Color::GreenYellow * 0.8f, 0, true);
 }
 
 void CharacterController::OnDebugDrawSelected()
 {
-    const float scaling = _cachedScale.GetAbsolute().MaxValue();
-    const float minSize = 0.001f;
-    const float radius = Math::Max(Math::Abs(_radius) * scaling, minSize);
-    const float height = Math::Max(Math::Abs(_height) * scaling, minSize);
-    DEBUG_DRAW_WIRE_TUBE(_transform.LocalToWorld(_center), Quaternion::Euler(90, 0, 0), radius, height, Color::GreenYellow, 0, false);
+    Quaternion rotation = Quaternion::Euler(90, 0, 0);
+    const Vector3 position = GetControllerPosition();
+    DEBUG_DRAW_WIRE_CAPSULE(position, rotation, _radius, _height, Color::GreenYellow, 0, false);
+    if (_controller)
+    {
+        // Physics backend capsule shape
+        float height, radius;
+        GetControllerSize(height, radius);
+        Vector3 pos = PhysicsBackend::GetControllerPosition(_controller);
+        DEBUG_DRAW_WIRE_CAPSULE(pos, rotation, radius, height, Color::Blue.AlphaMultiplied(0.2f), 0, false);
+#if 0
+        // More technical visuals debugging
+        Vector3 base = PhysicsBackend::GetControllerBasePosition(_controller);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(base, 5.0f), Color::Red, 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(pos, 4.0f), Color::Red, 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(pos + Vector3(0, height * 0.5f, 0), 2.0f), Color::Red, 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(pos - Vector3(0, height * 0.5f, 0), 2.0f), Color::Red, 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(pos + Vector3(0, height * 0.5f, 0), radius), Color::Red.AlphaMultiplied(0.5f), 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(pos - Vector3(0, height * 0.5f, 0), radius), Color::Red.AlphaMultiplied(0.5f), 0, false);
+        DEBUG_DRAW_WIRE_CYLINDER(pos, Quaternion::Identity, radius, height, Color::Red.AlphaMultiplied(0.2f), 0, false);
+#endif
+    }
 
     // Base
     Collider::OnDebugDrawSelected();
@@ -221,41 +292,21 @@ void CharacterController::OnDebugDrawSelected()
 
 void CharacterController::CreateController()
 {
-    ASSERT(_controller == nullptr && _shape == nullptr);
-
-    PxCapsuleControllerDesc desc;
-    desc.userData = this;
-    desc.contactOffset = Math::Max(_contactOffset, ZeroTolerance);
-    desc.position = PxExtendedVec3(_transform.Translation.X, _transform.Translation.Y, _transform.Translation.Z);
-    desc.slopeLimit = Math::Cos(_slopeLimit * DegreesToRadians);
-    desc.nonWalkableMode = static_cast<PxControllerNonWalkableMode::Enum>(_nonWalkableMode);
-    desc.climbingMode = PxCapsuleClimbingMode::eEASY;
-    if (Material && !Material->WaitForLoaded())
-        desc.material = ((PhysicalMaterial*)Material->Instance)->GetPhysXMaterial();
-    else
-        desc.material = Physics::GetDefaultMaterial();
-    _cachedScale = GetScale();
-    const float scaling = _cachedScale.GetAbsolute().MaxValue();
-    const float minSize = 0.001f;
-    desc.height = Math::Max(Math::Abs(_height) * scaling, minSize);
-    desc.radius = Math::Max(Math::Abs(_radius) * scaling - desc.contactOffset, minSize);
-    desc.stepOffset = Math::Min(_stepOffset, desc.height + desc.radius * 2.0f - minSize);
-
     // Create controller
-    _controller = (PxCapsuleController*)Physics::GetControllerManager()->createController(desc);
-    ASSERT(_controller);
-    _controller->setUpDirection(C2P(_upDirection));
-    const auto actor = _controller->getActor();
-    ASSERT(actor && actor->getNbShapes() == 1);
-    actor->getShapes(&_shape, 1);
-    actor->userData = this;
-    _shape->userData = this;
+    ASSERT(_controller == nullptr && _shape == nullptr);
+    _cachedScale = GetScale().GetAbsolute().MaxValue();
+    float height, radius;
+    GetControllerSize(height, radius);
+    Vector3 position = _center;
+    if (_originMode == OriginModes::Base)
+        position += _upDirection * (_height * 0.5f + _radius);
+    position = _transform.LocalToWorld(position);
+    _controller = PhysicsBackend::CreateController(GetPhysicsScene()->GetPhysicsScene(), this, this, _contactOffset, position, _slopeLimit, (int32)_nonWalkableMode, Material, radius, height, _stepOffset, _shape);
 
-    // Apply additional shape properties
-    _shape->setLocalPose(PxTransform(C2P(_center)));
+    // Setup
+    PhysicsBackend::SetControllerUpDirection(_controller, _upDirection);
+    PhysicsBackend::SetShapeLocalPose(_shape, Vector3::Zero, Quaternion::Identity);
     UpdateLayerBits();
-
-    // Update cached data
     UpdateBounds();
 }
 
@@ -263,26 +314,43 @@ void CharacterController::DeleteController()
 {
     if (_controller)
     {
-        _shape->userData = nullptr;
-        _controller->getActor()->userData = nullptr;
-        _controller->release();
+        PhysicsBackend::DestroyController(_controller);
         _controller = nullptr;
+        _shape = nullptr;
     }
-    _shape = nullptr;
 }
 
 void CharacterController::UpdateSize() const
 {
     if (_controller)
     {
-        const float scaling = _cachedScale.GetAbsolute().MaxValue();
-        const float minSize = 0.001f;
-        const float radius = Math::Max(Math::Abs(_radius) * scaling - Math::Max(_contactOffset, ZeroTolerance), minSize);
-        const float height = Math::Max(Math::Abs(_height) * scaling, minSize);
-
-        _controller->setRadius(radius);
-        _controller->resize(height);
+        float height, radius;
+        GetControllerSize(height, radius);
+        PhysicsBackend::SetControllerSize(_controller, radius, height);
     }
+}
+
+Vector3 CharacterController::GetControllerPosition() const
+{
+    Vector3 position = _center;
+    if (_originMode == OriginModes::Base)
+        position += _upDirection * (_height * 0.5f + _radius);
+    position = _transform.LocalToWorld(position);
+    return position;
+}
+
+void CharacterController::GetControllerSize(float& height, float& radius) const
+{
+    // Use absolute values including scale
+    height = Math::Abs(_height) * _cachedScale;
+    radius = Math::Abs(_radius) * _cachedScale;
+
+    // Exclude contact offset around the capsule (otherwise character floats in the air)
+    radius = radius - Math::Max(_contactOffset, 0.0f);
+
+    // Prevent too small controllers
+    height = Math::Max(height, CC_MIN_SIZE);
+    radius = Math::Max(radius, CC_MIN_SIZE);
 }
 
 void CharacterController::CreateShape()
@@ -292,18 +360,29 @@ void CharacterController::CreateShape()
 
 void CharacterController::UpdateBounds()
 {
-    const auto actor = GetPhysXRigidActor();
-    const float boundsScale = 1.03f;
-    if (actor)
-        _box = P2C(actor->getWorldBounds(boundsScale));
-    else
-        _box = BoundingBox(_transform.Translation);
+    _cachedScale = GetScale().GetAbsolute().MaxValue();
+    float height, radius;
+    GetControllerSize(height, radius);
+    const Vector3 position = GetControllerPosition();
+    const Vector3 extent(radius, height * 0.5f + radius, radius);
+    _box = BoundingBox(position - extent, position + extent);
     BoundingSphere::FromBox(_box, _sphere);
 }
 
 void CharacterController::AddMovement(const Vector3& translation, const Quaternion& rotation)
 {
-    Move(translation);
+    Vector3 displacement = translation;
+    if (_autoGravity)
+    {
+        // Apply gravity
+        const float deltaTime = Time::GetCurrentSafe()->DeltaTime.GetTotalSeconds();
+        displacement += GetPhysicsScene()->GetGravity() * deltaTime;
+    }
+
+    if (!displacement.IsZero())
+    {
+        Move(displacement);
+    }
 
     if (!rotation.IsIdentity())
     {
@@ -321,22 +400,44 @@ RigidBody* CharacterController::GetAttachedRigidBody() const
     return nullptr;
 }
 
-void CharacterController::OnActiveTransformChanged(const PxTransform& transform)
+void CharacterController::SetCenter(const Vector3& value)
 {
+    if (value == _center)
+        return;
+    Vector3 delta = value - _center;
+    _center = value;
+    if (_controller)
+    {
+        // Change physics position while maintaining actor placement
+        Vector3 position = PhysicsBackend::GetControllerPosition(_controller);
+        position += _upDirection * delta;
+        PhysicsBackend::SetControllerPosition(_controller, position);
+    }
+}
+
+void CharacterController::OnActiveTransformChanged()
+{
+    if (!_shape)
+        return;
+
     // Change actor transform (but with locking)
     ASSERT(!_isUpdatingTransform);
     _isUpdatingTransform = true;
-    Transform t = _transform;
-    t.Translation = P2C(transform.p);
-    SetTransform(t);
+    Vector3 position;
+    if (_originMode == OriginModes::Base)
+        position = PhysicsBackend::GetControllerBasePosition(_controller);
+    else
+        position = PhysicsBackend::GetControllerPosition(_controller);
+    position -= _center;
+    SetPosition(position);
     _isUpdatingTransform = false;
 
     UpdateBounds();
 }
 
-PxRigidActor* CharacterController::GetRigidActor()
+void* CharacterController::GetPhysicsActor() const
 {
-    return _shape ? _shape->getActor() : nullptr;
+    return _shape ? PhysicsBackend::GetShapeActor(_shape) : nullptr;
 }
 
 void CharacterController::UpdateGeometry()
@@ -346,22 +447,13 @@ void CharacterController::UpdateGeometry()
         return;
 
     // Setup shape geometry
-    _cachedScale = GetScale();
+    _cachedScale = GetScale().GetAbsolute().MaxValue();
     UpdateSize();
 }
 
-void CharacterController::GetGeometry(PxGeometryHolder& geometry)
+void CharacterController::GetGeometry(CollisionShape& collision)
 {
     // Unused
-}
-
-void CharacterController::UpdateLayerBits()
-{
-    // Base
-    Collider::UpdateLayerBits();
-
-    // Cache filter data
-    *(PxFilterData*)&_filterData = _shape->getSimulationFilterData();
 }
 
 void CharacterController::BeginPlay(SceneBeginData* data)
@@ -415,49 +507,29 @@ void CharacterController::OnTransformChanged()
     Actor::OnTransformChanged();
 
     // Update physics
+    const Vector3 position = _transform.LocalToWorld(_center);
     if (!_isUpdatingTransform && _controller)
     {
-        const PxExtendedVec3 pos(_transform.Translation.X, _transform.Translation.Y, _transform.Translation.Z);
-        _controller->setPosition(pos);
-
-        const Vector3 scale = GetScale();
-        if (!Vector3::NearEqual(_cachedScale, scale))
+        if (_originMode == OriginModes::Base)
+            PhysicsBackend::SetControllerBasePosition(_controller, position);
+        else
+            PhysicsBackend::SetControllerPosition(_controller, position);
+        const float scale = GetScale().GetAbsolute().MaxValue();
+        if (_cachedScale != scale)
             UpdateGeometry();
         UpdateBounds();
     }
     else if (!_controller)
     {
-        _box = BoundingBox(_transform.Translation);
+        _box = BoundingBox(position);
         BoundingSphere::FromBox(_box, _sphere);
     }
 }
 
-void CharacterController::Serialize(SerializeStream& stream, const void* otherObj)
+void CharacterController::OnPhysicsSceneChanged(PhysicsScene* previous)
 {
-    // Base
-    Collider::Serialize(stream, otherObj);
+    Collider::OnPhysicsSceneChanged(previous);
 
-    SERIALIZE_GET_OTHER_OBJ(CharacterController);
-
-    SERIALIZE_MEMBER(StepOffset, _stepOffset);
-    SERIALIZE_MEMBER(SlopeLimit, _slopeLimit);
-    SERIALIZE_MEMBER(NonWalkableMode, _nonWalkableMode);
-    SERIALIZE_MEMBER(Radius, _radius);
-    SERIALIZE_MEMBER(Height, _height);
-    SERIALIZE_MEMBER(MinMoveDistance, _minMoveDistance);
-    SERIALIZE_MEMBER(UpDirection, _upDirection);
-}
-
-void CharacterController::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
-{
-    // Base
-    Collider::Deserialize(stream, modifier);
-
-    DESERIALIZE_MEMBER(StepOffset, _stepOffset);
-    DESERIALIZE_MEMBER(SlopeLimit, _slopeLimit);
-    DESERIALIZE_MEMBER(NonWalkableMode, _nonWalkableMode);
-    DESERIALIZE_MEMBER(Radius, _radius);
-    DESERIALIZE_MEMBER(Height, _height);
-    DESERIALIZE_MEMBER(MinMoveDistance, _minMoveDistance);
-    DESERIALIZE_MEMBER(UpDirection, _upDirection);
+    DeleteController();
+    CreateController();
 }

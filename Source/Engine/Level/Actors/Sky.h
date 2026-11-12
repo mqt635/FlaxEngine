@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,74 +14,76 @@ class GPUPipelineState;
 /// <summary>
 /// Sky actor renders atmosphere around the scene with fog and sky.
 /// </summary>
-API_CLASS() class FLAXENGINE_API Sky : public Actor, public IAtmosphericFogRenderer, public ISkyRenderer
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Sky/Sky\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API Sky : public Actor, public IAtmosphericFogRenderer, public ISkyRenderer
 {
-DECLARE_SCENE_OBJECT(Sky);
+    DECLARE_SCENE_OBJECT(Sky);
 private:
-
     AssetReference<Shader> _shader;
-    GPUPipelineState* _psSky;
-    GPUPipelineState* _psFog;
+    GPUPipelineState* _psSky = nullptr;
+    int32 _sceneRenderingKey = -1;
 
 public:
-
     ~Sky();
 
 public:
-
     /// <summary>
     /// Directional light that is used to simulate the sun.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(10), DefaultValue(null), EditorDisplay(\"Sun\")")
+    API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Sky\")")
     ScriptingObjectReference<DirectionalLight> SunLight;
 
     /// <summary>
     /// The sun disc scale.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(20), DefaultValue(2.0f), EditorDisplay(\"Sun\"), Limit(0, 100, 0.01f)")
+    API_FIELD(Attributes="EditorOrder(20), EditorDisplay(\"Sky\"), Limit(0, 100, 0.01f)")
     float SunDiscScale = 2.0f;
 
     /// <summary>
     /// The sun power.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(30), DefaultValue(8.0f), EditorDisplay(\"Sun\"), Limit(0, 1000, 0.01f)")
+    API_FIELD(Attributes="EditorOrder(30), EditorDisplay(\"Sky\"), Limit(0, 1000, 0.01f)")
     float SunPower = 8.0f;
 
-private:
+    /// <summary>
+    /// Controls how much sky will contribute indirect lighting. When set to 0, there is no GI from the sky. The default value is 1.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(40), Limit(0, 100, 0.1f), EditorDisplay(\"Sky\")")
+    float IndirectLightingIntensity = 1.0f;
 
+private:
 #if COMPILE_WITH_DEV_ENV
     void OnShaderReloading(Asset* obj)
     {
         _psSky = nullptr;
-        _psFog = nullptr;
     }
 #endif
-    void InitConfig(AtmosphericFogData& config) const;
+    void InitConfig(ShaderAtmosphericFogData& config) const;
 
 public:
-
     // [Actor]
 #if USE_EDITOR
-    BoundingBox GetEditorBox() const override
+    BoundingBox GetEditorBoundingBox() const override
     {
         const Vector3 size(50);
         return BoundingBox(_transform.Translation - size, _transform.Translation + size);
     }
 #endif
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     bool HasContentLoaded() const override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
     // [IAtmosphericFogRenderer]
     void DrawFog(GPUContext* context, RenderContext& renderContext, GPUTextureView* output) override;
 
     // [ISkyRenderer]
+    bool IsDynamicSky() const override;
+    float GetIndirectLightingIntensity() const override;
     void ApplySky(GPUContext* context, RenderContext& renderContext, const Matrix& world) override;
 
 protected:
-
     // [Actor]
     void EndPlay() override;
     void OnEnable() override;

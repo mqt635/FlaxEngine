@@ -1,9 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-#if PLATFORM_UNIX
+#if PLATFORM_UNIX && !PLATFORM_WEB
 
 #include "UnixThread.h"
 #include "Engine/Core/Log.h"
+#if PLATFORM_APPLE_FAMILY
+#include "Engine/Utilities/StringConverter.h"
+#endif
 #include "Engine/Threading/IRunnable.h"
 #include "Engine/Threading/ThreadRegistry.h"
 
@@ -26,6 +29,13 @@ int32 UnixThread::Start(pthread_attr_t& attr)
 void* UnixThread::ThreadProc(void* pThis)
 {
     auto thread = (UnixThread*)pThis;
+#if PLATFORM_APPLE_FAMILY
+    // Apple doesn't support creating named thread so assign name here
+    {
+        const String& name = thread->GetName();
+        pthread_setname_np(StringAsANSI<>(name.Get(), name.Length()).Get());
+    }
+#endif
     const int32 exitCode = thread->Run();
     return (void*)(uintptr)exitCode;
 }
@@ -53,6 +63,7 @@ UnixThread* UnixThread::Setup(UnixThread* thread, uint32 stackSize)
 void UnixThread::Join()
 {
     pthread_join(_thread, nullptr);
+    ClearHandleInternal();
 }
 
 void UnixThread::ClearHandleInternal()

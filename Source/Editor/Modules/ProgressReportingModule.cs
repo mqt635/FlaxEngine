@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -57,6 +57,11 @@ namespace FlaxEditor.Modules
         public readonly GenerateScriptsProjectFilesProgress GenerateScriptsProjectFiles = new GenerateScriptsProjectFilesProgress();
 
         /// <summary>
+        /// The assets loading progress handler.
+        /// </summary>
+        public readonly LoadAssetsProgress LoadAssets = new LoadAssetsProgress();
+
+        /// <summary>
         /// Gets the first active handler.
         /// </summary>
         public ProgressHandler FirstActiveHandler => _handlers.FirstOrDefault(x => x.IsActive);
@@ -80,6 +85,7 @@ namespace FlaxEditor.Modules
             RegisterHandler(CodeEditorOpen);
             RegisterHandler(NavMeshBuilding);
             RegisterHandler(GenerateScriptsProjectFiles);
+            RegisterHandler(LoadAssets);
         }
 
         /// <summary>
@@ -96,6 +102,7 @@ namespace FlaxEditor.Modules
             handler.ProgressStart += HandlerOnProgressStart;
             handler.ProgressChanged += HandlerOnProgressChanged;
             handler.ProgressEnd += HandlerOnProgressEnd;
+            handler.ProgressFailed += HandlerOnProgressFail;
         }
 
         /// <summary>
@@ -113,6 +120,7 @@ namespace FlaxEditor.Modules
             handler.ProgressStart -= HandlerOnProgressStart;
             handler.ProgressChanged -= HandlerOnProgressChanged;
             handler.ProgressEnd -= HandlerOnProgressEnd;
+            handler.ProgressFailed -= HandlerOnProgressFail;
         }
 
         private void UpdateProgress()
@@ -127,6 +135,7 @@ namespace FlaxEditor.Modules
             else
             {
                 Editor.UI.UpdateProgress(string.Empty, 0);
+                Editor.UI.UpdateStatusBar();
             }
         }
 
@@ -149,6 +158,12 @@ namespace FlaxEditor.Modules
             {
                 Editor.Windows.FlashMainWindow();
             }
+        }
+
+        private void HandlerOnProgressFail(ProgressHandler handler, string message)
+        {
+            UpdateProgress();
+            Editor.UI.ProgressFailed(message);
         }
     }
 }

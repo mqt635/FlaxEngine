@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
@@ -73,6 +73,13 @@ namespace FlaxEditor.Modules
         /// Called when Editor is entering play mode.
         /// </summary>
         public virtual void OnPlayBegin()
+        {
+        }
+
+        /// <summary>
+        /// Called when Editor will leave the play mode.
+        /// </summary>
+        public virtual void OnPlayEnding()
         {
         }
 

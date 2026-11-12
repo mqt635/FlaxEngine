@@ -1,6 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 namespace FlaxEngine.GUI
 {
@@ -13,7 +15,7 @@ namespace FlaxEngine.GUI
         /// The delegate for text blocks processing.
         /// </summary>
         /// <param name="text">The text.</param>
-        /// <param name="textBlocks">The output text blocks. Given list is not-nul and cleared before.</param>
+        /// <param name="textBlocks">The output text blocks. Given list is not-null and cleared before.</param>
         public delegate void ParseTextBlocksDelegate(string text, List<TextBlock> textBlocks);
 
         /// <summary>
@@ -26,6 +28,11 @@ namespace FlaxEngine.GUI
         /// </summary>
         [HideInEditor]
         public ParseTextBlocksDelegate ParseTextBlocks;
+
+        /// <summary>
+        /// Gets the list of parsed text blocks.
+        /// </summary>
+        public List<TextBlock> TextBlocks => _textBlocks;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RichTextBoxBase"/> class.
@@ -43,7 +50,7 @@ namespace FlaxEngine.GUI
         /// <returns>True if got text block, otherwise false.</returns>
         public bool GetTextBlock(int index, out TextBlock result)
         {
-            var textBlocks = Utils.ExtractArrayFromList(_textBlocks);
+            var textBlocks = CollectionsMarshal.AsSpan(_textBlocks);
             var count = _textBlocks.Count;
             for (int i = 0; i < count; i++)
             {
@@ -59,9 +66,64 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Gets the text block or the nearest text block of the character at the given index.
+        /// </summary>
+        /// <param name="index">The character index.</param>
+        /// <param name="result">The result text block descriptor.</param>
+        /// <param name="snapToNext">If true, when the index is between two text blocks, it will return the next block.</param>
+        /// <returns>True if a text block is found, otherwise false.</returns>
+        public bool GetNearestTextBlock(int index, out TextBlock result, bool snapToNext = false)
+        {
+            var textBlocksSpan = CollectionsMarshal.AsSpan(_textBlocks);
+            int blockCount = _textBlocks.Count;
+
+            for (int i = 0; i < blockCount; i++)
+            {
+                ref TextBlock currentBlock = ref textBlocksSpan[i];
+
+                if (currentBlock.Range.Contains(index))
+                {
+                    result = currentBlock;
+                    return true;
+                }
+
+                if (i < blockCount - 1)
+                {
+                    ref TextBlock nextBlock = ref textBlocksSpan[i + 1];
+                    var containsY = nextBlock.Bounds.Y >= currentBlock.Bounds.Top && nextBlock.Bounds.Y < currentBlock.Bounds.Bottom;
+                    if (index >= currentBlock.Range.EndIndex && index < nextBlock.Range.StartIndex && containsY)
+                    {
+                        result = snapToNext ? nextBlock : currentBlock;
+                        return true;
+                    }
+                }
+            }
+
+            // Handle case when index is outside all text ranges
+            if (index >= 0 && blockCount > 0)
+            {
+                if (index <= textBlocksSpan[0].Range.StartIndex)
+                {
+                    result = textBlocksSpan[0];
+                    return true;
+                }
+
+                if (index >= textBlocksSpan[blockCount - 1].Range.StartIndex)
+                {
+                    result = textBlocksSpan[blockCount - 1];
+                    return true;
+                }
+            }
+
+            // If no text block is found
+            result = new TextBlock();
+            return false;
+        }
+
+        /// <summary>
         /// Updates the text blocks.
         /// </summary>
-        protected virtual void UpdateTextBlocks()
+        public virtual void UpdateTextBlocks()
         {
             Profiler.BeginEvent("RichTextBoxBase.UpdateTextBlocks");
 
@@ -91,30 +153,30 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 GetTextSize()
+        public override Float2 GetTextSize()
         {
             var count = _textBlocks.Count;
-            var textBlocks = Utils.ExtractArrayFromList(_textBlocks);
-            var max = Vector2.Zero;
+            var textBlocks = CollectionsMarshal.AsSpan(_textBlocks);
+            var max = Float2.Zero;
             for (int i = 0; i < count; i++)
             {
                 ref TextBlock textBlock = ref textBlocks[i];
-                max = Vector2.Max(max, textBlock.Bounds.BottomRight);
+                max = Float2.Max(max, textBlock.Bounds.BottomRight);
             }
             return max;
         }
 
         /// <inheritdoc />
-        public override Vector2 GetCharPosition(int index, out float height)
+        public override Float2 GetCharPosition(int index, out float height)
         {
             var count = _textBlocks.Count;
-            var textBlocks = Utils.ExtractArrayFromList(_textBlocks);
+            var textBlocks = CollectionsMarshal.AsSpan(_textBlocks);
 
             // Check if text is empty
             if (count == 0)
             {
                 height = 0;
-                return Vector2.Zero;
+                return Float2.Zero;
             }
 
             // Check if get first character position
@@ -172,22 +234,22 @@ namespace FlaxEngine.GUI
             }
 
             height = 0;
-            return Vector2.Zero;
+            return Float2.Zero;
         }
 
         /// <inheritdoc />
-        public override int HitTestText(Vector2 location)
+        public override int HitTestText(Float2 location)
         {
-            location = Vector2.Clamp(location, Vector2.Zero, _textSize);
+            location = Float2.Clamp(location, Float2.Zero, _textSize);
 
-            var textBlocks = Utils.ExtractArrayFromList(_textBlocks);
+            var textBlocks = CollectionsMarshal.AsSpan(_textBlocks);
             var count = _textBlocks.Count;
             for (int i = 0; i < count; i++)
             {
                 ref TextBlock textBlock = ref textBlocks[i];
 
-                var containsX = location.X >= textBlock.Bounds.Location.X && location.X < textBlock.Bounds.Location.X + textBlock.Bounds.Size.X;
-                var containsY = location.Y >= textBlock.Bounds.Location.Y && location.Y < textBlock.Bounds.Location.Y + textBlock.Bounds.Size.Y;
+                var containsX = location.X >= textBlock.Bounds.Left && location.X < textBlock.Bounds.Right;
+                var containsY = location.Y >= textBlock.Bounds.Top && location.Y < textBlock.Bounds.Bottom;
 
                 if (containsY && (containsX || (i + 1 < count && textBlocks[i + 1].Bounds.Location.Y > textBlock.Bounds.Location.Y + 1.0f)))
                 {
@@ -202,45 +264,86 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
-            // Select the word under the mouse
-            int textLength = TextLength;
-            if (textLength != 0)
+            if (button == MouseButton.Left)
             {
-                var hitPos = CharIndexAtPoint(ref location);
-                int spaceLoc = _text.LastIndexOfAny(Separators, hitPos - 2);
-                var left = spaceLoc == -1 ? 0 : spaceLoc + 1;
-                spaceLoc = _text.IndexOfAny(Separators, hitPos + 1);
-                var right = spaceLoc == -1 ? textLength : spaceLoc;
-                SetSelection(left, right);
+                // Select the word under the mouse
+                int textLength = TextLength;
+                if (textLength != 0 && IsSelectable)
+                {
+                    var hitPos = CharIndexAtPoint(ref location);
+                    int spaceLoc = _text.LastIndexOfAny(Separators, hitPos - 2);
+                    var left = spaceLoc == -1 ? 0 : spaceLoc + 1;
+                    spaceLoc = _text.IndexOfAny(Separators, Math.Min(hitPos + 1, _text.Length));
+                    var right = spaceLoc == -1 ? textLength : spaceLoc;
+                    Deselect();
+                    SetSelection(left, right);
+                }
             }
 
             return base.OnMouseDoubleClick(location, button);
         }
 
         /// <inheritdoc />
+        protected override void SetSelection(int start, int end, bool withScroll = true)
+        {
+            int snappedStart = start;
+            int snappedEnd = end;
+
+            // Snapping selection between text blocks
+            if (start != -1 && end != -1)
+            {
+                bool movingBack = (_selectionStart != -1 && _selectionEnd != -1) && (end < _selectionEnd || start < _selectionStart);
+
+                if (GetNearestTextBlock(start, out TextBlock startTextBlock, !movingBack))
+                {
+                    snappedStart = startTextBlock.Range.Contains(start) ? start : (movingBack ? startTextBlock.Range.EndIndex - 1 : startTextBlock.Range.StartIndex);
+                    snappedStart = movingBack ? Math.Min(start, snappedStart) : Math.Max(start, snappedStart);
+
+                    // Don't snap if selection is right in the end of the text
+                    if (start == _text.Length)
+                        snappedStart = _text.Length;
+                }
+
+                if (GetNearestTextBlock(end, out TextBlock endTextBlock, !movingBack))
+                {
+                    snappedEnd = endTextBlock.Range.Contains(end) ? end : (movingBack ? endTextBlock.Range.EndIndex - 1 : endTextBlock.Range.StartIndex);
+                    snappedEnd = movingBack ? Math.Min(end, snappedEnd) : Math.Max(end, snappedEnd);
+                    
+                    // Don't snap if selection is right in the end of the text
+                    if (end == _text.Length)
+                        snappedEnd = _text.Length;
+                }
+            }
+
+            base.SetSelection(snappedStart, snappedEnd, withScroll);
+        }
+
+        /// <inheritdoc />
         public override void DrawSelf()
         {
             // Cache data
-            var rect = new Rectangle(Vector2.Zero, Size);
+            var rect = new Rectangle(Float2.Zero, Size);
             bool enabled = EnabledInHierarchy;
 
             // Background
             Color backColor = BackgroundColor;
-            if (IsMouseOver)
+            if (IsMouseOver || IsNavFocused)
                 backColor = BackgroundSelectedColor;
             Render2D.FillRectangle(rect, backColor);
-            Render2D.DrawRectangle(rect, IsFocused ? BorderSelectedColor : BorderColor);
+            if (HasBorder)
+                Render2D.DrawRectangle(rect, IsFocused ? BorderSelectedColor : BorderColor, BorderThickness);
 
             // Apply view offset and clip mask
-            Render2D.PushClip(TextClipRectangle);
+            if (ClipText)
+                Render2D.PushClip(TextClipRectangle);
             bool useViewOffset = !_viewOffset.IsZero;
             if (useViewOffset)
                 Render2D.PushTransform(Matrix3x3.Translation2D(-_viewOffset));
 
             // Calculate text blocks for drawing
-            var textBlocks = Utils.ExtractArrayFromList(_textBlocks);
+            var textBlocks = CollectionsMarshal.AsSpan(_textBlocks);
             var textBlocksCount = _textBlocks?.Count ?? 0;
             var hasSelection = HasSelection;
             var selection = new TextRange(SelectionLeft, SelectionRight);
@@ -266,10 +369,16 @@ namespace FlaxEngine.GUI
                 }
             }
 
-            // Draw selection background
+            // Draw background
             for (int i = firstTextBlock; i < endTextBlock; i++)
             {
                 ref TextBlock textBlock = ref textBlocks[i];
+
+                // Background
+                if (textBlock.Style.BackgroundBrush != null)
+                {
+                    textBlock.Style.BackgroundBrush.Draw(textBlock.Bounds, textBlock.Style.Color);
+                }
 
                 // Pick font
                 var font = textBlock.Style.Font.GetFont();
@@ -279,9 +388,12 @@ namespace FlaxEngine.GUI
                 // Selection
                 if (hasSelection && textBlock.Style.BackgroundSelectedBrush != null && textBlock.Range.Intersect(ref selection))
                 {
-                    Vector2 leftEdge = selection.StartIndex <= textBlock.Range.StartIndex ? textBlock.Bounds.UpperLeft : font.GetCharPosition(_text, selection.StartIndex);
-                    Vector2 rightEdge = selection.EndIndex >= textBlock.Range.EndIndex ? textBlock.Bounds.UpperRight : font.GetCharPosition(_text, selection.EndIndex);
+                    var leftEdge = selection.StartIndex <= textBlock.Range.StartIndex ? textBlock.Bounds.UpperLeft : GetCharPosition(selection.StartIndex, out _);
+                    var rightEdge = selection.EndIndex >= textBlock.Range.EndIndex ? textBlock.Bounds.UpperRight : GetCharPosition(selection.EndIndex, out _);
                     float height = font.Height / DpiScale;
+#if PLATFORM_MAC && !PLATFORM_SDL
+                    height /= (float)Platform.Dpi / 96.0f; // TODO: refactor DPI support on macOS to skip such hacks
+#endif
                     float alpha = Mathf.Min(1.0f, Mathf.Cos(_animateTime * BackgroundSelectedFlashSpeed) * 0.5f + 1.3f);
                     alpha *= alpha;
                     Color selectionColor = Color.White * alpha;
@@ -340,15 +452,16 @@ namespace FlaxEngine.GUI
             // Caret
             if (IsFocused && CaretPosition > -1)
             {
-                float alpha = Mathf.Saturate(Mathf.Cos(_animateTime * CaretFlashSpeed) * 0.5f + 0.7f);
-                alpha = alpha * alpha * alpha * alpha * alpha * alpha;
+                float alpha = Mathf.Saturate(Mathf.Cos(_animateTime * CaretFlashSpeed) * 0.5f + 0.8f);
+                alpha = alpha * alpha;
                 Render2D.FillRectangle(CaretBounds, CaretColor * alpha);
             }
 
             // Restore rendering state
             if (useViewOffset)
                 Render2D.PopTransform();
-            Render2D.PopClip();
+            if (ClipText)
+                Render2D.PopClip();
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,21 +14,30 @@
 class BackBufferVulkan : public ResourceOwnerVulkan
 {
 public:
-
     /// <summary>
     /// The device.
     /// </summary>
     GPUDeviceVulkan* Device;
 
     /// <summary>
-    /// The image acquired semaphore handle.
+    /// The semaphore used to signal backbuffer image being ready to be used again for the commands rendering.
     /// </summary>
     SemaphoreVulkan* ImageAcquiredSemaphore;
 
     /// <summary>
-    /// The rendering done semaphore handle.
+    /// The semaphore used to signal the last command buffer rendering to be completed before presenting the image.
     /// </summary>
     SemaphoreVulkan* RenderingDoneSemaphore;
+
+    /// <summary>
+    /// The last command buffer used to submit commands for rendering to that backbuffer. Used to wait by CPU for the rendering completion before starting recording new commands (ensure that frame is not in flight).
+    /// </summary>
+    CmdBufferVulkan* SubmitCmdBuffer = nullptr;
+
+    /// <summary>
+    /// The fence counter value for SubmitCmdBuffer at the time it was submitted.
+    /// </summary>
+    uint64 SubmitCmdBufferFenceCounter = 0;
 
     /// <summary>
     /// The render target surface handle.
@@ -36,12 +45,11 @@ public:
     GPUTextureViewVulkan Handle;
 
 public:
-
     void Setup(GPUSwapChainVulkan* window, VkImage backbuffer, PixelFormat format, VkExtent3D extent);
+    void WaitForSubmit();
     void Release();
 
 public:
-
     // [ResourceOwnerVulkan]
     GPUResource* AsGPUResource() const override
     {
@@ -58,25 +66,23 @@ class GPUSwapChainVulkan : public GPUResourceVulkan<GPUSwapChain>, public Resour
     friend GPUDeviceVulkan;
 
 private:
-
     VkSurfaceKHR _surface;
+    void* _surfaceWindowHandle;
     VkSwapchainKHR _swapChain;
     int32 _currentImageIndex;
     int32 _semaphoreIndex;
     int32 _acquiredImageIndex;
+    bool _vsyncCurrent = false, _vsyncPending = false, _vsyncInit = true;
     Array<BackBufferVulkan, FixedAllocation<VULKAN_BACK_BUFFERS_COUNT_MAX>> _backBuffers;
     SemaphoreVulkan* _acquiredSemaphore;
 
 public:
-
     GPUSwapChainVulkan(GPUDeviceVulkan* device, Window* window);
 
 public:
-
     /// <summary>
     /// Gets the Vulkan surface.
     /// </summary>
-    /// <returns>The surface object.</returns>
     FORCE_INLINE VkSurfaceKHR GetSurface() const
     {
         return _surface;
@@ -85,14 +91,12 @@ public:
     /// <summary>
     /// Gets the Vulkan surface swap chain.
     /// </summary>
-    /// <returns>The swap chain object.</returns>
     FORCE_INLINE VkSwapchainKHR GetSwapChain() const
     {
         return _swapChain;
     }
 
 public:
-
     enum class Status
     {
         Ok = 0,
@@ -105,19 +109,22 @@ public:
     static int32 DoAcquireImageIndex(GPUSwapChainVulkan* viewport, void* customData);
     static int32 DoPresent(GPUSwapChainVulkan* viewport, void* customData);
     int32 TryPresent(Function<int32(GPUSwapChainVulkan*, void*)> job, void* customData = nullptr, bool skipOnOutOfDate = false);
-    int32 AcquireNextImage(SemaphoreVulkan** outSemaphore);
+    int32 AcquireNextImage(SemaphoreVulkan*& outSemaphore);
 
 private:
-
     void ReleaseBackBuffer();
-    bool CreateSwapChain(int32 width, int32 height);
+    // Releases swapchain-owned images and synchronization state. Keeps the VkSurfaceKHR alive during
+    // normal resize so the native surface is rebuilt only after surface loss or native window replacement.
+    void ReleaseSwapChain(bool releaseSurface);
+    // Recreates the swapchain for the requested size. Set recreateSurface when the VkSurfaceKHR is no longer valid.
+    bool CreateSwapChain(int32 width, int32 height, bool recreateSurface = false);
 
 public:
-
     // [GPUSwapChain]
     bool IsFullscreen() override;
     void SetFullscreen(bool isFullscreen) override;
     GPUTextureView* GetBackBufferView() override;
+    void Begin(RenderTask* task) override;
     void Present(bool vsync) override;
     bool Resize(int32 width, int32 height) override;
     void CopyBackbuffer(GPUContext* context, GPUTexture* dst) override;
@@ -129,7 +136,6 @@ public:
     }
 
 protected:
-
     // [GPUResourceVulkan]
     void OnReleaseGPU() override;
 };

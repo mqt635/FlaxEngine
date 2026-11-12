@@ -1,13 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.Content.Create;
 using FlaxEditor.Content.Thumbnails;
+using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Viewport.Previews;
 using FlaxEditor.Windows;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.GUI;
-using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Content
 {
@@ -15,6 +16,7 @@ namespace FlaxEditor.Content
     /// Content proxy for <see cref="PrefabItem"/>.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.JsonAssetBaseProxy" />
+    [ContentContextMenu("New/Prefab")]
     public sealed class PrefabProxy : JsonAssetBaseProxy
     {
         private PrefabPreview _preview;
@@ -54,7 +56,7 @@ namespace FlaxEditor.Content
         }
 
         /// <inheritdoc />
-        public override Color AccentColor => Color.FromRGB(0x7eef21);
+        public override Color AccentColor => Color.FromRGB(Utilities.Constants.ColorPrefab);
 
         /// <inheritdoc />
         public override string TypeName => AssetTypename;
@@ -72,21 +74,66 @@ namespace FlaxEditor.Content
         }
 
         /// <inheritdoc />
+        public override bool CanReimport(ContentItem item)
+        {
+            if (item is not PrefabItem prefabItem)
+                return base.CanReimport(item);
+
+            var prefab = FlaxEngine.Content.Load<Prefab>(prefabItem.ID);
+            return prefab.GetDefaultInstance().GetScript<ModelPrefab>() != null;
+        }
+
+        /// <inheritdoc />
         public override void Create(string outputPath, object arg)
         {
+            bool resetTransform = false;
+            var transform = Transform.Identity;
+            if (arg is PrefabItem item)
+                arg = item.LoadAsync();
+            if (arg is Prefab prefab)
+            {
+                // Create prefab variant
+                var instance = PrefabManager.SpawnPrefab(prefab, null);
+                FlaxEngine.Object.Destroy(instance, 20.0f);
+                arg = instance;
+            }
             if (!(arg is Actor actor))
             {
-                // Create default prefab root object
-                actor = new EmptyActor
-                {
-                    Name = "Root"
-                };
-
-                // Cleanup it after usage
-                Object.Destroy(actor, 20.0f);
+                // Show dialog with root actor type picker
+                Editor.Instance.ContentImporting.Create(new PrefabCreateEntry(outputPath));
+                return;
+            }
+            else if (actor.HasScene)
+            {
+                // Create prefab with identity transform so the actor instance on a level will have it customized
+                resetTransform = true;
+                transform = actor.LocalTransform;
+                actor.LocalTransform = Transform.Identity;
             }
 
             PrefabManager.CreatePrefab(actor, outputPath, true);
+            if (resetTransform)
+                actor.LocalTransform = transform;
+        }
+
+        /// <inheritdoc />
+        public override void OnContentWindowContextMenu(ContextMenu menu, ContentItem item)
+        {
+            base.OnContentWindowContextMenu(menu, item);
+
+            if (item is PrefabItem prefabItem)
+            {
+                var button = menu.AddButton("Create Prefab Variant", OnCreatePrefabVariant);
+                button.TooltipText = "Creates a new prefab that uses this prefab as base (nested in) and allows for further customizations.";
+                button.Tag = prefabItem;
+            }
+        }
+
+        private void OnCreatePrefabVariant(ContextMenuButton button)
+        {
+            var prefabItem = (PrefabItem)button.Tag;
+            var newName = prefabItem.ShortName + " Variant";
+            Editor.Instance.Windows.ContentWin.NewItem(this, prefabItem, null, newName);
         }
 
         /// <inheritdoc />
@@ -94,45 +141,49 @@ namespace FlaxEditor.Content
         {
             if (_preview == null)
             {
-                _preview = new PrefabPreview(false)
-                {
-                    RenderOnlyWithWindow = false,
-                    UseAutomaticTaskManagement = false,
-                    AnchorPreset = AnchorPresets.StretchAll,
-                    Offsets = Margin.Zero,
-                };
-                _preview.Task.Enabled = false;
-
-                var eyeAdaptation = _preview.PostFxVolume.EyeAdaptation;
-                eyeAdaptation.Mode = EyeAdaptationMode.None;
-                eyeAdaptation.OverrideFlags |= EyeAdaptationSettingsOverride.Mode;
-                _preview.PostFxVolume.EyeAdaptation = eyeAdaptation;
+                _preview = new PrefabPreview(false);
+                InitAssetPreview(_preview);
             }
-
-            // TODO: disable streaming for asset during thumbnail rendering (and restore it after)
         }
 
         /// <inheritdoc />
         public override bool CanDrawThumbnail(ThumbnailRequest request)
         {
-            if (!_preview.HasLoadedAssets)
+            if (!_preview.HasContentLoaded)
                 return false;
 
             // Check if asset is streamed enough
-            var asset = (Prefab)request.Asset;
-            return asset.IsLoaded;
+            return ThumbnailsModule.HasMinimumQuality((Prefab)request.Asset);
         }
 
-        private void Prepare(Actor actor)
+        private void Prepare(Actor actor, ref BoundingBox bounds)
         {
+            if (!actor.IsActive)
+                return;
             if (actor is TextRender textRender)
             {
                 textRender.UpdateLayout();
             }
 
+            // Use bounds from visual-only elements
+            var actorBounds = BoundingBox.Empty;
+            if (actor is ModelInstanceActor || 
+                actor is SpriteRender ||
+                actor is TextRender)
+            {
+                actorBounds = actor.EditorBoundingBox;
+            }
+            if (actorBounds != BoundingBox.Empty)
+            {
+                if (bounds == BoundingBox.Empty)
+                    bounds = actorBounds;
+                else
+                    BoundingBox.Merge(ref actorBounds, ref bounds, out bounds);
+            }
+
             for (int i = 0; i < actor.ChildrenCount; i++)
             {
-                Prepare(actor.GetChild(i));
+                Prepare(actor.GetChild(i), ref bounds);
             }
         }
 
@@ -141,7 +192,7 @@ namespace FlaxEditor.Content
         {
             _preview.Prefab = (Prefab)request.Asset;
             _preview.Parent = guiRoot;
-            _preview.Scale = Vector2.One;
+            _preview.Scale = Float2.One;
             _preview.ShowDefaultSceneActors = true;
             _preview.SyncBackbufferSize();
 
@@ -149,7 +200,7 @@ namespace FlaxEditor.Content
             if (_preview.Instance is UIControl uiControl && uiControl.HasControl)
             {
                 // Ensure to place UI in a proper way
-                uiControl.Control.Location = Vector2.Zero;
+                uiControl.Control.Location = Float2.Zero;
                 uiControl.Control.Scale *= PreviewsCache.AssetIconSize / uiControl.Control.Size.MaxValue;
                 uiControl.Control.AnchorPreset = AnchorPresets.TopLeft;
                 uiControl.Control.AnchorPreset = AnchorPresets.MiddleCenter;
@@ -160,14 +211,24 @@ namespace FlaxEditor.Content
             else
             {
                 // Update some actors data (some actor types update bounds/data later but its required to be done before rendering)
-                Prepare(_preview.Instance);
+                var bounds = BoundingBox.Empty;
+                Prepare(_preview.Instance, ref bounds);
+                //bounds = _preview.Instance.EditorBoundingBoxWithChildren;
 
                 // Auto fit actor to camera
-                float targetSize = 30.0f;
-                Editor.GetActorEditorBox(_preview.Instance, out var bounds);
-                float maxSize = Mathf.Max(0.001f, bounds.Size.MaxValue);
-                _preview.Instance.Scale = new Vector3(targetSize / maxSize);
-                _preview.Instance.Position = Vector3.Zero;
+                if (bounds != BoundingBox.Empty)
+                {
+                    float targetSize = 38.0f;
+                    float maxSize = Math.Max(0.001f, (float)bounds.Size.MaxValue);
+                    float scale = targetSize / maxSize;
+                    _preview.Instance.Scale = new Float3(scale);
+                    _preview.Instance.Position = -bounds.Center * scale;
+                }
+                else
+                {
+                    _preview.Instance.Scale = Float3.One;
+                    _preview.Instance.Position = Vector3.Zero;
+                }
             }
 
             _preview.Task.OnDraw();
@@ -191,6 +252,56 @@ namespace FlaxEditor.Content
             }
 
             base.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Content proxy for quick UI Control prefab creation as widget.
+    /// </summary>
+    [ContentContextMenu("New/Widget")]
+    internal sealed class WidgetProxy : AssetProxy
+    {
+        /// <inheritdoc />
+        public override string Name => "UI Widget";
+
+        /// <inheritdoc />
+        public override bool IsProxyFor(ContentItem item)
+        {
+            return false;
+        }
+
+        /// <inheritdoc />
+        public override string FileExtension => PrefabProxy.Extension;
+
+        /// <inheritdoc />
+        public override EditorWindow Open(Editor editor, ContentItem item)
+        {
+            return null;
+        }
+
+        /// <inheritdoc />
+        public override Color AccentColor => Color.Transparent;
+
+        /// <inheritdoc />
+        public override string TypeName => PrefabProxy.AssetTypename;
+
+        /// <inheritdoc />
+        public override AssetItem ConstructItem(string path, string typeName, ref Guid id)
+        {
+            return null;
+        }
+
+        /// <inheritdoc />
+        public override bool CanCreate(ContentFolder targetLocation)
+        {
+            return targetLocation.CanHaveAssets;
+        }
+
+        /// <inheritdoc />
+        public override void Create(string outputPath, object arg)
+        {
+            Editor.Instance.ContentImporting.Create(new WidgetCreateEntry(outputPath));
+            return;
         }
     }
 }

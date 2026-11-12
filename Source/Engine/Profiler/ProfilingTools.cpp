@@ -1,21 +1,23 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_PROFILER
 
 #include "ProfilingTools.h"
+#include "Engine/Core/Types/Pair.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/Time.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Networking/NetworkInternal.h"
 
 ProfilingTools::MainStats ProfilingTools::Stats;
 Array<ProfilingTools::ThreadStats, InlinedAllocation<64>> ProfilingTools::EventsCPU;
 Array<ProfilerGPU::Event> ProfilingTools::EventsGPU;
+Array<ProfilingTools::NetworkEventStat> ProfilingTools::EventsNetwork;
 
 class ProfilingToolsService : public EngineService
 {
 public:
-
     ProfilingToolsService()
         : EngineService(TEXT("Profiling Tools"))
     {
@@ -27,9 +29,13 @@ public:
 };
 
 ProfilingToolsService ProfilingToolsServiceInstance;
+double LastInputLatency = 0;
 
 void ProfilingToolsService::Update()
 {
+    ZoneScoped;
+    PROFILE_MEM(Profiler);
+
     // Capture stats
     {
         auto& stats = ProfilingTools::Stats;
@@ -44,7 +50,11 @@ void ProfilingToolsService::Update()
         stats.PhysicsTimeMs = static_cast<float>(Time::Physics.LastLength * 1000.0);
         stats.DrawCPUTimeMs = static_cast<float>(Time::Draw.LastLength * 1000.0);
 
-        ProfilerGPU::GetLastFrameData(stats.DrawGPUTimeMs, stats.DrawStats);
+        float presentTime;
+        ProfilerGPU::GetLastFrameData(stats.DrawGPUTimeMs, presentTime, stats.DrawStats);
+        stats.DrawCPUTimeMs = Math::Max(stats.DrawCPUTimeMs - presentTime, 0.0f); // Remove swapchain present wait time to exclude from drawing on CPU
+
+        stats.InputLatencyMs = (float)(LastInputLatency * 1000.0);
     }
 
     // Extract CPU profiler events
@@ -56,13 +66,13 @@ void ProfilingToolsService::Update()
     ProfilingTools::EventsCPU.EnsureCapacity(threads.Count());
     for (int32 i = 0; i < threads.Count(); i++)
     {
-        auto t = threads[i];
-        if (t == nullptr)
+        ProfilerCPU::Thread* thread = threads[i];
+        if (thread == nullptr)
             continue;
         ProfilingTools::ThreadStats* pt = nullptr;
         for (auto& e : ProfilingTools::EventsCPU)
         {
-            if (e.Name == t->GetName())
+            if (e.Name == thread->GetName())
             {
                 pt = &e;
                 break;
@@ -71,10 +81,10 @@ void ProfilingToolsService::Update()
         if (!pt)
         {
             pt = &ProfilingTools::EventsCPU.AddOne();
-            pt->Name = t->GetName();
+            pt->Name = thread->GetName();
         }
 
-        t->Buffer.Extract(pt->Events, true);
+        thread->Buffer.Extract(pt->Events, true);
     }
 
 #if 0
@@ -117,6 +127,40 @@ void ProfilingToolsService::Update()
     {
         auto& frame = frames[maxFrameIndex];
         frame.Extract(ProfilingTools::EventsGPU);
+    }
+
+    // Get the last events from networking runtime
+    {
+        auto& networkEvents = ProfilingTools::EventsNetwork;
+        networkEvents.Resize(NetworkInternal::ProfilerEvents.Count());
+        int32 i = 0;
+        for (const auto& e : NetworkInternal::ProfilerEvents)
+        {
+            const auto& src = e.Value;
+            auto& dst = networkEvents[i++];
+            dst.Count = src.Count;
+            dst.DataSize = src.DataSize;
+            dst.MessageSize = src.MessageSize;
+            dst.Receivers = src.Receivers;
+            const StringAnsiView& typeName = e.Key.First.GetType().Fullname;
+            uint64 len = Math::Min<uint64>(typeName.Length(), ARRAY_COUNT(dst.Name) - 10);
+            Platform::MemoryCopy(dst.Name, typeName.Get(), len);
+            const StringAnsiView& name = e.Key.Second;
+            if (name.HasChars())
+            {
+                uint64 pos = len;
+                dst.Name[pos++] = ':';
+                dst.Name[pos++] = ':';
+                len = Math::Min<uint64>(name.Length(), ARRAY_COUNT(dst.Name) - pos - 1);
+                Platform::MemoryCopy(dst.Name + pos, name.Get(), len);
+                dst.Name[pos + len] = 0;
+            }
+            else
+            {
+                dst.Name[len] = 0;
+            }
+        }
+        NetworkInternal::ProfilerEvents.Clear();
     }
 
 #if 0
@@ -172,6 +216,20 @@ void ProfilingToolsService::Dispose()
     ProfilingTools::EventsCPU.Clear();
     ProfilingTools::EventsCPU.SetCapacity(0);
     ProfilingTools::EventsGPU.SetCapacity(0);
+    ProfilingTools::EventsNetwork.SetCapacity(0);
+}
+
+bool ProfilingTools::GetEnabled()
+{
+    return ProfilerCPU::Enabled && ProfilerGPU::Enabled;
+}
+
+void ProfilingTools::SetEnabled(bool enabled)
+{
+    ProfilerCPU::Enabled = enabled;
+    ProfilerGPU::Enabled = enabled;
+    ProfilerGPU::EventsEnabled = enabled;
+    NetworkInternal::EnableProfiling = enabled;
 }
 
 #endif

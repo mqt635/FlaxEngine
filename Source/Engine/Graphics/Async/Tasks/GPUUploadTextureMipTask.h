@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,26 +14,28 @@
 class GPUUploadTextureMipTask : public GPUTask
 {
 protected:
-
     GPUTextureReference _texture;
-    int32 _mipIndex;
+    int32 _mipIndex, _rowPitch, _slicePitch;
     BytesContainer _data;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUUploadTextureMipTask"/> class.
     /// </summary>
     /// <param name="texture">The target texture.</param>
     /// <param name="mipIndex">The target texture mip data.</param>
     /// <param name="data">The data to upload.</param>
+    /// <param name="rowPitch">The data row pitch.</param>
+    /// <param name="slicePitch">The data slice pitch.</param>
     /// <param name="copyData">True if copy data to the temporary buffer, otherwise the input data will be used directly. Then ensure it is valid during the copy operation period (for the next few frames).</param>
-    GPUUploadTextureMipTask(GPUTexture* texture, int32 mipIndex, Span<byte> data, bool copyData)
+    GPUUploadTextureMipTask(GPUTexture* texture, int32 mipIndex, Span<byte> data, int32 rowPitch, int32 slicePitch, bool copyData)
         : GPUTask(Type::UploadTexture)
         , _texture(texture)
         , _mipIndex(mipIndex)
+        , _rowPitch(rowPitch)
+        , _slicePitch(slicePitch)
     {
-        _texture.OnUnload.Bind<GPUUploadTextureMipTask, &GPUUploadTextureMipTask::OnResourceUnload>(this);
+        _texture.Released.Bind<GPUUploadTextureMipTask, &GPUUploadTextureMipTask::OnResourceReleased>(this);
 
         if (copyData)
             _data.Copy(data);
@@ -42,14 +44,12 @@ public:
     }
 
 private:
-
-    void OnResourceUnload(GPUTextureReference* ref)
+    void OnResourceReleased()
     {
         Cancel();
     }
 
 public:
-
     // [GPUTask]
     bool HasReference(Object* resource) const override
     {
@@ -57,7 +57,6 @@ public:
     }
 
 protected:
-
     // [GPUTask]
     Result run(GPUTasksContext* context) override
     {
@@ -66,38 +65,19 @@ protected:
             return Result::MissingResources;
         ASSERT(texture->IsAllocated());
 
-        // Cache data
-        const int32 arraySize = texture->ArraySize();
-        uint32 rowPitch, slicePitch;
-        texture->ComputePitch(_mipIndex, rowPitch, slicePitch);
-        ASSERT((uint32)_data.Length() >= slicePitch * arraySize);
-
         // Update all array slices
         const byte* dataSource = _data.Get();
+        const int32 arraySize = texture->ArraySize();
+        ASSERT(_data.Length() >= _slicePitch * arraySize);
         for (int32 arrayIndex = 0; arrayIndex < arraySize; arrayIndex++)
         {
-            context->GPU->UpdateTexture(texture, arrayIndex, _mipIndex, dataSource, rowPitch, slicePitch);
-            dataSource += slicePitch;
+            context->GPU->UpdateTexture(texture, arrayIndex, _mipIndex, dataSource, _rowPitch, _slicePitch);
+            dataSource += _slicePitch;
         }
+
+        UpdateResidency(texture);
 
         return Result::Ok;
-    }
-
-    void OnSync() override
-    {
-        auto texture = _texture.Get();
-        if (texture)
-        {
-            // Check if the new mips has been just uploaded
-            if (_mipIndex == texture->HighestResidentMipIndex() - 1)
-            {
-                // Mark as mip loaded
-                texture->SetResidentMipLevels(texture->ResidentMipLevels() + 1);
-            }
-        }
-
-        // Base
-        GPUTask::OnSync();
     }
 
     void OnEnd() override
@@ -106,5 +86,19 @@ protected:
 
         // Base
         GPUTask::OnEnd();
+    }
+
+    void UpdateResidency(GPUTexture* texture) const
+    {
+        if (_mipIndex == texture->HighestResidentMipIndex() - 1)
+        {
+            // Mark the new mip as loaded
+            texture->SetResidentMipLevels(texture->ResidentMipLevels() + 1);
+        }
+        else
+        {
+            // Mark the new mip and all lower ones as loaded (eg. when loading Model SDF texture mips at once but out of order)
+            texture->SetResidentMipLevels(Math::Max(texture->ResidentMipLevels(), texture->MipLevels() - _mipIndex));
+        }
     }
 };

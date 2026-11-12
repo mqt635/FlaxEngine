@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
+#include "Config.h"
 #include "PixelFormat.h"
 #include "RenderView.h"
 #include "Engine/Scripting/ScriptingType.h"
@@ -9,10 +10,10 @@
 class Model;
 class SkinnedModel;
 struct RenderContext;
+struct FloatR10G10B10A2;
 
-PACK_STRUCT(struct QuadShaderData
-    {
-    Vector4 Color;
+GPU_CB_STRUCT(QuadShaderData {
+    Float4 Color;
     });
 
 /// <summary>
@@ -20,13 +21,23 @@ PACK_STRUCT(struct QuadShaderData
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API RenderTools
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(RenderTools);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(RenderTools);
 public:
-
     // Calculate a subresource index for a texture
     FORCE_INLINE static int32 CalcSubresourceIndex(uint32 mipSlice, int32 arraySlice, int32 mipLevels)
     {
         return mipSlice + arraySlice * mipLevels;
+    }
+
+    FORCE_INLINE static float GetWorldDeterminantSign(const Matrix& worldMatrix)
+    {
+        return Math::FloatSelect(worldMatrix.RotDeterminant(), 1, -1);
+    }
+
+    template<typename ResolutionMode>
+    FORCE_INLINE static int32 GetResolution(int32 base, ResolutionMode mode)
+    {
+        return Math::DivideAndRoundUp(base, (int32)mode);
     }
 
     /// <summary>
@@ -37,11 +48,19 @@ public:
     static FeatureLevel GetFeatureLevel(ShaderProfile profile);
 
     /// <summary>
+    /// Gets the features for the given shader profile. Runtime device might not support all of them.
+    /// </summary>
+    /// <param name="profile">The shader profile.</param>
+    /// <returns>The feature flags for the given shader profile.</returns>
+    static ShaderProfileFeatures GetShaderProfileFeatures(ShaderProfile profile);
+
+    /// <summary>
     /// Check if the given shader profile supports the tessellation. Runtime can reject tessellation support but it defines if given shader profile CAN support tessellation.
+    /// [Deprecated in v1.12]
     /// </summary>
     /// <param name="profile">The profile.</param>
     /// <returns>True if can support tessellation shaders, otherwise false.</returns>
-    static bool CanSupportTessellation(ShaderProfile profile);
+    DEPRECATED("Use GetShaderProfileFeatures instead") static bool CanSupportTessellation(ShaderProfile profile);
 
     /// <summary>
     /// Computes the image row pitch in bytes, and the slice pitch (size in bytes of the image) based on format, width, and height.
@@ -54,7 +73,6 @@ public:
     static void ComputePitch(PixelFormat format, int32 width, int32 height, uint32& rowPitch, uint32& slicePitch);
 
 public:
-
     static void UpdateModelLODTransition(byte& lodTransition);
     static uint64 CalculateTextureMemoryUsage(PixelFormat format, int32 width, int32 height, int32 mipLevels);
     static uint64 CalculateTextureMemoryUsage(PixelFormat format, int32 width, int32 height, int32 depth, int32 mipLevels);
@@ -66,7 +84,7 @@ public:
     /// <param name="radius">The bounds radius.</param>
     /// <param name="view">The render view.</param>
     /// <returns>The squared radius.</returns>
-    FORCE_INLINE static float ComputeBoundsScreenRadiusSquared(const Vector3& origin, const float radius, const RenderView& view)
+    FORCE_INLINE static float ComputeBoundsScreenRadiusSquared(const Float3& origin, const float radius, const RenderView& view)
     {
         return ComputeBoundsScreenRadiusSquared(origin, radius, view.Position, view.Projection);
     }
@@ -79,7 +97,7 @@ public:
     /// <param name="viewOrigin">The render view position.</param>
     /// <param name="projectionMatrix">The render view projection matrix.</param>
     /// <returns>The squared radius.</returns>
-    static float ComputeBoundsScreenRadiusSquared(const Vector3& origin, float radius, const Vector3& viewOrigin, const Matrix& projectionMatrix);
+    static float ComputeBoundsScreenRadiusSquared(const Float3& origin, float radius, const Float3& viewOrigin, const Matrix& projectionMatrix);
 
     /// <summary>
     /// Computes the model LOD index to use during rendering.
@@ -89,17 +107,28 @@ public:
     /// <param name="radius">The bounds radius.</param>
     /// <param name="renderContext">The rendering context.</param>
     /// <returns>The zero-based LOD index. Returns -1 if model should not be rendered.</returns>
-    API_FUNCTION() static int32 ComputeModelLOD(const Model* model, API_PARAM(Ref) const Vector3& origin, float radius, API_PARAM(Ref) const RenderContext& renderContext);
+    API_FUNCTION() static int32 ComputeModelLOD(const Model* model, API_PARAM(Ref) const Float3& origin, float radius, API_PARAM(Ref) const RenderContext& renderContext);
+
+    /// <summary>
+    /// Computes the model LOD index to use during rendering.
+    /// </summary>
+    /// <param name="model">The model.</param>
+    /// <param name="origin">The bounds origin.</param>
+    /// <param name="radius">The bounds radius.</param>
+    /// <param name="renderContext">The rendering context.</param>
+    /// <returns>The zero-based LOD index. Returns -1 if model should not be rendered.</returns>
+    API_FUNCTION() static int32 ComputeModelLOD(const SkinnedModel* model, API_PARAM(Ref) const Float3& origin, float radius, API_PARAM(Ref) const RenderContext& renderContext);
 
     /// <summary>
     /// Computes the skinned model LOD index to use during rendering.
+    /// [Deprecated in v1.12]
     /// </summary>
     /// <param name="model">The skinned model.</param>
     /// <param name="origin">The bounds origin.</param>
     /// <param name="radius">The bounds radius.</param>
     /// <param name="renderContext">The rendering context.</param>
     /// <returns>The zero-based LOD index. Returns -1 if model should not be rendered.</returns>
-    API_FUNCTION() static int32 ComputeSkinnedModelLOD(const SkinnedModel* model, API_PARAM(Ref) const Vector3& origin, float radius, API_PARAM(Ref) const RenderContext& renderContext);
+    API_FUNCTION() DEPRECATED("Use ComputeModelLOD instead.") static int32 ComputeSkinnedModelLOD(const SkinnedModel* model, API_PARAM(Ref) const Float3& origin, float radius, API_PARAM(Ref) const RenderContext& renderContext);
 
     /// <summary>
     /// Computes the sorting key for depth value (quantized)
@@ -110,34 +139,56 @@ public:
         const uint32 distanceI = *((uint32*)&distance);
         return ((uint32)(-(int32)(distanceI >> 31)) | 0x80000000) ^ distanceI;
     }
+
+    // Calculates the update frequency and phrase for the given cached data (eg. cascaded shadow map or global sdf cascade contents). Lower data indices are updated first and more frequent.
+    static void ComputeCascadeUpdateFrequency(int32 cascadeIndex, int32 cascadeCount, int32& updateFrequency, int32& updatePhrase, int32 updateMaxCountPerFrame = 1);
+
+    // Checks if cached data should be updated during the given frame.
+    static bool ShouldUpdateCascade(int32 frameIndex, int32 cascadeIndex, int32 cascadeCount, int32 updateMaxCountPerFrame = 1, bool updateForce = false);
+
+    // Calculates temporal offset in the dithering factor that gets cleaned out by TAA.
+    // Returns 0-1 value based on unscaled draw time for temporal effects to reduce artifacts from screen-space dithering when using Temporal Anti-Aliasing.
+    static float ComputeTemporalTime();
+
+    // [Deprecated in v1.10]
+    DEPRECATED("Use CalculateTangentFrame with unpacked Float3/Float4.") static void CalculateTangentFrame(FloatR10G10B10A2& resultNormal, FloatR10G10B10A2& resultTangent, const Float3& normal);
+    // [Deprecated in v1.10]
+    DEPRECATED("Use CalculateTangentFrame with unpacked Float3/Float4.") static void CalculateTangentFrame(FloatR10G10B10A2& resultNormal, FloatR10G10B10A2& resultTangent, const Float3& normal, const Float3& tangent);
+
+    // Result normal/tangent are already packed into [0;1] range.
+    API_FUNCTION() static void CalculateTangentFrame(API_PARAM(Out) Float3& resultNormal, API_PARAM(Out) Float4& resultTangent, API_PARAM(Ref) const Float3& normal);
+    // Result normal/tangent are already packed into [0;1] range.
+    API_FUNCTION() static void CalculateTangentFrame(API_PARAM(Out) Float3& resultNormal, API_PARAM(Out) Float4& resultTangent, API_PARAM(Ref) const Float3& normal, API_PARAM(Ref) const Float3& tangent);
+
+    static void ComputeSphereModelDrawMatrix(const RenderView& view, const Float3& position, float radius, Matrix& resultWorld, bool& resultIsViewInside);
+    static void ComputeBoxModelDrawMatrix(const RenderView& view, const OrientedBoundingBox& box, Matrix& resultWorld, bool& resultIsViewInside);
+
+    static float TemporalHalton(int32 index, int32 base);
+
+    // Calculates depth bounds to optimize drawing with depth buffer to cover only specific range of depth. Returns min and max depth (as Float2) to pass into GPUContext::SetDepthBounds.
+    static Float2 GetDepthBounds(const RenderView& view, const Float3& nearPoint, const Float3& farPoint);
+    static Float2 GetDepthBounds(const RenderView& view, const BoundingSphere& bounds);
+    static Float2 GetDepthBounds(const RenderView& view, const Span<Float3>& points);
+    static Float2 GetDepthBounds(const RenderView& view, const BoundingBox& bounds);
+    static Float2 GetDepthBounds(const RenderView& view, const OrientedBoundingBox& bounds);
+    static float GetDepthBounds(const RenderView& view, const Float3& point, bool near);
+    static float GetDepthBounds(const RenderView& view, float viewDistance, bool near);
+    // Skip background/sky pixels from shading
+#if REVERSE_Z
+    static constexpr float DepthBoundMaxBackground = 0.0000001f;
+#else
+    static constexpr float DepthBoundMaxBackground = 1.0f - 0.0000001f;
+#endif
+
+    // Calculates error for a given render target format to reduce floating-point precision artifacts via QuantizeColor (from Noise.hlsl).
+    static Float3 GetColorQuantizationError(PixelFormat format);
 };
 
-// Calculate mip levels count for a texture 1D
-// @param width Most detailed mip width
-// @param useMipLevels True if use mip levels, otherwise false (use only 1 mip)
-// @returns Mip levels count
-extern int32 MipLevelsCount(int32 width, bool useMipLevels = true);
+// Calculates mip levels count for a texture 1D.
+extern int32 MipLevelsCount(int32 width);
 
-// Calculate mip levels count for a texture 2D
-// @param width Most detailed mip width
-// @param height Most detailed mip height
-// @param useMipLevels True if use mip levels, otherwise false (use only 1 mip)
-// @returns Mip levels count
-extern int32 MipLevelsCount(int32 width, int32 height, bool useMipLevels = true);
+// Calculates mip levels count for a texture 2D.
+extern int32 MipLevelsCount(int32 width, int32 height);
 
-// Calculate mip levels count for a texture 3D
-// @param width Most detailed mip width
-// @param height Most detailed mip height
-// @param depth Most detailed mip depths
-// @param useMipLevels True if use mip levels, otherwise false (use only 1 mip)
-// @returns Mip levels count
-extern int32 MipLevelsCount(int32 width, int32 height, int32 depth, bool useMipLevels = true);
-
-/// <summary>
-/// Calculate distance from view center to the sphere center less sphere radius, clamped to fit view far plane
-/// </summary>
-/// <param name="view">Render View</param>
-/// <param name="center">Sphere center</param>
-/// <param name="radius">Sphere radius</param>
-/// <returns>Distance from view center to the sphere center less sphere radius</returns>
-extern float ViewToCenterLessRadius(const RenderView& view, const Vector3& center, float radius);
+// Calculates mip levels count for a texture 3D.
+extern int32 MipLevelsCount(int32 width, int32 height, int32 depth);

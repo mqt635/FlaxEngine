@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -66,6 +66,32 @@ namespace FlaxEditor.GUI.Docking
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
     public class DockPanel : ContainerControl
     {
+        private sealed class DockSplitPanel : SplitPanel
+        {
+            public DockSplitPanel(Orientation orientation)
+            : base(orientation, ScrollBars.None, ScrollBars.None)
+            {
+            }
+
+            public override void Draw()
+            {
+                base.Draw();
+
+                var margin = SplitterMargin;
+                if (margin.Top > 0)
+                {
+                    // Draw top margin of the splitter
+                    var rect = SplitterRectangle;
+                    rect.Y -= margin.Top;
+                    rect.Height = margin.Top;
+                    Render2D.FillRectangle(rect, Style.Current.DarkBackground);
+                    rect.Width += 1; // Draw again to fix 1px artifacts on top due to overdrawing background of different color
+                    rect.Height = 6;
+                    Render2D.FillRectangle(rect, Style.Current.DarkBackground);
+                }
+            }
+        }
+
         /// <summary>
         /// The default dock tabs header height.
         /// </summary>
@@ -123,7 +149,7 @@ namespace FlaxEditor.GUI.Docking
                 if (parentWin == null)
                     throw new InvalidOperationException("Missing parent window.");
                 var control = _tabsProxy != null ? (Control)_tabsProxy : this;
-                var clientPos = control.PointToWindow(Vector2.Zero);
+                var clientPos = control.PointToWindow(Float2.Zero);
                 return new Rectangle(parentWin.PointToScreen(clientPos), control.Size * DpiScale);
             }
         }
@@ -237,9 +263,7 @@ namespace FlaxEditor.GUI.Docking
         /// Determines whether panel contains the specified tab.
         /// </summary>
         /// <param name="tab">The tab.</param>
-        /// <returns>
-        ///   <c>true</c> if panel contains the specified tab; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if panel contains the specified tab; otherwise, <c>false</c>.</returns>
         public bool ContainsTab(DockWindow tab)
         {
             return _tabs.Contains(tab);
@@ -307,14 +331,14 @@ namespace FlaxEditor.GUI.Docking
         /// </summary>
         /// <param name="position">Screen space position to test</param>
         /// <returns>Dock panel that has been hit or null if nothing found</returns>
-        public DockPanel HitTest(ref Vector2 position)
+        public DockPanel HitTest(ref Float2 position)
         {
             // Get parent window and transform point position into local coordinates system
             var parentWin = Root;
             if (parentWin == null)
                 return null;
-            Vector2 clientPos = parentWin.PointFromScreen(position);
-            Vector2 localPos = PointFromWindow(clientPos);
+            var clientPos = parentWin.PointFromScreen(position);
+            var localPos = PointFromWindow(clientPos);
 
             // Early out
             if (localPos.X < 0 || localPos.Y < 0)
@@ -435,12 +459,17 @@ namespace FlaxEditor.GUI.Docking
 
             // Create splitter and link controls
             var parent = _tabsProxy.Parent;
-            var splitter = new SplitPanel(o, ScrollBars.None, ScrollBars.None)
+            var splitter = new DockSplitPanel(o)
             {
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
                 SplitterValue = splitterValue,
             };
+            if (state == DockState.DockLeft || state == DockState.DockRight)
+            {
+                // Skip top of the splitter from overlapping near dock panel tabs area for cleaner UI
+                splitter.SplitterMargin = new Margin(0, 0, DockPanelProxy.DefaultHeight, 0);
+            }
             splitter.Panel1.AddChild(c1);
             splitter.Panel2.AddChild(c2);
             parent.AddChild(splitter);
@@ -467,51 +496,103 @@ namespace FlaxEditor.GUI.Docking
             {
                 if (Parent.Parent is SplitPanel splitter)
                 {
-                    // Check if has any child panels
-                    var childPanel = new List<DockPanel>(_childPanels);
-                    for (int i = 0; i < childPanel.Count; i++)
+                    // Check if there is another nested dock panel inside this dock panel and extract it here
+                    var childPanels = _childPanels.ToArray();
+                    if (childPanels.Length != 0)
                     {
-                        // Undock all tabs
-                        var panel = childPanel[i];
-                        int count = panel.TabsCount;
-                        while (count-- > 0)
+                        // Fallback: move tabs from child panels into this one.
+                        DockWindow selectedTab = null;
+                        foreach (var childPanel in childPanels)
                         {
-                            panel.GetTab(0).Close();
+                            var childPanelTabs = childPanel.Tabs.ToArray();
+                            for (var i = 0; i < childPanelTabs.Length; i++)
+                            {
+                                var childPanelTab = childPanelTabs[i];
+                                if (selectedTab == null && childPanelTab.IsSelected)
+                                    selectedTab = childPanelTab;
+                                childPanel.UndockWindow(childPanelTab);
+                                AddTab(childPanelTab, false);
+                            }
                         }
+                        if (selectedTab != null)
+                            SelectTab(selectedTab);
                     }
-
-                    // Unlink splitter
-                    var splitterParent = splitter.Parent;
-                    Assert.IsNotNull(splitterParent);
-                    splitter.Parent = null;
-
-                    // Move controls from second split panel to the split panel parent
-                    var scrPanel = Parent == splitter.Panel2 ? splitter.Panel1 : splitter.Panel2;
-                    var srcPanelChildrenCount = scrPanel.ChildrenCount;
-                    for (int i = srcPanelChildrenCount - 1; i >= 0 && scrPanel.ChildrenCount > 0; i--)
+                    else
                     {
-                        scrPanel.GetChild(i).Parent = splitterParent;
-                    }
-                    Assert.IsTrue(scrPanel.ChildrenCount == 0);
-                    Assert.IsTrue(splitterParent.ChildrenCount == srcPanelChildrenCount);
+                        // Unlink splitter
+                        var splitterParent = splitter.Parent;
+                        if (splitterParent == null)
+                            return;
+                        splitter.Parent = null;
 
-                    // Delete
-                    splitter.Dispose();
+                        // Move controls from second split panel to the split panel parent
+                        var scrPanel = Parent == splitter.Panel2 ? splitter.Panel1 : splitter.Panel2;
+                        var srcPanelChildrenCount = scrPanel.ChildrenCount;
+                        for (int i = srcPanelChildrenCount - 1; i >= 0 && scrPanel.ChildrenCount > 0; i--)
+                        {
+                            scrPanel.GetChild(i).Parent = splitterParent;
+                        }
+                        if (scrPanel.ChildrenCount != 0 || splitterParent.ChildrenCount == srcPanelChildrenCount)
+                        {
+                            Editor.LogError("Broken dock panel layout!");
+                        }
+
+                        // Delete
+                        splitter.Dispose();
+                    }
                 }
-                else if (!IsMaster)
+                else if (IsMaster && _childPanels.Count != 0)
                 {
-                    throw new InvalidOperationException();
+                    if (TryCollapseSplitter(_tabsProxy?.Parent as Panel))
+                        return;
                 }
             }
-            else if (!IsMaster)
+            else if (_childPanels.Count != 0)
             {
-                throw new InvalidOperationException();
+                if (TryCollapseSplitter(_tabsProxy?.Parent as Panel))
+                    return;
             }
         }
 
-        internal virtual void DockWindowInternal(DockState state, DockWindow window)
+        internal bool CollapseEmptyTabsProxy()
         {
-            DockWindow(state, window);
+            if (TabsCount == 0 && ChildPanelsCount > 0)
+            {
+                return TryCollapseSplitter(_tabsProxy?.Parent as Panel);
+            }
+            return false;
+        }
+
+        private bool TryCollapseSplitter(Panel removedPanelParent)
+        {
+            if (removedPanelParent == null)
+                return false;
+            if (!(removedPanelParent.Parent is SplitPanel tabsSplitter))
+                return false;
+
+            var splitterParent = tabsSplitter.Parent;
+            if (splitterParent == null)
+                return false;
+            tabsSplitter.Parent = null;
+
+            var scrPanel = removedPanelParent == tabsSplitter.Panel2 ? tabsSplitter.Panel1 : tabsSplitter.Panel2;
+            var srcPanelChildrenCount = scrPanel.ChildrenCount;
+            for (int i = srcPanelChildrenCount - 1; i >= 0 && scrPanel.ChildrenCount > 0; i--)
+            {
+                scrPanel.GetChild(i).Parent = splitterParent;
+            }
+            Assert.IsTrue(scrPanel.ChildrenCount == 0);
+            Assert.IsTrue(splitterParent.ChildrenCount == srcPanelChildrenCount);
+
+            tabsSplitter.Dispose();
+            if (_tabsProxy != null && _tabsProxy.Parent == removedPanelParent)
+                _tabsProxy = null;
+            return true;
+        }
+
+        internal virtual void DockWindowInternal(DockState state, DockWindow window, bool autoSelect = true, float? splitterValue = null)
+        {
+            DockWindow(state, window, autoSelect, splitterValue);
         }
 
         /// <summary>
@@ -519,7 +600,9 @@ namespace FlaxEditor.GUI.Docking
         /// </summary>
         /// <param name="state">The state.</param>
         /// <param name="window">The window.</param>
-        protected virtual void DockWindow(DockState state, DockWindow window)
+        /// <param name="autoSelect">Whether or not to automatically select the window after docking it.</param>
+        /// <param name="splitterValue">The splitter value to use when docking to window.</param>
+        protected virtual void DockWindow(DockState state, DockWindow window, bool autoSelect = true, float? splitterValue = null)
         {
             CreateTabsProxy();
 
@@ -527,12 +610,12 @@ namespace FlaxEditor.GUI.Docking
             if (state == DockState.DockFill)
             {
                 // Add tab
-                AddTab(window);
+                AddTab(window, autoSelect);
             }
             else
             {
                 // Create child panel
-                var dockPanel = CreateChildPanel(state, DefaultSplitterValue);
+                var dockPanel = CreateChildPanel(state, splitterValue ?? DefaultSplitterValue);
 
                 // Dock window as a tab in a child panel
                 dockPanel.DockWindow(DockState.DockFill, window);
@@ -584,19 +667,17 @@ namespace FlaxEditor.GUI.Docking
         /// Adds the tab.
         /// </summary>
         /// <param name="window">The window to insert as a tab.</param>
-        protected virtual void AddTab(DockWindow window)
+        /// <param name="autoSelect">True if auto-select newly added tab.</param>
+        protected virtual void AddTab(DockWindow window, bool autoSelect = true)
         {
-            // Dock
             _tabs.Add(window);
             window.ParentDockPanel = this;
-
-            // Select tab
-            SelectTab(window);
+            if (autoSelect)
+                SelectTab(window);
         }
 
         private void CreateTabsProxy()
         {
-            // Check if has no tabs proxy created
             if (_tabsProxy == null)
             {
                 // Create proxy and make set simple full dock
@@ -620,7 +701,7 @@ namespace FlaxEditor.GUI.Docking
 
         internal void MoveTabRight(int index)
         {
-            if (index < _tabs.Count - 2)
+            if (index < _tabs.Count - 1)
             {
                 var tab = _tabs[index];
                 _tabs.RemoveAt(index);

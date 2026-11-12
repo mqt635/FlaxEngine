@@ -1,12 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "MaterialInfo.h"
 
 struct MaterialParamsLink;
+class GPUShader;
 class GPUContext;
 class GPUTextureView;
+class GPUBufferView;
+class GPUConstantBuffer;
 class RenderBuffers;
 class SceneRenderTask;
 struct RenderView;
@@ -19,12 +22,17 @@ struct DrawCall;
 class FLAXENGINE_API IMaterial
 {
 public:
-
     /// <summary>
     /// Gets the material info, structure which describes material surface.
     /// </summary>
     /// <returns>The constant reference to the material descriptor.</returns>
     virtual const MaterialInfo& GetInfo() const = 0;
+
+    /// <summary>
+    /// Gets the shader resource.
+    /// </summary>
+    /// <returns>The material shader resource.</returns>
+    virtual GPUShader* GetShader() const = 0;
 
     /// <summary>
     /// Determines whether material is a surface shader.
@@ -111,23 +119,25 @@ public:
     /// </summary>
     struct InstancingHandler
     {
-        void (*GetHash)(const DrawCall& drawCall, int32& batchKey);
-        bool (*CanBatch)(const DrawCall& a, const DrawCall& b);
-        void (*WriteDrawCall)(struct InstanceData* instanceData, const DrawCall& drawCall);
+        void (*GetHash)(const DrawCall& drawCall, uint32& batchKey);
+        bool (*CanBatch)(const DrawCall& a, const DrawCall& b, DrawPass pass);
     };
 
     /// <summary>
     /// Returns true if material can use draw calls instancing.
     /// </summary>
+    /// <param name="renderContext">The rendering context.</param>
     /// <param name="handler">The output data for the instancing handling used to hash, batch and write draw calls. Valid only when function returns true.</param>
     /// <returns>True if can use instancing, otherwise false.</returns>
-    virtual bool CanUseInstancing(InstancingHandler& handler) const
+    virtual bool CanUseInstancing(const RenderContext& renderContext, InstancingHandler& handler) const
     {
+#if BUILD_DEBUG
+        handler = { nullptr, nullptr };
+#endif
         return false;
     }
 
 public:
-
     /// <summary>
     /// Settings for the material binding to the graphics pipeline.
     /// </summary>
@@ -135,20 +145,30 @@ public:
     {
         GPUContext* GPUContext;
         const RenderContext& RenderContext;
-        const DrawCall* FirstDrawCall;
-        int32 DrawCallsCount;
+        GPUBufferView* ObjectBuffer = nullptr;
+        const ::DrawCall* DrawCall = nullptr;
         MaterialParamsLink* ParamsLink = nullptr;
         void* CustomData = nullptr;
-        float TimeParam;
+        float Time, ScaledTime;
+        bool Instanced = false;
 
         /// <summary>
         /// The input scene color. It's optional and used in forward/postFx rendering.
         /// </summary>
         GPUTextureView* Input = nullptr;
 
-        BindParameters(::GPUContext* context, const ::RenderContext& renderContext);
-        BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const DrawCall& drawCall);
-        BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const DrawCall* firstDrawCall, int32 drawCallsCount);
+        FLAXENGINE_API BindParameters(::GPUContext* context, const ::RenderContext& renderContext);
+        FLAXENGINE_API BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const ::DrawCall& drawCall, bool instanced = false);
+
+        // Per-view shared constant buffer (see ViewData in MaterialCommon.hlsl).
+        static GPUConstantBuffer* PerViewConstants;
+        // Per-draw shared constant buffer (see ViewData in MaterialCommon.hlsl).
+        static GPUConstantBuffer* PerDrawConstants;
+
+        // Binds the shared per-view constant buffer at slot 1 (see ViewData in MaterialCommon.hlsl)
+        void BindViewData();
+        // Binds the shared per-draw constant buffer at slot 2 (see DrawData in MaterialCommon.hlsl)
+        void BindDrawData();
     };
 
     /// <summary>

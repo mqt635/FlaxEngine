@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -7,11 +7,11 @@ using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.GUI.Tabs;
 using FlaxEditor.GUI.Tree;
-using FlaxEditor.Scripting;
 using FlaxEditor.Surface;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Windows
 {
@@ -62,22 +62,23 @@ namespace FlaxEditor.Windows
                             }
                         }
                         if (vsWindow == null)
-                        {
-                            var item = Editor.Instance.ContentDatabase.FindAsset(nodeInfo.Script.ID);
-                            if (item != null)
-                                vsWindow = Editor.Instance.ContentEditing.Open(item) as VisualScriptWindow;
-                        }
+                            vsWindow = Editor.Instance.ContentEditing.Open(nodeInfo.Script) as VisualScriptWindow;
                         return vsWindow?.Surface.FindNode(nodeInfo.NodeId);
                     }
                     return null;
                 }
 
                 /// <inheritdoc />
-                protected override bool OnMouseDoubleClickHeader(ref Vector2 location, MouseButton button)
+                protected override bool OnMouseDoubleClickHeader(ref Float2 location, MouseButton button)
                 {
-                    var node = GetNode(Tag);
-                    ((VisualScriptWindow)node?.Surface.Owner)?.ShowNode(node);
-                    return true;
+                    if (button == MouseButton.Left)
+                    {
+                        var node = GetNode(Tag);
+                        ((VisualScriptWindow)node?.Surface.Owner)?.ShowNode(node);
+                        return true;
+                    }
+
+                    return false;
                 }
             }
 
@@ -117,7 +118,7 @@ namespace FlaxEditor.Windows
                 }
             }
 
-            private void OnTreeRightClick(TreeNode treeNode, Vector2 location)
+            private void OnTreeRightClick(TreeNode treeNode, Float2 location)
             {
                 var menu = new ContextMenu
                 {
@@ -403,6 +404,8 @@ namespace FlaxEditor.Windows
         {
             Title = "Visual Script Debugger";
 
+            var inputOptions = editor.Options.Options.Input;
+
             var toolstrip = new ToolStrip
             {
                 Parent = this
@@ -411,7 +414,7 @@ namespace FlaxEditor.Windows
             _debugToolstripControls = new[]
             {
                 toolstrip.AddSeparator(),
-                toolstrip.AddButton(editor.Icons.Play64, OnDebuggerContinue).LinkTooltip("Continue (F5)"),
+                toolstrip.AddButton(editor.Icons.Play64, OnDebuggerContinue).LinkTooltip("Continue", ref inputOptions.DebuggerContinue),
                 toolstrip.AddButton(editor.Icons.Search64, OnDebuggerNavigateToCurrentNode).LinkTooltip("Navigate to the current stack trace node"),
                 toolstrip.AddButton(editor.Icons.Stop64, OnDebuggerStop).LinkTooltip("Stop debugging"),
             };
@@ -422,7 +425,7 @@ namespace FlaxEditor.Windows
             {
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = new Margin(0, 0, toolstrip.Bottom, 0),
-                TabsSize = new Vector2(80, 20),
+                TabsSize = new Float2(80, Tabs.MinSize),
                 TabsTextHorizontalAlignment = TextAlignment.Center,
                 UseScroll = true,
                 Parent = this

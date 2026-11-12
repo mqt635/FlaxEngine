@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,11 +8,12 @@
 /// <summary>
 /// Content streaming settings.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings", NoConstructor) class FLAXENGINE_API StreamingSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings", NoConstructor) class FLAXENGINE_API StreamingSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(StreamingSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(StreamingSettings);
+    API_AUTO_SERIALIZATION();
 
+public:
     /// <summary>
     /// Textures streaming configuration (per-group).
     /// </summary>
@@ -20,7 +21,6 @@ public:
     Array<TextureGroup, InlinedAllocation<32>> TextureGroups;
 
 public:
-
     /// <summary>
     /// Gets the instance of the settings asset (default value if missing). Object returned by this method is always loaded with valid data to use.
     /// </summary>
@@ -28,5 +28,4 @@ public:
 
     // [SettingsBase]
     void Apply() override;
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override;
 };

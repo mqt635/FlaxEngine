@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Runtime.CompilerServices;
 using FlaxEngine;
 
 namespace FlaxEditor.Modules
@@ -18,7 +20,7 @@ namespace FlaxEditor.Modules
         private DateTime _lastSaveTime;
 
         private readonly HashSet<Guid> _expandedActors = new HashSet<Guid>();
-        private readonly HashSet<string> _collapsedGroups = new HashSet<string>();
+        private readonly HashSet<string> _toggledGroups = new HashSet<string>();
         private readonly Dictionary<string, string> _customData = new Dictionary<string, string>();
 
         /// <summary>
@@ -62,26 +64,26 @@ namespace FlaxEditor.Modules
         }
 
         /// <summary>
-        /// Determines whether group identified by the given title is collapsed in the UI.
+        /// Determines whether group identified by the given title is collapsed/opened in the UI.
         /// </summary>
         /// <param name="title">The group title.</param>
-        /// <returns><c>true</c> if group is collapsed; otherwise, <c>false</c>.</returns>
-        public bool IsCollapsedGroup(string title)
+        /// <returns><c>true</c> if group is toggled; otherwise, <c>false</c>.</returns>
+        public bool IsGroupToggled(string title)
         {
-            return _collapsedGroups.Contains(title);
+            return _toggledGroups.Contains(title);
         }
 
         /// <summary>
-        /// Sets the group collapsed cached value.
+        /// Sets the group collapsed/opened cached value.
         /// </summary>
         /// <param name="title">The group title.</param>
-        /// <param name="isCollapsed">If set to <c>true</c> group will be cached as an collapsed, otherwise false.</param>
-        public void SetCollapsedGroup(string title, bool isCollapsed)
+        /// <param name="isToggled">If set to <c>true</c> group will be cached as a toggled, otherwise false.</param>
+        public void SetGroupToggle(string title, bool isToggled)
         {
-            if (isCollapsed)
-                _collapsedGroups.Add(title);
+            if (isToggled)
+                _toggledGroups.Add(title);
             else
-                _collapsedGroups.Remove(title);
+                _toggledGroups.Remove(title);
             _isDirty = true;
         }
 
@@ -120,6 +122,30 @@ namespace FlaxEditor.Modules
         }
 
         /// <summary>
+        /// Tries to get the custom data by the key.
+        /// </summary>
+        /// <param name="key">The key.</param>
+        /// <param name="value">When this method returns, contains the value associated with the specified key, if the key is found; otherwise, the default value for the type of the <paramref name="value" /> parameter. This parameter is passed uninitialized.</param>
+        /// <returns>The custom data.</returns>
+        public bool TryGetCustomData(string key, out bool value)
+        {
+            value = false;
+            return _customData.TryGetValue(key, out var valueStr) && bool.TryParse(valueStr, out value);
+        }
+
+        /// <summary>
+        /// Tries to get the custom data by the key.
+        /// </summary>
+        /// <param name="key">The key.</param>
+        /// <param name="value">When this method returns, contains the value associated with the specified key, if the key is found; otherwise, the default value for the type of the <paramref name="value" /> parameter. This parameter is passed uninitialized.</param>
+        /// <returns>The custom data.</returns>
+        public bool TryGetCustomData(string key, out float value)
+        {
+            value = 0.0f;
+            return _customData.TryGetValue(key, out var valueStr) && float.TryParse(valueStr, out value);
+        }
+
+        /// <summary>
         /// Sets the custom data.
         /// </summary>
         /// <param name="key">The key.</param>
@@ -128,6 +154,28 @@ namespace FlaxEditor.Modules
         {
             _customData[key] = value;
             _isDirty = true;
+        }
+
+        /// <summary>
+        /// Sets the custom data.
+        /// </summary>
+        /// <param name="key">The key.</param>
+        /// <param name="value">The value.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetCustomData(string key, bool value)
+        {
+            SetCustomData(key, value.ToString());
+        }
+
+        /// <summary>
+        /// Sets the custom data.
+        /// </summary>
+        /// <param name="key">The key.</param>
+        /// <param name="value">The value.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void SetCustomData(string key, float value)
+        {
+            SetCustomData(key, value.ToString(CultureInfo.InvariantCulture));
         }
 
         /// <summary>
@@ -160,7 +208,7 @@ namespace FlaxEditor.Modules
                         _expandedActors.Add(new Guid(bytes16));
                     }
 
-                    _collapsedGroups.Clear();
+                    _toggledGroups.Clear();
                     _customData.Clear();
 
                     break;
@@ -176,7 +224,7 @@ namespace FlaxEditor.Modules
                         _expandedActors.Add(new Guid(bytes16));
                     }
 
-                    _collapsedGroups.Clear();
+                    _toggledGroups.Clear();
 
                     _customData.Clear();
                     int customDataCount = reader.ReadInt32();
@@ -201,11 +249,9 @@ namespace FlaxEditor.Modules
                     }
 
                     int collapsedGroupsCount = reader.ReadInt32();
-                    _collapsedGroups.Clear();
+                    _toggledGroups.Clear();
                     for (int i = 0; i < collapsedGroupsCount; i++)
-                    {
-                        _collapsedGroups.Add(reader.ReadString());
-                    }
+                        _toggledGroups.Add(reader.ReadString());
 
                     _customData.Clear();
                     int customDataCount = reader.ReadInt32();
@@ -228,11 +274,7 @@ namespace FlaxEditor.Modules
         private void Load()
         {
             if (!File.Exists(_cachePath))
-            {
-                Editor.LogWarning("Missing editor cache file.");
                 return;
-            }
-
             _lastSaveTime = DateTime.UtcNow;
 
             try
@@ -259,11 +301,9 @@ namespace FlaxEditor.Modules
                     writer.Write(e.ToByteArray());
                 }
 
-                writer.Write(_collapsedGroups.Count);
-                foreach (var e in _collapsedGroups)
-                {
+                writer.Write(_toggledGroups.Count);
+                foreach (var e in _toggledGroups)
                     writer.Write(e);
-                }
 
                 writer.Write(_customData.Count);
                 foreach (var e in _customData)
@@ -284,7 +324,6 @@ namespace FlaxEditor.Modules
             try
             {
                 SaveGuarded();
-
                 _isDirty = false;
             }
             catch (Exception ex)

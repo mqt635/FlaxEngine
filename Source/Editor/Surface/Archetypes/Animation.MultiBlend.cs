@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.IO;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.Input;
 using FlaxEditor.Scripting;
+using FlaxEditor.Surface.Undo;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -16,30 +17,41 @@ namespace FlaxEditor.Surface.Archetypes
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
     [HideInEditor]
-    public abstract class BlendPointsEditor : ContainerControl
+    public class BlendPointsEditor : ContainerControl
     {
+        private readonly Animation.MultiBlend _node;
         private readonly bool _is2D;
-        private Vector2 _rangeX;
-        private Vector2 _rangeY;
-        private readonly BlendPoint[] _blendPoints = new BlendPoint[Animation.MultiBlend.MaxAnimationsCount];
-        private readonly Guid[] _pointsAnims = new Guid[Animation.MultiBlend.MaxAnimationsCount];
-        private readonly Vector2[] _pointsLocations = new Vector2[Animation.MultiBlend.MaxAnimationsCount];
+        private Float2 _rangeX, _rangeY;
+        private Float2 _debugPos = Float2.Minimum;
+        private float _debugScale = 1.0f;
+        private readonly List<BlendPoint> _blendPoints = new List<BlendPoint>();
 
         /// <summary>
         /// Represents single blend point.
         /// </summary>
         /// <seealso cref="FlaxEngine.GUI.Control" />
-        protected class BlendPoint : Control
+        internal class BlendPoint : Control
         {
-            private static Matrix3x3 _transform = Matrix3x3.RotationZ(45.0f * Mathf.DegreesToRadians) * Matrix3x3.Translation2D(4.0f, 0.5f);
             private readonly BlendPointsEditor _editor;
             private readonly int _index;
-            private bool _isMouseDown;
+            private Float2 _mousePosOffset;
+            private bool _isMouseDown, _mouseMoved;
+            private object[] _mouseMoveStartValues;
 
             /// <summary>
             /// The default size for the blend points.
             /// </summary>
             public const float DefaultSize = 8.0f;
+
+            /// <summary>
+            /// Blend point index.
+            /// </summary>
+            public int Index => _index;
+
+            /// <summary>
+            /// Flag that indicates that user is moving this point with a mouse.
+            /// </summary>
+            public bool IsMouseDown => _isMouseDown;
 
             /// <summary>
             /// Initializes a new instance of the <see cref="BlendPoint"/> class.
@@ -53,33 +65,63 @@ namespace FlaxEditor.Surface.Archetypes
                 _index = index;
             }
 
+            private void EndMove()
+            {
+                _isMouseDown = false;
+                EndMouseCapture();
+                if (_mouseMoveStartValues != null)
+                {
+                    // Add undo action
+                    _editor._node.Surface.AddBatchedUndoAction(new EditNodeValuesAction(_editor._node, _mouseMoveStartValues, true));
+                    _mouseMoveStartValues = null;
+                }
+                if (_mouseMoved)
+                    _editor._node.Surface.MarkAsEdited();
+            }
+
             /// <inheritdoc />
             public override void OnGotFocus()
             {
                 base.OnGotFocus();
 
-                _editor.SelectedIndex = _index;
+                _editor._node.SelectedAnimationIndex = _index;
             }
 
             /// <inheritdoc />
             public override void Draw()
             {
-                // Cache data
-                var isSelected = _editor.SelectedIndex == _index;
+                // Draw dot with outline
+                var style = Style.Current;
+                var icon = Editor.Instance.Icons.VisjectBoxClosed32;
+                var size = Height;
+                var rect = new Rectangle(new Float2(size * -0.5f) + Size * 0.5f, new Float2(size));
+                var outline = Color.Black; // Shadow
+                if (_isMouseDown)
+                    outline = style.SelectionBorder;
+                else if (IsMouseOver)
+                    outline = style.BorderHighlighted;
+                else if (_editor._node.SelectedAnimationIndex == _index)
+                    outline = style.BackgroundSelected;
 
-                // Draw rotated rectangle
-                Render2D.PushTransform(ref _transform);
-                Render2D.FillRectangle(new Rectangle(0, 0, 5, 5), isSelected ? Color.Orange : Color.BlueViolet);
-                Render2D.PopTransform();
+                var features = Render2D.Features;
+                Render2D.Features = features & ~Render2D.RenderingFeatures.VertexSnapping;
+
+                Render2D.DrawSprite(icon, rect.MakeExpanded(4.0f), outline);
+                Render2D.DrawSprite(icon, rect, style.Foreground);
+
+                Render2D.Features = features;
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDown(Vector2 location, MouseButton button)
+            public override bool OnMouseDown(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left)
                 {
                     Focus();
                     _isMouseDown = true;
+                    _mouseMoved = false;
+                    _mouseMoveStartValues = null;
+                    _mousePosOffset = -location;
                     StartMouseCapture();
                     return true;
                 }
@@ -88,12 +130,11 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override bool OnMouseUp(Vector2 location, MouseButton button)
+            public override bool OnMouseUp(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left && _isMouseDown)
                 {
-                    _isMouseDown = false;
-                    EndMouseCapture();
+                    EndMove();
                     return true;
                 }
 
@@ -101,11 +142,28 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnMouseMove(Vector2 location)
+            public override void OnMouseMove(Float2 location)
             {
-                if (_isMouseDown)
+                if (_isMouseDown && (_mouseMoved || Float2.DistanceSquared(location, _mousePosOffset) > 16.0f))
                 {
-                    _editor.SetLocation(_index, _editor.BlendPointPosToBlendSpacePos(Location + location));
+                    if (!_mouseMoved)
+                    {
+                        // Capture initial state for undo
+                        _mouseMoved = true;
+                        _mouseMoveStartValues = _editor._node.Surface.Undo != null ? (object[])_editor._node.Values.Clone() : null;
+                    }
+
+                    var newLocation = Location + location + _mousePosOffset;
+                    newLocation = _editor.BlendPointPosToBlendSpacePos(newLocation);
+                    if (Root != null && Root.GetKey(KeyboardKeys.Control))
+                    {
+                        var data0 = (Float4)_editor._node.Values[0];
+                        var rangeX = new Float2(data0.X, data0.Y);
+                        var rangeY = _editor._is2D ? new Float2(data0.Z, data0.W) : Float2.One;
+                        var grid = new Float2(Mathf.Abs(rangeX.Y - rangeX.X) * 0.01f, Mathf.Abs(rangeY.X - rangeY.Y) * 0.01f);
+                        newLocation = Float2.SnapToGrid(newLocation, grid);
+                    }
+                    _editor.SetLocation(_index, newLocation);
                 }
 
                 base.OnMouseMove(location);
@@ -116,8 +174,7 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 if (_isMouseDown)
                 {
-                    _isMouseDown = false;
-                    EndMouseCapture();
+                    EndMove();
                 }
 
                 base.OnMouseLeave();
@@ -128,8 +185,7 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 if (_isMouseDown)
                 {
-                    _isMouseDown = false;
-                    EndMouseCapture();
+                    EndMove();
                 }
 
                 base.OnLostFocus();
@@ -142,6 +198,18 @@ namespace FlaxEditor.Surface.Archetypes
 
                 base.OnEndMouseCapture();
             }
+
+            /// <inheritdoc />
+            public override bool OnKeyDown(KeyboardKeys key)
+            {
+                switch (key)
+                {
+                case KeyboardKeys.Delete:
+                    _editor.SetAsset(_index, Guid.Empty);
+                    return true;
+                }
+                return base.OnKeyDown(key);
+            }
         }
 
         /// <summary>
@@ -150,39 +218,166 @@ namespace FlaxEditor.Surface.Archetypes
         public bool Is2D => _is2D;
 
         /// <summary>
+        /// Blend points count.
+        /// </summary>
+        public int PointsCount => (_node.Values.Length - _node.AnimationsStartIndex) / 2; // 5 node values + 2 per blend point
+
+        /// <summary>
+        /// BLend points array.
+        /// </summary>
+        internal IReadOnlyList<BlendPoint> BlendPoints => _blendPoints;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="BlendPointsEditor"/> class.
         /// </summary>
+        /// <param name="node">The node.</param>
         /// <param name="is2D">The value indicating whether blend space is 2D, otherwise it is 1D.</param>
         /// <param name="x">The X location.</param>
         /// <param name="y">The Y location.</param>
         /// <param name="width">The width.</param>
         /// <param name="height">The height.</param>
-        public BlendPointsEditor(bool is2D, float x, float y, float width, float height)
+        public BlendPointsEditor(Animation.MultiBlend node, bool is2D, float x, float y, float width, float height)
         : base(x, y, width, height)
         {
+            AutoFocus = true;
+
+            _node = node;
             _is2D = is2D;
         }
 
-        /// <summary>
-        /// Gets the blend space data.
-        /// </summary>
-        /// <param name="rangeX">The space range for X axis (X-width, Y-height).</param>
-        /// <param name="rangeY">The space range for Y axis (X-width, Y-height).</param>
-        /// <param name="pointsAnims">The points anims (input array to fill of size equal 14).</param>
-        /// <param name="pointsLocations">The points locations (input array to fill of size equal 14).</param>
-        public abstract void GetData(out Vector2 rangeX, out Vector2 rangeY, Guid[] pointsAnims, Vector2[] pointsLocations);
+        internal void AddPoint()
+        {
+            // Add random point within range
+            var rand = new Float2(Mathf.Frac((float)Platform.TimeSeconds), (Platform.TimeCycles % 10000) / 10000.0f);
+            AddPoint(Float2.Lerp(new Float2(_rangeX.X, _rangeY.X), new Float2(_rangeX.Y, _rangeY.Y), rand));
+        }
+
+        private void AddPoint(Float2 location)
+        {
+            // If animation is provided externally, then just insert an empty point
+            if (_node.AnimationSource != Animation.MultiBlend.AnimationSources.Default)
+            {
+                AddPoint(Guid.Empty, location);
+                return;
+            }
+
+            // Reuse existing animation
+            var count = PointsCount;
+            var id = Guid.Empty;
+            var animsStart = _node.AnimationsStartIndex;
+            for (int i = 0; i < count; i++)
+            {
+                id = (Guid)_node.Values[animsStart + 1 + i * 2];
+                if (id != Guid.Empty)
+                    break;
+            }
+            if (id == Guid.Empty)
+            {
+                // Just use the first anim from project, user will change it
+                var ids = FlaxEngine.Content.GetAllAssetsByType(typeof(FlaxEngine.Animation));
+                if (ids.Length != 0)
+                    id = ids[0];
+                else
+                    return;
+            }
+
+            AddPoint(id, location);
+        }
 
         /// <summary>
-        /// Gets or sets the index of the selected blend point.
+        /// Sets the blend point asset.
         /// </summary>
-        public abstract int SelectedIndex { get; set; }
+        /// <param name="asset">The asset.</param>
+        /// <param name="location">The location.</param>
+        public void AddPoint(Guid asset, Float2 location)
+        {
+            var count = PointsCount;
+            if (count == Animation.MultiBlend.MaxAnimationsCount)
+                return;
+            var values = (object[])_node.Values.Clone();
+            var index = 0;
+            var animsStart = _node.AnimationsStartIndex;
+            if (_node.AnimationSource == Animation.MultiBlend.AnimationSources.Default)
+            {
+                // Find the first free slot
+                for (; index < count; index++)
+                {
+                    var dataB = (Guid)_node.Values[animsStart + 1 + index * 2];
+                    if (dataB == Guid.Empty)
+                        break;
+                }
+            }
+            else
+                index = count;
+            if (index == count)
+            {
+                // Add another blend point
+                Array.Resize(ref values, values.Length + 2);
+            }
+
+            // Insert animation
+            values[animsStart + index * 2] = new Float4(location.X, _is2D ? location.Y : 0.0f, 0, 1.0f);
+            values[animsStart + 1 + index * 2] = asset;
+            _node.SetValues(values);
+
+            // Auto-select
+            _node.SelectedAnimationIndex = index;
+        }
+
+        /// <summary>
+        /// Sets the blend point asset.
+        /// </summary>
+        /// <param name="index">The index.</param>
+        /// <param name="asset">The asset.</param>
+        /// <param name="withUndo">True to use undo action.</param>
+        public void SetAsset(int index, Guid asset, bool withUndo = true)
+        {
+            var animsStart = _node.AnimationsStartIndex;
+            if (asset == Guid.Empty && _node.AnimationSource != Animation.MultiBlend.AnimationSources.Default)
+            {
+                // Remove point
+                var values = (object[])_node.Values.Clone();
+                for (int i = animsStart + index * 2 + 2; i < values.Length; i++)
+                {
+                    values[i - 2] = values[i];
+                }
+                // TODO: re-connect input boxes after removed one to maintain the linkage
+                Array.Resize(ref values, values.Length - 2);
+                _node.SetValues(values);
+                return;
+            }
+
+            var animIndex = animsStart + 1 + index * 2;
+            if (withUndo)
+            {
+                _node.SetValue(animIndex, asset);
+            }
+            else
+            {
+                _node.Values[animIndex] = asset;
+                _node.Surface.MarkAsEdited();
+            }
+            _node.UpdateUI();
+        }
 
         /// <summary>
         /// Sets the blend point location.
         /// </summary>
         /// <param name="index">The index.</param>
         /// <param name="location">The location.</param>
-        public abstract void SetLocation(int index, Vector2 location);
+        public void SetLocation(int index, Float2 location)
+        {
+            var dataIndex = _node.AnimationsStartIndex + index * 2;
+            var dataA = (Float4)_node.Values[dataIndex];
+            var ranges = (Float4)_node.Values[0];
+
+            dataA.X = Mathf.Clamp(location.X, ranges.X, ranges.Y);
+            if (_is2D)
+                dataA.Y = Mathf.Clamp(location.Y, ranges.Z, ranges.W);
+
+            _node.Values[dataIndex] = dataA;
+            _node.UpdateUI();
+        }
 
         /// <summary>
         /// Gets the blend points area.
@@ -190,7 +385,7 @@ namespace FlaxEditor.Surface.Archetypes
         /// <param name="pointsArea">The control-space area.</param>
         public void GetPointsArea(out Rectangle pointsArea)
         {
-            pointsArea = new Rectangle(Vector2.Zero, Size);
+            pointsArea = new Rectangle(Float2.Zero, Size);
             pointsArea.Expand(-10.0f);
         }
 
@@ -199,23 +394,23 @@ namespace FlaxEditor.Surface.Archetypes
         /// </summary>
         /// <param name="pos">The blend point control position.</param>
         /// <returns>The blend space position.</returns>
-        public Vector2 BlendPointPosToBlendSpacePos(Vector2 pos)
+        public Float2 BlendPointPosToBlendSpacePos(Float2 pos)
         {
             GetPointsArea(out var pointsArea);
-            pos += new Vector2(BlendPoint.DefaultSize * 0.5f);
+            pos += new Float2(BlendPoint.DefaultSize * 0.5f);
             if (_is2D)
             {
-                pos = new Vector2(
-                    Mathf.Map(pos.X, pointsArea.Left, pointsArea.Right, _rangeX.X, _rangeX.Y),
-                    Mathf.Map(pos.Y, pointsArea.Bottom, pointsArea.Top, _rangeY.X, _rangeY.Y)
-                );
+                pos = new Float2(
+                                 Mathf.Remap(pos.X, pointsArea.Left, pointsArea.Right, _rangeX.X, _rangeX.Y),
+                                 Mathf.Remap(pos.Y, pointsArea.Bottom, pointsArea.Top, _rangeY.X, _rangeY.Y)
+                                );
             }
             else
             {
-                pos = new Vector2(
-                    Mathf.Map(pos.X, pointsArea.Left, pointsArea.Right, _rangeX.X, _rangeX.Y),
-                    0
-                );
+                pos = new Float2(
+                                 Mathf.Remap(pos.X, pointsArea.Left, pointsArea.Right, _rangeX.X, _rangeX.Y),
+                                 0
+                                );
             }
             return pos;
         }
@@ -225,34 +420,55 @@ namespace FlaxEditor.Surface.Archetypes
         /// </summary>
         /// <param name="pos">The blend space position.</param>
         /// <returns>The blend point control position.</returns>
-        public Vector2 BlendSpacePosToBlendPointPos(Vector2 pos)
+        public Float2 BlendSpacePosToBlendPointPos(Float2 pos)
         {
+            if (_rangeX.IsZero)
+            {
+                var data0 = (Float4)_node.Values[0];
+                _rangeX = new Float2(data0.X, data0.Y);
+                _rangeY = _is2D ? new Float2(data0.Z, data0.W) : Float2.Zero;
+            }
             GetPointsArea(out var pointsArea);
             if (_is2D)
             {
-                pos = new Vector2(
-                    Mathf.Map(pos.X, _rangeX.X, _rangeX.Y, pointsArea.Left, pointsArea.Right),
-                    Mathf.Map(pos.Y, _rangeY.X, _rangeY.Y, pointsArea.Bottom, pointsArea.Top)
-                );
+                pos = new Float2(
+                                 Mathf.Remap(pos.X, _rangeX.X, _rangeX.Y, pointsArea.Left, pointsArea.Right),
+                                 Mathf.Remap(pos.Y, _rangeY.X, _rangeY.Y, pointsArea.Bottom, pointsArea.Top)
+                                );
             }
             else
             {
-                pos = new Vector2(
-                    Mathf.Map(pos.X, _rangeX.X, _rangeX.Y, pointsArea.Left, pointsArea.Right),
-                    pointsArea.Center.Y
-                );
+                pos = new Float2(
+                                 Mathf.Remap(pos.X, _rangeX.X, _rangeX.Y, pointsArea.Left, pointsArea.Right),
+                                 pointsArea.Center.Y
+                                );
             }
-            return pos - new Vector2(BlendPoint.DefaultSize * 0.5f);
+            return pos;
         }
 
         /// <inheritdoc />
         public override void Update(float deltaTime)
         {
             // Synchronize blend points collection
-            GetData(out _rangeX, out _rangeY, _pointsAnims, _pointsLocations);
-            for (int i = 0; i < Animation.MultiBlend.MaxAnimationsCount; i++)
+            var data0 = (Float4)_node.Values[0];
+            _rangeX = new Float2(data0.X, data0.Y);
+            _rangeY = _is2D ? new Float2(data0.Z, data0.W) : Float2.Zero;
+            var count = PointsCount;
+            while (_blendPoints.Count > count)
             {
-                if (_pointsAnims[i] != Guid.Empty)
+                _blendPoints[count].Dispose();
+                _blendPoints.RemoveAt(count);
+            }
+            while (_blendPoints.Count < count)
+                _blendPoints.Add(null);
+            var animsStart = _node.AnimationsStartIndex;
+            var animSource = _node.AnimationSource;
+            for (int i = 0; i < count; i++)
+            {
+                var animId = (Guid)_node.Values[animsStart + 1 + i * 2];
+                var dataA = (Float4)_node.Values[animsStart + i * 2];
+                var location = new Float2(Mathf.Clamp(dataA.X, _rangeX.X, _rangeX.Y), _is2D ? Mathf.Clamp(dataA.Y, _rangeY.X, _rangeY.Y) : 0.0f);
+                if (animId != Guid.Empty || animSource != Animation.MultiBlend.AnimationSources.Default)
                 {
                     if (_blendPoints[i] == null)
                     {
@@ -264,7 +480,15 @@ namespace FlaxEditor.Surface.Archetypes
                     }
 
                     // Update blend point
-                    _blendPoints[i].Location = BlendSpacePosToBlendPointPos(_pointsLocations[i]);
+                    _blendPoints[i].Location = BlendSpacePosToBlendPointPos(location) - BlendPoint.DefaultSize * 0.5f;
+                    var asset = Editor.Instance.ContentDatabase.FindAsset(animId);
+                    var tooltip = asset?.ShortName ?? string.Empty;
+                    if (animSource != Animation.MultiBlend.AnimationSources.Default)
+                        tooltip = $"[{i}]";
+                    tooltip += "\nX: " + location.X;
+                    if (_is2D)
+                        tooltip += "\nY: " + location.Y;
+                    _blendPoints[i].TooltipText = tooltip;
                 }
                 else
                 {
@@ -277,6 +501,34 @@ namespace FlaxEditor.Surface.Archetypes
                 }
             }
 
+            // Debug current playback position
+            if (((AnimGraphSurface)_node.Surface).TryGetTraceEvent(_node, out var traceEvent))
+            {
+                var prev = _debugPos;
+                if (_is2D)
+                {
+                    unsafe
+                    {
+                        // Unpack xy from 32-bits
+                        Half2 packed = *(Half2*)&traceEvent.Value;
+                        _debugPos = (Float2)packed;
+                    }
+                }
+                else
+                    _debugPos = new Float2(traceEvent.Value, 0.0f);
+
+                // Scale debug pointer when it moves to make it more visible when investigating blending
+                const float debugMaxSize = 2.0f;
+                float debugScale = Mathf.Saturate(Float2.Distance(ref _debugPos, ref prev) / new Float2(_rangeX.Absolute.ValuesSum, _rangeY.Absolute.ValuesSum).Length * 100.0f) * debugMaxSize + 1.0f;
+                float debugBlendSpeed = _debugScale <= debugScale ? 4.0f : 1.0f;
+                _debugScale = Mathf.Lerp(_debugScale, debugScale, deltaTime * debugBlendSpeed);
+            }
+            else
+            {
+                _debugPos = Float2.Minimum;
+                _debugScale = 1.0f;
+            }
+
             base.Update(deltaTime);
         }
 
@@ -287,54 +539,93 @@ namespace FlaxEditor.Surface.Archetypes
         {
             get
             {
-                var upperLeft = BlendSpacePosToBlendPointPos(new Vector2(_rangeX.X, _rangeY.X));
-                var bottomRight = BlendSpacePosToBlendPointPos(new Vector2(_rangeX.Y, _rangeY.Y));
+                var upperLeft = BlendSpacePosToBlendPointPos(new Float2(_rangeX.X, _rangeY.X));
+                var bottomRight = BlendSpacePosToBlendPointPos(new Float2(_rangeX.Y, _rangeY.Y));
                 return new Rectangle(upperLeft, bottomRight - upperLeft);
             }
         }
 
         /// <inheritdoc />
+        public override bool OnMouseDown(Float2 location, MouseButton button)
+        {
+            if (base.OnMouseDown(location, button))
+                return true;
+
+            Focus();
+            return true;
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
+            if (base.OnMouseUp(location, button))
+                return true;
+
+            if (button == MouseButton.Right)
+            {
+                // Show context menu
+                var menu = new FlaxEditor.GUI.ContextMenu.ContextMenu();
+                var b = menu.AddButton("Add point", OnAddPoint);
+                b.Tag = location;
+                b.Enabled = PointsCount < Animation.MultiBlend.MaxAnimationsCount;
+                if (GetChildAt(location) is BlendPoint blendPoint)
+                {
+                    b = menu.AddButton("Remove point", OnRemovePoint);
+                    b.Tag = blendPoint.Index;
+                    b.TooltipText = blendPoint.TooltipText;
+                }
+                menu.Show(this, location);
+            }
+
+            return true;
+        }
+
+        private void OnAddPoint(FlaxEditor.GUI.ContextMenu.ContextMenuButton b)
+        {
+            AddPoint(BlendPointPosToBlendSpacePos((Float2)b.Tag));
+        }
+
+        private void OnRemovePoint(FlaxEditor.GUI.ContextMenu.ContextMenuButton b)
+        {
+            SetAsset((int)b.Tag, Guid.Empty);
+        }
+
+        /// <inheritdoc />
         public override void Draw()
         {
-            // Cache data
             var style = Style.Current;
-            var rect = new Rectangle(Vector2.Zero, Size);
+            var rect = new Rectangle(Float2.Zero, Size);
             var containsFocus = ContainsFocus;
-            GetPointsArea(out var pointsArea);
 
             // Background
-            Render2D.DrawRectangle(rect, IsMouseOver ? style.TextBoxBackgroundSelected : style.TextBoxBackground);
-            //Render2D.DrawRectangle(pointsArea, Color.Red);
+            _node.DrawEditorBackground(ref rect);
 
             // Grid
-            int splits = 10;
-            var gridColor = style.TextBoxBackgroundSelected * 1.1f;
-            //var blendArea = BlendAreaRect;
-            var blendArea = pointsArea;
-            for (int i = 0; i < splits; i++)
-            {
-                float x = blendArea.Left + blendArea.Width * i / splits;
-                Render2D.DrawLine(new Vector2(x, 1), new Vector2(x, rect.Height - 2), gridColor);
-            }
-            if (_is2D)
-            {
-                for (int i = 0; i < splits; i++)
-                {
-                    float y = blendArea.Top + blendArea.Height * i / splits;
-                    Render2D.DrawLine(new Vector2(1, y), new Vector2(rect.Width - 2, y), gridColor);
-                }
-            }
-            else
-            {
-                float y = blendArea.Center.Y;
-                Render2D.DrawLine(new Vector2(1, y), new Vector2(rect.Width - 2, y), gridColor);
-            }
+            _node.DrawEditorGrid(ref rect);
 
-            // Base
+            var features = Render2D.Features;
+            Render2D.Features = features & ~Render2D.RenderingFeatures.VertexSnapping;
+
             base.Draw();
 
+            // Draw debug position
+            if (_debugPos.X > float.MinValue)
+            {
+                // Draw dot with outline
+                var icon = Editor.Instance.Icons.VisjectBoxOpen32;
+                var size = BlendPoint.DefaultSize * _debugScale;
+                var debugPos = BlendSpacePosToBlendPointPos(_debugPos);
+                var debugRect = new Rectangle(debugPos + new Float2(size * -0.5f), new Float2(size));
+                var outline = Color.Black; // Shadow
+                Render2D.DrawSprite(icon, debugRect.MakeExpanded(2.0f), outline);
+                Render2D.DrawSprite(icon, debugRect, style.ProgressNormal);
+            }
+
+            Render2D.Features = features;
+
             // Frame
-            Render2D.DrawRectangle(new Rectangle(1, 1, rect.Width - 2, rect.Height - 2), containsFocus ? style.ProgressNormal : style.BackgroundSelected);
+            var frameColor = containsFocus ? style.BackgroundSelected : (IsMouseOver ? style.ForegroundGrey : style.ForegroundDisabled);
+            Render2D.DrawRectangle(new Rectangle(1, 1, rect.Width - 2, rect.Height - 2), frameColor);
         }
     }
 
@@ -346,6 +637,30 @@ namespace FlaxEditor.Surface.Archetypes
         /// <seealso cref="FlaxEditor.Surface.SurfaceNode" />
         public abstract class MultiBlend : SurfaceNode
         {
+            /// <summary>
+            /// Possible input animation sources for the Multi Blend points.
+            /// </summary>
+            internal enum AnimationSources
+            {
+                /// <summary>
+                /// Default source with animation assigned to each blend point.
+                /// </summary>
+                Default,
+
+                /// <summary>
+                /// Node exposes series of inputs to plug in custom animation assets used by each blend point. Can be used to provide different animations based for the same Multi Blend (eg. male and female versions).
+                /// </summary>
+                InputAnimations,
+            }
+
+            private Button _addButton;
+            private Button _removeButton;
+
+            /// <summary>
+            /// The blend space editor.
+            /// </summary>
+            protected BlendPointsEditor _editor;
+
             /// <summary>
             /// The selected animation label.
             /// </summary>
@@ -379,15 +694,54 @@ namespace FlaxEditor.Surface.Archetypes
             /// <summary>
             /// The maximum animations amount to blend per node.
             /// </summary>
-            public const int MaxAnimationsCount = 14;
+            public const int MaxAnimationsCount = 255;
+
+            /// <summary>
+            /// Gets the index of the first animation data in Values array (after node options data that varies in size between engine versions).
+            /// </summary>
+            public int AnimationsStartIndex
+            {
+                get
+                {
+                    // This must match Multi Blend nodes archetypes from Animation.cs where 'Per blend sample data' starts
+                    return 5;
+                }
+            }
+
+            /// <summary>
+            /// Gets the index of the first animation input box.
+            /// </summary>
+            public const int AnimationInputsStartIndex = 10;
+
+            /// <summary>
+            /// Gets the animation source mode.
+            /// </summary>
+            internal AnimationSources AnimationSource
+            {
+                get
+                {
+                    if (Values[4] is AnimationSources asEnum)
+                        return asEnum;
+                    if (Values[4] is int asInt)
+                        return (AnimationSources)asInt;
+                    if (Values[4] is long asLong)
+                        return (AnimationSources)asLong;
+                    return AnimationSources.Default;
+                }
+            }
 
             /// <summary>
             /// Gets or sets the index of the selected animation.
             /// </summary>
             public int SelectedAnimationIndex
             {
-                get => _selectedAnimation.SelectedIndex;
-                set => _selectedAnimation.SelectedIndex = value;
+                get => Mathf.Min(_selectedAnimation.SelectedIndex, _editor.PointsCount - 1);
+                set
+                {
+                    OnSelectedAnimationPopupShowing(_selectedAnimation);
+                    _selectedAnimation.SelectedIndex = value;
+                    UpdateUI();
+                }
             }
 
             /// <inheritdoc />
@@ -402,21 +756,15 @@ namespace FlaxEditor.Surface.Archetypes
                     Text = "Selected Animation:",
                     Parent = this
                 };
-
                 _selectedAnimation = new ComboBox(_selectedAnimationLabel.X, 4 * layoutOffsetY, _selectedAnimationLabel.Width)
                 {
+                    TooltipText = "Select blend point to view and edit it",
                     Parent = this
                 };
-
                 _selectedAnimation.PopupShowing += OnSelectedAnimationPopupShowing;
                 _selectedAnimation.SelectedIndexChanged += OnSelectedAnimationChanged;
 
-                var items = new List<string>(MaxAnimationsCount);
-                while (items.Count < MaxAnimationsCount)
-                    items.Add(string.Empty);
-                _selectedAnimation.Items = items;
-
-                _animationPicker = new AssetPicker(new ScriptType(typeof(FlaxEngine.Animation)), new Vector2(_selectedAnimation.Left, _selectedAnimation.Bottom + 4))
+                _animationPicker = new AssetPicker(new ScriptType(typeof(FlaxEngine.Animation)), new Float2(_selectedAnimation.Left, _selectedAnimation.Bottom + 4))
                 {
                     Parent = this
                 };
@@ -428,22 +776,39 @@ namespace FlaxEditor.Surface.Archetypes
                     Text = "Speed:",
                     Parent = this
                 };
-
                 _animationSpeed = new FloatValueBox(1.0f, _animationSpeedLabel.Right + 4, _animationSpeedLabel.Y, _selectedAnimation.Right - _animationSpeedLabel.Right - 4)
                 {
                     SlideSpeed = 0.01f,
                     Parent = this
                 };
                 _animationSpeed.ValueChanged += OnAnimationSpeedValueChanged;
+
+                var buttonsSize = 12;
+                _addButton = new Button(_selectedAnimation.Right - buttonsSize, _selectedAnimation.Bottom + 4, buttonsSize, buttonsSize)
+                {
+                    Text = "+",
+                    TooltipText = "Add a new blend point",
+                    Parent = this
+                };
+                _addButton.Clicked += OnAddButtonClicked;
+                _removeButton = new Button(_addButton.Left - buttonsSize - 4, _addButton.Y, buttonsSize, buttonsSize)
+                {
+                    Text = "-",
+                    TooltipText = "Remove selected blend point",
+                    Parent = this
+                };
+                _removeButton.Clicked += OnRemoveButtonClicked;
             }
 
             private void OnSelectedAnimationPopupShowing(ComboBox comboBox)
             {
                 var items = comboBox.Items;
                 items.Clear();
-                for (var i = 0; i < MaxAnimationsCount; i++)
+                var count = _editor.PointsCount;
+                var animsStart = AnimationsStartIndex;
+                for (var i = 0; i < count; i++)
                 {
-                    var animId = (Guid)Values[5 + i * 2];
+                    var animId = (Guid)Values[animsStart + 1 + i * 2];
                     var path = string.Empty;
                     if (FlaxEngine.Content.GetAssetInfo(animId, out var assetInfo))
                         path = Path.GetFileNameWithoutExtension(assetInfo.Path);
@@ -461,11 +826,11 @@ namespace FlaxEditor.Surface.Archetypes
                 if (_isUpdatingUI)
                     return;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
+                var selectedIndex = SelectedAnimationIndex;
                 if (selectedIndex != -1)
                 {
-                    var index = 5 + selectedIndex * 2;
-                    SetValue(index, _animationPicker.SelectedID);
+                    var index = AnimationsStartIndex + 1 + selectedIndex * 2;
+                    SetValue(index, _animationPicker.Validator.SelectedID);
                 }
             }
 
@@ -474,13 +839,104 @@ namespace FlaxEditor.Surface.Archetypes
                 if (_isUpdatingUI)
                     return;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
+                var selectedIndex = SelectedAnimationIndex;
                 if (selectedIndex != -1)
                 {
-                    var index = 4 + selectedIndex * 2;
-                    var data0 = (Vector4)Values[index];
+                    var index = AnimationsStartIndex + selectedIndex * 2;
+                    var data0 = (Float4)Values[index];
                     data0.W = _animationSpeed.Value;
                     SetValue(index, data0);
+                }
+            }
+
+            private void OnAddButtonClicked()
+            {
+                _editor.AddPoint();
+            }
+
+            private void OnRemoveButtonClicked()
+            {
+                _editor.SetAsset(SelectedAnimationIndex, Guid.Empty);
+            }
+
+            private void DrawAxis(bool vertical, Float2 start, Float2 end, ref Color gridColor, ref Color labelColor, Font labelFont, float value, bool isLast)
+            {
+                // Draw line
+                Render2D.DrawLine(start, end, gridColor);
+
+                // Draw label
+                var labelWidth = 50.0f;
+                var labelHeight = 10.0f;
+                var labelMargin = 2.0f;
+                string label = Utils.RoundTo2DecimalPlaces(value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var hAlign = TextAlignment.Near;
+                Rectangle labelRect;
+                if (vertical)
+                {
+                    labelRect = new Rectangle(start.X + labelMargin * 2, start.Y, labelWidth, labelHeight);
+                    if (isLast)
+                        return; // Don't overlap with the first horizontal label
+                }
+                else
+                {
+                    labelRect = new Rectangle(start.X + labelMargin, start.Y - labelHeight - labelMargin, labelWidth, labelHeight);
+                    if (isLast)
+                    {
+                        labelRect.X = start.X - labelMargin - labelRect.Width;
+                        hAlign = TextAlignment.Far;
+                    }
+                }
+                Render2D.DrawText(labelFont, label, labelRect, labelColor, hAlign, TextAlignment.Center, TextWrapping.NoWrap, 1.0f, 0.7f);
+            }
+
+            /// <summary>
+            /// Custom drawing logic for blend space background.
+            /// </summary>
+            public virtual void DrawEditorBackground(ref Rectangle rect)
+            {
+                var style = Style.Current;
+                Render2D.FillRectangle(rect, style.Background.AlphaMultiplied(0.5f));
+                Render2D.DrawRectangle(rect, IsMouseOver ? style.TextBoxBackgroundSelected : style.TextBoxBackground);
+            }
+
+            /// <summary>
+            /// Custom drawing logic for blend space grid.
+            /// </summary>
+            public virtual void DrawEditorGrid(ref Rectangle rect)
+            {
+                var style = Style.Current;
+                _editor.GetPointsArea(out var pointsArea);
+                var data0 = (Float4)Values[0];
+                var rangeX = new Float2(data0.X, data0.Y);
+                int splits = 10;
+                var gridColor = style.TextBoxBackgroundSelected * 1.1f;
+                var labelColor = style.ForegroundDisabled;
+                var labelFont = style.FontSmall;
+                //var blendArea = BlendAreaRect;
+                var blendArea = pointsArea;
+
+                for (int i = 0; i <= splits; i++)
+                {
+                    float alpha = (float)i / splits;
+                    float x = blendArea.Left + blendArea.Width * alpha;
+                    float value = Mathf.Lerp(rangeX.X, rangeX.Y, alpha);
+                    DrawAxis(false, new Float2(x, rect.Height - 2), new Float2(x, 1), ref gridColor, ref labelColor, labelFont, value, i == splits);
+                }
+                if (_editor.Is2D)
+                {
+                    var rangeY = new Float2(data0.Z, data0.W);
+                    for (int i = 0; i <= splits; i++)
+                    {
+                        float alpha = (float)i / splits;
+                        float y = blendArea.Top + blendArea.Height * alpha;
+                        float value = Mathf.Lerp(rangeY.X, rangeY.Y, 1.0f - alpha);
+                        DrawAxis(true, new Float2(1, y), new Float2(rect.Width - 2, y), ref gridColor, ref labelColor, labelFont, value, i == splits);
+                    }
+                }
+                else
+                {
+                    float y = blendArea.Center.Y;
+                    Render2D.DrawLine(new Float2(1, y), new Float2(rect.Width - 2, y), gridColor);
                 }
             }
 
@@ -491,62 +947,186 @@ namespace FlaxEditor.Surface.Archetypes
             /// <param name="isValid">if set to <c>true</c> is selection valid.</param>
             /// <param name="data0">The packed data 0.</param>
             /// <param name="data1">The packed data 1.</param>
-            protected virtual void UpdateUI(int selectedIndex, bool isValid, ref Vector4 data0, ref Guid data1)
+            public virtual void UpdateUI(int selectedIndex, bool isValid, ref Float4 data0, ref Guid data1)
             {
                 if (isValid)
                 {
-                    _animationPicker.SelectedID = data1;
+                    _animationPicker.Validator.SelectedID = data1;
                     _animationSpeed.Value = data0.W;
 
                     var path = string.Empty;
                     if (FlaxEngine.Content.GetAssetInfo(data1, out var assetInfo))
                         path = Path.GetFileNameWithoutExtension(assetInfo.Path);
-                    _selectedAnimation.Items[selectedIndex] = string.Format("[{0}] {1}", selectedIndex, path);
+                    if (selectedIndex >= 0 && _selectedAnimation.Items.Count > selectedIndex)
+                        _selectedAnimation.Items[selectedIndex] = string.Format("[{0}] {1}", selectedIndex, path);
                 }
                 else
                 {
-                    _animationPicker.SelectedID = Guid.Empty;
+                    _animationPicker.Validator.SelectedID = Guid.Empty;
                     _animationSpeed.Value = 1.0f;
                 }
                 _animationPicker.Enabled = isValid;
                 _animationSpeedLabel.Enabled = isValid;
                 _animationSpeed.Enabled = isValid;
+                _addButton.Enabled = _editor.PointsCount < MaxAnimationsCount;
+                _removeButton.Enabled = isValid && (data1 != Guid.Empty || AnimationSource != AnimationSources.Default);
             }
 
             /// <summary>
             /// Updates the editor UI.
             /// </summary>
-            protected void UpdateUI()
+            public void UpdateUI()
             {
                 if (_isUpdatingUI)
                     return;
                 _isUpdatingUI = true;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
-                var isValid = selectedIndex != -1;
-                Vector4 data0;
+                // Update animation picker and blend point options
+                OnSelectedAnimationPopupShowing(_selectedAnimation);
+                var selectedIndex = SelectedAnimationIndex;
+                var pointsCount = _editor.PointsCount;
+                var isValid = selectedIndex >= 0 && selectedIndex < pointsCount;
+                Float4 data0;
                 Guid data1;
                 if (isValid)
                 {
-                    data0 = (Vector4)Values[4 + selectedIndex * 2];
-                    data1 = (Guid)Values[5 + selectedIndex * 2];
+                    var animsStart = AnimationsStartIndex;
+                    data0 = (Float4)Values[animsStart + selectedIndex * 2];
+                    data1 = (Guid)Values[animsStart + 1 + selectedIndex * 2];
                 }
                 else
                 {
-                    data0 = Vector4.Zero;
+                    data0 = Float4.Zero;
                     data1 = Guid.Empty;
                 }
                 UpdateUI(selectedIndex, isValid, ref data0, ref data1);
+
+                // Update input boxes
+                var animSource = AnimationSource;
+                var animInputBoxId = AnimationInputsStartIndex;
+                var animInputPos = _editor.Top + 2;
+                if (animSource != AnimationSources.Default)
+                {
+                    // Add or update inputs
+                    var animInputType = new ScriptType(typeof(FlaxEngine.Animation));
+                    for (int i = 0; i < pointsCount; i++, animInputBoxId++)
+                    {
+                        var box = AddBox(false, animInputBoxId, 0, $"[{i}]", animInputType, true);
+                        box.Y = animInputPos;
+                        animInputPos += FlaxEditor.Surface.Constants.LayoutOffsetY;
+                    }
+                }
+                {
+                    // Remove unused inputs
+                    var box = GetBox(animInputBoxId);
+                    if (box != null)
+                    {
+                        // Break connections with undo
+                        var action = new EditNodeConnections(Context, this);
+                        while (box != null)
+                        {
+                            box.RemoveConnections();
+                            box = GetNextBox(box);
+                        }
+                        if (action.End())
+                            Surface.AddBatchedUndoAction(action);
+
+                        // Destroy boxes
+                        box = GetBox(animInputBoxId);
+                        while (box != null)
+                        {
+                            var oldBox = box;
+                            box = GetNextBox(box);
+                            RemoveElement(oldBox);
+                        }
+                    }
+                }
+
+                // Update blend space editor bounds
+                var editorBounds = _editor.Bounds;
+                editorBounds.X = FlaxEditor.Surface.Constants.NodeMarginX;
+                if (animSource != AnimationSources.Default)
+                    editorBounds.X += 35 + FlaxEditor.Surface.Constants.NodeMarginX + (pointsCount > 10 && _editor.Is2D ? 5 : 0);
+                editorBounds.Width = Width - FlaxEditor.Surface.Constants.NodeMarginX - editorBounds.X;
+                _editor.Bounds = editorBounds;
+
+                // Update height to fit animation inputs
+                var size = Archetype.Size;
+                size.Y = Mathf.Max(size.Y, animInputPos - FlaxEditor.Surface.Constants.NodeMarginY * 2 - FlaxEditor.Surface.Constants.NodeHeaderHeight);
+                Resize(size.X, size.Y);
 
                 _isUpdatingUI = false;
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void ResizeAuto()
             {
-                base.OnSurfaceLoaded();
+                // Don't resize here
+            }
+
+            /// <inheritdoc />
+            public override void OnLoading(SurfaceNodeActions action)
+            {
+                // Upgrade old nodes data
+                if (Values.Length < 5 || Values[4] is Float4)
+                {
+                    // MultiBlend.AnimationSources added at [4]
+                    Array.Resize(ref Values, Values.Length + 1);
+                    for (int i = Values.Length - 1; i > 4; i--)
+                        Values[i] = Values[i - 1];
+                    Values[4] = (int)AnimationSources.Default;
+                    // TODO: mark as dirty when loading old data to auto-save
+                }
+
+                base.OnLoading(action);
+            }
+
+            /// <inheritdoc />
+            public override void OnLoaded(SurfaceNodeActions action)
+            {
+                // Spawn boxes for animation inputs
+                var animSource = AnimationSource;
+                if (animSource != AnimationSources.Default)
+                {
+                    // Add or update inputs
+                    var animInputBoxId = AnimationInputsStartIndex;
+                    var pointsCount = (Values.Length - AnimationsStartIndex) / 2;
+                    var animInputType = new ScriptType(typeof(FlaxEngine.Animation));
+                    for (int i = 0; i < pointsCount; i++, animInputBoxId++)
+                        AddBox(false, animInputBoxId, 0, string.Empty, animInputType, true);
+                }
+
+                base.OnLoaded(action);
+            }
+
+            /// <inheritdoc />
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
+            {
+                base.OnSurfaceLoaded(action);
 
                 UpdateUI();
+            }
+
+            /// <inheritdoc />
+            public override void OnSpawned(SurfaceNodeActions action)
+            {
+                base.OnSpawned(action);
+
+                // Select the first animation to make setup easier
+                OnSelectedAnimationPopupShowing(_selectedAnimation);
+                _selectedAnimation.SelectedIndex = 0;
+            }
+
+            /// <inheritdoc />
+            public override void SetValuesPaste(object[] values)
+            {
+                // Fix Guids pasted as string
+                // TODO: let copy/paste system in Visject handle value types to be strongly typed
+                var animsStart = AnimationsStartIndex;
+                for (int i = animsStart + 1; i < values.Length; i += 2)
+                    values[i] = Guid.Parse((string)values[i]);
+
+                base.SetValuesPaste(values);
             }
 
             /// <inheritdoc />
@@ -555,6 +1135,23 @@ namespace FlaxEditor.Surface.Archetypes
                 base.OnValuesChanged();
 
                 UpdateUI();
+            }
+
+            /// <inheritdoc />
+            public override bool Search(string text)
+            {
+                FlaxEngine.Json.JsonSerializer.ParseID(text, out var id);
+                if (id != Guid.Empty)
+                {
+                    var animsStart = AnimationsStartIndex;
+                    for (int i = animsStart + 1; i < Values.Length; i += 2)
+                    {
+                        if ((Guid)Values[i] == id)
+                            return true;
+                    }
+                }
+
+                return base.Search(text);
             }
         }
 
@@ -566,66 +1163,6 @@ namespace FlaxEditor.Surface.Archetypes
         {
             private readonly Label _animationXLabel;
             private readonly FloatValueBox _animationX;
-            private readonly Editor _editor;
-
-            /// <summary>
-            /// The Multi Blend 1D blend space editor.
-            /// </summary>
-            /// <seealso cref="FlaxEditor.Surface.Archetypes.BlendPointsEditor" />
-            protected class Editor : BlendPointsEditor
-            {
-                private MultiBlend1D _node;
-
-                /// <summary>
-                /// Initializes a new instance of the <see cref="Editor"/> class.
-                /// </summary>
-                /// <param name="node">The parent Visject Node node.</param>
-                /// <param name="x">The X location.</param>
-                /// <param name="y">The Y location.</param>
-                /// <param name="width">The width.</param>
-                /// <param name="height">The height.</param>
-                public Editor(MultiBlend1D node, float x, float y, float width, float height)
-                : base(false, x, y, width, height)
-                {
-                    _node = node;
-                }
-
-                /// <inheritdoc />
-                public override void GetData(out Vector2 rangeX, out Vector2 rangeY, Guid[] pointsAnims, Vector2[] pointsLocations)
-                {
-                    var data0 = (Vector4)_node.Values[0];
-                    rangeX = new Vector2(data0.X, data0.Y);
-                    rangeY = Vector2.Zero;
-                    for (int i = 0; i < MaxAnimationsCount; i++)
-                    {
-                        var dataA = (Vector4)_node.Values[4 + i * 2];
-                        var dataB = (Guid)_node.Values[5 + i * 2];
-
-                        pointsAnims[i] = dataB;
-                        pointsLocations[i] = new Vector2(dataA.X, 0.0f);
-                    }
-                }
-
-                /// <inheritdoc />
-                public override int SelectedIndex
-                {
-                    get => _node.SelectedAnimationIndex;
-                    set => _node.SelectedAnimationIndex = value;
-                }
-
-                /// <inheritdoc />
-                public override void SetLocation(int index, Vector2 location)
-                {
-                    var dataA = (Vector4)_node.Values[4 + index * 2];
-
-                    dataA.X = location.X;
-
-                    _node.Values[4 + index * 2] = dataA;
-                    _node.Surface.MarkAsEdited();
-
-                    _node.UpdateUI();
-                }
-            }
 
             /// <inheritdoc />
             public MultiBlend1D(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
@@ -645,11 +1182,8 @@ namespace FlaxEditor.Surface.Archetypes
                 };
                 _animationX.ValueChanged += OnAnimationXChanged;
 
-                _editor = new Editor(this,
-                                     FlaxEditor.Surface.Constants.NodeMarginX,
-                                     _animationX.Bottom + 4.0f,
-                                     Width - FlaxEditor.Surface.Constants.NodeMarginX * 2.0f,
-                                     120.0f);
+                var size = Width - FlaxEditor.Surface.Constants.NodeMarginX * 2.0f;
+                _editor = new BlendPointsEditor(this, false, FlaxEditor.Surface.Constants.NodeMarginX, _animationX.Bottom + 4.0f, size, 120.0f);
                 _editor.Parent = this;
             }
 
@@ -658,18 +1192,18 @@ namespace FlaxEditor.Surface.Archetypes
                 if (_isUpdatingUI)
                     return;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
+                var selectedIndex = SelectedAnimationIndex;
                 if (selectedIndex != -1)
                 {
-                    var index = 4 + selectedIndex * 2;
-                    var data0 = (Vector4)Values[index];
+                    var index = AnimationsStartIndex + selectedIndex * 2;
+                    var data0 = (Float4)Values[index];
                     data0.X = _animationX.Value;
                     SetValue(index, data0);
                 }
             }
 
             /// <inheritdoc />
-            protected override void UpdateUI(int selectedIndex, bool isValid, ref Vector4 data0, ref Guid data1)
+            public override void UpdateUI(int selectedIndex, bool isValid, ref Float4 data0, ref Guid data1)
             {
                 base.UpdateUI(selectedIndex, isValid, ref data0, ref data1);
 
@@ -681,6 +1215,9 @@ namespace FlaxEditor.Surface.Archetypes
                 {
                     _animationX.Value = 0.0f;
                 }
+                var ranges = (Float4)Values[0];
+                _animationX.MinValue = ranges.X;
+                _animationX.MaxValue = ranges.Y;
                 _animationXLabel.Enabled = isValid;
                 _animationX.Enabled = isValid;
             }
@@ -696,67 +1233,10 @@ namespace FlaxEditor.Surface.Archetypes
             private readonly FloatValueBox _animationX;
             private readonly Label _animationYLabel;
             private readonly FloatValueBox _animationY;
-            private readonly Editor _editor;
-
-            /// <summary>
-            /// The Multi Blend 2D blend space editor.
-            /// </summary>
-            /// <seealso cref="FlaxEditor.Surface.Archetypes.BlendPointsEditor" />
-            protected class Editor : BlendPointsEditor
-            {
-                private MultiBlend2D _node;
-
-                /// <summary>
-                /// Initializes a new instance of the <see cref="Editor"/> class.
-                /// </summary>
-                /// <param name="node">The parent Visject Node node.</param>
-                /// <param name="x">The X location.</param>
-                /// <param name="y">The Y location.</param>
-                /// <param name="width">The width.</param>
-                /// <param name="height">The height.</param>
-                public Editor(MultiBlend2D node, float x, float y, float width, float height)
-                : base(true, x, y, width, height)
-                {
-                    _node = node;
-                }
-
-                /// <inheritdoc />
-                public override void GetData(out Vector2 rangeX, out Vector2 rangeY, Guid[] pointsAnims, Vector2[] pointsLocations)
-                {
-                    var data0 = (Vector4)_node.Values[0];
-                    rangeX = new Vector2(data0.X, data0.Y);
-                    rangeY = new Vector2(data0.Z, data0.W);
-                    for (int i = 0; i < MaxAnimationsCount; i++)
-                    {
-                        var dataA = (Vector4)_node.Values[4 + i * 2];
-                        var dataB = (Guid)_node.Values[5 + i * 2];
-
-                        pointsAnims[i] = dataB;
-                        pointsLocations[i] = new Vector2(dataA.X, dataA.Y);
-                    }
-                }
-
-                /// <inheritdoc />
-                public override int SelectedIndex
-                {
-                    get => _node.SelectedAnimationIndex;
-                    set => _node.SelectedAnimationIndex = value;
-                }
-
-                /// <inheritdoc />
-                public override void SetLocation(int index, Vector2 location)
-                {
-                    var dataA = (Vector4)_node.Values[4 + index * 2];
-
-                    dataA.X = location.X;
-                    dataA.Y = location.Y;
-
-                    _node.Values[4 + index * 2] = dataA;
-                    _node.Surface.MarkAsEdited();
-
-                    _node.UpdateUI();
-                }
-            }
+            private Float2[] _triangles;
+            private Color[] _triangleColors;
+            private Float2[] _selectedTriangles;
+            private Color[] _selectedColors;
 
             /// <inheritdoc />
             public MultiBlend2D(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
@@ -790,11 +1270,8 @@ namespace FlaxEditor.Surface.Archetypes
                 };
                 _animationY.ValueChanged += OnAnimationYChanged;
 
-                _editor = new Editor(this,
-                                     FlaxEditor.Surface.Constants.NodeMarginX,
-                                     _animationY.Bottom + 4.0f,
-                                     Width - FlaxEditor.Surface.Constants.NodeMarginX * 2.0f,
-                                     120.0f);
+                var size = Width - FlaxEditor.Surface.Constants.NodeMarginX * 2.0f;
+                _editor = new BlendPointsEditor(this, true, FlaxEditor.Surface.Constants.NodeMarginX, _animationY.Bottom + 4.0f, size, size);
                 _editor.Parent = this;
             }
 
@@ -803,11 +1280,11 @@ namespace FlaxEditor.Surface.Archetypes
                 if (_isUpdatingUI)
                     return;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
+                var selectedIndex = SelectedAnimationIndex;
                 if (selectedIndex != -1)
                 {
-                    var index = 4 + selectedIndex * 2;
-                    var data0 = (Vector4)Values[index];
+                    var index = AnimationsStartIndex + selectedIndex * 2;
+                    var data0 = (Float4)Values[index];
                     data0.X = _animationX.Value;
                     SetValue(index, data0);
                 }
@@ -818,18 +1295,153 @@ namespace FlaxEditor.Surface.Archetypes
                 if (_isUpdatingUI)
                     return;
 
-                var selectedIndex = _selectedAnimation.SelectedIndex;
+                var selectedIndex = SelectedAnimationIndex;
                 if (selectedIndex != -1)
                 {
-                    var index = 4 + selectedIndex * 2;
-                    var data0 = (Vector4)Values[index];
+                    var index = AnimationsStartIndex + selectedIndex * 2;
+                    var data0 = (Float4)Values[index];
                     data0.Y = _animationY.Value;
                     SetValue(index, data0);
                 }
             }
 
+            private void ClearTriangles()
+            {
+                // Remove cache
+                _triangles = null;
+                _triangleColors = null;
+                _selectedTriangles = null;
+                _selectedColors = null;
+            }
+
+            private void CacheTriangles()
+            {
+                // Get locations of blend point vertices
+                int pointsCount = _editor.PointsCount;
+                int count = 0, j = 0;
+                var animsStart = AnimationsStartIndex;
+                var animSource = AnimationSource;
+                for (int i = 0; i < pointsCount; i++)
+                {
+                    var animId = (Guid)Values[animsStart + 1 + i * 2];
+                    if (animId != Guid.Empty || animSource != AnimationSources.Default)
+                        count++;
+                }
+                var vertices = new Float2[count];
+                for (int i = 0; i < pointsCount; i++)
+                {
+                    var animId = (Guid)Values[animsStart + 1 + i * 2];
+                    if (animId != Guid.Empty || animSource != AnimationSources.Default)
+                    {
+                        var dataA = (Float4)Values[animsStart + i * 2];
+                        vertices[j++] = new Float2(dataA.X, dataA.Y);
+                    }
+                }
+
+                // Triangulate
+                _triangles = FlaxEngine.Utilities.Delaunay2D.Triangulate(vertices);
+                _triangleColors = null;
+
+                // Fix incorrect triangles (mirror logic in AnimGraphBase::onNodeLoaded)
+                if (_triangles == null || _triangles.Length == 0)
+                {
+                    // Insert dummy triangles to have something working (eg. blend points are on the same axis)
+                    var triangles = new List<Float2>();
+                    int verticesLeft = vertices.Length;
+                    while (verticesLeft >= 3)
+                    {
+                        verticesLeft -= 3;
+                        triangles.Add(vertices[verticesLeft + 0]);
+                        triangles.Add(vertices[verticesLeft + 1]);
+                        triangles.Add(vertices[verticesLeft + 2]);
+                    }
+                    if (verticesLeft == 1)
+                    {
+                        triangles.Add(vertices[0]);
+                        triangles.Add(vertices[0]);
+                        triangles.Add(vertices[0]);
+                    }
+                    else if (verticesLeft == 2)
+                    {
+                        triangles.Add(vertices[0]);
+                        triangles.Add(vertices[1]);
+                        triangles.Add(vertices[0]);
+                    }
+                    _triangles = triangles.ToArray();
+                }
+
+                // Project to the blend space for drawing
+                for (int i = 0; i < _triangles.Length; i++)
+                    _triangles[i] = _editor.BlendSpacePosToBlendPointPos(_triangles[i]);
+
+                // Check if anything is selected
+                var selectedIndex = SelectedAnimationIndex;
+                if (selectedIndex != -1)
+                {
+                    // Find triangles that contain selected point
+                    var dataA = (Float4)Values[animsStart + selectedIndex * 2];
+                    var pos = _editor.BlendSpacePosToBlendPointPos(new Float2(dataA.X, dataA.Y));
+                    var selectedTriangles = new List<Float2>();
+                    var selectedColors = new List<Color>();
+                    var style = Style.Current;
+                    var triangleColor = style.TextBoxBackgroundSelected.AlphaMultiplied(0.6f);
+                    var selectedTriangleColor = style.BackgroundSelected.AlphaMultiplied(0.6f);
+                    _triangleColors = new Color[_triangles.Length];
+                    for (int i = 0; i < _triangles.Length; i += 3)
+                    {
+                        var is0 = Float2.NearEqual(ref _triangles[i + 0], ref pos);
+                        var is1 = Float2.NearEqual(ref _triangles[i + 1], ref pos);
+                        var is2 = Float2.NearEqual(ref _triangles[i + 2], ref pos);
+                        if (is0 || is1 || is2)
+                        {
+                            selectedTriangles.Add(_triangles[i + 0]);
+                            selectedTriangles.Add(_triangles[i + 1]);
+                            selectedTriangles.Add(_triangles[i + 2]);
+                            selectedColors.Add(is0 ? Color.White : Color.Transparent);
+                            selectedColors.Add(is1 ? Color.White : Color.Transparent);
+                            selectedColors.Add(is2 ? Color.White : Color.Transparent);
+                        }
+                        _triangleColors[i + 0] = is0 ? selectedTriangleColor : triangleColor;
+                        _triangleColors[i + 1] = is1 ? selectedTriangleColor : triangleColor;
+                        _triangleColors[i + 2] = is2 ? selectedTriangleColor : triangleColor;
+                    }
+                    _selectedTriangles = selectedTriangles.ToArray();
+                    _selectedColors = selectedColors.ToArray();
+                }
+            }
+
             /// <inheritdoc />
-            protected override void UpdateUI(int selectedIndex, bool isValid, ref Vector4 data0, ref Guid data1)
+            public override void DrawEditorGrid(ref Rectangle rect)
+            {
+                base.DrawEditorGrid(ref rect);
+
+                // Draw triangulated multi blend space
+                var style = Style.Current;
+                if (_triangles == null)
+                    CacheTriangles();
+                if (_triangleColors != null && (ContainsFocus || IsMouseOver))
+                    Render2D.FillTriangles(_triangles, _triangleColors);
+                else
+                    Render2D.FillTriangles(_triangles, style.TextBoxBackgroundSelected.AlphaMultiplied(0.6f));
+                Render2D.DrawTriangles(_triangles, style.Foreground);
+
+                // Highlight selected blend point
+                var selectedIndex = SelectedAnimationIndex;
+                if (selectedIndex != -1 && selectedIndex < _editor.BlendPoints.Count && (ContainsFocus || IsMouseOver))
+                {
+                    var point = _editor.BlendPoints[selectedIndex];
+                    if (point != null)
+                    {
+                        var highlightColor = point.IsMouseDown ? style.SelectionBorder : style.BackgroundSelected;
+                        Render2D.PushTint(ref highlightColor);
+                        Render2D.DrawTriangles(_selectedTriangles, _selectedColors);
+                        Render2D.PopTint();
+                    }
+                }
+            }
+
+            /// <inheritdoc />
+            public override void UpdateUI(int selectedIndex, bool isValid, ref Float4 data0, ref Guid data1)
             {
                 base.UpdateUI(selectedIndex, isValid, ref data0, ref data1);
 
@@ -843,10 +1455,32 @@ namespace FlaxEditor.Surface.Archetypes
                     _animationX.Value = 0.0f;
                     _animationY.Value = 0.0f;
                 }
+                var ranges = (Float4)Values[0];
+                _animationX.MinValue = ranges.X;
+                _animationX.MaxValue = ranges.Y;
+                _animationY.MinValue = ranges.Z;
+                _animationY.MaxValue = ranges.W;
                 _animationXLabel.Enabled = isValid;
                 _animationX.Enabled = isValid;
                 _animationYLabel.Enabled = isValid;
                 _animationY.Enabled = isValid;
+                ClearTriangles();
+            }
+
+            /// <inheritdoc />
+            public override void OnValuesChanged()
+            {
+                base.OnValuesChanged();
+
+                ClearTriangles();
+            }
+
+            /// <inheritdoc />
+            public override void OnLoaded(SurfaceNodeActions action)
+            {
+                base.OnLoaded(action);
+
+                ClearTriangles();
             }
         }
     }

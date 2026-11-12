@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/String.h"
-#include "Engine/Animations/Curve.h"
+#include "Engine/Core/Types/Pair.h"
 #include "Engine/Core/Math/Transform.h"
+#include "Engine/Animations/Curve.h"
 
 /// <summary>
 /// Single node animation data container.
@@ -12,7 +13,6 @@
 struct NodeAnimationData
 {
 public:
-
     /// <summary>
     /// The target node name.
     /// </summary>
@@ -21,7 +21,7 @@ public:
     /// <summary>
     /// The position channel animation.
     /// </summary>
-    LinearCurve<Vector3> Position;
+    LinearCurve<Float3> Position;
 
     /// <summary>
     /// The rotation channel animation.
@@ -31,37 +31,27 @@ public:
     /// <summary>
     /// The scale channel animation.
     /// </summary>
-    LinearCurve<Vector3> Scale;
+    LinearCurve<Float3> Scale;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="NodeAnimationData"/> class.
     /// </summary>
     NodeAnimationData()
-        : Position(Vector3::Zero)
+        : Position(Float3::Zero)
         , Rotation(Quaternion::Identity)
-        , Scale(Vector3::One)
+        , Scale(Float3::One)
     {
     }
 
 public:
-
     /// <summary>
     /// Evaluates the animation transformation at the specified time (only for the curves with non-empty data).
     /// </summary>
     /// <param name="time">The time to evaluate the curves at.</param>
     /// <param name="result">The interpolated value from the curve at provided time.</param>
     /// <param name="loop">If true the curve will loop when it goes past the end or beginning. Otherwise the curve value will be clamped.</param>
-    void Evaluate(float time, Transform* result, bool loop = true) const
-    {
-        if (Position.GetKeyframes().HasItems())
-            Position.Evaluate(result->Translation, time, loop);
-        if (Rotation.GetKeyframes().HasItems())
-            Rotation.Evaluate(result->Orientation, time, loop);
-        if (Scale.GetKeyframes().HasItems())
-            Scale.Evaluate(result->Scale, time, loop);
-    }
+    void Evaluate(float time, Transform* result, bool loop = true) const;
 
     /// <summary>
     /// Evaluates the animation transformation at the specified time.
@@ -69,30 +59,54 @@ public:
     /// <param name="time">The time to evaluate the curves at.</param>
     /// <param name="result">The interpolated value from the curve at provided time.</param>
     /// <param name="loop">If true the curve will loop when it goes past the end or beginning. Otherwise the curve value will be clamped.</param>
-    void EvaluateAll(float time, Transform* result, bool loop = true) const
-    {
-        Position.Evaluate(result->Translation, time, loop);
-        Rotation.Evaluate(result->Orientation, time, loop);
-        Scale.Evaluate(result->Scale, time, loop);
-    }
+    void EvaluateAll(float time, Transform* result, bool loop = true) const;
 
     /// <summary>
     /// Gets the total amount of keyframes in the animation curves.
     /// </summary>
-    /// <returns>The total keyframes count.</returns>
-    int32 GetKeyframesCount() const
-    {
-        return Position.GetKeyframes().Count() + Rotation.GetKeyframes().Count() + Scale.GetKeyframes().Count();
-    }
+    int32 GetKeyframesCount() const;
+
+    uint64 GetMemoryUsage() const;
 };
+
+/// <summary>
+/// Single track with events.
+/// </summary>
+struct EventAnimationData
+{
+    float Duration = 0.0f;
+    StringAnsi TypeName;
+    StringAnsi JsonData;
+};
+
+/// <summary>
+/// Root Motion modes that can be applied by the animation. Used as flags for selective behavior.
+/// </summary>
+API_ENUM(Attributes="Flags") enum class AnimationRootMotionFlags : byte
+{
+    // No root motion.
+    None = 0,
+    // Root node position along XZ plane. Applies horizontal movement. Good for stationary animations (eg. idle).
+    RootPositionXZ = 1 << 0,
+    // Root node position along Y axis (up). Applies vertical movement. Good for all 'grounded' animations unless jumping is handled from code.
+    RootPositionY = 1 << 1,
+    // Root node rotation. Applies orientation changes. Good for animations that have baked-in root rotation (eg. turn animations).
+    RootRotation = 1 << 2,
+    // Root node position.
+    RootPosition = RootPositionXZ | RootPositionY,
+    // Root node position and rotation.
+    RootTransform = RootPosition | RootRotation,
+    // Marks that the root node position is affected by the skeleton transform and should be extracted with transformed mask. Use this option for models that don't use Y-up coordinate system.
+    LocalPositionMask = 1 << 3,
+};
+
+DECLARE_ENUM_OPERATORS(AnimationRootMotionFlags);
 
 /// <summary>
 /// Skeleton nodes animation data container. Includes metadata about animation sampling, duration and node animations curves.
 /// </summary>
 struct AnimationData
 {
-public:
-
     /// <summary>
     /// The duration of the animation (in frames).
     /// </summary>
@@ -106,7 +120,12 @@ public:
     /// <summary>
     /// Enables root motion extraction support from this animation.
     /// </summary>
-    bool EnableRootMotion = false;
+    AnimationRootMotionFlags RootMotionFlags = AnimationRootMotionFlags::None;
+
+    /// <summary>
+    /// The animation name.
+    /// </summary>
+    String Name;
 
     /// <summary>
     /// The custom node name to be used as a root motion source. If not specified the actual root node will be used.
@@ -114,60 +133,44 @@ public:
     String RootNodeName;
 
     /// <summary>
-    /// The per skeleton node animation channels.
+    /// The per-skeleton node animation channels.
     /// </summary>
     Array<NodeAnimationData> Channels;
 
-public:
+    /// <summary>
+    /// The animation event tracks.
+    /// </summary>
+    Array<Pair<String, StepCurve<EventAnimationData>>> Events;
 
+public:
     /// <summary>
     /// Gets the length of the animation (in seconds).
     /// </summary>
-    /// <returns>The length in seconds.</returns>
     FORCE_INLINE float GetLength() const
     {
 #if BUILD_DEBUG
-        ASSERT(FramesPerSecond != 0);
+        ASSERT(FramesPerSecond > ZeroTolerance);
 #endif
         return static_cast<float>(Duration / FramesPerSecond);
     }
 
+    uint64 GetMemoryUsage() const;
+
     /// <summary>
     /// Gets the total amount of keyframes in the all animation channels.
     /// </summary>
-    /// <returns>The total keyframes count.</returns>
-    int32 GetKeyframesCount() const
-    {
-        int32 result = 0;
-        for (int32 i = 0; i < Channels.Count(); i++)
-        {
-            result += Channels[i].GetKeyframesCount();
-        }
-        return result;
-    }
+    int32 GetKeyframesCount() const;
+
+    NodeAnimationData* GetChannel(const StringView& name);
 
     /// <summary>
     /// Swaps the contents of object with the other object without copy operation. Performs fast internal data exchange.
     /// </summary>
     /// <param name="other">The other object.</param>
-    void Swap(AnimationData& other)
-    {
-        ::Swap(Duration, other.Duration);
-        ::Swap(FramesPerSecond, other.FramesPerSecond);
-        ::Swap(EnableRootMotion, other.EnableRootMotion);
-        ::Swap(RootNodeName, other.RootNodeName);
-        Channels.Swap(other.Channels);
-    }
+    void Swap(AnimationData& other);
 
     /// <summary>
     /// Releases data.
     /// </summary>
-    void Dispose()
-    {
-        Duration = 0.0;
-        FramesPerSecond = 0.0;
-        RootNodeName.Clear();
-        EnableRootMotion = false;
-        Channels.Resize(0);
-    }
+    void Release();
 };

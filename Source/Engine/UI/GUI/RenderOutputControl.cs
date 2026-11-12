@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -180,9 +180,9 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override void Draw()
+        public override void DrawSelf()
         {
-            var bounds = new Rectangle(Vector2.Zero, Size);
+            var bounds = new Rectangle(Float2.Zero, Size);
 
             // Draw background
             var backgroundColor = BackgroundColor;
@@ -192,31 +192,19 @@ namespace FlaxEngine.GUI
             }
 
             // Draw backbuffer texture
-            var buffer = _backBufferOld ? _backBufferOld : _backBuffer;
+            var buffer = _backBuffer ? _backBuffer : _backBufferOld;
             var color = TintColor.RGBMultiplied(Brightness);
-            if (KeepAspectRatio)
+            if (KeepAspectRatio && buffer)
             {
                 float ratioX = bounds.Width / buffer.Width;
                 float ratioY = bounds.Height / buffer.Height;
                 float ratio = ratioX < ratioY ? ratioX : ratioY;
                 bounds = new Rectangle((bounds.Width - buffer.Width * ratio) / 2, (bounds.Height - buffer.Height * ratio) / 2, buffer.Width * ratio, buffer.Height * ratio);
             }
-            Render2D.DrawTexture(buffer, bounds, color);
-
-            // Push clipping mask
-            if (ClipChildren)
-            {
-                GetDesireClientArea(out var clientArea);
-                Render2D.PushClip(ref clientArea);
-            }
-
-            DrawChildren();
-
-            // Pop clipping mask
-            if (ClipChildren)
-            {
-                Render2D.PopClip();
-            }
+            if (buffer)
+                Render2D.DrawTexture(buffer, bounds, color);
+            else
+                Render2D.FillRectangle(bounds, Color.Black);
         }
 
         /// <summary>
@@ -232,7 +220,9 @@ namespace FlaxEngine.GUI
                 width = _customResolution.Value.X;
                 height = _customResolution.Value.Y;
             }
-            if (_backBuffer == null || _backBuffer.Width == width && _backBuffer.Height == height)
+            if (_backBuffer == null || (_backBuffer.Width == width && _backBuffer.Height == height))
+                return;
+            if (GPUDevice.Instance.RendererType == RendererType.Null)
                 return;
             if (width < 1 || height < 1)
             {

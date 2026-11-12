@@ -1,9 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "NavMesh.h"
 #include "NavMeshRuntime.h"
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Serialization/Serialization.h"
+#include "Engine/Threading/Threading.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if COMPILE_WITH_ASSETS_IMPORTER
 #include "Engine/Core/Log.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
@@ -16,13 +18,14 @@
 NavMesh::NavMesh(const SpawnParams& params)
     : Actor(params)
     , IsDataDirty(false)
+    , DataAsset(this)
 {
-    DataAsset.Loaded.Bind<NavMesh, &NavMesh::OnDataAssetLoaded>(this);
 }
 
 void NavMesh::SaveNavMesh()
 {
 #if COMPILE_WITH_ASSETS_IMPORTER
+    PROFILE_MEM(NavigationMesh);
 
     // Skip if scene is missing
     const auto scene = GetScene();
@@ -56,7 +59,7 @@ void NavMesh::SaveNavMesh()
     MemoryWriteStream stream(streamInitialCapacity);
     Data.Save(stream);
     BytesContainer bytesContainer;
-    bytesContainer.Link(stream.GetHandle(), stream.GetPosition());
+    bytesContainer.Link(ToSpan(stream));
 
     // Save asset to file
     if (AssetsImportingManager::Create(AssetsImportingManager::CreateRawDataTag, assetPath, assetId, (void*)&bytesContainer))
@@ -99,16 +102,20 @@ void NavMesh::RemoveTiles()
         navMesh->RemoveTiles(this);
 }
 
-void NavMesh::OnDataAssetLoaded()
+void NavMesh::OnAssetChanged(Asset* asset, void* caller)
+{
+}
+
+void NavMesh::OnAssetLoaded(Asset* asset, void* caller)
 {
     // Skip if already has data (prevent reloading navmesh on saving)
     if (Data.Tiles.HasItems())
         return;
-
-    const bool isEnabled = IsDuringPlay() && IsActiveInHierarchy();
+    ScopeLock lock(DataAsset->Locker);
+    PROFILE_MEM(NavigationMesh);
 
     // Remove added tiles
-    if (isEnabled)
+    if (_navMeshActive)
     {
         RemoveTiles();
     }
@@ -120,10 +127,14 @@ void NavMesh::OnDataAssetLoaded()
     IsDataDirty = false;
 
     // Add loaded tiles
-    if (isEnabled)
+    if (_navMeshActive)
     {
         AddTiles();
     }
+}
+
+void NavMesh::OnAssetUnloaded(Asset* asset, void* caller)
+{
 }
 
 void NavMesh::Serialize(SerializeStream& stream, const void* otherObj)
@@ -156,15 +167,36 @@ void NavMesh::OnEnable()
     // Base
     Actor::OnEnable();
 
-    GetScene()->Navigation.Meshes.Add(this);
-    AddTiles();
+    if (!_navMeshActive)
+    {
+        GetScene()->Navigation.Meshes.Add(this);
+        AddTiles();
+        _navMeshActive = true;
+    }
 }
 
 void NavMesh::OnDisable()
 {
-    RemoveTiles();
-    GetScene()->Navigation.Meshes.Remove(this);
+    if (_navMeshActive)
+    {
+        RemoveTiles();
+        GetScene()->Navigation.Meshes.Remove(this);
+        _navMeshActive = false;
+    }
 
     // Base
     Actor::OnDisable();
+}
+
+void NavMesh::Initialize()
+{
+    // Base
+    Actor::Initialize();
+
+    if (!_navMeshActive && IsActiveInHierarchy())
+    {
+        GetScene()->Navigation.Meshes.Add(this);
+        AddTiles();
+        _navMeshActive = true;
+    }
 }

@@ -1,46 +1,34 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "TerrainMaterialShader.h"
 #include "MaterialShaderFeatures.h"
 #include "MaterialParams.h"
+#include "Engine/Core/Math/Matrix3x4.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPULimits.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/RenderBuffers.h"
-#include "Engine/Graphics/RenderTask.h"
-#include "Engine/Graphics/RenderView.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Level/Scene/Lightmap.h"
 #include "Engine/Renderer/DrawCall.h"
 #include "Engine/Terrain/TerrainPatch.h"
 
 PACK_STRUCT(struct TerrainMaterialShaderData {
-    Matrix ViewProjectionMatrix;
-    Matrix WorldMatrix;
-    Matrix ViewMatrix;
-    Vector3 ViewPos;
-    float ViewFar;
-    Vector3 ViewDir;
-    float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector3 WorldInvScale;
+    Matrix3x4 WorldMatrix;
+    Float3 WorldInvScale;
     float WorldDeterminantSign;
     float PerInstanceRandom;
     float CurrentLOD; // Index of the current LOD
     float ChunkSizeNextLOD; // ChunkSize for the next current LOD (after applying LOD down-scaling)
     float TerrainChunkSizeLOD0; // Size of the terrain chunk in world units of the top-most LOD0
-    Vector4 HeightmapUVScaleBias; // xy-scale, zw-offset for chunk geometry UVs into heightmap UVs (as single MAD instruction)
-    Vector4 NeighborLOD; // Per component LOD index for chunk neighbors ordered: top, left, right, bottom
-    Vector2 OffsetUV; // Offset applied to the texture coordinates (used to implement seamless UVs based on chunk location relative to terrain root)
-    Vector2 Dummy0;
+    Float4 HeightmapUVScaleBias; // xy-scale, zw-offset for chunk geometry UVs into heightmap UVs (as single MAD instruction)
+    Float4 NeighborLOD; // Per component LOD index for chunk neighbors ordered: top, left, right, bottom
+    Float2 OffsetUV; // Offset applied to the texture coordinates (used to implement seamless UVs based on chunk location relative to terrain root)
+    Float2 Dummy0;
+    Float4 LightmapArea;
     });
-
-DrawPass TerrainMaterialShader::GetDrawModes() const
-{
-    return DrawPass::Depth | DrawPass::GBuffer;
-}
 
 bool TerrainMaterialShader::CanUseLightmap() const
 {
@@ -52,11 +40,11 @@ void TerrainMaterialShader::Bind(BindParameters& params)
     // Prepare
     auto context = params.GPUContext;
     auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
+    auto& drawCall = *params.DrawCall;
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(TerrainMaterialShaderData));
     auto materialData = reinterpret_cast<TerrainMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(TerrainMaterialShaderData), cb.Length() - sizeof(TerrainMaterialShaderData));
+    cb = cb.Slice(sizeof(TerrainMaterialShaderData));
     int32 srv = 3;
 
     // Setup features
@@ -67,30 +55,22 @@ void TerrainMaterialShader::Bind(BindParameters& params)
     bindMeta.Context = context;
     bindMeta.Constants = cb;
     bindMeta.Input = nullptr;
-    bindMeta.Buffers = nullptr;
+    bindMeta.Buffers = params.RenderContext.Buffers;
     bindMeta.CanSampleDepth = false;
     bindMeta.CanSampleGBuffer = false;
     MaterialParams::Bind(params.ParamsLink, bindMeta);
 
     // Setup material constants
     {
-        Matrix::Transpose(view.Frustum.GetMatrix(), materialData->ViewProjectionMatrix);
-        Matrix::Transpose(drawCall.World, materialData->WorldMatrix);
-        Matrix::Transpose(view.View, materialData->ViewMatrix);
-        materialData->ViewPos = view.Position;
-        materialData->ViewFar = view.Far;
-        materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = view.ViewInfo;
-        materialData->ScreenSize = view.ScreenSize;
-        const float scaleX = Vector3(drawCall.World.M11, drawCall.World.M12, drawCall.World.M13).Length();
-        const float scaleY = Vector3(drawCall.World.M21, drawCall.World.M22, drawCall.World.M23).Length();
-        const float scaleZ = Vector3(drawCall.World.M31, drawCall.World.M32, drawCall.World.M33).Length();
-        materialData->WorldInvScale = Vector3(
+        materialData->WorldMatrix.SetMatrixTranspose(drawCall.World);
+        const float scaleX = Float3(drawCall.World.M11, drawCall.World.M12, drawCall.World.M13).Length();
+        const float scaleY = Float3(drawCall.World.M21, drawCall.World.M22, drawCall.World.M23).Length();
+        const float scaleZ = Float3(drawCall.World.M31, drawCall.World.M32, drawCall.World.M33).Length();
+        materialData->WorldInvScale = Float3(
             scaleX > 0.00001f ? 1.0f / scaleX : 0.0f,
             scaleY > 0.00001f ? 1.0f / scaleY : 0.0f,
             scaleZ > 0.00001f ? 1.0f / scaleZ : 0.0f);
-        materialData->WorldDeterminantSign = drawCall.WorldDeterminantSign;
+        materialData->WorldDeterminantSign = drawCall.WorldDeterminant ? -1.0f : 1.0f;
         materialData->PerInstanceRandom = drawCall.PerInstanceRandom;
         materialData->CurrentLOD = drawCall.Terrain.CurrentLOD;
         materialData->ChunkSizeNextLOD = drawCall.Terrain.ChunkSizeNextLOD;
@@ -98,12 +78,12 @@ void TerrainMaterialShader::Bind(BindParameters& params)
         materialData->HeightmapUVScaleBias = drawCall.Terrain.HeightmapUVScaleBias;
         materialData->NeighborLOD = drawCall.Terrain.NeighborLOD;
         materialData->OffsetUV = drawCall.Terrain.OffsetUV;
+        materialData->LightmapArea = *(Float4*)&drawCall.Terrain.LightmapUVsArea;
     }
 
     // Bind terrain textures
-    const auto heightmap = drawCall.Terrain.Patch->Heightmap->GetTexture();
-    const auto splatmap0 = drawCall.Terrain.Patch->Splatmap[0] ? drawCall.Terrain.Patch->Splatmap[0]->GetTexture() : nullptr;
-    const auto splatmap1 = drawCall.Terrain.Patch->Splatmap[1] ? drawCall.Terrain.Patch->Splatmap[1]->GetTexture() : nullptr;
+    GPUTexture* heightmap, *splatmap0, *splatmap1;
+    drawCall.Terrain.Patch->GetTextures(heightmap, splatmap0, splatmap1);
     context->BindSR(0, heightmap);
     context->BindSR(1, splatmap0);
     context->BindSR(2, splatmap1);
@@ -116,26 +96,23 @@ void TerrainMaterialShader::Bind(BindParameters& params)
     }
 
     // Select pipeline state based on current pass and render mode
-    const bool wireframe = (_info.FeaturesFlags & MaterialFeaturesFlags::Wireframe) != 0 || view.Mode == ViewMode::Wireframe;
     CullMode cullMode = view.Pass == DrawPass::Depth ? CullMode::TwoSided : _info.CullMode;
 #if USE_EDITOR
     if (IsRunningRadiancePass)
         cullMode = CullMode::TwoSided;
 #endif
-    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminantSign < 0)
+    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminant)
     {
         // Invert culling when scale is negative
-        if (cullMode == CullMode::Normal)
-            cullMode = CullMode::Inverted;
-        else
-            cullMode = CullMode::Normal;
+        cullMode = cullMode == CullMode::Normal ? CullMode::Inverted : CullMode::Normal;
     }
     const PipelineStateCache* psCache = _cache.GetPS(view.Pass, useLightmap);
     ASSERT(psCache);
-    GPUPipelineState* state = ((PipelineStateCache*)psCache)->GetPS(cullMode, wireframe);
+    GPUPipelineState* state = ((PipelineStateCache*)psCache)->GetPS(this, cullMode);
 
     // Bind pipeline
     context->SetState(state);
+    context->SetStencilRef(drawCall.StencilValue);
 }
 
 void TerrainMaterialShader::Unload()
@@ -148,10 +125,18 @@ void TerrainMaterialShader::Unload()
 
 bool TerrainMaterialShader::Load()
 {
-    GPUPipelineState::Description psDesc = GPUPipelineState::Description::Default;
-    psDesc.DepthTestEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthTest) == 0;
-    psDesc.DepthWriteEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthWrite) == 0;
+    _drawModes = DrawPass::Depth | DrawPass::GBuffer | DrawPass::GlobalSurfaceAtlas | DrawPass::Wireframe;
+    auto psDesc = GPUPipelineState::Description::Default;
+    psDesc.DepthEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthTest);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.CullMode = _info.CullMode;
 
+    psDesc.StencilEnable = true;
+    psDesc.StencilReadMask = 0;
+    psDesc.StencilPassOp = StencilOperation::Replace;
+
+#if GPU_ALLOW_TESSELLATION_SHADERS
     // Check if use tessellation (both material and runtime supports it)
     const bool useTess = _info.TessellationMode != TessellationMethod::None && GPUDevice::Instance->Limits.HasTessellation;
     if (useTess)
@@ -159,6 +144,7 @@ bool TerrainMaterialShader::Load()
         psDesc.HS = _shader->GetHS("HS");
         psDesc.DS = _shader->GetDS("DS");
     }
+#endif
 
     // Support blending but then use only emissive channel
     switch (_info.BlendMode)
@@ -184,17 +170,44 @@ bool TerrainMaterialShader::Load()
     psDesc.PS = _shader->GetPS("PS_GBuffer", 1);
     _cache.DefaultLightmap.Init(psDesc);
 
+    psDesc.StencilEnable = false;
+    psDesc.StencilPassOp = StencilOperation::Keep;
+
+#if GPU_ENABLE_DEVELOPMENT
+    if (_shader->HasShader("PS_QuadOverdraw"))
+    {
+        // Quad Overdraw
+        _drawModes |= DrawPass::QuadOverdraw;
+        psDesc.PS = _shader->GetPS("PS_QuadOverdraw");
+        _cache.QuadOverdraw.Init(psDesc);
+    }
+
+    // Wireframe
+    psDesc.Wireframe = true;
+    psDesc.DepthWriteEnable = false;
+    psDesc.BlendMode = BlendingMode::AlphaBlend;
+    psDesc.PS = GPUDevice::Instance->QuadShader->GetPS("PS_Wireframe");
+    _cache.Wireframe.Init(psDesc);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.BlendMode = BlendingMode::Opaque;
+#endif
+
     // Depth Pass
     psDesc.CullMode = CullMode::TwoSided;
     psDesc.BlendMode = BlendingMode::Opaque;
     psDesc.DepthClipEnable = false;
     psDesc.DepthWriteEnable = true;
-    psDesc.DepthTestEnable = true;
-    psDesc.DepthFunc = ComparisonFunc::Less;
+    psDesc.DepthEnable = true;
+    psDesc.DepthFunc = ComparisonFunc::Default;
+    psDesc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::None;
     psDesc.HS = nullptr;
     psDesc.DS = nullptr;
-    // TODO: masked terrain materials (depth pass should clip holes)
     psDesc.PS = nullptr;
+    if (EnumHasAnyFlags(_info.UsageFlags, MaterialUsageFlags::UseMask))
+    {
+        psDesc.PS = _shader->GetPS("PS_Depth");
+    }
     _cache.Depth.Init(psDesc);
 
     return false;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "AnimationGraph.h"
 #if USE_EDITOR
@@ -9,7 +9,9 @@
 #include "Engine/Core/Types/DataContainer.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Serialization/MemoryWriteStream.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
+#include "Engine/Animations/Animations.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Debug/Exceptions/ArgumentNullException.h"
 
@@ -24,6 +26,8 @@ AnimationGraph::AnimationGraph(const SpawnParams& params, const AssetInfo* info)
 
 Asset::LoadResult AnimationGraph::load()
 {
+    PROFILE_MEM(AnimationsData);
+
     // Get stream with graph data
     const auto surfaceChunk = GetChunk(0);
     if (surfaceChunk == nullptr)
@@ -48,6 +52,7 @@ Asset::LoadResult AnimationGraph::load()
 
 void AnimationGraph::unload(bool isReloading)
 {
+    ScopeWriteLock systemScope(Animations::SystemLocker);
     Graph.Clear();
 }
 
@@ -67,7 +72,7 @@ void AnimationGraph::OnDependencyModified(BinaryAsset* asset)
 
 #endif
 
-bool AnimationGraph::InitAsAnimation(SkinnedModel* baseModel, Animation* anim, bool loop)
+bool AnimationGraph::InitAsAnimation(SkinnedModel* baseModel, Animation* anim, bool loop, bool rootMotion)
 {
     if (!IsVirtual())
     {
@@ -79,6 +84,7 @@ bool AnimationGraph::InitAsAnimation(SkinnedModel* baseModel, Animation* anim, b
         Log::ArgumentNullException();
         return true;
     }
+    PROFILE_MEM(AnimationsData);
 
     // Create Graph data
     MemoryWriteStream writeStream(512);
@@ -89,7 +95,7 @@ bool AnimationGraph::InitAsAnimation(SkinnedModel* baseModel, Animation* anim, b
         rootNode.Type = GRAPH_NODE_MAKE_TYPE(9, 1);
         rootNode.ID = 1;
         rootNode.Values.Resize(1);
-        rootNode.Values[0] = (int32)RootMotionMode::NoExtraction;
+        rootNode.Values[0] = (int32)(rootMotion ? RootMotionExtraction::Enable : RootMotionExtraction::Ignore);
         rootNode.Boxes.Resize(1);
         rootNode.Boxes[0] = AnimGraphBox(&rootNode, 0, VariantType::Void);
         auto& animNode = graph.Nodes[1];
@@ -123,12 +129,14 @@ bool AnimationGraph::InitAsAnimation(SkinnedModel* baseModel, Animation* anim, b
 
     // Load Graph data (with initialization)
     ScopeLock lock(Locker);
-    MemoryReadStream readStream(writeStream.GetHandle(), writeStream.GetPosition());
+    MemoryReadStream readStream(ToSpan(writeStream));
     return Graph.Load(&readStream, USE_EDITOR);
 }
 
-BytesContainer AnimationGraph::LoadSurface()
+BytesContainer AnimationGraph::LoadSurface() const
 {
+    if (!IsVirtual() && WaitForLoaded())
+        return BytesContainer();
     ScopeLock lock(Locker);
 
     if (IsVirtual())
@@ -138,7 +146,7 @@ BytesContainer AnimationGraph::LoadSurface()
         if (!Graph.Save(&stream, USE_EDITOR))
         {
             BytesContainer result;
-            result.Copy(stream.GetHandle(), stream.GetPosition());
+            result.Copy(ToSpan(stream));
             return result;
         }
     }
@@ -158,19 +166,10 @@ BytesContainer AnimationGraph::LoadSurface()
 
 #if USE_EDITOR
 
-bool AnimationGraph::SaveSurface(BytesContainer& data)
+bool AnimationGraph::SaveSurface(const BytesContainer& data)
 {
-    // Wait for asset to be loaded or don't if last load failed
-    if (LastLoadFailed())
-    {
-        LOG(Warning, "Saving asset that failed to load.");
-    }
-    else if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave())
         return true;
-    }
-
     ScopeLock lock(Locker);
 
     if (IsVirtual())
@@ -204,7 +203,7 @@ void AnimationGraph::FindDependencies(AnimGraphBase* graph)
 {
     for (const auto& node : graph->Nodes)
     {
-        if (node.Type == GRAPH_NODE_MAKE_TYPE(9, 24))
+        if (node.Type == GRAPH_NODE_MAKE_TYPE(9, 24) && node.Assets.Count() > 0)
         {
             const auto function = node.Assets[0].As<AnimationGraphFunction>();
             if (function)
@@ -220,12 +219,23 @@ void AnimationGraph::FindDependencies(AnimGraphBase* graph)
     }
 }
 
-void AnimationGraph::GetReferences(Array<Guid>& output) const
+void AnimationGraph::GetReferences(Array<Guid>& assets, Array<String>& files) const
 {
-    // Base
-    BinaryAsset::GetReferences(output);
+    BinaryAsset::GetReferences(assets, files);
+    Graph.GetReferences(assets);
+}
 
-    Graph.GetReferences(output);
+bool AnimationGraph::Save(const StringView& path)
+{
+    if (OnCheckSave(path))
+        return true;
+    ScopeLock lock(Locker);
+    MemoryWriteStream writeStream;
+    if (Graph.Save(&writeStream, true))
+        return true;
+    BytesContainer data;
+    data.Link(ToSpan(writeStream));
+    return SaveSurface(data);
 }
 
 #endif

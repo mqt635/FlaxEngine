@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -21,30 +21,27 @@
 /// <seealso cref="Asset" />
 API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API BinaryAsset : public Asset
 {
-DECLARE_ASSET_HEADER(BinaryAsset);
+    DECLARE_ASSET_HEADER(BinaryAsset);
+    friend Content;
 protected:
-
     AssetHeader _header;
     FlaxStorageReference _storageRef; // Allow asset to have missing storage reference but only before asset is loaded or if it's virtual
     bool _isSaving;
     Array<BinaryAsset*> _dependantAssets;
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="BinaryAsset"/> class.
     /// </summary>
     ~BinaryAsset();
 
 public:
-
     /// <summary>
     /// The asset storage container.
     /// </summary>
     FlaxStorage* Storage;
 
 #if USE_EDITOR
-
     /// <summary>
     /// The asset metadata information. Stored in a Json format.
     /// </summary>
@@ -54,15 +51,12 @@ public:
     /// Asset dependencies list used by the asset for tracking (eg. material functions used by material asset). The pair of asset ID and cached file edit time (for tracking modification).
     /// </summary>
     Array<Pair<Guid, DateTime>> Dependencies;
-
 #endif
 
 public:
-
     /// <summary>
     /// Gets the asset serialized version.
     /// </summary>
-    /// <returns>Version number.</returns>
     virtual uint32 GetSerializedVersion() const = 0;
 
     /// <summary>
@@ -87,16 +81,13 @@ public:
     bool InitVirtual(AssetInitData& initData);
 
 public:
-
 #if USE_EDITOR
-
 #if COMPILE_WITH_ASSETS_IMPORTER
-
     /// <summary>
     /// Reimports asset from the source file.
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     API_FUNCTION() void Reimport() const;
-
 #endif
 
     /// <summary>
@@ -109,6 +100,7 @@ public:
     /// <summary>
     /// Gets the imported file path from the asset metadata (can be empty if not available).
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     API_PROPERTY() String GetImportPath() const;
 
     /// <summary>
@@ -128,7 +120,6 @@ public:
     bool HasDependenciesModified() const;
 
 protected:
-
     /// <summary>
     /// Called when one of the asset dependencies gets modified (it was saved or reloaded or reimported).
     /// </summary>
@@ -136,11 +127,9 @@ protected:
     virtual void OnDependencyModified(BinaryAsset* asset)
     {
     }
-
 #endif
 
 protected:
-
     /// <summary>
     /// Initializes the specified asset.
     /// </summary>
@@ -161,7 +150,6 @@ protected:
     }
 
 public:
-
     /// <summary>
     /// Gets the asset chunk.
     /// </summary>
@@ -181,7 +169,7 @@ public:
     /// </summary>
     /// <param name="index">The chunk index.</param>
     /// <returns>Flax Chunk object (may be null if asset storage doesn't allow to add new chunks).</returns>
-    FlaxChunk* GetOrCreateChunk(int32 index);
+    FlaxChunk* GetOrCreateChunk(int32 index) const;
 
     /// <summary>
     /// Determines whether the specified chunk exists.
@@ -253,20 +241,20 @@ public:
     /// </summary>
     /// <param name="chunkIndex">The chunk index to load.</param>
     /// <returns>True if failed, otherwise false.</returns>
-    bool LoadChunk(int32 chunkIndex);
+    bool LoadChunk(int32 chunkIndex) const;
 
     /// <summary>
     /// Loads the chunks (synchronous, blocks current thread).
     /// </summary>
     /// <param name="chunks">The chunks to load (packed in a flag).</param>
     /// <returns>True if failed, otherwise false.</returns>
-    bool LoadChunks(AssetChunksFlag chunks);
+    bool LoadChunks(AssetChunksFlag chunks) const;
 
 #if USE_EDITOR
-
     /// <summary>
     /// Saves this asset to the storage container.
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     /// <param name="data">Asset data.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <returns>True if failed, otherwise false.</returns>
@@ -275,6 +263,7 @@ public:
     /// <summary>
     /// Saves this asset to the file.
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     /// <param name="data">Asset data.</param>
     /// <param name="path">Asset path (will be used to override the asset or create a new one).</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
@@ -284,16 +273,15 @@ public:
     /// <summary>
     /// Saves asset data to the storage container. Asset unique ID is handled by auto.
     /// </summary>
+    /// <remarks>Only available in Editor.</remarks>
     /// <param name="path">Asset path (will be used to override the asset or create a new one).</param>
     /// <param name="data">Asset data.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <returns>True if failed, otherwise false.</returns>
     static bool SaveToAsset(const StringView& path, AssetInitData& data, bool silentMode = false);
-
 #endif
 
 protected:
-
     /// <summary>
     /// Load data from the chunks
     /// </summary>
@@ -301,21 +289,19 @@ protected:
     virtual LoadResult load() = 0;
 
 private:
-
 #if USE_EDITOR
     void OnStorageReloaded(FlaxStorage* storage, bool failed);
 #endif
 
 public:
-
     // [Asset]
 #if USE_EDITOR
     void OnDeleteObject() override;
 #endif
-    const String& GetPath() const final override;
+    StringView GetPath() const final override;
+    uint64 GetMemoryUsage() const override;
 
 protected:
-
     // [Asset]
     ContentLoadTask* createLoadingTask() override;
     LoadResult loadAsset() override;

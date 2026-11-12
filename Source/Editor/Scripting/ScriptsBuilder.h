@@ -1,10 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Delegate.h"
 #include "Engine/Core/Types/String.h"
-#include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingType.h"
 
 /// <summary>
@@ -42,6 +41,11 @@ public:
     API_PROPERTY() static int32 GetCompilationsCount();
 
     /// <summary>
+    /// Gets the full path to the Flax.Build app.
+    /// </summary>
+    API_PROPERTY() static String GetBuildToolPath();
+
+    /// <summary>
     /// Checks if last scripting building failed due to errors.
     /// </summary>
     /// <returns>True if last compilation result was a fail, otherwise false.</returns>
@@ -64,7 +68,7 @@ public:
     /// </summary>
     /// <param name="timeout">Time to use for checking.</param>
     /// <returns>True if source code is dirty, otherwise false.</returns>
-    static bool IsSourceDirty(const TimeSpan& timeout);
+    API_FUNCTION() static bool IsSourceDirtyFor(const TimeSpan& timeout);
 
     /// <summary>
     /// Returns true if scripts are being now compiled/reloaded.

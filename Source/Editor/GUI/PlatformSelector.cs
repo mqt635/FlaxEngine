@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -84,22 +84,26 @@ namespace FlaxEditor.GUI
             {
                 new PlatformData(PlatformType.Windows, icons.WindowsIcon128, "Windows"),
                 new PlatformData(PlatformType.XboxOne, icons.XBoxOne128, "Xbox One"),
-                new PlatformData(PlatformType.UWP, icons.UWPStore128, "Windows Store"),
                 new PlatformData(PlatformType.Linux, icons.LinuxIcon128, "Linux"),
                 new PlatformData(PlatformType.PS4, icons.PS4Icon128, "PlayStation 4"),
                 new PlatformData(PlatformType.XboxScarlett, icons.XBoxScarletIcon128, "Xbox Scarlett"),
                 new PlatformData(PlatformType.Android, icons.AndroidIcon128, "Android"),
                 new PlatformData(PlatformType.Switch, icons.SwitchIcon128, "Switch"),
+                new PlatformData(PlatformType.PS5, icons.PS5Icon128, "PlayStation 5"),
+                new PlatformData(PlatformType.Mac, icons.MacOSIcon128, "macOS"),
+                new PlatformData(PlatformType.iOS, icons.IOSIcon128, "iOS"),
+                new PlatformData(PlatformType.Web, icons.Web128, "Web"),
             };
 
             const float IconSize = 64.0f;
-            TileSize = new Vector2(IconSize);
+            TileSize = new Float2(IconSize);
             AutoResize = true;
             Offsets = new Margin(0, 0, 0, IconSize);
 
-            _mouseOverColor = style.Foreground;
-            _selectedColor = style.Foreground;
-            _defaultColor = style.ForegroundGrey;
+            // Ignoring style on purpose (style would make sense if the icons were white, but they are colored)
+            _mouseOverColor = new Color(0.8f, 0.8f, 0.8f, 1f);
+            _selectedColor = Color.White;
+            _defaultColor = new Color(0.7f, 0.7f, 0.7f, 0.5f);
 
             for (int i = 0; i < platforms.Length; i++)
             {

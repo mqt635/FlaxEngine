@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -22,19 +22,23 @@ namespace CSG
     class RawData
     {
     public:
-
         struct Surface
         {
             float ScaleInLightmap;
             Rectangle LightmapUVsBox;
-            Vector2 Size;
+            Float2 Size;
             Rectangle UVsArea;
-            Array<RawModelVertex> Vertices;
+            Array<MeshVertex> Vertices;
+        };
+
+        struct SurfaceTriangle
+        {
+            Float3 V[3];
         };
 
         struct SurfaceData
         {
-            Array<Triangle> Triangles;
+            Array<SurfaceTriangle> Triangles;
         };
 
         struct BrushData
@@ -45,12 +49,10 @@ namespace CSG
         class Slot
         {
         public:
-
             Guid Material;
             Array<Surface> Surfaces;
 
         public:
-
             /// <summary>
             /// Initializes a new instance of the <see cref="Slot"/> class.
             /// </summary>
@@ -61,17 +63,15 @@ namespace CSG
             }
 
         public:
-
             bool IsEmpty() const
             {
                 return Surfaces.IsEmpty();
             }
 
-            void AddSurface(float scaleInLightmap, const Rectangle& lightmapUVsBox, const RawModelVertex* firstVertex, int32 vertexCount);
+            void AddSurface(float scaleInLightmap, const Rectangle& lightmapUVsBox, const MeshVertex* firstVertex, int32 vertexCount);
         };
 
     public:
-
         /// <summary>
         /// The slots.
         /// </summary>
@@ -83,7 +83,6 @@ namespace CSG
         Dictionary<Guid, BrushData> Brushes;
 
     public:
-
         /// <summary>
         /// Initializes a new instance of the <see cref="RawData"/> class.
         /// </summary>
@@ -100,7 +99,6 @@ namespace CSG
         }
 
     public:
-
         /// <summary>
         /// Gets or adds the slot for the given material.
         /// </summary>
@@ -120,8 +118,7 @@ namespace CSG
         }
 
     public:
-
-        void AddSurface(Brush* brush, int32 brushSurfaceIndex, const Guid& surfaceMaterial, float scaleInLightmap, const Rectangle& lightmapUVsBox, const RawModelVertex* firstVertex, int32 vertexCount);
+        void AddSurface(Brush* brush, int32 brushSurfaceIndex, const Guid& surfaceMaterial, float scaleInLightmap, const Rectangle& lightmapUVsBox, const MeshVertex* firstVertex, int32 vertexCount);
 
         /// <summary>
         /// Removes the empty slots.

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,15 +9,22 @@
 /// <summary>
 /// Game localization and internalization settings container.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LocalizationSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LocalizationSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LocalizationSettings);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LocalizationSettings);
+
 public:
     /// <summary>
     /// The list of the string localization tables used by the game.
     /// </summary>
-    API_FIELD()
+    API_FIELD(Attributes="Collection(Display = CollectionAttribute.DisplayType.Inline)")
     Array<AssetReference<LocalizedStringTable>> LocalizedStringTables;
+
+    /// <summary>
+    /// The default fallback language to use if localization system fails to pick the system locale language (eg. en-GB).
+    /// </summary>
+    API_FIELD()
+    String DefaultFallbackLanguage;
 
 public:
     /// <summary>
@@ -27,5 +34,8 @@ public:
 
     // [SettingsBase]
     void Apply() override;
+#if USE_EDITOR
+    void Serialize(SerializeStream& stream, const void* otherObj) override;
+#endif
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override;
 };

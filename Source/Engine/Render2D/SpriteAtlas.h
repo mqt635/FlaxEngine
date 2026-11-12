@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -119,6 +119,14 @@ public:
     /// <param name="index">The index.</param>
     /// <returns>The sprite data.</returns>
     API_FUNCTION() Sprite GetSprite(int32 index) const;
+
+    /// <summary>
+    /// Gets the sprite area.
+    /// </summary>
+    /// <param name="index">The index.</param>
+    /// <param name="result">The output sprite area.</param>
+    /// <returns>The sprite data.</returns>
+    API_FUNCTION() void GetSpriteArea(int32 index, API_PARAM(Out) Rectangle& result) const;
 
     /// <summary>
     /// Sets the sprite data.

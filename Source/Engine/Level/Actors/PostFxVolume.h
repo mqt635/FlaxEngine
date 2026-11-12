@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,23 +9,28 @@
 /// <summary>
 /// A special type of volume that blends custom set of post process settings into the rendering.
 /// </summary>
-API_CLASS() class FLAXENGINE_API PostFxVolume : public BoxVolume, public IPostFxSettingsProvider
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Lighting & PostFX/Post Fx Volume\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API PostFxVolume : public BoxVolume, public IPostFxSettingsProvider
 {
-DECLARE_SCENE_OBJECT(PostFxVolume);
+    DECLARE_SCENE_OBJECT(PostFxVolume);
 private:
-
     int32 _priority;
     float _blendRadius;
     float _blendWeight;
     bool _isBounded;
 
 public:
-
     /// <summary>
     /// The ambient occlusion effect settings.
     /// </summary>
     API_FIELD(Attributes="EditorDisplay(\"Ambient Occlusion\"), EditorOrder(100)")
     AmbientOcclusionSettings AmbientOcclusion;
+
+    /// <summary>
+    /// The Global Illumination effect settings.
+    /// </summary>
+    API_FIELD(Attributes="EditorDisplay(\"Global Illumination\"), EditorOrder(150)")
+    GlobalIlluminationSettings GlobalIllumination;
 
     /// <summary>
     /// The bloom effect settings.
@@ -94,12 +99,9 @@ public:
     PostFxMaterialsSettings PostFxMaterials;
 
 public:
-
     /// <summary>
-    /// Gets the order in which multiple volumes are blended together.
-    /// The volume with the highest priority takes precedence over all other overlapping volumes.
+    /// Gets the order in which multiple volumes are blended together. The volume with the highest priority takes precedence over all other overlapping volumes.
     /// </summary>
-    /// <returns>The result.</returns>
     API_PROPERTY(Attributes="EditorDisplay(\"PostFx Volume\"), EditorOrder(60)")
     FORCE_INLINE int32 GetPriority() const
     {
@@ -107,10 +109,8 @@ public:
     }
 
     /// <summary>
-    /// Sets the order in which multiple volumes are blended together.
-    /// The volume with the highest priority takes precedence over all other overlapping volumes.
+    /// Sets the order in which multiple volumes are blended together. The volume with the highest priority takes precedence over all other overlapping volumes.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() FORCE_INLINE void SetPriority(int32 value)
     {
         _priority = value;
@@ -119,7 +119,6 @@ public:
     /// <summary>
     /// Gets the distance inside the volume at which blending with the volume's settings occurs.
     /// </summary>
-    /// <returns>The result.</returns>
     API_PROPERTY(Attributes="EditorDisplay(\"PostFx Volume\"), EditorOrder(70)")
     FORCE_INLINE float GetBlendRadius() const
     {
@@ -129,7 +128,6 @@ public:
     /// <summary>
     /// Sets the distance inside the volume at which blending with the volume's settings occurs.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetBlendRadius(float value)
     {
         _blendRadius = Math::Clamp(value, 0.0f, 1000.0f);
@@ -138,7 +136,6 @@ public:
     /// <summary>
     /// Gets the amount of influence the volume's properties have. 0 is no effect; 1 is full effect.
     /// </summary>
-    /// <returns>The result.</returns>
     API_PROPERTY(Attributes="EditorDisplay(\"PostFx Volume\"), EditorOrder(80)")
     FORCE_INLINE float GetBlendWeight() const
     {
@@ -148,18 +145,14 @@ public:
     /// <summary>
     /// Sets the amount of influence the volume's properties have. 0 is no effect; 1 is full effect.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetBlendWeight(float value)
     {
         _blendWeight = Math::Saturate(value);
     }
 
     /// <summary>
-    /// Gets the value indicating whether the bounds of the volume are taken into account.
-    /// If false, the volume affects the entire world, regardless of its bounds.
-    /// If true, the volume only has an effect within its bounds.
+    /// Gets the value indicating whether the bounds of the volume are taken into account. If false, the volume affects the entire world, regardless of its bounds. If true, the volume only has an effect within its bounds.
     /// </summary>
-    /// <returns>The result.</returns>
     API_PROPERTY(Attributes="EditorDisplay(\"PostFx Volume\"), EditorOrder(90)")
     FORCE_INLINE bool GetIsBounded() const
     {
@@ -167,18 +160,14 @@ public:
     }
 
     /// <summary>
-    /// Sets the value indicating whether the bounds of the volume are taken into account.
-    /// If false, the volume affects the entire world, regardless of its bounds.
-    /// If true, the volume only has an effect within its bounds.
+    /// Sets the value indicating whether the bounds of the volume are taken into account. If false, the volume affects the entire world, regardless of its bounds. If true, the volume only has an effect within its bounds.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() FORCE_INLINE void SetIsBounded(bool value)
     {
         _isBounded = value;
     }
 
 public:
-
     /// <summary>
     /// Adds the post fx material to the settings.
     /// </summary>
@@ -192,7 +181,6 @@ public:
     API_FUNCTION() void RemovePostFxMaterial(MaterialBase* material);
 
 public:
-
     // [BoxVolume]
     bool HasContentLoaded() const override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
@@ -203,7 +191,6 @@ public:
     void Blend(PostProcessSettings& other, float weight) override;
 
 protected:
-
     // [BoxVolume]
     void OnEnable() override;
     void OnDisable() override;

@@ -2,14 +2,13 @@
 // Version: @0
 
 #define MATERIAL 1
+#define USE_PER_VIEW_CONSTANTS 1
 @3
-// Ribbons don't use sorted indices so overlap the segment distances buffer on the slot
-#define HAS_SORTED_INDICES (!defined(_VS_Ribbon))
 
 #include "./Flax/Common.hlsl"
 #include "./Flax/MaterialCommon.hlsl"
 #include "./Flax/GBufferCommon.hlsl"
-#include "./Flax/Matrix.hlsl"
+#include "./Flax/Math/Matrix.hlsl"
 @7
 struct SpriteInput
 {
@@ -17,17 +16,17 @@ struct SpriteInput
 	float2 TexCoord : TEXCOORD;
 };
 
+struct RibbonInput
+{
+	uint Order : TEXCOORD0;
+	uint ParticleIndex : TEXCOORD1;
+	uint PrevParticleIndex : TEXCOORD2;
+	float Distance : TEXCOORD3;
+};
+
 // Primary constant buffer (with additional material parameters)
 META_CB_BEGIN(0, Data)
-float4x4 ViewProjectionMatrix;
-float4x4 WorldMatrix;
-float4x4 ViewMatrix;
-float3 ViewPos;
-float ViewFar;
-float3 ViewDir;
-float TimeParam;
-float4 ViewInfo;
-float4 ScreenSize;
+float4x3 WorldMatrix;
 uint SortedIndicesOffset;
 float PerInstanceRandom;
 int ParticleStride;
@@ -46,19 +45,14 @@ int RibbonWidthOffset;
 int RibbonTwistOffset;
 int RibbonFacingVectorOffset;
 uint RibbonSegmentCount;
-float4x4 WorldMatrixInverseTransposed;
+float4x3 WorldMatrixInverseTransposed;
 @1META_CB_END
 
 // Particles attributes buffer
 ByteAddressBuffer ParticlesData : register(t0);
 
-#if HAS_SORTED_INDICES
 // Sorted particles indices
 Buffer<uint> SortedIndices : register(t1);
-#else
-// Ribbon particles segments distances buffer
-Buffer<float> SegmentDistances : register(t1);
-#endif
 
 // Shader resources
 @2
@@ -76,8 +70,8 @@ struct VertexOutput
 #if USE_CUSTOM_VERTEX_INTERPOLATORS
 	float4 CustomVSToPS[CUSTOM_VERTEX_INTERPOLATORS_COUNT] : TEXCOORD9;
 #endif
-	float3 InstanceOrigin    : TEXCOORD6;
-	float InstanceParams     : TEXCOORD7; // x-PerInstanceRandom
+	nointerpolation float3 InstanceOrigin : TEXCOORD6;
+	nointerpolation float InstanceParams : TEXCOORD7; // x-PerInstanceRandom
 };
 
 // Interpolants passed to the pixel shader
@@ -94,8 +88,8 @@ struct PixelInput
 #if USE_CUSTOM_VERTEX_INTERPOLATORS
 	float4 CustomVSToPS[CUSTOM_VERTEX_INTERPOLATORS_COUNT] : TEXCOORD9;
 #endif
-	float3 InstanceOrigin    : TEXCOORD6;
-	float InstanceParams     : TEXCOORD7; // x-PerInstanceRandom
+	nointerpolation float3 InstanceOrigin : TEXCOORD6;
+	nointerpolation float InstanceParams : TEXCOORD7; // x-PerInstanceRandom
 	bool IsFrontFace         : SV_IsFrontFace;
 };
 
@@ -144,7 +138,7 @@ MaterialInput GetMaterialInput(PixelInput input)
 #if USE_INSTANCING
 #define GetInstanceTransform(input) float4x4(float4(input.InstanceTransform1.xyz, 0.0f), float4(input.InstanceTransform2.xyz, 0.0f), float4(input.InstanceTransform3.xyz, 0.0f), float4(input.InstanceOrigin.xyz, 1.0f))
 #else
-#define GetInstanceTransform(input) WorldMatrix;
+#define GetInstanceTransform(input) ToMatrix4x4(WorldMatrix);
 #endif
 
 // Removes the scale vector from the local to world transformation matrix (supports instancing)
@@ -270,12 +264,12 @@ float4 GetParticleVec4(uint particleIndex, int offset)
 
 float3 TransformParticlePosition(float3 input)
 {
-	return mul(float4(input, 1.0f), WorldMatrix).xyz;
+	return mul(float4(input, 1.0f), ToMatrix4x4(WorldMatrix)).xyz;
 }
 
 float3 TransformParticleVector(float3 input)
 {
-	return mul(float4(input, 0.0f), WorldMatrixInverseTransposed).xyz;
+	return mul(float4(input, 0.0f), ToMatrix4x4(WorldMatrixInverseTransposed)).xyz;
 }
 
 @8
@@ -305,35 +299,31 @@ half3x3 CalcTangentToLocal(ModelInput input)
 	float3 normal = input.Normal.xyz * 2.0 - 1.0;
 	float3 tangent = input.Tangent.xyz * 2.0 - 1.0;
 	float3 bitangent = cross(normal, tangent) * bitangentSign;
-	return float3x3(tangent, bitangent, normal);
+	return (half3x3)float3x3(tangent, bitangent, normal);
 }
 
 half3x3 CalcTangentToWorld(in float4x4 world, in half3x3 tangentToLocal)
 {
-	half3x3 localToWorld = RemoveScaleFromLocalToWorld((float3x3)world);
+	half3x3 localToWorld = (half3x3)RemoveScaleFromLocalToWorld((float3x3)world);
 	return mul(tangentToLocal, localToWorld); 
 }
 
-float3 GetParticlePosition(uint ParticleIndex)
+float3 GetParticlePosition(uint particleIndex)
 {
-	return TransformParticlePosition(GetParticleVec3(ParticleIndex, PositionOffset));
+	return TransformParticlePosition(GetParticleVec3(particleIndex, PositionOffset));
 }
 
 // Vertex Shader function for Sprite Rendering
 META_VS(true, FEATURE_LEVEL_ES2)
-META_VS_IN_ELEMENT(POSITION, 0, R32G32_FLOAT, 0, 0,     PER_VERTEX, 0, true)
-META_VS_IN_ELEMENT(TEXCOORD, 0, R32G32_FLOAT, 0, ALIGN, PER_VERTEX, 0, true)
 VertexOutput VS_Sprite(SpriteInput input, uint particleIndex : SV_InstanceID)
 {
 	VertexOutput output;
 
-#if HAS_SORTED_INDICES
 	// Sorted particles mapping
 	if (SortedIndicesOffset != 0xFFFFFFFF)
 	{
 		particleIndex = SortedIndices[SortedIndicesOffset + particleIndex];
 	}
-#endif
 
 	// Read particle data	
 	float3 particlePosition = GetParticleVec3(particleIndex, PositionOffset);
@@ -341,7 +331,7 @@ VertexOutput VS_Sprite(SpriteInput input, uint particleIndex : SV_InstanceID)
 	float2 spriteSize = GetParticleVec2(particleIndex, SpriteSizeOffset);
 	int spriteFacingMode = SpriteFacingModeOffset != -1 ? GetParticleInt(particleIndex, SpriteFacingModeOffset) : -1;
 
-	float4x4 world = WorldMatrix;
+	float4x4 world = ToMatrix4x4(WorldMatrix);
 	float3x3 eulerMatrix = EulerMatrix(radians(particleRotation));
 	float3x3 viewRot = transpose((float3x3)ViewMatrix);
 	float3 position = mul(float4(particlePosition, 1), world).xyz;
@@ -403,7 +393,7 @@ VertexOutput VS_Sprite(SpriteInput input, uint particleIndex : SV_InstanceID)
 	output.WorldPosition = position + spriteVertexPosition;
 
 	// Compute clip space position
-	output.Position = mul(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
 
 	// Pass vertex attributes
 	output.TexCoord = input.TexCoord;
@@ -415,7 +405,7 @@ VertexOutput VS_Sprite(SpriteInput input, uint particleIndex : SV_InstanceID)
 	output.InstanceParams = PerInstanceRandom;
 
 	// Calculate tanget space to world space transformation matrix for unit vectors
-	half3x3 tangentToLocal = float3x3(axisX, axisY, axisZ);
+	half3x3 tangentToLocal = half3x3(axisX, axisY, axisZ);
 	half3x3 tangentToWorld = CalcTangentToWorld(world, tangentToLocal);
 	output.TBN = tangentToWorld;
 
@@ -441,7 +431,7 @@ VertexOutput VS_Sprite(SpriteInput input, uint particleIndex : SV_InstanceID)
 	// Apply world position offset per-vertex
 #if USE_POSITION_OFFSET
 	output.WorldPosition += material.PositionOffset;
-	output.Position = mul(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
 #endif
 
 	// Copy interpolants for other shader stages
@@ -464,20 +454,19 @@ VertexOutput VS_Model(ModelInput input, uint particleIndex : SV_InstanceID)
 {
 	VertexOutput output;
 
-#if HAS_SORTED_INDICES
 	// Sorted particles mapping
 	if (SortedIndicesOffset != 0xFFFFFFFF)
 	{
 		particleIndex = SortedIndices[SortedIndicesOffset + particleIndex];
 	}
-#endif
 
 	// Read particle data
+	float4x4 worldMatrix = ToMatrix4x4(WorldMatrix);
 	float3 particlePosition = GetParticleVec3(particleIndex, PositionOffset);
 	float3 particleScale = GetParticleVec3(particleIndex, ScaleOffset);
 	float3 particleRotation = GetParticleVec3(particleIndex, RotationOffset);
 	int modelFacingMode = ModelFacingModeOffset != -1 ? GetParticleInt(particleIndex, ModelFacingModeOffset) : -1;
-	float3 position = mul(float4(particlePosition, 1), WorldMatrix).xyz;
+	float3 position = mul(float4(particlePosition, 1), worldMatrix).xyz;
 
 	// Compute final vertex position in the world
 	float3x3 eulerMatrix = EulerMatrix(radians(particleRotation));
@@ -516,26 +505,26 @@ VertexOutput VS_Model(ModelInput input, uint particleIndex : SV_InstanceID)
 		world =  mul(world, scaleMatrix);
 	}
 	world = transpose(world);
-	world =  mul(world, WorldMatrix);
+	world =  mul(world, worldMatrix);
 
 	// Calculate the vertex position in world space
 	output.WorldPosition = mul(float4(input.Position, 1), world).xyz;
 
 	// Compute clip space position
-	output.Position = mul(float4(output.WorldPosition, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition, 1), ViewProjectionMatrix);
 
 	// Pass vertex attributes
-	output.TexCoord = input.TexCoord;
+	output.TexCoord = input.TexCoord0;
 	output.ParticleIndex = particleIndex;
 #if USE_VERTEX_COLOR
 	output.VertexColor = input.Color;
 #endif
-	output.InstanceOrigin = WorldMatrix[3].xyz;
+	output.InstanceOrigin = worldMatrix[3].xyz;
 	output.InstanceParams = PerInstanceRandom;
 
 	// Calculate tanget space to world space transformation matrix for unit vectors
 	half3x3 tangentToLocal = CalcTangentToLocal(input);
-	half3x3 tangentToWorld = CalcTangentToWorld(WorldMatrix, tangentToLocal);
+	half3x3 tangentToWorld = CalcTangentToWorld(worldMatrix, tangentToLocal);
 	output.TBN = tangentToWorld;
 
 	// Get material input params if need to evaluate any material property
@@ -560,7 +549,7 @@ VertexOutput VS_Model(ModelInput input, uint particleIndex : SV_InstanceID)
 	// Apply world position offset per-vertex
 #if USE_POSITION_OFFSET
 	output.WorldPosition += material.PositionOffset;
-	output.Position = mul(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
 #endif
 
 	// Copy interpolants for other shader stages
@@ -573,12 +562,16 @@ VertexOutput VS_Model(ModelInput input, uint particleIndex : SV_InstanceID)
 
 // Vertex Shader function for Ribbon Rendering
 META_VS(true, FEATURE_LEVEL_ES2)
-VertexOutput VS_Ribbon(uint vertexIndex : SV_VertexID)
+META_VS_IN_ELEMENT(TEXCOORD, 0, R32_UINT,  0, 0,     PER_VERTEX, 0, true)
+META_VS_IN_ELEMENT(TEXCOORD, 1, R32_UINT,  0, ALIGN, PER_VERTEX, 0, true)
+META_VS_IN_ELEMENT(TEXCOORD, 2, R32_UINT,  0, ALIGN, PER_VERTEX, 0, true)
+META_VS_IN_ELEMENT(TEXCOORD, 3, R32_FLOAT, 0, ALIGN, PER_VERTEX, 0, true)
+VertexOutput VS_Ribbon(RibbonInput input, uint vertexIndex : SV_VertexID)
 {
 	VertexOutput output;
 
 	// Get particle data
-	uint particleIndex = vertexIndex / 2;
+	uint particleIndex = input.ParticleIndex;
 	int vertexSign = (((int)vertexIndex & 0x1) * 2) - 1;
 	float3 position = GetParticlePosition(particleIndex);
 	float ribbonWidth = RibbonWidthOffset != -1 ? GetParticleFloat(particleIndex, RibbonWidthOffset) : 20.0f;
@@ -586,15 +579,13 @@ VertexOutput VS_Ribbon(uint vertexIndex : SV_VertexID)
 
 	// Calculate ribbon direction
 	float3 direction;
-	if (particleIndex == 0)
+	if (input.Order == 0)
 	{
-		float3 nextParticlePos = GetParticlePosition(particleIndex + 1);
-		direction = nextParticlePos - position;
+		direction = GetParticlePosition(input.PrevParticleIndex) - position;
 	}
 	else
 	{
-		float3 previousParticlePos = GetParticlePosition(particleIndex - 1);
-		direction = position - previousParticlePos;
+		direction = position - GetParticlePosition(input.PrevParticleIndex);
 	}
 
 	// Calculate particle orientation (tangent vectors)
@@ -611,37 +602,35 @@ VertexOutput VS_Ribbon(uint vertexIndex : SV_VertexID)
 	}
 
 	// Calculate texture coordinates
-	float texCoordU;
-#ifdef _VS_Ribbon
 	if (RibbonUVTilingDistance != 0.0f)
 	{
-		texCoordU = SegmentDistances[particleIndex] / RibbonUVTilingDistance;
+		output.TexCoord.x = input.Distance / RibbonUVTilingDistance;
 	}
 	else
-#endif
 	{
-		texCoordU = (float)particleIndex / RibbonSegmentCount;
+		output.TexCoord.x = (float)input.Order / (float)RibbonSegmentCount;
 	}
-	float texCoordV = (vertexIndex + 1) & 0x1;
-	output.TexCoord = float2(texCoordU, texCoordV) * RibbonUVScale + RibbonUVOffset;
+	output.TexCoord.y = (float)((vertexIndex + 1) & 0x1);
+	output.TexCoord = output.TexCoord * RibbonUVScale + RibbonUVOffset;
 
 	// Compute world space vertex position
 	output.WorldPosition = position + tangentRight * vertexSign * (ribbonWidth.xxx * 0.5f);
 
 	// Compute clip space position
-	output.Position = mul(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
 
 	// Pass vertex attributes
 	output.ParticleIndex = particleIndex;
 #if USE_VERTEX_COLOR
 	output.VertexColor = 1;
 #endif
-	output.InstanceOrigin = WorldMatrix[3].xyz;
+	float4x4 world = ToMatrix4x4(WorldMatrix);
+	output.InstanceOrigin = world[3].xyz;
 	output.InstanceParams = PerInstanceRandom;
 
 	// Calculate tanget space to world space transformation matrix for unit vectors
-	half3x3 tangentToLocal = float3x3(tangentRight, tangentUp, cross(tangentRight, tangentUp));
-	half3x3 tangentToWorld = CalcTangentToWorld(WorldMatrix, tangentToLocal);
+	half3x3 tangentToLocal = half3x3(tangentRight, tangentUp, cross(tangentRight, tangentUp));
+	half3x3 tangentToWorld = CalcTangentToWorld(world, tangentToLocal);
 	output.TBN = tangentToWorld;
 
 	// Get material input params if need to evaluate any material property
@@ -656,7 +645,7 @@ VertexOutput VS_Ribbon(uint vertexIndex : SV_VertexID)
 	materialInput.TBN = output.TBN;
 	materialInput.TwoSidedSign = 1;
 	materialInput.SvPosition = output.Position;
-	materialInput.PreSkinnedPosition = Position;
+	materialInput.PreSkinnedPosition = position;
 	materialInput.PreSkinnedNormal = tangentToLocal[2].xyz;
 	materialInput.InstanceOrigin = output.InstanceOrigin;
 	materialInput.InstanceParams = output.InstanceParams;	
@@ -666,7 +655,7 @@ VertexOutput VS_Ribbon(uint vertexIndex : SV_VertexID)
 	// Apply world position offset per-vertex
 #if USE_POSITION_OFFSET
 	output.WorldPosition += material.PositionOffset;
-	output.Position = mul(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.WorldPosition.xyz, 1), ViewProjectionMatrix);
 #endif
 
 	// Copy interpolants for other shader stages
@@ -693,5 +682,20 @@ void PS_Depth(PixelInput input)
 	clip(material.Opacity - MATERIAL_OPACITY_THRESHOLD);
 #endif
 }
+
+#if _PS_QuadOverdraw
+
+#include "./Flax/Editor/QuadOverdraw.hlsl"
+
+// Pixel Shader function for Quad Overdraw Pass (development-only)
+[earlydepthstencil]
+META_PS(true, FEATURE_LEVEL_SM5)
+META_FLAG(DevelopmentOnly)
+void PS_QuadOverdraw(float4 svPos : SV_Position, uint primId : SV_PrimitiveID)
+{
+	DoQuadOverdraw(svPos, primId);
+}
+
+#endif
 
 @9

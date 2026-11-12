@@ -1,50 +1,66 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Renderer.h"
 #include "Engine/Graphics/GPUContext.h"
+#include "Engine/Graphics/GPUPass.h"
 #include "Engine/Graphics/RenderTargetPool.h"
 #include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
+#include "Engine/Graphics/PostProcessEffect.h"
 #include "Engine/Engine/EngineService.h"
 #include "GBufferPass.h"
 #include "ForwardPass.h"
-#include "ShadowsPass.h"
-#include "LightPass.h"
-#include "ReflectionsPass.h"
-#include "ScreenSpaceReflectionsPass.h"
-#include "AmbientOcclusionPass.h"
-#include "DepthOfFieldPass.h"
-#include "EyeAdaptationPass.h"
-#include "PostProcessingPass.h"
-#include "ColorGradingPass.h"
-#include "MotionBlurPass.h"
-#include "VolumetricFogPass.h"
-#include "HistogramPass.h"
-#include "AtmospherePreCompute.h"
+#include "Reflections/ReflectionsPass.h"
+#include "Reflections/ScreenSpaceReflectionsPass.h"
+#include "PostFX/DepthOfFieldPass.h"
+#include "PostFX/EyeAdaptationPass.h"
+#include "PostFX/PostProcessingPass.h"
+#include "PostFX/ColorGradingPass.h"
+#include "PostFX/MotionBlurPass.h"
+#include "PostFX/HistogramPass.h"
+#include "Lighting/ShadowsPass.h"
+#include "Lighting/LightPass.h"
+#include "Lighting/VolumetricFogPass.h"
+#include "Lighting/AtmospherePreCompute.h"
+#include "Lighting/AmbientOcclusionPass.h"
+#include "GI/GlobalSurfaceAtlasPass.h"
+#include "GI/DynamicDiffuseGlobalIllumination.h"
+#include "Utils/GlobalSignDistanceFieldPass.h"
 #include "Utils/MultiScaler.h"
 #include "Utils/BitonicSort.h"
 #include "AntiAliasing/FXAA.h"
 #include "AntiAliasing/TAA.h"
 #include "AntiAliasing/SMAA.h"
+#include "AntiAliasing/ContrastAdaptiveSharpeningPass.h"
 #include "Engine/Level/Actor.h"
 #include "Engine/Level/Level.h"
+#include "Engine/Level/Scene/SceneRendering.h"
+#include "Engine/Core/Config/GraphicsSettings.h"
+#include "Engine/Graphics/Graphics.h"
+#include "Engine/Threading/JobSystem.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if USE_EDITOR
 #include "Editor/Editor.h"
+#endif
+#if GPU_ENABLE_DEVELOPMENT
+#include "Editor/QuadOverdrawPass.h"
 #endif
 
 #if USE_EDITOR
 // Additional options used in editor for lightmaps baking
 bool IsRunningRadiancePass = false;
 bool IsBakingLightmaps = false;
+#endif
+#if GPU_ENABLE_DEVELOPMENT
 bool EnableLightmapsUsage = true;
 #endif
 
-Array<RendererPassBase*> PassList(64);
+Array<RendererPassBase*> PassList;
 
 class RendererService : public EngineService
 {
 public:
-
     RendererService()
         : EngineService(TEXT("Renderer"), 20)
     {
@@ -56,11 +72,14 @@ public:
 
 RendererService RendererServiceInstance;
 
-void RenderInner(SceneRenderTask* task, RenderContext& renderContext);
+void RenderInner(RenderContext& renderContext, RenderContextBatch& renderContextBatch);
 
 bool RendererService::Init()
 {
+    PROFILE_MEM(Graphics);
+
     // Register passes
+    PassList.EnsureCapacity(64);
     PassList.Add(GBufferPass::Instance());
     PassList.Add(ShadowsPass::Instance());
     PassList.Add(LightPass::Instance());
@@ -80,12 +99,17 @@ bool RendererService::Init()
     PassList.Add(TAA::Instance());
     PassList.Add(SMAA::Instance());
     PassList.Add(HistogramPass::Instance());
+    PassList.Add(GlobalSignDistanceFieldPass::Instance());
+    PassList.Add(GlobalSurfaceAtlasPass::Instance());
+    PassList.Add(DynamicDiffuseGlobalIlluminationPass::Instance());
+#if GPU_ENABLE_DEVELOPMENT
+    PassList.Add(QuadOverdrawPass::Instance());
+#endif
 
+#if GPU_ENABLE_PRELOADING_RESOURCES
     // Skip when using Null renderer
     if (GPUDevice::Instance->GetRendererType() == RendererType::Null)
-    {
         return false;
-    }
 
     // Init child services
     for (int32 i = 0; i < PassList.Count(); i++)
@@ -96,6 +120,7 @@ bool RendererService::Init()
             return true;
         }
     }
+#endif
 
     return false;
 }
@@ -107,28 +132,75 @@ void RendererService::Dispose()
     {
         PassList[i]->Dispose();
     }
+    SAFE_DELETE_GPU_RESOURCE(IMaterial::BindParameters::PerViewConstants);
 }
 
-void RenderAntiAliasingPass(RenderContext& renderContext, GPUTexture* input, GPUTextureView* output)
+void RenderAntiAliasingPass(RenderContext& renderContext, GPUTexture* input, GPUTextureView* output, const Viewport& outputViewport)
 {
     auto context = GPUDevice::Instance->GetMainContext();
-    context->SetViewportAndScissors(renderContext.View.ScreenSize.X, renderContext.View.ScreenSize.Y);
-
     const auto aaMode = renderContext.List->Settings.AntiAliasing.Mode;
-    if (aaMode == AntialiasingMode::FastApproximateAntialiasing)
+    if (ContrastAdaptiveSharpeningPass::Instance()->CanRender(renderContext))
     {
-        FXAA::Instance()->Render(renderContext, input, output);
-    }
-    else if (aaMode == AntialiasingMode::SubpixelMorphologicalAntialiasing)
-    {
-        SMAA::Instance()->Render(renderContext, input, output);
+        if (aaMode == AntialiasingMode::FastApproximateAntialiasing ||
+            aaMode == AntialiasingMode::SubpixelMorphologicalAntialiasing)
+        {
+            // AA -> CAS -> Output
+            auto tmpImage = RenderTargetPool::Get(input->GetDescription());
+            RENDER_TARGET_POOL_SET_NAME(tmpImage, "TmpImage");
+            context->SetViewportAndScissors((float)tmpImage->Width(), (float)tmpImage->Height());
+            if (aaMode == AntialiasingMode::FastApproximateAntialiasing)
+                FXAA::Instance()->Render(renderContext, input, tmpImage->View());
+            else
+                SMAA::Instance()->Render(renderContext, input, tmpImage->View());
+            context->ResetSR();
+            context->ResetRenderTarget();
+            context->SetViewportAndScissors(outputViewport);
+            ContrastAdaptiveSharpeningPass::Instance()->Render(renderContext, tmpImage, output);
+            RenderTargetPool::Release(tmpImage);
+        }
+        else
+        {
+            // CAS -> Output
+            context->SetViewportAndScissors(outputViewport);
+            ContrastAdaptiveSharpeningPass::Instance()->Render(renderContext, input, output);
+        }
     }
     else
     {
-        PROFILE_GPU("Copy frame");
-        context->SetRenderTarget(output);
-        context->Draw(input);
+        // AA -> Output
+        context->SetViewportAndScissors(outputViewport);
+        if (aaMode == AntialiasingMode::FastApproximateAntialiasing)
+            FXAA::Instance()->Render(renderContext, input, output);
+        else if (aaMode == AntialiasingMode::SubpixelMorphologicalAntialiasing)
+            SMAA::Instance()->Render(renderContext, input, output);
+        else
+        {
+            PROFILE_GPU("Copy frame");
+            context->SetRenderTarget(output);
+            context->Draw(input);
+        }
     }
+}
+
+void RenderLightBuffer(GPUContext* context, RenderContext& renderContext, GPUTexture* lightBuffer, const GPUTextureDescription& tempDesc)
+{
+    context->ResetRenderTarget();
+    auto colorGradingLUT = ColorGradingPass::Instance()->RenderLUT(renderContext);
+    auto tempBuffer = RenderTargetPool::Get(tempDesc);
+    RENDER_TARGET_POOL_SET_NAME(tempBuffer, "TempBuffer");
+    EyeAdaptationPass::Instance()->Render(renderContext, lightBuffer);
+    PostProcessingPass::Instance()->Render(renderContext, lightBuffer, tempBuffer->View(), Viewport(tempBuffer->Size()), colorGradingLUT);
+    context->ResetRenderTarget();
+    if (renderContext.List->Settings.AntiAliasing.Mode == AntialiasingMode::TemporalAntialiasing)
+    {
+        TAA::Instance()->Render(renderContext, tempBuffer, lightBuffer);
+        Swap(lightBuffer, tempBuffer);
+    }
+    RenderTargetPool::Release(lightBuffer);
+    context->SetRenderTarget(renderContext.Task->GetOutputView());
+    context->SetViewportAndScissors(renderContext.Task->GetOutputViewport());
+    context->Draw(tempBuffer);
+    RenderTargetPool::Release(tempBuffer);
 }
 
 bool Renderer::IsReady()
@@ -154,17 +226,23 @@ void Renderer::Render(SceneRenderTask* task)
 {
     PROFILE_GPU_CPU_NAMED("Render Frame");
 
+    // Prepare GPU context
     auto context = GPUDevice::Instance->GetMainContext();
-
-    context->ClearState();
+    context->ResetState();
     context->FlushState();
-
     const Viewport viewport = task->GetViewport();
     context->SetViewportAndScissors(viewport);
 
-    // Prepare
+    // Prepare render context
     RenderContext renderContext(task);
     renderContext.List = RenderList::GetFromPool();
+    RenderContextBatch renderContextBatch(task);
+    renderContextBatch.Contexts.Add(renderContext);
+
+    // Pre-init render view cache early in case it's used in PreRender drawing
+    Float4 jitter = renderContext.View.TemporalAAJitter; // Preserve temporal jitter value (PrepareCache modifies it)
+    renderContext.View.PrepareCache(renderContext, viewport.Width, viewport.Height, Float2::Zero);
+    renderContext.View.TemporalAAJitter = jitter;
 
 #if USE_EDITOR
     // Turn on low quality rendering during baking lightmaps (leave more GPU power for baking)
@@ -191,11 +269,17 @@ void Renderer::Render(SceneRenderTask* task)
             | ViewFlags::ContactShadows
             | ViewFlags::DepthOfField);
     }
+
+    // Force Debug Draw usage in some specific views that depend on it
+    if (renderContext.View.Mode == ViewMode::PhysicsColliders)
+    {
+        renderContext.View.Flags |= ViewFlags::DebugDraw;
+    }
 #endif
 
     // Perform the actual rendering
     task->OnPreRender(context, renderContext);
-    RenderInner(task, renderContext);
+    RenderInner(renderContext, renderContextBatch);
     task->OnPostRender(context, renderContext);
 
 #if USE_EDITOR
@@ -207,20 +291,8 @@ void Renderer::Render(SceneRenderTask* task)
     task->View = renderContext.View;
 
     // Cleanup
-    RenderList::ReturnToPool(renderContext.List);
-}
-
-bool Renderer::NeedMotionVectors(RenderContext& renderContext)
-{
-    const int32 screenWidth = renderContext.Buffers->GetWidth();
-    const int32 screenHeight = renderContext.Buffers->GetHeight();
-    if (screenWidth < 16 || screenHeight < 16 || renderContext.Task->IsCameraCut)
-        return false;
-    MotionBlurSettings& motionBlurSettings = renderContext.List->Settings.MotionBlur;
-    return ((renderContext.View.Flags & ViewFlags::MotionBlur) != 0 && motionBlurSettings.Enabled && motionBlurSettings.Scale > ZeroTolerance) ||
-            renderContext.View.Mode == ViewMode::MotionVectors ||
-            ScreenSpaceReflectionsPass::NeedMotionVectors(renderContext) ||
-            TAA::NeedMotionVectors(renderContext);
+    for (const auto& e : renderContextBatch.Contexts)
+        RenderList::ReturnToPool(e.List);
 }
 
 void Renderer::DrawSceneDepth(GPUContext* context, SceneRenderTask* task, GPUTexture* output, const Array<Actor*>& customActors)
@@ -231,26 +303,14 @@ void Renderer::DrawSceneDepth(GPUContext* context, SceneRenderTask* task, GPUTex
     RenderContext renderContext(task);
     renderContext.List = RenderList::GetFromPool();
     renderContext.View.Pass = DrawPass::Depth;
+    renderContext.View.Flags &= ~ViewFlags::OcclusionCulling;
     renderContext.View.Prepare(renderContext);
 
     // Call drawing (will collect draw calls)
-    if (customActors.HasItems())
-    {
-        // Draw custom actors
-        for (auto actor : customActors)
-        {
-            if (actor && actor->GetIsActive())
-                actor->Draw(renderContext);
-        }
-    }
-    else
-    {
-        // Draw scene actors
-        Level::DrawActors(renderContext);
-    }
+    DrawActors(renderContext, customActors);
 
     // Sort draw calls
-    renderContext.List->SortDrawCalls(renderContext, false, DrawCallsListType::Depth);
+    renderContext.List->SortDrawCalls(renderContext, false, DrawCallsListType::Depth, DrawPass::Depth);
 
     // Execute draw calls
     const float width = (float)output->Width();
@@ -281,55 +341,337 @@ void Renderer::DrawPostFxMaterial(GPUContext* context, const RenderContext& rend
     context->ResetRenderTarget();
 }
 
-void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
+void Renderer::DrawActors(RenderContext& renderContext, const Array<Actor*>& customActors)
 {
-    auto context = GPUDevice::Instance->GetMainContext();
-    auto& view = renderContext.View;
-    ASSERT(renderContext.Buffers && renderContext.Buffers->GetWidth() > 0);
+    RenderContextBatch renderContextBatch(renderContext);
+    DrawActors(renderContextBatch, customActors);
+}
+
+void Renderer::DrawActors(RenderContextBatch& renderContextBatch, const Array<Actor*>& customActors)
+{
+    if (customActors.HasItems())
+    {
+        // Draw custom actors
+        for (Actor* actor : customActors)
+        {
+            if (actor && actor->GetIsActive())
+                actor->Draw(renderContextBatch);
+        }
+    }
+    else
+    {
+        // Draw scene actors
+        JobSystem::SetJobStartingOnDispatch(false);
+        Level::DrawActors(renderContextBatch, SceneRendering::DrawCategory::SceneDraw);
+        Level::DrawActors(renderContextBatch, SceneRendering::DrawCategory::SceneDrawAsync);
+        JobSystem::SetJobStartingOnDispatch(true);
+        renderContextBatch.FlushWaitLabels();
+    }
+}
+
+static void Setup(GPUContext* context, RenderContext& renderContext)
+{
+    PROFILE_CPU_NAMED("Setup");
+    auto* graphicsSettings = GraphicsSettings::Get();
+    const bool isGBufferDebug = GBufferPass::IsDebugView(renderContext.View.Mode);
+    const int32 screenWidth = renderContext.Buffers->GetWidth();
+    const int32 screenHeight = renderContext.Buffers->GetHeight();
 
     // Perform postFx volumes blending and query before rendering
-    task->CollectPostFxVolumes(renderContext);
+    renderContext.Task->CollectPostFxVolumes(renderContext);
     renderContext.List->BlendSettings();
-    auto aaMode = (renderContext.View.Flags & ViewFlags::AntiAliasing) != 0 ? renderContext.List->Settings.AntiAliasing.Mode : AntialiasingMode::None;
-    if (aaMode == AntialiasingMode::TemporalAntialiasing && view.IsOrthographicProjection())
-        aaMode = AntialiasingMode::None; // TODO: support TAA in ortho projection (see RenderView::Prepare to jitter projection matrix better)
-    renderContext.List->Settings.AntiAliasing.Mode = aaMode;
-
-    // Prepare
-    renderContext.View.Prepare(renderContext);
-    renderContext.Buffers->Prepare();
-    for (auto& postFx : task->CustomPostFx)
     {
-        if (postFx.Target)
-            renderContext.List->PostFx.Add(&postFx);
+        auto aaMode = EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::AntiAliasing) ? renderContext.List->Settings.AntiAliasing.Mode : AntialiasingMode::None;
+        if (aaMode == AntialiasingMode::TemporalAntialiasing && renderContext.View.IsOrthographicProjection())
+            aaMode = AntialiasingMode::None; // TODO: support TAA in ortho projection (see RenderView::Prepare to jitter projection matrix better)
+        renderContext.List->Settings.AntiAliasing.Mode = aaMode;
     }
 
-    // Collect renderable objects and construct draw call list
-    view.Pass = DrawPass::GBuffer | DrawPass::Forward | DrawPass::Distortion;
-    if (Renderer::NeedMotionVectors(renderContext))
-        view.Pass |= DrawPass::MotionVectors;
-    task->OnCollectDrawCalls(renderContext);
+    // Initialize render setup
+    RenderSetup& setup = renderContext.List->Setup;
+    setup.UpscaleLocation = renderContext.Task->UpscaleLocation;
+    if (setup.UpscaleLocation == RenderingUpscaleLocation::DuringAntiAliasing && renderContext.List->Settings.AntiAliasing.Mode != AntialiasingMode::TemporalAntialiasing)
+        setup.UpscaleLocation = RenderingUpscaleLocation::AfterAntiAliasing; // Fall-back when AA doesn't support uplscaling
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    setup.RenderScale = renderContext.Task->RenderingPercentage * renderContext.Task->RenderScale;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+    setup.UseShadows = !isGBufferDebug && EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::Shadows) && ShadowsPass::Instance()->IsReady();
+    switch (renderContext.View.Mode)
+    {
+    case ViewMode::QuadOverdraw:
+    case ViewMode::Emissive:
+    case ViewMode::LightmapUVsDensity:
+    case ViewMode::GlobalSurfaceAtlas:
+    case ViewMode::GlobalSDF:
+    case ViewMode::GlobalSDFOverdraw:
+    case ViewMode::MaterialComplexity:
+    case ViewMode::VertexColors:
+    case ViewMode::LightOverlap:
+        setup.UseShadows = false;
+        break;
+#if GPU_ENABLE_DEVELOPMENT
+    case ViewMode::Wireframe:
+        // Use FXAA in wireframe view to improve readability (compared to TAA)
+        renderContext.List->Settings.AntiAliasing.Mode = AntialiasingMode::FastApproximateAntialiasing;
+        break;
+#endif
+    }
+    if (screenWidth < 16 || screenHeight < 16 || renderContext.Task->IsCameraCut || isGBufferDebug || renderContext.View.Mode == ViewMode::NoPostFx)
+        setup.UseMotionVectors = false;
+    else
+    {
+        const MotionBlurSettings& motionBlurSettings = renderContext.List->Settings.MotionBlur;
+        const ScreenSpaceReflectionsSettings ssrSettings = renderContext.List->Settings.ScreenSpaceReflections;
+        setup.UseMotionVectors =
+            (EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::MotionBlur) && motionBlurSettings.Enabled && motionBlurSettings.Scale > ZeroTolerance) ||
+            renderContext.View.Mode == ViewMode::MotionVectors ||
+            (ssrSettings.Intensity > ZeroTolerance && ssrSettings.TemporalEffect && EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::SSR)) ||
+            renderContext.List->Settings.AntiAliasing.Mode == AntialiasingMode::TemporalAntialiasing;
+    }
+    setup.UseTemporalAAJitter = renderContext.List->Settings.AntiAliasing.Mode == AntialiasingMode::TemporalAntialiasing;
+    setup.UseGlobalSurfaceAtlas = renderContext.View.Mode == ViewMode::GlobalSurfaceAtlas ||
+        (EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::Reflections) && renderContext.List->Settings.GlobalIllumination.Reflections == ReflectionsMode::DDGI) ||
+        (EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::GI) && renderContext.List->Settings.GlobalIllumination.Mode == GlobalIlluminationMode::DDGI);
+    setup.UseGlobalSDF = (graphicsSettings->EnableGlobalSDF && EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::GlobalSDF)) ||
+        renderContext.View.Mode == ViewMode::GlobalSDF ||
+        renderContext.View.Mode == ViewMode::GlobalSDFOverdraw ||
+        setup.UseGlobalSurfaceAtlas;
+    setup.UseVolumetricFog = (renderContext.View.Flags & ViewFlags::Fog) != ViewFlags::None;
 
-    // Sort draw calls
-    renderContext.List->SortDrawCalls(renderContext, false, DrawCallsListType::GBuffer);
-    renderContext.List->SortDrawCalls(renderContext, false, DrawCallsListType::GBufferNoDecals);
-    renderContext.List->SortDrawCalls(renderContext, true, DrawCallsListType::Forward);
-    renderContext.List->SortDrawCalls(renderContext, false, DrawCallsListType::Distortion);
+    // Calculate material texture mip bias
+    setup.MaterialTextureMipBias = renderContext.Task->MaterialTextureMipBias;
+    if (setup.RenderScale < 1.0f) // Increase textures sharpness when upscaling (eg. -1.0 bias when using 2x upscaling)
+        setup.MaterialTextureMipBias += Math::Log2(setup.RenderScale);
+
+    // Disable TAA jitter in debug modes
+    switch (renderContext.View.Mode)
+    {
+    case ViewMode::Unlit:
+    case ViewMode::Diffuse:
+    case ViewMode::Normals:
+    case ViewMode::Depth:
+    case ViewMode::Emissive:
+    case ViewMode::AmbientOcclusion:
+    case ViewMode::Metalness:
+    case ViewMode::Roughness:
+    case ViewMode::Specular:
+    case ViewMode::SpecularColor:
+    case ViewMode::SubsurfaceColor:
+    case ViewMode::ShadingModel:
+    case ViewMode::GlobalSDF:
+    case ViewMode::GlobalSDFOverdraw:
+    case ViewMode::GlobalSurfaceAtlas:
+    case ViewMode::LightmapUVsDensity:
+    case ViewMode::MaterialComplexity:
+    case ViewMode::NoPostFx:
+    case ViewMode::VertexColors:
+    case ViewMode::QuadOverdraw:
+    case ViewMode::LightOverlap:
+        setup.UseTemporalAAJitter = false;
+        break;
+    }
+
+    // Customize setup (by postfx or custom gameplay effects)
+    renderContext.Task->SetupRender(renderContext);
+    for (PostProcessEffect* e : renderContext.List->PostFx)
+        e->PreRender(context, renderContext);
+
+    // Final render view preparations
+    renderContext.View.Pass = DrawPass::GBuffer | DrawPass::Forward | DrawPass::Distortion;
+    if (setup.UseMotionVectors)
+        renderContext.View.Pass |= DrawPass::MotionVectors;
+    renderContext.View.Prepare(renderContext);
+    renderContext.Buffers->OnRendering(renderContext);
+}
+
+static void CollectDrawCalls(GPUContext* context, RenderContext& renderContext, RenderContextBatch& renderContextBatch)
+{
+    PROFILE_CPU_NAMED("Collect Draw Calls");
+    RenderSetup& setup = renderContext.List->Setup;
+    renderContextBatch.GetMainContext() = renderContext; // Sync render context in batch with the current value
+    renderContext.List->PreDraw(context, renderContextBatch);
+
+    LightPass::Instance()->SetupLights(renderContext, renderContextBatch);
+    if (setup.UseShadows)
+        ShadowsPass::Instance()->SetupShadows(renderContext, renderContextBatch);
+#if GPU_ENABLE_DEVELOPMENT
+    GBufferPass::Instance()->PreOverrideDrawCalls(renderContext);
+#endif
+
+    // Dispatch drawing (via JobSystem - multiple job batches for every scene)
+    JobSystem::SetJobStartingOnDispatch(false);
+    renderContext.Task->OnCollectDrawCalls(renderContextBatch, SceneRendering::DrawCategory::SceneDraw);
+    renderContext.Task->OnCollectDrawCalls(renderContextBatch, SceneRendering::DrawCategory::SceneDrawAsync);
+    if (setup.UseGlobalSDF)
+        GlobalSignDistanceFieldPass::Instance()->OnCollectDrawCalls(renderContextBatch);
+    if (setup.UseGlobalSurfaceAtlas)
+        GlobalSurfaceAtlasPass::Instance()->OnCollectDrawCalls(renderContextBatch);
+    if (EnumHasAllFlags(renderContext.View.Flags, ViewFlags::CustomPostProcess))
+    {
+        for (PostProcessEffect* fx : renderContext.List->PostFx)
+            fx->CollectDrawCalls(renderContextBatch);
+    }
+
+    // Wait for async jobs to finish
+    JobSystem::SetJobStartingOnDispatch(true);
+    renderContextBatch.FlushWaitLabels();
+
+    // Perform custom post-scene drawing (eg. GPU dispatches used by VFX)
+    for (int32 i = 0; i < renderContextBatch.Contexts.Count(); i++)
+        renderContextBatch.Contexts[i].List->DrainDelayedDraws(context, renderContextBatch, i);
+    renderContext.List->PostDraw(context, renderContextBatch);
+
+#if GPU_ENABLE_DEVELOPMENT
+    GBufferPass::Instance()->OverrideDrawCalls(renderContext);
+#endif
+}
+
+static void ProcessDrawCalls(GPUContext* context, RenderContext& renderContext, RenderContextBatch& renderContextBatch)
+{
+    PROFILE_CPU_NAMED("Process Draw Calls");
+
+    // Utility that handles async jobs for a specific rendering routines in async
+    struct DrawCallsProcessor
+    {
+        RenderContextBatch& RenderContextBatch;
+        Pair<DrawCallsListType, bool> MainContextSorting[5] =
+        {
+            // Draw List + Reverse Distance sorting
+            ToPair(DrawCallsListType::GBuffer, false),
+            ToPair(DrawCallsListType::GBufferNoDecals, false),
+            ToPair(DrawCallsListType::Forward, true),
+            ToPair(DrawCallsListType::Distortion, false),
+            ToPair(DrawCallsListType::MotionVectors, false),
+        };
+
+        void BuildObjectsBufferJob(int32 index)
+        {
+            RenderContextBatch.Contexts[index].List->BuildObjectsBuffer();
+        }
+
+        void SortDrawCallsJob(int32 index)
+        {
+            RenderContext& renderContext = RenderContextBatch.GetMainContext();
+            if (index < ARRAY_COUNT(MainContextSorting))
+            {
+                // Main context sorting
+                RenderSetup& setup = renderContext.List->Setup;
+                auto sorting = MainContextSorting[index];
+                if (sorting.First == DrawCallsListType::MotionVectors && !setup.UseMotionVectors)
+                    return;
+                renderContext.List->SortDrawCalls(renderContext, sorting.Second, sorting.First);
+            }
+            else
+            {
+                // Shadow context sorting
+                auto& shadowContext = RenderContextBatch.Contexts[index - ARRAY_COUNT(MainContextSorting)];
+                shadowContext.List->SortDrawCalls(shadowContext, false, DrawCallsListType::Depth, DrawPass::Depth);
+                shadowContext.List->SortDrawCalls(shadowContext, false, shadowContext.List->ShadowDepthDrawCallsList, renderContext.List->DrawCalls, DrawCallsListType::Depth, DrawPass::Depth);
+            }
+        }
+    } processor = { renderContextBatch };
+
+    // Dispatch async jobs
+    Function<void(int32)> func;
+    func.Bind<DrawCallsProcessor, &DrawCallsProcessor::BuildObjectsBufferJob>(&processor);
+    const int64 buildObjectsBufferJob = JobSystem::Dispatch(func, renderContextBatch.Contexts.Count());
+    func.Bind<DrawCallsProcessor, &DrawCallsProcessor::SortDrawCallsJob>(&processor);
+    const int64 sortDrawCallsJob = JobSystem::Dispatch(func, ARRAY_COUNT(DrawCallsProcessor::MainContextSorting) + renderContextBatch.Contexts.Count());
+
+    // Upload objects buffers to the GPU
+    JobSystem::Wait(buildObjectsBufferJob);
+    {
+        PROFILE_CPU_NAMED("FlushObjectsBuffer");
+        GPUMemoryPass pass(context);
+        for (auto& e : renderContextBatch.Contexts)
+            e.List->ObjectBuffer.Flush(context);
+    }
+
+    // Wait for async jobs to finish
+    // TODO: use per-pass wait labels (eg. don't wait for shadow pass draws sorting until ShadowPass needs it)       
+    JobSystem::Wait(sortDrawCallsJob);
+}
+
+void RenderInner(RenderContext& renderContext, RenderContextBatch& renderContextBatch)
+{
+    auto context = GPUDevice::Instance->GetMainContext();
+    ASSERT(renderContext.Buffers && renderContext.Buffers->GetWidth() > 0);
+
+    // Setup rendering
+    RenderSetup& setup = renderContext.List->Setup;
+    Setup(context, renderContext);
+
+    // Build batch of render contexts (main view and shadow projections)
+    CollectDrawCalls(context, renderContext, renderContextBatch);
+
+    // Process draw calls (sorting, objects buffer building)
+    ProcessDrawCalls(context, renderContext, renderContextBatch);
 
     // Get the light accumulation buffer
-    auto tempDesc = GPUTextureDescription::New2D(renderContext.Buffers->GetWidth(), renderContext.Buffers->GetHeight(), PixelFormat::R11G11B10_Float);
+    auto outputFormat = renderContext.Buffers->GetOutputFormat();
+    auto tempFlags = GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget;
+    if (GPUDevice::Instance->Limits.HasCompute && EnumHasAllFlags(GPUDevice::Instance->GetFormatFeatures(outputFormat).Support, FormatSupport::UnorderedAccessReadOnly | FormatSupport::UnorderedAccessWriteOnly))
+        tempFlags |= GPUTextureFlags::UnorderedAccess;
+    auto tempDesc = GPUTextureDescription::New2D(renderContext.Buffers->GetWidth(), renderContext.Buffers->GetHeight(), outputFormat, tempFlags);
     auto lightBuffer = RenderTargetPool::Get(tempDesc);
+    RENDER_TARGET_POOL_SET_NAME(lightBuffer, "LightBuffer");
+
+#if GPU_ENABLE_DEVELOPMENT
+    if (renderContext.View.Mode == ViewMode::QuadOverdraw)
+    {
+        QuadOverdrawPass::Instance()->Render(renderContext, context, lightBuffer->View());
+        context->ResetRenderTarget();
+        context->SetRenderTarget(renderContext.Task->GetOutputView());
+        context->SetViewportAndScissors(renderContext.Task->GetOutputViewport());
+        context->Draw(lightBuffer);
+        RenderTargetPool::Release(lightBuffer);
+        return;
+    }
+#endif
+
+    // Global SDF rendering (can be used by materials later on)
+    if (setup.UseGlobalSDF)
+    {
+        GlobalSignDistanceFieldPass::BindingData bindingData;
+        GlobalSignDistanceFieldPass::Instance()->Render(renderContext, context, bindingData);
+    }
 
     // Fill GBuffer
-    GBufferPass::Instance()->Fill(renderContext, lightBuffer->View());
+    GBufferPass::Instance()->Fill(renderContext, lightBuffer);
 
-    // Check if debug emissive light
-    if (renderContext.View.Mode == ViewMode::Emissive || renderContext.View.Mode == ViewMode::LightmapUVsDensity)
+    // Debug drawing
+#if GPU_ENABLE_DEVELOPMENT
+    switch (renderContext.View.Mode)
     {
-        // Render reflections debug view
+    case ViewMode::MaterialComplexity:
+        GBufferPass::Instance()->DrawMaterialComplexity(renderContext, context, lightBuffer->View());
+        RenderTargetPool::Release(lightBuffer);
+        return;
+    case ViewMode::LightOverlap:
+        LightPass::Instance()->RenderDebug(renderContext, context, lightBuffer);
+        break;
+    case ViewMode::GlobalSDF:
+    case ViewMode::GlobalSDFOverdraw:
+        GlobalSignDistanceFieldPass::Instance()->RenderDebug(renderContext, context, lightBuffer);
+        break;
+    case ViewMode::GlobalSurfaceAtlas:
+        GlobalSurfaceAtlasPass::Instance()->RenderDebug(renderContext, context, lightBuffer);
+        break;
+    }
+    if (renderContext.View.Mode == ViewMode::Emissive ||
+        renderContext.View.Mode == ViewMode::VertexColors ||
+        renderContext.View.Mode == ViewMode::LightmapUVsDensity ||
+        renderContext.View.Mode == ViewMode::LightOverlap ||
+        renderContext.View.Mode == ViewMode::GlobalSurfaceAtlas ||
+        renderContext.View.Mode == ViewMode::GlobalSDF ||
+        renderContext.View.Mode == ViewMode::GlobalSDFOverdraw)
+#else
+    if (renderContext.View.Mode == ViewMode::Emissive)
+#endif
+    {
         context->ResetRenderTarget();
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
+        context->SetRenderTarget(renderContext.Task->GetOutputView());
+        context->SetViewportAndScissors(renderContext.Task->GetOutputViewport());
         context->Draw(lightBuffer->View());
         RenderTargetPool::Release(lightBuffer);
         return;
@@ -345,27 +687,30 @@ void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
     if (GBufferPass::IsDebugView(renderContext.View.Mode))
     {
         context->ResetRenderTarget();
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
+        context->SetRenderTarget(renderContext.Task->GetOutputView());
+        context->SetViewportAndScissors(renderContext.Task->GetOutputViewport());
         GBufferPass::Instance()->RenderDebug(renderContext);
         RenderTargetPool::Release(lightBuffer);
         return;
     }
 
     // Render lighting
-    LightPass::Instance()->RenderLight(renderContext, *lightBuffer);
+    renderContextBatch.GetMainContext() = renderContext; // Sync render context in batch with the current value
+    ShadowsPass::Instance()->RenderShadowMaps(renderContextBatch);
+    context->SetViewportAndScissors((float)tempDesc.Width, (float)tempDesc.Height);
+    LightPass::Instance()->RenderLights(renderContextBatch, *lightBuffer);
+    if (EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::GI))
+    {
+        switch (renderContext.List->Settings.GlobalIllumination.Mode)
+        {
+        case GlobalIlluminationMode::DDGI:
+            DynamicDiffuseGlobalIlluminationPass::Instance()->Render(renderContext, context, *lightBuffer);
+            break;
+        }
+    }
     if (renderContext.View.Mode == ViewMode::LightBuffer)
     {
-        auto colorGradingLUT = ColorGradingPass::Instance()->RenderLUT(renderContext);
-        GPUTexture* tempBuffer = renderContext.Buffers->RT2_FloatRGB;
-        EyeAdaptationPass::Instance()->Render(renderContext, lightBuffer);
-        PostProcessingPass::Instance()->Render(renderContext, lightBuffer, tempBuffer, colorGradingLUT);
-        RenderTargetPool::Release(colorGradingLUT);
-        RenderTargetPool::Release(lightBuffer);
-        context->ResetRenderTarget();
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
-        context->Draw(tempBuffer);
+        RenderLightBuffer(context, renderContext, lightBuffer, tempDesc);
         return;
     }
 
@@ -376,11 +721,13 @@ void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
     ReflectionsPass::Instance()->Render(renderContext, *lightBuffer);
     if (renderContext.View.Mode == ViewMode::Reflections)
     {
-        context->ResetRenderTarget();
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
-        context->Draw(lightBuffer);
-        RenderTargetPool::Release(lightBuffer);
+        renderContext.List->Settings.ToneMapping.Mode = ToneMappingMode::Neutral;
+        renderContext.List->Settings.Bloom.Enabled = false;
+        renderContext.List->Settings.LensFlares.Intensity = 0.0f;
+        renderContext.List->Settings.CameraArtifacts.GrainAmount = 0.0f;
+        renderContext.List->Settings.CameraArtifacts.ChromaticDistortion = 0.0f;
+        renderContext.List->Settings.CameraArtifacts.VignetteIntensity = 0.0f;
+        RenderLightBuffer(context, renderContext, lightBuffer, tempDesc);
         return;
     }
 
@@ -395,54 +742,134 @@ void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
         renderContext.List->AtmosphericFog->DrawFog(context, renderContext, *lightBuffer);
         context->ResetSR();
     }
-    if (renderContext.List->Fog)
+    if (renderContext.List->Fog.Renderer)
     {
         VolumetricFogPass::Instance()->Render(renderContext);
 
         PROFILE_GPU_CPU("Fog");
-        renderContext.List->Fog->DrawFog(context, renderContext, *lightBuffer);
+        renderContext.List->Fog.Renderer->DrawFog(context, renderContext, *lightBuffer);
         context->ResetSR();
     }
 
     // Run forward pass
-    auto forwardPassResult = renderContext.Buffers->RT1_FloatRGB;
-    ForwardPass::Instance()->Render(renderContext, lightBuffer, forwardPassResult);
+    auto frameBuffer = RenderTargetPool::Get(tempDesc);
+    RENDER_TARGET_POOL_SET_NAME(frameBuffer, "FrameBuffer");
+    ForwardPass::Instance()->Render(renderContext, lightBuffer, frameBuffer);
+
+    // Material and Custom PostFx
+    renderContext.List->RunMaterialPostFxPass(context, renderContext, MaterialPostFxLocation::AfterForwardPass, frameBuffer, lightBuffer);
+    renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::AfterForwardPass, frameBuffer, lightBuffer);
+
+#if GPU_ENABLE_DEVELOPMENT
+    // Debug drawing
+    if (renderContext.View.Mode == ViewMode::Wireframe)
+    {
+        // Compose wireframe on top of the scene
+        PROFILE_GPU_CPU_NAMED("Wireframe");
+#if COMPILE_WITH_PROFILER
+        auto stats = RenderStatsData::Counter;
+#endif
+        renderContext.View.Pass = DrawPass::Wireframe;
+        auto depthBuffer = renderContext.Buffers->GetReadOnlyDepthBuffer();
+        auto cb = GPUDevice::Instance->QuadShader->GetCB(3);
+        GPU_CB_STRUCT(WireframeData {
+            Float4 ColorNear;
+            Float4 ColorFar;
+            });
+        WireframeData data;
+        context->BindCB(3, cb);
+        context->SetRenderTarget(nullptr, *frameBuffer); // 1st pass without depth buffer
+        data.ColorNear = Float4(0.07f, 0.15f, 0.07f, 0.2f);
+        data.ColorFar = Float4(0.06f, 0.06f, 0.1f, 0.05f);
+        context->UpdateCB(cb, &data);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::GBuffer);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::GBufferNoDecals);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::Forward);
+        context->SetRenderTarget(depthBuffer.RTV, *frameBuffer); // 2nd pass with depth buffer (read-only)
+        data.ColorNear = Float4(0.2f, 0.1f, 0.15f, 1.0);
+        data.ColorFar = Float4(0.1f, 0.15f, 0.4f, 0.7f);
+        context->UpdateCB(cb, &data);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::GBuffer);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::GBufferNoDecals);
+        renderContext.List->ExecuteDrawCalls(renderContext, DrawCallsListType::Forward);
+#if COMPILE_WITH_PROFILER
+        // Cancel-out any draw stats from profiler (hidden draws)
+        RenderStatsData::Counter = stats;
+#endif
+    }
+#endif
 
     // Cleanup
     context->ResetRenderTarget();
     context->ResetSR();
     context->FlushState();
     RenderTargetPool::Release(lightBuffer);
-
-    // Check if skip post-processing
-    if (renderContext.View.Mode == ViewMode::NoPostFx || renderContext.View.Mode == ViewMode::Wireframe)
+    if (renderContext.View.Mode == ViewMode::NoPostFx)
     {
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
-        context->Draw(forwardPassResult);
+        // Skip post-processing
+        context->SetRenderTarget(renderContext.Task->GetOutputView());
+        context->SetViewportAndScissors(renderContext.Task->GetOutputViewport());
+        if (!Graphics::GammaColorSpace)
+            GBufferPass::Instance()->DrawLinearToSrgb(renderContext, frameBuffer);
+        else
+            context->Draw(frameBuffer);
+        RenderTargetPool::Release(frameBuffer);
         return;
     }
 
-    // Prepare buffers for post processing frame
-    GPUTexture* frameBuffer = renderContext.Buffers->RT1_FloatRGB;
-    GPUTexture* tempBuffer = renderContext.Buffers->RT2_FloatRGB;
-    if (forwardPassResult == tempBuffer)
-        Swap(frameBuffer, tempBuffer);
-
     // Material and Custom PostFx
+    auto tempBuffer = RenderTargetPool::Get(tempDesc);
+    RENDER_TARGET_POOL_SET_NAME(tempBuffer, "TempBuffer");
     renderContext.List->RunMaterialPostFxPass(context, renderContext, MaterialPostFxLocation::BeforePostProcessingPass, frameBuffer, tempBuffer);
     renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::BeforePostProcessingPass, frameBuffer, tempBuffer);
 
     // Temporal Anti-Aliasing (goes before post processing)
-    if (aaMode == AntialiasingMode::TemporalAntialiasing)
+    bool useUpscaling = setup.RenderScale < 1.0f;
+    const Viewport outputViewport = renderContext.Task->GetOutputViewport();
+    if (renderContext.List->Settings.AntiAliasing.Mode == AntialiasingMode::TemporalAntialiasing)
     {
-        TAA::Instance()->Render(renderContext, frameBuffer, tempBuffer->View());
+        if (useUpscaling && setup.UpscaleLocation == RenderingUpscaleLocation::DuringAntiAliasing)
+        {
+            // TAAU
+            useUpscaling = false;
+            RenderTargetPool::Release(tempBuffer);
+            tempDesc.Width = (int32)outputViewport.Width;
+            tempDesc.Height = (int32)outputViewport.Height;
+            tempBuffer = RenderTargetPool::Get(tempDesc);
+            context->ResetSR();
+            TAA::Instance()->Render(renderContext, frameBuffer, tempBuffer);
+            RenderTargetPool::Release(frameBuffer);
+            frameBuffer = RenderTargetPool::Get(tempDesc);
+        }
+        else
+        {
+            // TAA
+            TAA::Instance()->Render(renderContext, frameBuffer, tempBuffer);
+        }
         Swap(frameBuffer, tempBuffer);
     }
 
+    // Upscaling after scene rendering but before post-processing
+    if (useUpscaling && setup.UpscaleLocation == RenderingUpscaleLocation::BeforePostProcessing)
+    {
+        useUpscaling = false;
+        RenderTargetPool::Release(tempBuffer);
+        tempDesc.Width = (int32)outputViewport.Width;
+        tempDesc.Height = (int32)outputViewport.Height;
+        tempBuffer = RenderTargetPool::Get(tempDesc);
+        context->ResetSR();
+        if (renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::CustomUpscale))
+            renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::CustomUpscale, frameBuffer, tempBuffer);
+        else
+            MultiScaler::Instance()->Upscale(context, outputViewport, frameBuffer, tempBuffer->View());
+        if (tempBuffer->Width() == tempDesc.Width && tempBuffer->Height() == tempDesc.Height)
+            Swap(frameBuffer, tempBuffer);
+        RenderTargetPool::Release(tempBuffer);
+        tempBuffer = RenderTargetPool::Get(tempDesc);
+    }
+
     // Depth of Field
-    auto dofTemporary = DepthOfFieldPass::Instance()->Render(renderContext, frameBuffer);
-    frameBuffer = dofTemporary ? dofTemporary : frameBuffer;
+    DepthOfFieldPass::Instance()->Render(renderContext, frameBuffer, tempBuffer);
 
     // Motion Blur
     MotionBlurPass::Instance()->Render(renderContext, frameBuffer, tempBuffer);
@@ -450,11 +877,28 @@ void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
     // Color Grading LUT generation
     auto colorGradingLUT = ColorGradingPass::Instance()->RenderLUT(renderContext);
 
-    // Post processing
+    // Post-processing
     EyeAdaptationPass::Instance()->Render(renderContext, frameBuffer);
-    PostProcessingPass::Instance()->Render(renderContext, frameBuffer, tempBuffer, colorGradingLUT);
-    RenderTargetPool::Release(colorGradingLUT);
-    RenderTargetPool::Release(dofTemporary);
+    const AntialiasingMode aaMode = renderContext.List->Settings.AntiAliasing.Mode;
+    const bool hasAntiAliasingPass = aaMode == AntialiasingMode::FastApproximateAntialiasing ||
+                                     aaMode == AntialiasingMode::SubpixelMorphologicalAntialiasing ||
+                                     ContrastAdaptiveSharpeningPass::Instance()->CanRender(renderContext);
+    if (!useUpscaling &&
+        !hasAntiAliasingPass &&
+        !renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::AfterAntiAliasingPass, MaterialPostFxLocation::AfterAntiAliasingPass) &&
+        !renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::Default, MaterialPostFxLocation::AfterPostProcessingPass) &&
+        !renderContext.List->HasAnyPostFx(renderContext, MaterialPostFxLocation::AfterCustomPostEffects) &&
+        renderContext.View.Mode != ViewMode::MotionVectors
+        )
+    {
+        // PostFx -> Back Buffer
+        GPUTextureView* outputView = renderContext.Task->GetOutputView();
+        PostProcessingPass::Instance()->Render(renderContext, frameBuffer, outputView, outputViewport, colorGradingLUT);
+        RenderTargetPool::Release(tempBuffer);
+        RenderTargetPool::Release(frameBuffer);
+        return;
+    }
+    PostProcessingPass::Instance()->Render(renderContext, frameBuffer, tempBuffer->View(), Viewport(tempBuffer->Size()), colorGradingLUT);
     Swap(frameBuffer, tempBuffer);
 
     // Cleanup
@@ -472,46 +916,73 @@ void RenderInner(SceneRenderTask* task, RenderContext& renderContext)
     context->ResetSR();
     context->FlushState();
 
+#if GPU_ENABLE_DEVELOPMENT
     // Debug motion vectors
     if (renderContext.View.Mode == ViewMode::MotionVectors)
     {
-        context->ResetRenderTarget();
-        context->SetRenderTarget(task->GetOutputView());
-        context->SetViewportAndScissors(task->GetOutputViewport());
         MotionBlurPass::Instance()->RenderDebug(renderContext, frameBuffer->View());
+        RenderTargetPool::Release(tempBuffer);
+        RenderTargetPool::Release(frameBuffer);
         return;
     }
+#endif
 
     // Anti Aliasing
-    if (!renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::AfterAntiAliasingPass, MaterialPostFxLocation::AfterAntiAliasingPass) && Math::IsOne(task->RenderingPercentage))
+    GPUTextureView* outputView = renderContext.Task->GetOutputView();
+    if (!renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::AfterAntiAliasingPass, MaterialPostFxLocation::AfterAntiAliasingPass) && !useUpscaling)
     {
         // AA -> Back Buffer
-        RenderAntiAliasingPass(renderContext, frameBuffer, task->GetOutputView());
+        RenderAntiAliasingPass(renderContext, frameBuffer, outputView, outputViewport);
     }
     else
     {
         // AA -> PostFx
-        RenderAntiAliasingPass(renderContext, frameBuffer, *tempBuffer);
+        RenderAntiAliasingPass(renderContext, frameBuffer, *tempBuffer, Viewport(Float2(renderContext.View.ScreenSize)));
         context->ResetRenderTarget();
         Swap(frameBuffer, tempBuffer);
         renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::AfterAntiAliasingPass, frameBuffer, tempBuffer);
         renderContext.List->RunMaterialPostFxPass(context, renderContext, MaterialPostFxLocation::AfterAntiAliasingPass, frameBuffer, tempBuffer);
 
         // PostFx -> (up-scaling) -> Back Buffer
-        if (Math::IsOne(task->RenderingPercentage))
+        if (!useUpscaling)
         {
             PROFILE_GPU("Copy frame");
-            context->SetRenderTarget(task->GetOutputView());
-            context->SetViewportAndScissors(task->GetOutputViewport());
+            context->SetRenderTarget(outputView);
+            context->SetViewportAndScissors(outputViewport);
             context->Draw(frameBuffer);
         }
-        else if (renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::CustomUpscale, MaterialPostFxLocation::MAX))
+        else if (renderContext.List->HasAnyPostFx(renderContext, PostProcessEffectLocation::CustomUpscale))
         {
-            renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::CustomUpscale, frameBuffer, frameBuffer);
+            if (outputView->GetParent()->Is<GPUTexture>())
+            {
+                // Upscale directly to the output texture
+                auto outputTexture = (GPUTexture*)outputView->GetParent();
+                renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::CustomUpscale, frameBuffer, outputTexture);
+                if (frameBuffer == (GPUTexture*)outputView->GetParent())
+                    Swap(frameBuffer, outputTexture);
+            }
+            else
+            {
+                // Use temporary buffer for upscaled frame if GetOutputView is owned by GPUSwapChain
+                RenderTargetPool::Release(tempBuffer);
+                tempDesc.Width = (int32)outputViewport.Width;
+                tempDesc.Height = (int32)outputViewport.Height;
+                tempBuffer = RenderTargetPool::Get(tempDesc);
+                renderContext.List->RunCustomPostFxPass(context, renderContext, PostProcessEffectLocation::CustomUpscale, frameBuffer, tempBuffer);
+                {
+                    PROFILE_GPU("Copy frame");
+                    context->SetRenderTarget(outputView);
+                    context->SetViewportAndScissors(outputViewport);
+                    context->Draw(frameBuffer);
+                }
+            }
         }
         else
         {
-            MultiScaler::Instance()->Upscale(context, task->GetOutputViewport(), frameBuffer, task->GetOutputView());
+            MultiScaler::Instance()->Upscale(context, outputViewport, frameBuffer, outputView);
         }
     }
+
+    RenderTargetPool::Release(tempBuffer);
+    RenderTargetPool::Release(frameBuffer);
 }

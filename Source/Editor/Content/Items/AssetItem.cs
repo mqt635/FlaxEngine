@@ -1,8 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.IO;
-using System.Text;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -26,6 +24,11 @@ namespace FlaxEditor.Content
         public string TypeName { get; }
 
         /// <summary>
+        /// Returns true if asset is now loaded.
+        /// </summary>
+        public bool IsLoaded => FlaxEngine.Content.GetAsset(ID)?.IsLoaded ?? false;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="AssetItem"/> class.
         /// </summary>
         /// <param name="path">The asset path.</param>
@@ -38,14 +41,6 @@ namespace FlaxEditor.Content
             ID = id;
         }
 
-        /// <inheritdoc />
-        protected override void UpdateTooltipText()
-        {
-            var sb = new StringBuilder();
-            OnBuildTooltipText(sb);
-            TooltipText = sb.ToString();
-        }
-
         private sealed class TooltipDoubleClickHook : Control
         {
             public AssetItem Item;
@@ -56,7 +51,7 @@ namespace FlaxEditor.Content
                 Offsets = Margin.Zero;
             }
 
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
                 return Item.OnMouseDoubleClick(Item.PointFromScreen(PointToScreen(location)), button);
             }
@@ -74,19 +69,45 @@ namespace FlaxEditor.Content
             hook.Item = this;
         }
 
-        /// <summary>
-        /// Called when building tooltip text.
-        /// </summary>
-        /// <param name="sb">The String Builder.</param>
-        protected virtual void OnBuildTooltipText(StringBuilder sb)
-        {
-            sb.Append("Type: ").Append(TypeName).AppendLine();
-            sb.Append("Size: ").Append(Utilities.Utils.FormatBytesCount((int)new FileInfo(Path).Length)).AppendLine();
-            sb.Append("Path: ").Append(Path).AppendLine();
-        }
-
         /// <inheritdoc />
         public override ContentItemType ItemType => ContentItemType.Asset;
+
+        /// <inheritdoc />
+        public override string TypeDescription
+        {
+            get
+            {
+                // Translate asset type name
+                var typeName = TypeName;
+                string[] typeNamespaces = typeName.Split('.');
+                if (typeNamespaces.Length != 0 && typeNamespaces[typeNamespaces.Length - 1].Length != 0)
+                {
+                    typeName = Utilities.Utils.GetPropertyNameUI(typeNamespaces[typeNamespaces.Length - 1]);
+                }
+                return typeName;
+            }
+        }
+
+        /// <summary>
+        /// Loads the asset.
+        /// </summary>
+        /// <returns>The asset object.</returns>
+        public Asset LoadAsync()
+        {
+            return FlaxEngine.Content.LoadAsync<Asset>(ID);
+        }
+
+        /// <summary>
+        /// Reloads the asset (if it's loaded or failed to load).
+        /// </summary>
+        public void Reload()
+        {
+            var asset = FlaxEngine.Content.GetAsset(ID);
+            if (asset != null && (asset.IsLoaded || asset.LastLoadFailed))
+            {
+                asset.Reload();
+            }
+        }
 
         /// <summary>
         /// Determines whether asset is of the specified type (included inheritance checks).
@@ -109,7 +130,7 @@ namespace FlaxEditor.Content
         }
 
         /// <summary>
-        /// Called when user dags this item into editor viewport or scene tree node.
+        /// Called when user drags this item into editor viewport or scene tree node.
         /// </summary>
         /// <param name="context">The editor context (eg. editor viewport or scene tree node).</param>
         /// <returns>True if item can be dropped in, otherwise false.</returns>

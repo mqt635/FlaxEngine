@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Editor/Cooker/GameCooker.h"
+#include "Editor/Cooker/PlatformTools.h"
 #include "Engine/Core/Types/Pair.h"
 #include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Collections/Dictionary.h"
@@ -56,7 +57,7 @@ public:
     /// <summary>
     /// Assets cooking cache data (incremental building feature).
     /// </summary>
-    struct FLAXENGINE_API CacheData
+    struct FLAXENGINE_API CacheData : public IBuildCache
     {
         /// <summary>
         /// The cache header file path.
@@ -75,6 +76,7 @@ public:
         {
             struct
             {
+                bool SupportDX12;
                 bool SupportDX11;
                 bool SupportDX10;
                 bool SupportVulkan;
@@ -95,7 +97,12 @@ public:
             {
                 bool ShadersNoOptimize;
                 bool ShadersGenerateDebugData;
+                bool ShadersReverseZ;
+                bool ShadersDevelopment;
                 Guid StreamingSettingsAssetId;
+                int32 ShadersVersion;
+                int32 MaterialGraphVersion;
+                int32 ParticleGraphVersion;
             } Global;
         } Settings;
 
@@ -133,16 +140,6 @@ public:
         CacheEntry& CreateEntry(const Asset* asset, String& cachedFilePath);
 
         /// <summary>
-        /// Removes all cached entries for assets that contain a shader. This forces rebuild for them.
-        /// </summary>
-        void InvalidateShaders();
-
-        /// <summary>
-        /// Removes all cached entries for assets that contain a texture. This forces rebuild for them.
-        /// </summary>
-        void InvalidateTextures();
-
-        /// <summary>
         /// Loads the cache for the given cooking data.
         /// </summary>
         /// <param name="data">The data.</param>
@@ -151,7 +148,11 @@ public:
         /// <summary>
         /// Saves this cache (header file).
         /// </summary>
-        void Save();
+        /// <param name="data">The data.</param>
+        void Save(CookingData& data);
+
+        using IBuildCache::InvalidateCachePerType;
+        void InvalidateCachePerType(const StringView& typeName) override;
     };
 
     struct FLAXENGINE_API AssetCookData

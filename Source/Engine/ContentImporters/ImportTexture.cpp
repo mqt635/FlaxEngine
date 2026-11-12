@@ -1,16 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ImportTexture.h"
-
 #if COMPILE_WITH_ASSETS_IMPORTER
-
 #include "Engine/Core/Log.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Serialization/JsonWriters.h"
 #include "Engine/Serialization/MemoryWriteStream.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Graphics/Textures/TextureData.h"
-#include "Engine/Graphics/Textures/TextureUtils.h"
 #include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Content/Storage/ContentStorageManager.h"
 #include "Engine/ContentImporters/ImportIES.h"
@@ -22,17 +19,14 @@
 
 bool IsSpriteAtlasOrTexture(const String& typeName)
 {
-    return typeName == Texture::TypeName || typeName == SpriteAtlas::TypeName;
+    return typeName == Texture::TypeName || typeName == CubeTexture::TypeName || typeName == SpriteAtlas::TypeName;
 }
 
 bool ImportTexture::TryGetImportOptions(const StringView& path, Options& options)
 {
 #if IMPORT_TEXTURE_CACHE_OPTIONS
-
-    // Check if target asset texture exists
     if (FileSystem::FileExists(path))
     {
-        // Try to load asset file and asset info (also check for Sprite Atlas or Texture assets)
         auto tmpFile = ContentStorageManager::GetStorage(path);
         AssetInitData data;
         if (tmpFile
@@ -48,19 +42,18 @@ bool ImportTexture::TryGetImportOptions(const StringView& path, Options& options
                 if (chunk15 != nullptr && !tmpFile->LoadAssetChunk(chunk15) && chunk15->Data.IsValid())
                 {
                     MemoryReadStream stream(chunk15->Data.Get(), chunk15->Data.Length());
-
-                    // Load tiles data
                     int32 tilesVersion, tilesCount;
-                    stream.ReadInt32(&tilesVersion);
+                    stream.Read(tilesVersion);
                     if (tilesVersion == 1)
                     {
-                        stream.ReadInt32(&tilesCount);
+                        options.Sprites.Clear();
+                        stream.Read(tilesCount);
                         for (int32 i = 0; i < tilesCount; i++)
                         {
                             // Load sprite
                             Sprite t;
-                            stream.Read(&t.Area);;
-                            stream.ReadString(&t.Name, 49);
+                            stream.Read(t.Area);
+                            stream.Read(t.Name, 49);
                             options.Sprites.Add(t);
                         }
                     }
@@ -72,15 +65,12 @@ bool ImportTexture::TryGetImportOptions(const StringView& path, Options& options
             metadata.Parse((const char*)data.Metadata.Get(), data.Metadata.Length());
             if (metadata.HasParseError() == false)
             {
-                // Success
                 options.Deserialize(metadata, nullptr);
                 return true;
             }
         }
     }
-
 #endif
-
     return false;
 }
 
@@ -111,7 +101,7 @@ void ImportTexture::InitOptions(CreateAssetContext& context, Options& options)
 
         // Add default tile if has no sprites
         if (options.Sprites.IsEmpty())
-            options.Sprites.Add({ Rectangle(Vector2::Zero, Vector2::One), TEXT("Default") });
+            options.Sprites.Add({ Rectangle(Float2::Zero, Float2::One), TEXT("Default") });
     }
     options.MaxSize = Math::Min(options.MaxSize, GPU_MAX_TEXTURE_SIZE);
 }
@@ -169,6 +159,8 @@ CreateAssetResult ImportTexture::Create(CreateAssetContext& context, const Textu
     textureHeader.IsSRGB = PixelFormatExtensions::IsSRGB(textureHeader.Format);
     textureHeader.IsCubeMap = isCubeMap;
     textureHeader.TextureGroup = options.TextureGroup;
+    if (textureHeader.Format == PixelFormat::Basis)
+        textureHeader.IsSRGB = options.sRGB; // Basis format can be either sRGB or linear, so use option to decide that
     ASSERT(textureHeader.MipLevels <= GPU_MAX_TEXTURE_MIP_LEVELS);
 
     // Save header
@@ -178,62 +170,26 @@ CreateAssetResult ImportTexture::Create(CreateAssetContext& context, const Textu
     if (options.IsAtlas)
     {
         MemoryWriteStream stream(256);
-        stream.WriteInt32(1); // Version
-        stream.WriteInt32(options.Sprites.Count()); // Amount of tiles
+        stream.Write(1); // Version
+        stream.Write(options.Sprites.Count()); // Amount of tiles
         for (int32 i = 0; i < options.Sprites.Count(); i++)
         {
             auto& sprite = options.Sprites[i];
-            stream.Write(&sprite.Area);
-            stream.WriteString(sprite.Name, 49);
+            stream.Write(sprite.Area);
+            stream.Write(sprite.Name, 49);
         }
         if (context.AllocateChunk(15))
             return CreateAssetResult::CannotAllocateChunk;
-        context.Data.Header.Chunks[15]->Data.Copy(stream.GetHandle(), stream.GetPosition());
+        context.Data.Header.Chunks[15]->Data.Copy(ToSpan(stream));
     }
 
     // Save mip maps
-    if (!isCubeMap)
+    for (int32 mipIndex = 0; mipIndex < textureHeader.MipLevels; mipIndex++)
     {
-        for (int32 mipIndex = 0; mipIndex < textureHeader.MipLevels; mipIndex++)
-        {
-            auto mipData = textureData.GetData(0, mipIndex);
-
-            if (context.AllocateChunk(mipIndex))
-                return CreateAssetResult::CannotAllocateChunk;
-            context.Data.Header.Chunks[mipIndex]->Data.Copy(mipData->Data.Get(), static_cast<uint32>(mipData->DepthPitch));
-        }
-    }
-    else
-    {
-        // Allocate memory for a temporary buffer
-        const uint32 imageSize = textureData.GetData(0, 0)->DepthPitch * 6;
-        MemoryWriteStream imageData(imageSize);
-
-        // Copy cube sides for every mip into separate chunks
-        for (int32 mipLevelIndex = 0; mipLevelIndex < textureHeader.MipLevels; mipLevelIndex++)
-        {
-            // Write array slices to the stream
-            imageData.SetPosition(0);
-            for (int32 cubeFaceIndex = 0; cubeFaceIndex < 6; cubeFaceIndex++)
-            {
-                // Get image
-                const auto image = textureData.GetData(cubeFaceIndex, mipLevelIndex);
-                if (image == nullptr)
-                {
-                    LOG(Warning, "Cannot create cube texture '{0}'. Missing image slice.", context.InputPath);
-                    return CreateAssetResult::Error;
-                }
-                ASSERT(image->DepthPitch < MAX_int32);
-
-                // Copy data
-                imageData.WriteBytes(image->Data.Get(), image->Data.Length());
-            }
-
-            // Copy mip
-            if (context.AllocateChunk(mipLevelIndex))
-                return CreateAssetResult::CannotAllocateChunk;
-            context.Data.Header.Chunks[mipLevelIndex]->Data.Copy(imageData.GetHandle(), imageData.GetPosition());
-        }
+        if (context.AllocateChunk(mipIndex))
+            return CreateAssetResult::CannotAllocateChunk;
+        if (TextureTool::WriteTextureData(context.Data.Header.Chunks[mipIndex]->Data, textureData, mipIndex))
+            return CreateAssetResult::Error;
     }
 
 #if IMPORT_TEXTURE_CACHE_OPTIONS
@@ -317,17 +273,17 @@ CreateAssetResult ImportTexture::Create(CreateAssetContext& context, const Textu
     if (options.IsAtlas)
     {
         MemoryWriteStream stream(256);
-        stream.WriteInt32(1); // Version
-        stream.WriteInt32(options.Sprites.Count()); // Amount of tiles
+        stream.Write(1); // Version
+        stream.Write(options.Sprites.Count()); // Amount of tiles
         for (int32 i = 0; i < options.Sprites.Count(); i++)
         {
             auto& sprite = options.Sprites[i];
-            stream.Write(&sprite.Area);
-            stream.WriteString(sprite.Name, 49);
+            stream.Write(sprite.Area);
+            stream.Write(sprite.Name, 49);
         }
         if (context.AllocateChunk(15))
             return CreateAssetResult::CannotAllocateChunk;
-        context.Data.Header.Chunks[15]->Data.Copy(stream.GetHandle(), stream.GetPosition());
+        context.Data.Header.Chunks[15]->Data.Copy(ToSpan(stream));
     }
 
     // Save mip maps

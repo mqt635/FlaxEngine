@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,18 +14,15 @@ class GPUTask;
 class GPUTasksExecutor : public Object
 {
 protected:
-
     Array<GPUTasksContext*> _contextList;
 
 public:
-
     /// <summary>
     /// Destructor
     /// </summary>
     virtual ~GPUTasksExecutor();
 
 public:
-
     /// <summary>
     /// Sync point event called on begin of the frame
     /// </summary>
@@ -37,17 +34,14 @@ public:
     virtual void FrameEnd() = 0;
 
 public:
-
     /// <summary>
     /// Gets the context list.
     /// </summary>
-    /// <returns>GPU contexts</returns>
     FORCE_INLINE const Array<GPUTasksContext*>* GetContextList() const
     {
         return &_contextList;
     }
 
 protected:
-
     GPUTasksContext* createContext();
 };

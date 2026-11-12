@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,15 +8,13 @@
 /// Universal representation of a contiguous region of arbitrary memory.
 /// </summary>
 template<typename T>
-class Span
+API_CLASS(InBuild) class Span
 {
 protected:
-
     T* _data;
     int32 _length;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Span"/> class.
     /// </summary>
@@ -38,11 +36,9 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Returns true if data is valid.
     /// </summary>
-    /// <returns>True if is valid, otherwise false.</returns>
     FORCE_INLINE bool IsValid() const
     {
         return _data != nullptr;
@@ -51,7 +47,6 @@ public:
     /// <summary>
     /// Returns true if data is invalid.
     /// </summary>
-    /// <returns>True if is invalid, otherwise false.</returns>
     FORCE_INLINE bool IsInvalid() const
     {
         return _data == nullptr;
@@ -60,7 +55,6 @@ public:
     /// <summary>
     /// Gets length of the data.
     /// </summary>
-    /// <returns>The amount of elements.</returns>
     FORCE_INLINE int32 Length() const
     {
         return _length;
@@ -69,7 +63,6 @@ public:
     /// <summary>
     /// Gets the pointer to the data.
     /// </summary>
-    /// <returns>The data.</returns>
     FORCE_INLINE T* Get()
     {
         return _data;
@@ -78,7 +71,6 @@ public:
     /// <summary>
     /// Gets the pointer to the data.
     /// </summary>
-    /// <returns>The data.</returns>
     FORCE_INLINE const T* Get() const
     {
         return _data;
@@ -87,7 +79,6 @@ public:
     /// <summary>
     /// Gets the pointer to the data.
     /// </summary>
-    /// <returns>The data.</returns>
     template<typename U>
     FORCE_INLINE U* Get() const
     {
@@ -95,7 +86,30 @@ public:
     }
 
 public:
+    /// <summary>
+    /// Constructs a slice out of the current span that begins at a specified index.
+    /// </summary>
+    /// <param name="start">The zero-based index at which to begin the slice.</param>
+    /// <returns>A span that consists of all elements of the current span from <paramref name="start" /> to the end of the span.</returns>
+    Span<T> Slice(int32 start)
+    {
+        ASSERT(start <= _length);
+        return Span(_data + start, _length - start);
+    }
 
+    /// <summary>
+    /// Constructs a slice out of the current span starting at a specified index for a specified length.
+    /// </summary>
+    /// <param name="start">The zero-based index at which to begin this slice.</param>
+    /// <param name="length">The length for the result slice.</param>
+    /// <returns>A span that consists of <paramref name="length" /> elements from the current span starting at <paramref name="start" />.</returns>
+    Span<T> Slice(int32 start, int32 length)
+    {
+        ASSERT(start + length <= _length);
+        return Span(_data + start, length);
+    }
+
+public:
     /// <summary>
     /// Gets or sets the element by index
     /// </summary>
@@ -117,10 +131,47 @@ public:
         ASSERT(index >= 0 && index < _length);
         return _data[index];
     }
+
+    FORCE_INLINE T* begin()
+    {
+        return _data;
+    }
+
+    FORCE_INLINE T* end()
+    {
+        return _data + _length;
+    }
+
+    FORCE_INLINE const T* begin() const
+    {
+        return _data;
+    }
+
+    FORCE_INLINE const T* end() const
+    {
+        return _data + _length;
+    }
 };
 
 template<typename T>
 inline Span<T> ToSpan(const T* ptr, int32 length)
 {
     return Span<T>(ptr, length);
+}
+
+template<typename T, typename U = T, typename AllocationType = HeapAllocation>
+inline Span<U> ToSpan(const Array<T, AllocationType>& data)
+{
+    return Span<U>((U*)data.Get(), data.Count());
+}
+
+template<typename T, typename ComparableType = T>
+inline bool SpanContains(const Span<T> span, const ComparableType& value)
+{
+    for (int32 i = 0; i < span.Length(); i++)
+    {
+        if (span.Get()[i] == value)
+            return true;
+    }
+    return false;
 }

@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -42,6 +43,38 @@ namespace FlaxEditor.Windows.Profiler
             private Color _color;
             private string _name;
             private float _nameLength = -1;
+            private bool _leftClick;
+            private bool _isRightDown;
+
+            /// <summary>
+            /// The double click event.
+            /// </summary>
+            public Action DoubleClick;
+
+            /// <summary>
+            /// The left mouse button click event.
+            /// </summary>
+            public Action LeftClick;
+
+            /// <summary>
+            /// The right mouse button click event.
+            /// </summary>
+            public Action RightClick;
+
+            /// <summary>
+            /// The double click event.
+            /// </summary>
+            public Action<Event> EventDoubleClick;
+
+            /// <summary>
+            /// The left mouse button click event.
+            /// </summary>
+            public Action<Event> EventLeftClick;
+
+            /// <summary>
+            /// The right mouse button click event.
+            /// </summary>
+            public Action<Event> EventRightClick;
 
             /// <summary>
             /// The default height of the event.
@@ -76,7 +109,7 @@ namespace FlaxEditor.Windows.Profiler
                 base.Draw();
 
                 var style = Style.Current;
-                var bounds = new Rectangle(Vector2.Zero, Size);
+                var bounds = new Rectangle(Float2.Zero, Size);
                 Color color = _color;
                 if (IsMouseOver)
                     color *= 1.1f;
@@ -90,10 +123,72 @@ namespace FlaxEditor.Windows.Profiler
                 if (_nameLength < bounds.Width + 4)
                 {
                     Render2D.PushClip(bounds);
-                    Render2D.DrawText(style.FontMedium, _name, bounds, Color.White, TextAlignment.Center, TextAlignment.Center);
+                    Render2D.DrawText(style.FontMedium, _name, bounds, Style.Current.Foreground, TextAlignment.Center, TextAlignment.Center);
                     Render2D.PopClip();
                 }
             }
+
+            /// <inheritdoc />
+            public override bool OnMouseDown(Float2 location, MouseButton button)
+            {
+                if (InteractBounds.Contains(ref location))
+                {
+                    if (button == MouseButton.Left)
+                        _leftClick = true;
+                    else if (button == MouseButton.Right)
+                        _isRightDown = true;
+                    Focus();
+                }
+
+                return base.OnMouseDown(location, button);
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseUp(Float2 location, MouseButton button)
+            {
+                if (button == MouseButton.Left && _leftClick && InteractBounds.Contains(ref location))
+                {
+                    _leftClick = false;
+                    LeftClick?.Invoke();
+                    EventLeftClick?.Invoke(this);
+                    return true;
+                }
+                if (button == MouseButton.Right && _isRightDown && InteractBounds.Contains(ref location))
+                {
+                    _isRightDown = false;
+                    RightClick?.Invoke();
+                    EventRightClick?.Invoke(this);
+                    return true;
+                }
+
+                return base.OnMouseUp(location, button);
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
+            {
+                if (button == MouseButton.Left && InteractBounds.Contains(ref location))
+                {
+                    _leftClick = false;
+                    _isRightDown = false;
+                    DoubleClick?.Invoke();
+                    EventDoubleClick?.Invoke(this);
+                    return true;
+                }
+
+                return base.OnMouseDoubleClick(location, button);
+            }
+
+            /// <inheritdoc />
+            public override void OnMouseLeave()
+            {
+                _leftClick = false;
+                _isRightDown = false;
+
+                base.OnMouseLeave();
+            }
+
+            private Rectangle InteractBounds => new Rectangle(Float2.Zero, Mathf.Max(Width, 4), Height);
         }
 
         /// <summary>
@@ -113,9 +208,9 @@ namespace FlaxEditor.Windows.Profiler
                 base.Draw();
 
                 var style = Style.Current;
-                var rect = new Rectangle(Vector2.Zero, Size);
+                var rect = new Rectangle(Float2.Zero, Size);
                 Render2D.PushClip(rect);
-                Render2D.DrawText(style.FontMedium, Name, rect, Color.White, TextAlignment.Center, TextAlignment.Center, TextWrapping.WrapChars);
+                Render2D.DrawText(style.FontMedium, Name, rect, Style.Current.Foreground, TextAlignment.Center, TextAlignment.Center, TextWrapping.WrapChars);
                 Render2D.PopClip();
             }
         }

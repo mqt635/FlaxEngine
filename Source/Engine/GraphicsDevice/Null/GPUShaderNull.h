@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,12 +14,7 @@ class GPUShaderNull : public GPUShader
 protected:
 
     // [GPUShader]
-    GPUShaderProgram* CreateGPUShaderProgram(ShaderStage type, const GPUShaderProgramInitializer& initializer, byte* cacheBytes, uint32 cacheSize, MemoryReadStream& stream) override
-    {
-        return nullptr;
-    }
-
-    GPUConstantBuffer* CreateCB(const String& name, uint32 size, MemoryReadStream& stream) override
+    GPUShaderProgram* CreateGPUShaderProgram(ShaderStage type, const GPUShaderProgramInitializer& initializer, Span<byte> bytecode, MemoryReadStream& stream) override
     {
         return nullptr;
     }

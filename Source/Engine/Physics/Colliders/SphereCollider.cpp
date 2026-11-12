@@ -1,9 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SphereCollider.h"
-#include "Engine/Serialization/Serialization.h"
-#include "Engine/Physics/Utilities.h"
-#include <PxShape.h>
 
 SphereCollider::SphereCollider(const SpawnParams& params)
     : Collider(params)
@@ -13,7 +10,7 @@ SphereCollider::SphereCollider(const SpawnParams& params)
 
 void SphereCollider::SetRadius(const float value)
 {
-    if (Math::NearEqual(value, _radius))
+    if (value == _radius)
         return;
 
     _radius = value;
@@ -29,15 +26,30 @@ void SphereCollider::SetRadius(const float value)
 
 void SphereCollider::DrawPhysicsDebug(RenderView& view)
 {
+    const BoundingSphere sphere(_sphere.Center - view.Origin, Math::Abs(_sphere.Radius));
+    if (!view.CullingFrustum.Intersects(sphere))
+        return;
     if (view.Mode == ViewMode::PhysicsColliders && !GetIsTrigger())
-        DebugDraw::DrawSphere(_sphere, _staticActor ? Color::CornflowerBlue : Color::Orchid, 0, true);
+        DEBUG_DRAW_SPHERE(_sphere, _staticActor ? Color::CornflowerBlue : Color::Orchid, 0, true);
     else
-        DebugDraw::DrawWireSphere(_sphere, Color::GreenYellow * 0.8f, 0, true);
+        DEBUG_DRAW_WIRE_SPHERE(_sphere, Color::GreenYellow * 0.8f, 0, true);
+}
+
+void SphereCollider::OnDebugDrawSelf()
+{
+    DEBUG_DRAW_WIRE_SPHERE(_sphere, Color::GreenYellow, 0, false);
 }
 
 void SphereCollider::OnDebugDrawSelected()
 {
-    DEBUG_DRAW_WIRE_SPHERE(_sphere, Color::GreenYellow, 0, false);
+    OnDebugDrawSelf();
+    DEBUG_DRAW_SPHERE(_sphere, Color::GreenYellow.AlphaMultiplied(0.1f), 0, true);
+    if (_contactOffset > 0)
+    {
+        BoundingSphere contactBounds = _sphere;
+        contactBounds.Radius += _contactOffset;
+        DEBUG_DRAW_WIRE_SPHERE(contactBounds, Color::Blue.AlphaMultiplied(0.2f), 0, false);
+    }
 
     // Base
     Collider::OnDebugDrawSelected();
@@ -45,27 +57,9 @@ void SphereCollider::OnDebugDrawSelected()
 
 #endif
 
-bool SphereCollider::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool SphereCollider::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return _sphere.Intersects(ray, distance, normal);
-}
-
-void SphereCollider::Serialize(SerializeStream& stream, const void* otherObj)
-{
-    // Base
-    Collider::Serialize(stream, otherObj);
-
-    SERIALIZE_GET_OTHER_OBJ(SphereCollider);
-
-    SERIALIZE_MEMBER(Radius, _radius);
-}
-
-void SphereCollider::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
-{
-    // Base
-    Collider::Deserialize(stream, modifier);
-
-    DESERIALIZE_MEMBER(Radius, _radius);
 }
 
 void SphereCollider::UpdateBounds()
@@ -76,11 +70,9 @@ void SphereCollider::UpdateBounds()
     _sphere.GetBoundingBox(_box);
 }
 
-void SphereCollider::GetGeometry(PxGeometryHolder& geometry)
+void SphereCollider::GetGeometry(CollisionShape& collision)
 {
-    const float scaling = _cachedScale.GetAbsolute().MaxValue();
-    const float radius = Math::Abs(_radius) * scaling;
+    const float radius = Math::Abs(_radius) * _cachedScale;
     const float minSize = 0.001f;
-    const PxSphereGeometry sphere(Math::Max(radius, minSize));
-    geometry.storeAny(sphere);
+    collision.SetSphere(Math::Max(radius, minSize));
 }

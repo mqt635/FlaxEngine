@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SceneCSGData.h"
 #include "Engine/Core/Log.h"
@@ -44,12 +44,11 @@ bool SceneCSGData::HasData() const
     return Model && Data;
 }
 
-bool SceneCSGData::SurfaceData::Intersects(const Ray& ray, float& distance, Vector3& normal)
+bool SceneCSGData::SurfaceData::Intersects(const Ray& ray, Real& distance, Vector3& normal)
 {
     bool result = false;
-    float minDistance = MAX_float;
+    Real minDistance = MAX_Real;
     Vector3 minDistanceNormal = Vector3::Up;
-
     for (int32 i = 0; i < Triangles.Count(); i++)
     {
         auto& e = Triangles[i];
@@ -60,7 +59,6 @@ bool SceneCSGData::SurfaceData::Intersects(const Ray& ray, float& distance, Vect
             result = true;
         }
     }
-
     distance = minDistance;
     normal = minDistanceNormal;
     return result;
@@ -90,12 +88,12 @@ bool SceneCSGData::TryGetSurfaceData(const Guid& brushId, int32 brushSurfaceInde
                 // Invalid data
                 return false;
             }
-            DataBrushLocations.EnsureCapacity((int32)(brushesCount * 4.0f));
+            DataBrushLocations.EnsureCapacity(brushesCount);
             for (int32 i = 0; i < brushesCount; i++)
             {
                 Guid id;
                 int32 pos;
-                stream.Read(&id);
+                stream.Read(id);
                 stream.ReadInt32(&pos);
                 DataBrushLocations.Add(id, pos);
             }
@@ -128,7 +126,7 @@ bool SceneCSGData::TryGetSurfaceData(const Guid& brushId, int32 brushSurfaceInde
             // Invalid data
             return false;
         }
-        stream.Read<Triangle>(trianglesCount);
+        stream.Move(trianglesCount * sizeof(Float3) * 3);
     }
 
     // Read surface data
@@ -139,7 +137,11 @@ bool SceneCSGData::TryGetSurfaceData(const Guid& brushId, int32 brushSurfaceInde
         return false;
     }
     outData.Triangles.Clear();
-    outData.Triangles.Add(stream.Read<Triangle>(trianglesCount), trianglesCount);
+    outData.Triangles.Resize(trianglesCount);
+    Float3* src = stream.Move<Float3>(trianglesCount * 3);
+    Vector3* dst = (Vector3*)outData.Triangles.Get();
+    for (int32 i = 0; i < trianglesCount * 3; i++)
+        *dst++ = *src++;
     return true;
 }
 

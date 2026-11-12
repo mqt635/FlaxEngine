@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 
@@ -11,6 +11,8 @@ namespace FlaxEditor.Progress.Handlers
     public sealed class NavMeshBuildingProgress : ProgressHandler
     {
         private bool _isActive;
+
+        internal bool DirtyScenesOnEnd;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NavMeshBuildingProgress"/> class.
@@ -34,6 +36,11 @@ namespace FlaxEditor.Progress.Handlers
                 }
                 else
                 {
+                    if (DirtyScenesOnEnd)
+                    {
+                        DirtyScenesOnEnd = false;
+                        Editor.Instance.Scene.MarkAllScenesEdited();
+                    }
                     OnEnd();
                 }
             }

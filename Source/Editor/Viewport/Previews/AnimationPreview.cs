@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.Input;
 using FlaxEngine;
@@ -13,7 +13,22 @@ namespace FlaxEditor.Viewport.Previews
     /// <seealso cref="AnimatedModelPreview" />
     public class AnimationPreview : AnimatedModelPreview
     {
+        private bool _baseModelMissing;
         private ViewportWidgetButton _playPauseButton;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether enable root motion.
+        /// </summary>
+        public bool RootMotion
+        {
+            get => !_snapToOrigin;
+            set
+            {
+                if (!_snapToOrigin == value)
+                    return;
+                _snapToOrigin = !value;
+            }
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AnimationPreview"/> class.
@@ -24,11 +39,12 @@ namespace FlaxEditor.Viewport.Previews
         {
             PlayAnimation = true;
             PlayAnimationChanged += OnPlayAnimationChanged;
+            _snapToOrigin = false;
 
             // Playback Speed
             {
                 var playbackSpeed = ViewWidgetButtonMenu.AddButton("Playback Speed");
-                var playbackSpeedValue = new FloatValueBox(-1, 90, 2, 70.0f, 0.0f, 10000.0f, 0.001f)
+                var playbackSpeedValue = new FloatValueBox(-1, 90, 2, 70.0f, -10000.0f, 10000.0f, 0.001f)
                 {
                     Parent = playbackSpeed
                 };
@@ -46,6 +62,17 @@ namespace FlaxEditor.Viewport.Previews
                 };
                 _playPauseButton.Clicked += button => PlayAnimation = !PlayAnimation;
                 playPauseWidget.Parent = this;
+            }
+
+            // Play Root Motion
+            {
+                var button = ViewWidgetButtonMenu.AddButton("Root Motion");
+                var buttonValue = new CheckBox(90, 2, !_snapToOrigin)
+                {
+                    Parent = button
+                };
+                buttonValue.StateChanged += checkbox => RootMotion = !RootMotion;
+                ViewWidgetButtonMenu.VisibleChanged += control => buttonValue.Checked = RootMotion;
             }
 
             // Enable shadows
@@ -67,14 +94,23 @@ namespace FlaxEditor.Viewport.Previews
 
             var style = Style.Current;
             var skinnedModel = SkinnedModel;
+            var baseModelMissing = false;
             if (skinnedModel == null)
             {
-                Render2D.DrawText(style.FontLarge, "Missing Base Model", new Rectangle(Vector2.Zero, Size), Color.Red, TextAlignment.Center, TextAlignment.Center, TextWrapping.WrapWords);
+                Render2D.DrawText(style.FontLarge, "Missing Base Model", new Rectangle(Float2.Zero, Size), style.ProgressError, TextAlignment.Center, TextAlignment.Center, TextWrapping.WrapWords);
+                baseModelMissing = true;
             }
             else if (!skinnedModel.IsLoaded)
             {
-                Render2D.DrawText(style.FontLarge, "Loading...", new Rectangle(Vector2.Zero, Size), style.ForegroundDisabled, TextAlignment.Center, TextAlignment.Center);
+                Render2D.DrawText(style.FontLarge, skinnedModel.LastLoadFailed ? "Failed to load" : "Loading...", new Rectangle(Float2.Zero, Size), style.ForegroundDisabled, TextAlignment.Center, TextAlignment.Center);
+                baseModelMissing = true;
             }
+            if (_baseModelMissing && !baseModelMissing)
+            {
+                // Focus model when base model appears
+                ResetCamera();
+            }
+            _baseModelMissing = baseModelMissing;
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -94,14 +94,21 @@ namespace FlaxEditor
             {
             case BuildPlatform.Windows32:
             case BuildPlatform.Windows64: return PlatformType.Windows;
+#pragma warning disable CS0612
             case BuildPlatform.UWPx86:
             case BuildPlatform.UWPx64: return PlatformType.UWP;
+#pragma warning restore CS0612
             case BuildPlatform.XboxOne: return PlatformType.XboxOne;
             case BuildPlatform.LinuxX64: return PlatformType.Linux;
             case BuildPlatform.PS4: return PlatformType.PS4;
+            case BuildPlatform.PS5: return PlatformType.PS5;
             case BuildPlatform.AndroidARM64: return PlatformType.Android;
             case BuildPlatform.XboxScarlett: return PlatformType.XboxScarlett;
             case BuildPlatform.Switch: return PlatformType.Switch;
+            case BuildPlatform.MacOSARM64:
+            case BuildPlatform.MacOSx64: return PlatformType.Mac;
+            case BuildPlatform.iOSARM64: return PlatformType.iOS;
+            case BuildPlatform.Web: return PlatformType.Web;
             default: throw new ArgumentOutOfRangeException(nameof(buildPlatform), buildPlatform, null);
             }
         }
@@ -126,7 +133,9 @@ namespace FlaxEditor
             // Plugin assets
             foreach (var plugin in PluginManager.GamePlugins)
             {
-                plugin.OnCollectAssets(list);
+                var pluginRefs = plugin.GetReferences();
+                if (pluginRefs != null)
+                    list.AddRange(pluginRefs);
             }
 
             if (list.Count == 0)

@@ -1,16 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
-using FlaxEngine;
+using System.Text;
+using FlaxEditor;
+using FlaxEditor.Scripting;
 
-namespace FlaxEditor.Scripting
+namespace FlaxEngine.Utilities
 {
-    /// <summary>
-    /// Editor scripting utilities and helper functions.
-    /// </summary>
-    public static class TypeUtils
+    partial class TypeUtils
     {
         /// <summary>
         /// Custom list of scripting types containers. Can be used by custom scripting languages to provide types info for the editor.
@@ -31,6 +31,48 @@ namespace FlaxEditor.Scripting
                 return type.FullName != typeName ? GetType(typeName) : new ScriptType(type);
             }
             return o != null ? new ScriptType(o.GetType()) : ScriptType.Null;
+        }
+
+        /// <summary>
+        /// Gets the typename name for UI.
+        /// </summary>
+        /// <param name="type">The type.</param>
+        /// <returns>The display of the type.</returns>
+        public static string GetTypeDisplayName(this Type type)
+        {
+            // Special display for in-built basic types
+            if (type == null)
+                return "Null";
+            if (type == typeof(bool))
+                return "Bool";
+            if (type == typeof(float))
+                return "Float";
+            if (type == typeof(int))
+                return "Int";
+            if (type == typeof(uint))
+                return "Uint";
+
+            // For generic types (eg. Dictionary) Name returns generic parameter types with fully qualified name so simplify it manually
+            if (type.IsGenericType)
+            {
+                var sb = new StringBuilder();
+                var name = type.Name;
+                var idx = name.IndexOf('`');
+                sb.Append(idx != -1 ? name.Substring(0, idx) : name);
+                sb.Append('<');
+                var genericArgs = type.GetGenericArguments();
+                for (var i = 0; i < genericArgs.Length; i++)
+                {
+                    if (i != 0)
+                        sb.Append(", ");
+                    sb.Append(genericArgs[i].GetTypeDisplayName());
+                }
+                sb.Append('>');
+                return sb.ToString();
+            }
+
+            // Default name
+            return type.Name;
         }
 
         /// <summary>
@@ -61,18 +103,18 @@ namespace FlaxEditor.Scripting
             if (type.IsValueType)
             {
                 var value = type.CreateInstance();
-                Utilities.Utils.InitDefaultValues(value);
+                FlaxEditor.Utilities.Utils.InitDefaultValues(value);
                 return value;
             }
-            if (new ScriptType(typeof(object)).IsAssignableFrom(type))
+            if (ScriptType.Object.IsAssignableFrom(type))
                 return null;
             if (type.CanCreateInstance)
             {
                 var value = type.CreateInstance();
-                Utilities.Utils.InitDefaultValues(value);
+                FlaxEditor.Utilities.Utils.InitDefaultValues(value);
                 return value;
             }
-            throw new NotSupportedException("Cannot create default value for type " + type);
+            return null;
         }
 
         /// <summary>
@@ -122,7 +164,7 @@ namespace FlaxEditor.Scripting
         /// <param name="checkFunc">Additional callback used to check if the given type is valid. Returns true if add type, otherwise false.</param>
         public static void GetDerivedTypes(ScriptType baseType, List<ScriptType> result, Func<ScriptType, bool> checkFunc)
         {
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 GetDerivedTypes(assemblies[i], baseType, result, checkFunc);
@@ -139,7 +181,7 @@ namespace FlaxEditor.Scripting
         public static void GetDerivedTypes(ScriptType baseType, List<ScriptType> result, Func<ScriptType, bool> checkFunc, Func<Assembly, bool> checkAssembly)
         {
             // C#/C++ types
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 if (checkAssembly(assemblies[i]))
@@ -177,7 +219,7 @@ namespace FlaxEditor.Scripting
         public static void GetTypes(List<ScriptType> result, Func<ScriptType, bool> checkFunc, Func<Assembly, bool> checkAssembly)
         {
             // C#/C++ types
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 if (checkAssembly(assemblies[i]))
@@ -216,7 +258,7 @@ namespace FlaxEditor.Scripting
         /// <param name="checkAssembly">Additional callback used to check if the given assembly is valid. Returns true if search for types in the given assembly, otherwise false.</param>
         public static void GetTypesWithAttributeDefined(Type attributeType, List<ScriptType> result, Func<ScriptType, bool> checkFunc, Func<Assembly, bool> checkAssembly)
         {
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 if (checkAssembly(assemblies[i]))
@@ -233,7 +275,7 @@ namespace FlaxEditor.Scripting
         {
             if (string.IsNullOrEmpty(typeName))
                 return null;
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 var assembly = assemblies[i];
@@ -258,7 +300,12 @@ namespace FlaxEditor.Scripting
                 return ScriptType.Null;
 
             // C#/C++ types
-            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            {
+                var type = Type.GetType(typeName);
+                if (type != null)
+                    return new ScriptType(type);
+            }
+            var assemblies = Utils.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
                 var assembly = assemblies[i];
@@ -266,9 +313,7 @@ namespace FlaxEditor.Scripting
                 {
                     var type = assembly.GetType(typeName);
                     if (type != null)
-                    {
                         return new ScriptType(type);
-                    }
                 }
             }
 
@@ -277,11 +322,24 @@ namespace FlaxEditor.Scripting
             {
                 var type = customTypesInfo.GetType(typeName);
                 if (type)
-                {
                     return type;
+            }
+            if (typeName.EndsWith("[]"))
+            {
+                // Array of custom type
+                if (typeName[0] == '.')
+                    typeName = typeName.Substring(1);
+                typeName = typeName.Substring(0, typeName.Length - 2);
+                foreach (var customTypesInfo in CustomTypes)
+                {
+                    var type = customTypesInfo.GetType(typeName);
+                    if (type)
+                        return type.MakeArrayType();
                 }
             }
 
+            if (!FlaxEditor.Content.Settings.GameSettings.OptionalPlatformSettings.Contains(typeName))
+                Editor.LogWarning($"Failed to find type '{typeName}'.");
             return ScriptType.Null;
         }
 
@@ -292,10 +350,10 @@ namespace FlaxEditor.Scripting
         /// <returns>The created object or null if failed.</returns>
         public static object CreateInstance(string typeName)
         {
-            var type = GetType(typeName);
-            if (type)
+            object obj = null;
+            ScriptType type = GetType(typeName);
+            if (type && type.CanCreateInstance)
             {
-                object obj = null;
                 try
                 {
                     return obj = type.CreateInstance();
@@ -304,11 +362,19 @@ namespace FlaxEditor.Scripting
                 {
                     Debug.LogException(ex);
                 }
-
-                return obj;
             }
+            return obj;
+        }
 
-            return null;
+        /// <summary>
+        /// Creates a one-dimensional <see cref="T:System.Array" /> of the specified type and length.
+        /// </summary>
+        /// <param name="elementType">The type of the array to create.</param>
+        /// <param name="size">The length of the array to create.</param>
+        /// <returns>The created object or null if failed.</returns>
+        public static Array CreateArrayInstance(ScriptType elementType, int size)
+        {
+            return Array.CreateInstance(GetType(elementType), size);
         }
 
         /// <summary>
@@ -321,7 +387,12 @@ namespace FlaxEditor.Scripting
             return type.IsValueType && !type.IsEnum && !type.IsPrimitive;
         }
 
-        internal static bool IsDelegate(Type type)
+        /// <summary>
+        /// Checks if the input type represents a delegate.
+        /// </summary>
+        /// <param name="type">The input type of the object to check.</param>
+        /// <returns>Returns true if the input type represents a delegate.</returns>
+        public static bool IsDelegate(this Type type)
         {
             return typeof(MulticastDelegate).IsAssignableFrom(type.BaseType);
         }
@@ -333,6 +404,10 @@ namespace FlaxEditor.Scripting
         /// <returns>The managed type.</returns>
         public static Type GetType(ScriptType type)
         {
+            if (type == ScriptType.Null)
+                return null;
+            if (type.BaseType == null)
+                return type.Type;
             while (type.Type == null)
                 type = type.BaseType;
             return type.Type;

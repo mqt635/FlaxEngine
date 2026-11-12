@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Memory/Memory.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #define MOODYCAMEL_EXCEPTIONS_ENABLED 0
 #include <ThirdParty/concurrentqueue.h>
 
@@ -17,6 +18,7 @@ struct ConcurrentQueueSettings : public moodycamel::ConcurrentQueueDefaultTraits
     // Use default engine memory allocator
     static inline void* malloc(size_t size)
     {
+        PROFILE_MEM(EngineThreading);
         return Allocator::Allocate((uint64)size);
     }
 
@@ -35,11 +37,9 @@ template<typename T>
 class ConcurrentQueue : public moodycamel::ConcurrentQueue<T, ConcurrentQueueSettings>
 {
 public:
-
     typedef moodycamel::ConcurrentQueue<T, ConcurrentQueueSettings> Base;
 
 public:
-
     /// <summary>
     /// Gets an estimate of the total number of elements currently in the queue.
     /// </summary>
@@ -52,7 +52,16 @@ public:
     /// Adds item to the collection.
     /// </summary>
     /// <param name="item">The item to add.</param>
-    FORCE_INLINE void Add(T& item)
+    FORCE_INLINE void Add(const T& item)
+    {
+        enqueue(item);
+    }
+
+    /// <summary>
+    /// Adds item to the collection.
+    /// </summary>
+    /// <param name="item">The item to add.</param>
+    FORCE_INLINE void Add(T&& item)
     {
         enqueue(item);
     }

@@ -1,40 +1,44 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "RenderTargetPool.h"
 #include "GPUDevice.h"
+#if BUILD_DEBUG
+#include "GPUContext.h"
+#endif
+#include "Engine/Core/Log.h"
 #include "Engine/Engine/Engine.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Threading/Threading.h"
 
 struct Entry
 {
-    bool IsOccupied;
     GPUTexture* RT;
-    uint64 LastFrameTaken;
     uint64 LastFrameReleased;
     uint32 DescriptionHash;
+    bool IsOccupied;
 };
 
 namespace
 {
-    Array<Entry> TemporaryRTs(64);
+    Array<Entry> TemporaryRTs;
 }
 
-void RenderTargetPool::Flush(bool force)
+void RenderTargetPool::Flush(bool force, int32 framesOffset)
 {
-    const uint64 framesOffset = 10;
-    const uint64 maxReleaseFrame = Engine::FrameCount - framesOffset;
+    PROFILE_CPU();
+    if (framesOffset < 0)
+        framesOffset = 3 * 60; // For how many frames RTs should be cached (by default)
+    const uint64 frameCount = Engine::FrameCount;
+    const uint64 maxReleaseFrame = frameCount - Math::Min<uint64>(frameCount, framesOffset);
     force |= Engine::ShouldExit();
 
     for (int32 i = 0; i < TemporaryRTs.Count(); i++)
     {
-        auto& tmp = TemporaryRTs[i];
-
-        if (!tmp.IsOccupied && (force || (tmp.LastFrameReleased < maxReleaseFrame)))
+        const auto& e = TemporaryRTs[i];
+        if (!e.IsOccupied && (force || e.LastFrameReleased < maxReleaseFrame))
         {
-            // Release
-            tmp.RT->DeleteObjectNow();
-            TemporaryRTs.RemoveAt(i);
-            i--;
-
+            e.RT->DeleteObjectNow();
+            TemporaryRTs.RemoveAt(i--);
             if (TemporaryRTs.IsEmpty())
                 break;
         }
@@ -43,23 +47,28 @@ void RenderTargetPool::Flush(bool force)
 
 GPUTexture* RenderTargetPool::Get(const GPUTextureDescription& desc)
 {
+    PROFILE_CPU();
+
+    // Initialize render targets with pink color in debug builds to prevent incorrect data usage (GPU doesn't clear texture upon creation)
+#if BUILD_DEBUG && PLATFORM_DESKTOP
+    #define RENDER_TARGET_POOL_CLEAR() if (desc.Dimensions == TextureDimensions::Texture && EnumHasAllFlags(desc.Flags, GPUTextureFlags::RenderTarget) && GPUDevice::Instance->IsRendering() && IsInMainThread()) GPUDevice::Instance->GetMainContext()->Clear(e.RT->View(), Color::Pink);
+#else
+    #define RENDER_TARGET_POOL_CLEAR()
+#endif
+
     // Find free render target with the same properties
     const uint32 descHash = GetHash(desc);
     for (int32 i = 0; i < TemporaryRTs.Count(); i++)
     {
-        auto& tmp = TemporaryRTs[i];
-
-        if (!tmp.IsOccupied && tmp.DescriptionHash == descHash)
+        auto& e = TemporaryRTs[i];
+        if (!e.IsOccupied && e.DescriptionHash == descHash)
         {
-            ASSERT(tmp.RT);
-
             // Mark as used
-            tmp.IsOccupied = true;
-            tmp.LastFrameTaken = Engine::FrameCount;
-            return tmp.RT;
+            e.IsOccupied = true;
+            RENDER_TARGET_POOL_CLEAR();
+            return e.RT;
         }
     }
-
 #if !BUILD_RELEASE
     if (TemporaryRTs.Count() > 2000)
     {
@@ -70,43 +79,42 @@ GPUTexture* RenderTargetPool::Get(const GPUTextureDescription& desc)
 
     // Create new rt
     const String name = TEXT("TemporaryRT_") + StringUtils::ToString(TemporaryRTs.Count());
-    auto newRenderTarget = GPUDevice::Instance->CreateTexture(name);
-    if (newRenderTarget->Init(desc))
+    GPUTexture* rt = GPUDevice::Instance->CreateTexture(name);
+    if (rt->Init(desc))
     {
+        Delete(rt);
         LOG(Error, "Cannot create temporary render target. Description: {0}", desc.ToString());
         return nullptr;
     }
 
     // Create temporary rt entry
-    Entry entry;
-    entry.IsOccupied = true;
-    entry.LastFrameReleased = 0;
-    entry.LastFrameTaken = Engine::FrameCount;
-    entry.RT = newRenderTarget;
-    entry.DescriptionHash = descHash;
-    TemporaryRTs.Add(entry);
+    Entry e;
+    e.IsOccupied = true;
+    e.LastFrameReleased = 0;
+    e.RT = rt;
+    e.DescriptionHash = descHash;
+    TemporaryRTs.Add(e);
+    RENDER_TARGET_POOL_CLEAR();
 
-    return newRenderTarget;
+#undef RENDER_TARGET_POOL_CLEAR
+    return rt;
 }
 
 void RenderTargetPool::Release(GPUTexture* rt)
 {
     if (!rt)
         return;
-
     for (int32 i = 0; i < TemporaryRTs.Count(); i++)
     {
-        auto& tmp = TemporaryRTs[i];
-
-        if (tmp.RT == rt)
+        auto& e = TemporaryRTs[i];
+        if (e.RT == rt)
         {
             // Mark as free
-            ASSERT(tmp.IsOccupied);
-            tmp.IsOccupied = false;
-            tmp.LastFrameReleased = Engine::FrameCount;
+            ASSERT(e.IsOccupied);
+            e.IsOccupied = false;
+            e.LastFrameReleased = Engine::FrameCount;
             return;
         }
     }
-
     LOG(Error, "Trying to release temporary render target which has not been registered in service!");
 }

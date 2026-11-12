@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Flax.Build.NativeCpp;
@@ -34,6 +36,48 @@ namespace Flax.Build.Bindings
             /// The generated C# file path that contains a API bindings wrapper code to setup the glue code.
             /// </summary>
             public string GeneratedCSharpFilePath;
+
+            /// <summary>
+            /// The custom data per-scripting language.
+            /// </summary>
+            public Dictionary<string, string> CustomScriptingData;
+        }
+
+        public delegate void GenerateModuleBindingsDelegate(BuildData buildData, IGrouping<string, Module> binaryModule);
+
+        public delegate void GenerateBinaryModuleBindingsDelegate(BuildData buildData, ModuleInfo moduleInfo, ref BindingsResult bindings);
+
+        public delegate void ParseTypeTagDelegate(ref bool valid, TagParameter tag, ApiTypeInfo typeInfo);
+
+        public delegate void ParseMemberTagDelegate(ref bool valid, TagParameter tag, MemberInfo memberInfo);
+
+        public delegate void ParseFunctionParameterTagDelegate(ref bool valid, TagParameter tag, ref FunctionInfo.ParameterInfo parameterInfo);
+
+        public static event GenerateModuleBindingsDelegate GenerateModuleBindings;
+        public static event GenerateBinaryModuleBindingsDelegate GenerateBinaryModuleBindings;
+        public static event ParseTypeTagDelegate ParseTypeTag;
+        public static event ParseMemberTagDelegate ParseMemberTag;
+        public static event ParseFunctionParameterTagDelegate ParseFunctionParameterTag;
+        public static ModuleInfo CurrentModule;
+
+        private static List<StringBuilder> _strignBuilderCache;
+
+        public static StringBuilder GetStringBuilder()
+        {
+            if (_strignBuilderCache == null || _strignBuilderCache.Count == 0)
+                return new StringBuilder();
+            var idx = _strignBuilderCache.Count - 1;
+            var result = _strignBuilderCache[idx];
+            _strignBuilderCache.RemoveAt(idx);
+            result.Clear();
+            return result;
+        }
+
+        public static void PutStringBuilder(StringBuilder value)
+        {
+            if (_strignBuilderCache == null)
+                _strignBuilderCache = new List<StringBuilder>();
+            _strignBuilderCache.Add(value);
         }
 
         public static ModuleInfo ParseModule(BuildData buildData, Module module, BuildOptions moduleOptions = null)
@@ -68,6 +112,8 @@ namespace Flax.Build.Bindings
             };
             if (string.IsNullOrEmpty(moduleInfo.Name))
                 throw new Exception("Module name cannot be empty.");
+            if (module.Tags != null && module.Tags.Count != 0)
+                moduleInfo.Tags = new Dictionary<string, string>(module.Tags);
             buildData.ModulesInfo.Add(module, moduleInfo);
 
             // Skip for modules that cannot have API bindings
@@ -81,7 +127,7 @@ namespace Flax.Build.Bindings
             var headerFiles = new List<string>(moduleOptions.SourceFiles.Count / 2);
             for (int i = 0; i < moduleOptions.SourceFiles.Count; i++)
             {
-                if (moduleOptions.SourceFiles[i].EndsWith(".h", StringComparison.OrdinalIgnoreCase))
+                if (moduleOptions.SourceFiles[i].EndsWith(".h", StringComparison.OrdinalIgnoreCase) || moduleOptions.SourceFiles[i].EndsWith(".hpp", StringComparison.OrdinalIgnoreCase))
                     headerFiles.Add(moduleOptions.SourceFiles[i]);
             }
             if (headerFiles.Count == 0)
@@ -199,11 +245,13 @@ namespace Flax.Build.Bindings
                     File = fileInfo,
                     Tokenizer = tokenizer,
                     ScopeInfo = null,
+                    ModuleOptions = moduleOptions,
                     CurrentAccessLevel = AccessLevel.Public,
                     ScopeTypeStack = new Stack<ApiTypeInfo>(),
                     ScopeAccessStack = new Stack<AccessLevel>(),
                     PreprocessorDefines = new Dictionary<string, string>(),
                 };
+                context.PreprocessorDefines.Add("FLAX_BUILD_BINDINGS", "1");
                 context.EnterScope(fileInfo);
 
                 // Process the source code
@@ -223,8 +271,8 @@ namespace Flax.Build.Bindings
                     {
                         if (string.Equals(token.Value, ApiTokens.Class, StringComparison.Ordinal))
                         {
-                            if (!(context.ScopeInfo is FileInfo))
-                                throw new NotImplementedException("TODO: add support for nested classes in scripting API");
+                            if (!(context.ScopeInfo is FileInfo) && !(context.ScopeInfo is ClassInfo))
+                                throw new Exception($"Not supported nested class at line {tokenizer.CurrentLine}. Classes can be nested only in other classes (or in global scope).");
 
                             var classInfo = ParseClass(ref context);
                             scopeType = classInfo;
@@ -282,10 +330,15 @@ namespace Flax.Build.Bindings
                             else
                                 throw new Exception($"Not supported location for event {eventInfo.Name} at line {tokenizer.CurrentLine}. Place it in the class to use API bindings for it.");
                         }
-                        else if (string.Equals(token.Value, ApiTokens.InjectCppCode, StringComparison.Ordinal))
+                        else if (string.Equals(token.Value, ApiTokens.Typedef, StringComparison.Ordinal))
                         {
-                            var injectCppCodeInfo = ParseInjectCppCode(ref context);
-                            fileInfo.AddChild(injectCppCodeInfo);
+                            var typeInfo = ParseTypedef(ref context);
+                            fileInfo.AddChild(typeInfo);
+                        }
+                        else if (string.Equals(token.Value, ApiTokens.InjectCode, StringComparison.Ordinal))
+                        {
+                            var injectCodeInfo = ParseInjectCode(ref context);
+                            fileInfo.AddChild(injectCodeInfo);
                         }
                         else if (string.Equals(token.Value, ApiTokens.Interface, StringComparison.Ordinal))
                         {
@@ -328,87 +381,7 @@ namespace Flax.Build.Bindings
                     // Handle preprocessor blocks
                     if (token.Type == TokenType.Preprocessor)
                     {
-                        token = tokenizer.NextToken();
-                        switch (token.Value)
-                        {
-                        case "define":
-                        {
-                            token = tokenizer.NextToken();
-                            var name = token.Value;
-                            var value = string.Empty;
-                            token = tokenizer.NextToken(true);
-                            while (token.Type != TokenType.Newline)
-                            {
-                                value += token.Value;
-                                token = tokenizer.NextToken(true);
-                            }
-                            value = value.Trim();
-                            context.PreprocessorDefines[name] = value;
-                            break;
-                        }
-                        case "if":
-                        {
-                            // Parse condition
-                            var condition = string.Empty;
-                            token = tokenizer.NextToken(true);
-                            while (token.Type != TokenType.Newline)
-                            {
-                                var tokenValue = token.Value.Trim();
-                                if (tokenValue.Length == 0)
-                                {
-                                    token = tokenizer.NextToken(true);
-                                    continue;
-                                }
-
-                                // Very simple defines processing
-                                tokenValue = ReplacePreProcessorDefines(tokenValue, context.PreprocessorDefines.Keys);
-                                tokenValue = ReplacePreProcessorDefines(tokenValue, moduleOptions.PublicDefinitions);
-                                tokenValue = ReplacePreProcessorDefines(tokenValue, moduleOptions.PrivateDefinitions);
-                                tokenValue = ReplacePreProcessorDefines(tokenValue, moduleOptions.CompileEnv.PreprocessorDefinitions);
-                                tokenValue = tokenValue.Replace("false", "0");
-                                tokenValue = tokenValue.Replace("true", "1");
-                                tokenValue = tokenValue.Replace("||", "|");
-                                if (tokenValue.Length != 0 && tokenValue != "1" && tokenValue != "0" && tokenValue != "|")
-                                    tokenValue = "0";
-
-                                condition += tokenValue;
-                                token = tokenizer.NextToken(true);
-                            }
-
-                            // Filter condition
-                            condition = condition.Replace("1|1", "1");
-                            condition = condition.Replace("1|0", "1");
-                            condition = condition.Replace("0|1", "1");
-
-                            // Skip chunk of code of condition fails
-                            if (condition != "1")
-                            {
-                                ParsePreprocessorIf(fileInfo, tokenizer, ref token);
-                            }
-
-                            break;
-                        }
-                        case "ifdef":
-                        {
-                            // Parse condition
-                            var define = string.Empty;
-                            token = tokenizer.NextToken(true);
-                            while (token.Type != TokenType.Newline)
-                            {
-                                define += token.Value;
-                                token = tokenizer.NextToken(true);
-                            }
-
-                            // Check condition
-                            define = define.Trim();
-                            if (!context.PreprocessorDefines.ContainsKey(define) && !moduleOptions.CompileEnv.PreprocessorDefinitions.Contains(define))
-                            {
-                                ParsePreprocessorIf(fileInfo, tokenizer, ref token);
-                            }
-
-                            break;
-                        }
-                        }
+                        OnPreProcessorToken(ref context, ref token);
                     }
 
                     // Scope tracking
@@ -439,12 +412,178 @@ namespace Flax.Build.Bindings
             }
         }
 
+        private static void OnPreProcessorToken(ref ParsingContext context, ref Token token)
+        {
+            var tokenizer = context.Tokenizer;
+            token = tokenizer.NextToken();
+            switch (token.Value)
+            {
+                case "define":
+                {
+                    token = tokenizer.NextToken();
+                    var name = token.Value;
+                    var value = string.Empty;
+                    token = tokenizer.NextToken(true);
+                    while (token.Type != TokenType.Newline)
+                    {
+                        value += token.Value;
+                        token = tokenizer.NextToken(true);
+                    }
+                    value = value.Trim();
+                    context.PreprocessorDefines[name] = value;
+                    break;
+                }
+                case "if":
+                case "elif":
+                {
+                    // Parse condition
+                    var condition = string.Empty;
+                    token = tokenizer.NextToken(true);
+                    while (token.Type != TokenType.Newline)
+                    {
+                        var tokenValue = token.Value.Trim();
+                        if (tokenValue.Length == 0)
+                        {
+                            token = tokenizer.NextToken(true);
+                            continue;
+                        }
+
+                        // Very simple defines processing
+                        var negate = tokenValue[0] == '!';
+                        if (negate)
+                            tokenValue = tokenValue.Substring(1);
+                        tokenValue = ReplacePreProcessorDefines(tokenValue, context.PreprocessorDefines);
+                        tokenValue = ReplacePreProcessorDefines(tokenValue, context.ModuleOptions.PublicDefinitions);
+                        tokenValue = ReplacePreProcessorDefines(tokenValue, context.ModuleOptions.PrivateDefinitions);
+                        tokenValue = ReplacePreProcessorDefines(tokenValue, context.ModuleOptions.CompileEnv.PreprocessorDefinitions);
+                        tokenValue = tokenValue.Replace("false", "0");
+                        tokenValue = tokenValue.Replace("true", "1");
+                        tokenValue = tokenValue.Replace("||", "|");
+                        if (tokenValue.Length != 0 && tokenValue != "1" && tokenValue != "0" && tokenValue != "|" && tokenValue != "&")
+                            tokenValue = "0";
+                        if (negate)
+                            tokenValue = tokenValue == "1" ? "0" : "1";
+
+                        condition += tokenValue;
+                        token = tokenizer.NextToken(true);
+                    }
+
+                    // Filter condition
+                    condition = condition.Replace("&&", "&");
+                    bool modified;
+                    do
+                    {
+                        modified = false;
+                        if (condition.Contains("1|1"))
+                        {
+                            condition = condition.Replace("1|1", "1");
+                            modified = true;
+                        }
+                        if (condition.Contains("1|0"))
+                        {
+                            condition = condition.Replace("1|0", "1");
+                            modified = true;
+                        }
+                        if (condition.Contains("0|1"))
+                        {
+                            condition = condition.Replace("0|1", "1");
+                            modified = true;
+                        }
+                        if (condition.Contains("0|0"))
+                        {
+                            condition = condition.Replace("0|0", "0");
+                            modified = true;
+                        }
+                        if (condition.Contains("1&1"))
+                        {
+                            condition = condition.Replace("1&1", "1");
+                            modified = true;
+                        }
+                        if (condition.Contains("1&0"))
+                        {
+                            condition = condition.Replace("1&0", "0");
+                            modified = true;
+                        }
+                        if (condition.Contains("0&1"))
+                        {
+                            condition = condition.Replace("0&1", "0");
+                            modified = true;
+                        }
+                        if (condition.Contains("0&0"))
+                        {
+                            condition = condition.Replace("0&0", "0");
+                            modified = true;
+                        }
+                    } while (modified);
+
+                    // Skip chunk of code of condition fails
+                    bool skip = condition != "1";
+                    context.PreprocessorWaitForElse = !skip;
+                    if (skip)
+                    {
+                        ParsePreprocessorIf(context.File, tokenizer, ref token);
+                    }
+
+                    break;
+                }
+                case "else":
+                {
+                    // Skip chunk of code if one of the previous conditions was taken (if/elif)
+                    if (context.PreprocessorWaitForElse)
+                    {
+                        context.PreprocessorWaitForElse = false;
+                        ParsePreprocessorIf(context.File, tokenizer, ref token);
+                    }
+                    break;
+                }
+                case "ifdef":
+                {
+                    // Parse condition
+                    var define = string.Empty;
+                    token = tokenizer.NextToken(true);
+                    while (token.Type != TokenType.Newline)
+                    {
+                        define += token.Value;
+                        token = tokenizer.NextToken(true);
+                    }
+
+                    // Check condition
+                    define = define.Trim();
+                    bool skip = !context.PreprocessorDefines.ContainsKey(define) && !context.ModuleOptions.CompileEnv.PreprocessorDefinitions.Contains(define);
+                    context.PreprocessorWaitForElse = !skip;
+                    if (skip)
+                    {
+                        context.PreprocessorWaitForElse = true;
+                        ParsePreprocessorIf(context.File, tokenizer, ref token);
+                    }
+
+                    break;
+                }
+                case "endif":
+                {
+                    context.PreprocessorWaitForElse = false;
+                    token = tokenizer.NextToken(true);
+                    break;
+                }
+            }
+        }
+
         private static string ReplacePreProcessorDefines(string text, IEnumerable<string> defines)
         {
             foreach (var define in defines)
             {
                 if (string.Equals(text, define, StringComparison.Ordinal))
                     text = text.Replace(define, "1");
+            }
+            return text;
+        }
+
+        private static string ReplacePreProcessorDefines(string text, IDictionary<string, string> defines)
+        {
+            foreach (var e in defines)
+            {
+                if (string.Equals(text, e.Key, StringComparison.Ordinal))
+                    text = text.Replace(e.Key, string.IsNullOrEmpty(e.Value) ? "1" : e.Value);
             }
             return text;
         }
@@ -464,6 +603,22 @@ namespace Flax.Build.Bindings
                     case "ifdef":
                         ifsCount++;
                         break;
+                    case "else":
+                        if (ifsCount == 1)
+                        {
+                            // Continue with `else` block
+                            return;
+                        }
+                        break;
+                    case "elif":
+                        if (ifsCount == 1)
+                        {
+                            // Rollback to process conditional block
+                            tokenizer.PreviousToken();
+                            tokenizer.PreviousToken();
+                            return;
+                        }
+                        break;
                     case "endif":
                         ifsCount--;
                         break;
@@ -478,7 +633,7 @@ namespace Flax.Build.Bindings
         private static bool UseBindings(object type)
         {
             var apiTypeInfo = type as ApiTypeInfo;
-            if (apiTypeInfo != null && apiTypeInfo.IsInBuild)
+            if (apiTypeInfo != null && apiTypeInfo.SkipGeneration)
                 return false;
             if ((type is ModuleInfo || type is FileInfo) && apiTypeInfo != null)
             {
@@ -491,7 +646,7 @@ namespace Flax.Build.Bindings
             return type is ClassInfo ||
                    type is StructureInfo ||
                    type is InterfaceInfo ||
-                   type is InjectCppCodeInfo;
+                   type is InjectCodeInfo;
         }
 
         /// <summary>
@@ -513,7 +668,7 @@ namespace Flax.Build.Bindings
                 buildData.Modules.TryGetValue(moduleInfo.Module, out var moduleBuildInfo);
 
                 // Ensure that generated files are included into build
-                if (!moduleBuildInfo.SourceFiles.Contains(bindings.GeneratedCSharpFilePath))
+                if (EngineConfiguration.WithCSharp(buildData.TargetOptions) && !moduleBuildInfo.SourceFiles.Contains(bindings.GeneratedCSharpFilePath))
                     moduleBuildInfo.SourceFiles.Add(bindings.GeneratedCSharpFilePath);
             }
 
@@ -533,10 +688,12 @@ namespace Flax.Build.Bindings
                 Log.Verbose($"Generating API bindings for {module.Name} ({moduleInfo.Name})");
                 using (new ProfileEventScope("Cpp"))
                     GenerateCpp(buildData, moduleInfo, ref bindings);
-                using (new ProfileEventScope("CSharp"))
-                    GenerateCSharp(buildData, moduleInfo, ref bindings);
-
-                // TODO: add support for extending this code and support generating bindings for other scripting languages
+                if (EngineConfiguration.WithCSharp(buildData.TargetOptions))
+                {
+                    using (new ProfileEventScope("CSharp"))
+                        GenerateCSharp(buildData, moduleInfo, ref bindings);
+                }
+                GenerateBinaryModuleBindings?.Invoke(buildData, moduleInfo, ref bindings);
             }
         }
 
@@ -552,9 +709,11 @@ namespace Flax.Build.Bindings
                     // Generate bindings for binary module
                     Log.Verbose($"Generating binary module bindings for {binaryModule.Key}");
                     GenerateCpp(buildData, binaryModule);
-                    GenerateCSharp(buildData, binaryModule);
-
-                    // TODO: add support for extending this code and support generating bindings for other scripting languages
+                    if (EngineConfiguration.WithCSharp(buildData.TargetOptions))
+                    {
+                        GenerateCSharp(buildData, binaryModule);
+                    }
+                    GenerateModuleBindings?.Invoke(buildData, binaryModule);
                 }
             }
         }

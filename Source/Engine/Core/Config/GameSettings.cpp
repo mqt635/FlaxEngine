@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GameSettings.h"
 #include "Engine/Serialization/JsonTools.h"
@@ -12,6 +12,7 @@
 #include "BuildSettings.h"
 #include "Engine/Input/InputSettings.h"
 #include "Engine/Audio/AudioSettings.h"
+#include "Engine/Networking/NetworkSettings.h"
 #include "Engine/Navigation/NavigationSettings.h"
 #include "Engine/Localization/LocalizationSettings.h"
 #include "Engine/Content/Content.h"
@@ -21,11 +22,14 @@
 #include "Engine/Engine/Globals.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Streaming/StreamingSettings.h"
+#include "Engine/Serialization/Serialization.h"
+#if FLAX_TESTS || USE_EDITOR
+#include "Engine/Platform/FileSystem.h"
+#endif
 
 class GameSettingsService : public EngineService
 {
 public:
-
     GameSettingsService()
         : EngineService(TEXT("GameSettings"), -70)
     {
@@ -37,32 +41,82 @@ public:
     }
 };
 
-IMPLEMENT_SETTINGS_GETTER(BuildSettings, GameCooking);
-IMPLEMENT_SETTINGS_GETTER(GraphicsSettings, Graphics);
-IMPLEMENT_SETTINGS_GETTER(LayersAndTagsSettings, LayersAndTags);
-IMPLEMENT_SETTINGS_GETTER(TimeSettings, Time);
-IMPLEMENT_SETTINGS_GETTER(AudioSettings, Audio);
-IMPLEMENT_SETTINGS_GETTER(PhysicsSettings, Physics);
-IMPLEMENT_SETTINGS_GETTER(InputSettings, Input);
-IMPLEMENT_SETTINGS_GETTER(StreamingSettings, Streaming);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(BuildSettings, GameCooking);
+
+#include "Engine/Content/Deprecated.h"
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+
+bool GraphicsSettings::GetUeeHDRProbes() const
+{
+    return UseHDRProbes;
+}
+
+void GraphicsSettings::SetUeeHDRProbes(bool value)
+{
+    MARK_CONTENT_DEPRECATED();
+    DefaultProbeCubemapFormat = value ? ProbeCubemapFormats::R11G11B10 : ProbeCubemapFormats::R8G8B8A8;
+}
+
+bool GraphicsSettings::GetUseHDRProbes() const
+{
+    return UseHDRProbes;
+}
+
+void GraphicsSettings::SetUseHDRProbes(bool value)
+{
+    DefaultProbeCubemapFormat = value ? ProbeCubemapFormats::R11G11B10 : ProbeCubemapFormats::R8G8B8A8;
+}
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+
+void GraphicsSettings::OnDeserializing(const CallbackContext& context)
+{
+#if 0 // TODO: move to Linear color space as default once it's ready for production
+    // [Deprecated on 9.01.2026, expires on 9.01.2028]
+    if (context.Modifier && context.Modifier->EngineBuild < 6901)
+    {
+        // Old projects were made in Gamma color space
+        GammaColorSpace = true;
+        MARK_CONTENT_DEPRECATED();
+    }
+#endif
+}
+
+IMPLEMENT_ENGINE_SETTINGS_GETTER(GraphicsSettings, Graphics);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(NetworkSettings, Network);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(LayersAndTagsSettings, LayersAndTags);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(TimeSettings, Time);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(AudioSettings, Audio);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(PhysicsSettings, Physics);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(InputSettings, Input);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(StreamingSettings, Streaming);
 
 #if !USE_EDITOR
 #if PLATFORM_WINDOWS
-IMPLEMENT_SETTINGS_GETTER(WindowsPlatformSettings, WindowsPlatform);
-#elif PLATFORM_UWP 
-IMPLEMENT_SETTINGS_GETTER(UWPPlatformSettings, UWPPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(WindowsPlatformSettings, WindowsPlatform);
+#elif PLATFORM_UWP
+IMPLEMENT_ENGINE_SETTINGS_GETTER(UWPPlatformSettings, UWPPlatform);
 #elif PLATFORM_LINUX
-IMPLEMENT_SETTINGS_GETTER(LinuxPlatformSettings, LinuxPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(LinuxPlatformSettings, LinuxPlatform);
 #elif PLATFORM_PS4
-IMPLEMENT_SETTINGS_GETTER(PS4PlatformSettings, PS4Platform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(PS4PlatformSettings, PS4Platform);
+#elif PLATFORM_PS5
+IMPLEMENT_ENGINE_SETTINGS_GETTER(PS5PlatformSettings, PS5Platform);
 #elif PLATFORM_XBOX_ONE
-IMPLEMENT_SETTINGS_GETTER(XboxOnePlatformSettings, XboxOnePlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(XboxOnePlatformSettings, XboxOnePlatform);
 #elif PLATFORM_XBOX_SCARLETT
-IMPLEMENT_SETTINGS_GETTER(XboxScarlettPlatformSettings, XboxScarlettPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(XboxScarlettPlatformSettings, XboxScarlettPlatform);
 #elif PLATFORM_ANDROID
-IMPLEMENT_SETTINGS_GETTER(AndroidPlatformSettings, AndroidPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(AndroidPlatformSettings, AndroidPlatform);
 #elif PLATFORM_SWITCH
-IMPLEMENT_SETTINGS_GETTER(SwitchPlatformSettings, SwitchPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(SwitchPlatformSettings, SwitchPlatform);
+#elif PLATFORM_MAC
+IMPLEMENT_ENGINE_SETTINGS_GETTER(MacPlatformSettings, MacPlatform);
+#elif PLATFORM_IOS
+IMPLEMENT_ENGINE_SETTINGS_GETTER(iOSPlatformSettings, iOSPlatform);
+#elif PLATFORM_WEB
+IMPLEMENT_ENGINE_SETTINGS_GETTER(WebPlatformSettings, WebPlatform);
 #else
 #error Unknown platform
 #endif
@@ -79,6 +133,24 @@ GameSettings* GameSettings::Get()
         // It may be missing in editor during dev but must be ready in the build game.
         PROFILE_CPU();
         const auto assetPath = Globals::ProjectContentFolder / TEXT("GameSettings.json");
+#if FLAX_TESTS
+        // Silence missing GameSettings during test run before Editor creates it (not important)
+        if (!FileSystem::FileExists(assetPath))
+            return nullptr;
+#endif
+#if USE_EDITOR
+        // Log once missing GameSettings in Editor
+        if (!FileSystem::FileExists(assetPath))
+        {
+            static bool LogOnce = true;
+            if (LogOnce)
+            {
+                LogOnce = false;
+                LOG(Error, "Missing file game settings asset ({0})", assetPath);
+            }
+            return nullptr;
+        }
+#endif
         GameSettingsAsset = Content::LoadAsync<JsonAsset>(assetPath);
         if (GameSettingsAsset == nullptr)
         {
@@ -135,6 +207,7 @@ bool GameSettings::Load()
     PRELOAD_SETTINGS(Physics);
     PRELOAD_SETTINGS(Input);
     PRELOAD_SETTINGS(Graphics);
+    PRELOAD_SETTINGS(Network);
     PRELOAD_SETTINGS(Navigation);
     PRELOAD_SETTINGS(Localization);
     PRELOAD_SETTINGS(GameCooking);
@@ -169,6 +242,7 @@ void GameSettings::Apply()
     APPLY_SETTINGS(StreamingSettings);
     APPLY_SETTINGS(InputSettings);
     APPLY_SETTINGS(GraphicsSettings);
+    APPLY_SETTINGS(NetworkSettings);
     APPLY_SETTINGS(NavigationSettings);
     APPLY_SETTINGS(LocalizationSettings);
     APPLY_SETTINGS(BuildSettings);
@@ -182,6 +256,7 @@ void GameSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     ProductName = JsonTools::GetString(stream, "ProductName");
     CompanyName = JsonTools::GetString(stream, "CompanyName");
     CopyrightNotice = JsonTools::GetString(stream, "CopyrightNotice");
+    Version = JsonTools::GetString(stream, "Version");
     Icon = JsonTools::GetGuid(stream, "Icon");
     FirstScene = JsonTools::GetGuid(stream, "FirstScene");
     NoSplashScreen = JsonTools::GetBool(stream, "NoSplashScreen", NoSplashScreen);
@@ -209,6 +284,7 @@ void GameSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     DESERIALIZE(Physics);
     DESERIALIZE(Input);
     DESERIALIZE(Graphics);
+    DESERIALIZE(Network);
     DESERIALIZE(Navigation);
     DESERIALIZE(Localization);
     DESERIALIZE(GameCooking);
@@ -223,7 +299,32 @@ void GameSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     DESERIALIZE(XboxScarlettPlatform);
     DESERIALIZE(AndroidPlatform);
     DESERIALIZE(SwitchPlatform);
+    DESERIALIZE(PS5Platform);
+    DESERIALIZE(MacPlatform);
+    DESERIALIZE(iOSPlatform);
+    DESERIALIZE(WebPlatform);
 }
+
+#if USE_EDITOR
+
+void LayersAndTagsSettings::Serialize(SerializeStream& stream, const void* otherObj)
+{
+    SERIALIZE_GET_OTHER_OBJ(LayersAndTagsSettings);
+
+    stream.JKEY("Tags");
+    stream.StartArray();
+    for (const String& e : Tags)
+        stream.String(e);
+    stream.EndArray();
+
+    stream.JKEY("Layers");
+    stream.StartArray();
+    for (const String& e : Layers)
+        stream.String(e);
+    stream.EndArray();
+}
+
+#endif
 
 void LayersAndTagsSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
 {
@@ -245,7 +346,7 @@ void LayersAndTagsSettings::Deserialize(DeserializeStream& stream, ISerializeMod
     if (layers != stream.MemberEnd() && layers->value.IsArray())
     {
         auto& layersArray = layers->value;
-        for (uint32 i = 0; i < layersArray.Size() && i < 32; i++)
+        for (uint32 i = 0; i < layersArray.Size() && i < ARRAY_COUNT(Layers); i++)
         {
             auto& v = layersArray[i];
             if (v.IsString())
@@ -253,7 +354,7 @@ void LayersAndTagsSettings::Deserialize(DeserializeStream& stream, ISerializeMod
             else
                 Layers[i].Clear();
         }
-        for (uint32 i = layersArray.Size(); i < 32; i++)
+        for (uint32 i = layersArray.Size(); i < ARRAY_COUNT(Layers); i++)
         {
             Layers[i].Clear();
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Builder.h"
 #include "AtlasChartsPacker.h"
@@ -6,6 +6,7 @@
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Core/Collections/Sorting.h"
 #include "Engine/ContentImporters/ImportTexture.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Level/SceneQuery.h"
 #include "Engine/Level/Scene/Lightmap.h"
@@ -38,14 +39,14 @@ void ShadowsOfMordor::Builder::generateCharts()
 
         // Calculate desired area for the entry's chart (based on object dimensions and settings)
         // Reject missing models or too small objects
-        Vector3 size = entry.Box.GetSize();
+        Float3 size = entry.Box.GetSize();
         float dimensionsCoeff = size.AverageArithmetic();
         if (size.X <= 1.0f)
-            dimensionsCoeff = Vector2(size.Y, size.Z).AverageArithmetic();
+            dimensionsCoeff = Float2(size.Y, size.Z).AverageArithmetic();
         else if (size.Y <= 1.0f)
-            dimensionsCoeff = Vector2(size.X, size.Z).AverageArithmetic();
+            dimensionsCoeff = Float2(size.X, size.Z).AverageArithmetic();
         else if (size.Z <= 1.0f)
-            dimensionsCoeff = Vector2(size.Y, size.X).AverageArithmetic();
+            dimensionsCoeff = Float2(size.Y, size.X).AverageArithmetic();
         const float scale = settings.GlobalObjectsScale * entry.Scale * LightmapTexelsPerWorldUnit * dimensionsCoeff;
         if (scale <= ZeroTolerance)
             continue;
@@ -151,7 +152,7 @@ void ShadowsOfMordor::Builder::updateLightmaps()
         {
             auto texture = textures[textureIndex];
             GPUDevice::Instance->Locker.Unlock();
-            if (texture->WaitForLoaded())
+            if (texture == nullptr || texture->WaitForLoaded())
             {
                 LOG(Error, "Lightmap load failed.");
                 return;

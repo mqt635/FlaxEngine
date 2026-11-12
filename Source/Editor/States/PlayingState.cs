@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -36,6 +36,9 @@ namespace FlaxEditor.States
 
         /// <inheritdoc />
         public override bool CanEnterPlayMode => true;
+
+        /// <inheritdoc />
+        public override bool CanCookGame => true;
 
         /// <summary>
         /// Occurs when play mode is starting (before scene duplicating).
@@ -77,10 +80,19 @@ namespace FlaxEditor.States
             {
                 if (!IsActive)
                     throw new InvalidOperationException();
-
                 Time.GamePaused = value;
             }
         }
+
+        /// <summary>
+        /// True if play mode is starting.
+        /// </summary>
+        public bool IsPlayModeStarting;
+
+        /// <summary>
+        /// True if play mode is ending.
+        /// </summary>
+        public bool IsPlayModeEnding;
 
         internal PlayingState(Editor editor)
         : base(editor)
@@ -127,6 +139,7 @@ namespace FlaxEditor.States
         public override void OnEnter()
         {
             Profiler.BeginEvent("PlayingState.OnEnter");
+            IsPlayModeStarting = true;
             Editor.OnPlayBeginning();
 
             CacheSelection();
@@ -144,19 +157,22 @@ namespace FlaxEditor.States
             _duplicateScenes.GatherSceneData();
             Editor.Internal_SetPlayMode(true);
             IsPaused = false;
-            PluginManager.InitializeGamePlugins();
+            PluginManager.Internal_InitializeGamePlugins();
             _duplicateScenes.CreateScenes();
             SceneDuplicated?.Invoke();
             RestoreSelection();
 
+            Time.Synchronize(true);
+
             Editor.OnPlayBegin();
+            IsPlayModeStarting = false;
             Profiler.EndEvent();
         }
 
         private void SetupEditorEnvOptions()
         {
             Time.TimeScale = 1.0f;
-            Physics.AutoSimulation = true;
+            Physics.DefaultScene.AutoSimulation = true;
             Screen.CursorVisible = true;
             Screen.CursorLock = CursorLockMode.None;
         }
@@ -171,6 +187,8 @@ namespace FlaxEditor.States
         public override void OnExit(State nextState)
         {
             Profiler.BeginEvent("PlayingState.OnExit");
+            IsPlayModeEnding = true;
+            Editor.OnPlayEnding();
             IsPaused = true;
 
             // Remove references to the scene objects
@@ -178,8 +196,10 @@ namespace FlaxEditor.States
 
             // Restore editor scene
             SceneRestoring?.Invoke();
-            _duplicateScenes.DeletedScenes();
-            PluginManager.DeinitializeGamePlugins();
+            _duplicateScenes.UnloadScenes();
+            PluginManager.Internal_DeinitializeGamePlugins();
+            FlaxEngine.Scripting.FlushRemovedObjects();
+            Editor.WipeOutLeftoverSceneObjects();
             Editor.Internal_SetPlayMode(false);
             _duplicateScenes.RestoreSceneData();
             SceneRestored?.Invoke();
@@ -193,7 +213,10 @@ namespace FlaxEditor.States
             RestoreSelection();
 
             Editor.OnPlayEnd();
+            IsPlayModeEnding = false;
             Profiler.EndEvent();
+
+            Time.Synchronize(true);
         }
     }
 }

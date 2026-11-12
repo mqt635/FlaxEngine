@@ -1,18 +1,35 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "SerializationFwd.h"
+#include "ISerializeModifier.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Collections/Dictionary.h"
-#include "Engine/Scripting/ScriptingObjectReference.h"
-#include "Engine/Scripting/SoftObjectReference.h"
-#include "Engine/Content/AssetReference.h"
-#include "Engine/Content/WeakAssetReference.h"
+#include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Utilities/Encryption.h"
 
 struct Version;
 struct VariantType;
+template<typename T>
+class ScriptingObjectReference;
+template<typename T>
+class ScriptingObjectInterfaceReference;
+template<typename T>
+class SoftObjectReference;
+template<typename T>
+class AssetReference;
+template<typename T>
+class WeakAssetReference;
+template<typename T>
+class SoftAssetReference;
+
+// Clang fails to properly resolve TIsBaseOf<SceneObject, T> without SceneObject defined
+#ifdef _MSC_VER
+class SceneObject;
+#else
+#include "Engine/Level/SceneObject.h"
+#endif
 
 // @formatter:off
 
@@ -23,12 +40,16 @@ namespace Serialization
         int32 result = 0;
         if (stream.IsInt())
             result = stream.GetInt();
+        else if (stream.IsInt64())
+            result = (int32)stream.GetInt64();
         else if (stream.IsFloat())
             result = (int32)stream.GetFloat();
         else if (stream.IsString())
             StringUtils::Parse(stream.GetString(), &result);
         return result;
     }
+    FLAXENGINE_API void SerializeEnum(ISerializable::SerializeStream& stream, uint32 v, ScriptingTypeHandle typeHandle);
+    FLAXENGINE_API int32 DeserializeEnum(ISerializable::DeserializeStream& stream, ScriptingTypeHandle typeHandle);
 
     // In-build types
     
@@ -177,7 +198,7 @@ namespace Serialization
 
     inline bool ShouldSerialize(const float& v, const void* otherObj)
     {
-        return !otherObj || abs(v - *(float*)otherObj) > SERIALIZE_EPSILON;
+        return !otherObj || fabsf(v - *(float*)otherObj) > SERIALIZE_EPSILON;
     }
     inline void Serialize(ISerializable::SerializeStream& stream, const float& v, const void* otherObj)
     {
@@ -190,7 +211,7 @@ namespace Serialization
 
     inline bool ShouldSerialize(const double& v, const void* otherObj)
     {
-        return !otherObj || v != *(double*)otherObj;
+        return !otherObj || fabs(v - *(double*)otherObj) > SERIALIZE_EPSILON_DOUBLE;
     }
     inline void Serialize(ISerializable::SerializeStream& stream, const double& v, const void* otherObj)
     {
@@ -211,12 +232,12 @@ namespace Serialization
     template<typename T>
     inline typename TEnableIf<TIsEnum<T>::Value>::Type Serialize(ISerializable::SerializeStream& stream, const T& v, const void* otherObj)
     {
-        stream.Uint((uint32)v);
+        SerializeEnum(stream, (uint32)v, StaticType<T>());
     }
     template<typename T>
     inline typename TEnableIf<TIsEnum<T>::Value>::Type Deserialize(ISerializable::DeserializeStream& stream, T& v, ISerializeModifier* modifier)
     {
-        v = (T)DeserializeInt(stream);
+        v = (T)DeserializeEnum(stream, StaticType<T>());
     }
 
     // Common types
@@ -254,32 +275,66 @@ namespace Serialization
         v = stream.GetText();
     }
 
+    inline bool ShouldSerialize(const StringAnsi& v, const void* otherObj)
+    {
+        return !otherObj || v != *(StringAnsi*)otherObj;
+    }
+    inline void Serialize(ISerializable::SerializeStream& stream, const StringAnsi& v, const void* otherObj)
+    {
+        stream.String(v);
+    }
+    inline void Deserialize(ISerializable::DeserializeStream& stream, StringAnsi& v, ISerializeModifier* modifier)
+    {
+        v = stream.GetTextAnsi();
+    }
+
     FLAXENGINE_API bool ShouldSerialize(const Version& v, const void* otherObj);
     FLAXENGINE_API void Serialize(ISerializable::SerializeStream& stream, const Version& v, const void* otherObj);
     FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Version& v, ISerializeModifier* modifier);
 
     // Math types
 
-    FLAXENGINE_API bool ShouldSerialize(const Vector2& v, const void* otherObj);
-    inline void Serialize(ISerializable::SerializeStream& stream, const Vector2& v, const void* otherObj)
+    FLAXENGINE_API bool ShouldSerialize(const Float2& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Float2& v, const void* otherObj)
     {
-        stream.Vector2(v);
+        stream.Float2(v);
     }
-    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Vector2& v, ISerializeModifier* modifier);
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Float2& v, ISerializeModifier* modifier);
 
-    FLAXENGINE_API bool ShouldSerialize(const Vector3& v, const void* otherObj);
-    inline void Serialize(ISerializable::SerializeStream& stream, const Vector3& v, const void* otherObj)
+    FLAXENGINE_API bool ShouldSerialize(const Float3& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Float3& v, const void* otherObj)
     {
-        stream.Vector3(v);
+        stream.Float3(v);
     }
-    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Vector3& v, ISerializeModifier* modifier);
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Float3& v, ISerializeModifier* modifier);
 
-    FLAXENGINE_API bool ShouldSerialize(const Vector4& v, const void* otherObj);
-    inline void Serialize(ISerializable::SerializeStream& stream, const Vector4& v, const void* otherObj)
+    FLAXENGINE_API bool ShouldSerialize(const Float4& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Float4& v, const void* otherObj)
     {
-        stream.Vector4(v);
+        stream.Float4(v);
     }
-    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Vector4& v, ISerializeModifier* modifier);
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Float4& v, ISerializeModifier* modifier);
+
+    FLAXENGINE_API bool ShouldSerialize(const Double2& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Double2& v, const void* otherObj)
+    {
+        stream.Double2(v);
+    }
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Double2& v, ISerializeModifier* modifier);
+
+    FLAXENGINE_API bool ShouldSerialize(const Double3& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Double3& v, const void* otherObj)
+    {
+        stream.Double3(v);
+    }
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Double3& v, ISerializeModifier* modifier);
+
+    FLAXENGINE_API bool ShouldSerialize(const Double4& v, const void* otherObj);
+    inline void Serialize(ISerializable::SerializeStream& stream, const Double4& v, const void* otherObj)
+    {
+        stream.Double4(v);
+    }
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Double4& v, ISerializeModifier* modifier);
 
     FLAXENGINE_API bool ShouldSerialize(const Int2& v, const void* otherObj);
     inline void Serialize(ISerializable::SerializeStream& stream, const Int2& v, const void* otherObj)
@@ -351,7 +406,7 @@ namespace Serialization
     FLAXENGINE_API bool ShouldSerialize(const Transform& v, const void* otherObj);
     inline void Serialize(ISerializable::SerializeStream& stream, const Transform& v, const void* otherObj)
     {
-        stream.Transform(v);
+        stream.Transform(v, (const Transform*)otherObj);
     }
     FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, Transform& v, ISerializeModifier* modifier);
 
@@ -364,14 +419,14 @@ namespace Serialization
 
     // ISerializable
 
-    inline bool ShouldSerialize(ISerializable& v, const void* otherObj)
+    inline bool ShouldSerialize(const ISerializable& v, const void* otherObj)
     {
-        return true;
+        return !otherObj || v.ShouldSerialize(otherObj);
     }
-    inline void Serialize(ISerializable::SerializeStream& stream, ISerializable& v, const void* otherObj)
+    inline void Serialize(ISerializable::SerializeStream& stream, const ISerializable& v, const void* otherObj)
     {
         stream.StartObject();
-        v.Serialize(stream, otherObj);
+        const_cast<ISerializable*>(&v)->Serialize(stream, otherObj);
         stream.EndObject();
     }
     inline void Deserialize(ISerializable::DeserializeStream& stream, ISerializable& v, ISerializeModifier* modifier)
@@ -380,15 +435,15 @@ namespace Serialization
     }
 
     template<typename T>
-    inline typename TEnableIf<TIsBaseOf<ISerializable, T>::Value, bool>::Type ShouldSerialize(ISerializable& v, const void* otherObj)
+    inline typename TEnableIf<TIsBaseOf<ISerializable, T>::Value, bool>::Type ShouldSerialize(const ISerializable& v, const void* otherObj)
     {
-        return true;
+        return !otherObj || v.ShouldSerialize(otherObj);
     }
     template<typename T>
-    inline typename TEnableIf<TIsBaseOf<ISerializable, T>::Value>::Type Serialize(ISerializable::SerializeStream& stream, ISerializable& v, const void* otherObj)
+    inline typename TEnableIf<TIsBaseOf<ISerializable, T>::Value>::Type Serialize(ISerializable::SerializeStream& stream, const ISerializable& v, const void* otherObj)
     {
         stream.StartObject();
-        v.Serialize(stream, otherObj);
+        const_cast<ISerializable*>(&v)->Serialize(stream, otherObj);
         stream.EndObject();
     }
     template<typename T>
@@ -399,13 +454,19 @@ namespace Serialization
 
     // Scripting Object
 
-    template<typename T>
-    inline typename TEnableIf<TIsBaseOf<ScriptingObject, T>::Value, bool>::Type ShouldSerialize(T*& v, const void* otherObj)
+    inline bool ShouldSerializeRef(const ScriptingObject* v, const ScriptingObject* other)
     {
-        return !otherObj || v != *(T**)otherObj;
+        return v != other;
+    }
+
+    FLAXENGINE_API bool ShouldSerializeRef(const SceneObject* v, const SceneObject* other);
+    template<typename T>
+    inline typename TEnableIf<TAnd<TIsBaseOf<ScriptingObject, T>, TNot<TIsBaseOf<SceneObject, T>>>::Value, bool>::Type ShouldSerialize(const T* v, const void* otherObj)
+    {
+        return !otherObj || v != *(const T**)otherObj;
     }
     template<typename T>
-    inline typename TEnableIf<TIsBaseOf<ScriptingObject, T>::Value>::Type Serialize(ISerializable::SerializeStream& stream, T*& v, const void* otherObj)
+    inline typename TEnableIf<TIsBaseOf<ScriptingObject, T>::Value>::Type Serialize(ISerializable::SerializeStream& stream, const T* v, const void* otherObj)
     {
         stream.Guid(v ? v->GetID() : Guid::Empty);
     }
@@ -414,8 +475,14 @@ namespace Serialization
     {
         Guid id;
         Deserialize(stream, id, modifier);
-		modifier->IdsMapping.TryGet(id, id);
-        v = (T*)FindObject(id, T::GetStaticClass());
+        modifier->IdsMapping.TryGet(id, id);
+        v = (T*)::FindObject(id, T::GetStaticClass());
+    }
+
+    template<typename T>
+    inline typename TEnableIf<TIsBaseOf<SceneObject, T>::Value, bool>::Type ShouldSerialize(const T* v, const void* otherObj)
+    {
+        return !otherObj || ShouldSerializeRef((const SceneObject*)v, *(const SceneObject**)otherObj);
     }
 
     // Scripting Object Reference
@@ -423,7 +490,7 @@ namespace Serialization
     template<typename T>
     inline bool ShouldSerialize(const ScriptingObjectReference<T>& v, const void* otherObj)
     {
-        return !otherObj || v.Get() != ((ScriptingObjectReference<T>*)otherObj)->Get();
+        return !otherObj || ShouldSerializeRef(v.Get(), ((ScriptingObjectReference<T>*)otherObj)->Get());
     }
     template<typename T>
     inline void Serialize(ISerializable::SerializeStream& stream, const ScriptingObjectReference<T>& v, const void* otherObj)
@@ -435,7 +502,28 @@ namespace Serialization
     {
         Guid id;
         Deserialize(stream, id, modifier);
-		modifier->IdsMapping.TryGet(id, id);
+        modifier->IdsMapping.TryGet(id, id);
+        v = id;
+    }
+
+    // Scripting Interface Reference
+
+    template<typename T>
+    inline bool ShouldSerialize(const ScriptingObjectInterfaceReference<T>& v, const void* otherObj)
+    {
+        return !otherObj || ShouldSerializeRef(v.GetObject(), ((ScriptingObjectInterfaceReference<T>*)otherObj)->GetObject());
+    }
+    template<typename T>
+    inline void Serialize(ISerializable::SerializeStream& stream, const ScriptingObjectInterfaceReference<T>& v, const void* otherObj)
+    {
+        stream.Guid(v.GetID());
+    }
+    template<typename T>
+    inline void Deserialize(ISerializable::DeserializeStream& stream, ScriptingObjectInterfaceReference<T>& v, ISerializeModifier* modifier)
+    {
+        Guid id;
+        Deserialize(stream, id, modifier);
+        modifier->IdsMapping.TryGet(id, id);
         v = id;
     }
 
@@ -444,7 +532,7 @@ namespace Serialization
     template<typename T>
     inline bool ShouldSerialize(const SoftObjectReference<T>& v, const void* otherObj)
     {
-        return !otherObj || v.Get() != ((SoftObjectReference<T>*)otherObj)->Get();
+        return !otherObj || ShouldSerializeRef(v.Get(), ((SoftObjectReference<T>*)otherObj)->Get());
     }
     template<typename T>
     inline void Serialize(ISerializable::SerializeStream& stream, const SoftObjectReference<T>& v, const void* otherObj)
@@ -456,7 +544,7 @@ namespace Serialization
     {
         Guid id;
         Deserialize(stream, id, modifier);
-		modifier->IdsMapping.TryGet(id, id);
+        modifier->IdsMapping.TryGet(id, id);
         v = id;
     }
 
@@ -500,6 +588,26 @@ namespace Serialization
         v = id;
     }
 
+    // Soft Asset Reference
+
+    template<typename T>
+    inline bool ShouldSerialize(const SoftAssetReference<T>& v, const void* otherObj)
+    {
+        return !otherObj || v.Get() != ((SoftAssetReference<T>*)otherObj)->Get();
+    }
+    template<typename T>
+    inline void Serialize(ISerializable::SerializeStream& stream, const SoftAssetReference<T>& v, const void* otherObj)
+    {
+        stream.Guid(v.GetID());
+    }
+    template<typename T>
+    inline void Deserialize(ISerializable::DeserializeStream& stream, SoftAssetReference<T>& v, ISerializeModifier* modifier)
+    {
+        Guid id;
+        Deserialize(stream, id, modifier);
+        v = id;
+    }
+
     // Array
 
     template<typename T, typename AllocationType = HeapAllocation>
@@ -507,12 +615,13 @@ namespace Serialization
     {
         if (!otherObj)
             return true;
-        const auto other = (Array<T, AllocationType>*)otherObj;
+        const auto other = (const Array<T, AllocationType>*)otherObj;
         if (v.Count() != other->Count())
             return true;
+        const T* vPtr = v.Get();
         for (int32 i = 0; i < v.Count(); i++)
         {
-            if (ShouldSerialize((T&)v[i], (const void*)&other->At(i)))
+            if (ShouldSerialize(vPtr[i], (const void*)&other->At(i)))
                 return true;
         }
         return false;
@@ -521,36 +630,28 @@ namespace Serialization
     inline void Serialize(ISerializable::SerializeStream& stream, const Array<T, AllocationType>& v, const void* otherObj)
     {
         stream.StartArray();
+        const T* vPtr = v.Get();
         for (int32 i = 0; i < v.Count(); i++)
-            Serialize(stream, (T&)v[i], nullptr);
+            Serialize(stream, vPtr[i], nullptr);
         stream.EndArray();
     }
     template<typename T, typename AllocationType = HeapAllocation>
     inline void Deserialize(ISerializable::DeserializeStream& stream, Array<T, AllocationType>& v, ISerializeModifier* modifier)
     {
-        if (!stream.IsArray())
-            return;
-        const auto& streamArray = stream.GetArray();
-        v.Resize(streamArray.Size());
-        for (int32 i = 0; i < v.Count(); i++)
-            Deserialize(streamArray[i], (T&)v[i], modifier);
-    }
-    template<typename AllocationType = HeapAllocation>
-    inline void Deserialize(ISerializable::DeserializeStream& stream, Array<byte, AllocationType>& v, ISerializeModifier* modifier)
-    {
         if (stream.IsArray())
         {
             const auto& streamArray = stream.GetArray();
             v.Resize(streamArray.Size());
+            T* vPtr = v.Get();
             for (int32 i = 0; i < v.Count(); i++)
-                Deserialize(streamArray[i], v[i], modifier);
+                Deserialize(streamArray[i], vPtr[i], modifier);
         }
-        else if (stream.IsString())
+        else if (TIsPODType<T>::Value && stream.IsString())
         {
-            // byte[] encoded as Base64
+            // T[] encoded as Base64
             const StringAnsiView streamView(stream.GetStringAnsiView());
-            v.Resize(Encryption::Base64DecodeLength(*streamView, streamView.Length()));
-            Encryption::Base64Decode(*streamView, streamView.Length(), v.Get());
+            v.Resize(Encryption::Base64DecodeLength(*streamView, streamView.Length()) / sizeof(T));
+            Encryption::Base64Decode(*streamView, streamView.Length(), (byte*)v.Get());
         }
     }
 
@@ -594,7 +695,7 @@ namespace Serialization
         {
             const auto& streamArray = stream.GetArray();
             const int32 size = streamArray.Size();
-            v.EnsureCapacity(size * 3);
+            v.EnsureCapacity(size);
             for (int32 i = 0; i < size; i++)
             {
                 auto& streamItem = streamArray[i];
@@ -611,7 +712,7 @@ namespace Serialization
         else if (stream.IsObject())
         {
             const int32 size = stream.MemberCount();
-            v.EnsureCapacity(size * 3);
+            v.EnsureCapacity(size);
             for (auto i = stream.MemberBegin(); i != stream.MemberEnd(); ++i)
             {
                 KeyType key;

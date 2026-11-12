@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
     /// <summary>
     /// Border control that draws the border around the control edges (inner and outer sides).
     /// </summary>
+    [ActorToolbox("UI")]
     public class Border : ContainerControl
     {
         /// <summary>
@@ -34,7 +35,15 @@ namespace FlaxEngine.GUI
         {
             base.DrawSelf();
 
-            Render2D.DrawRectangle(new Rectangle(Vector2.Zero, Size), BorderColor, BorderWidth);
+            Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), BorderColor, BorderWidth);
+        }
+
+        /// <inheritdoc />
+        public override bool ContainsPoint(ref Float2 location, bool precise = false)
+        {
+            if (precise) // Ignore border
+                return false;
+            return base.ContainsPoint(ref location, precise);
         }
     }
 }

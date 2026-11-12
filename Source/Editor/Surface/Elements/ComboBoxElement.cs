@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI;
 using FlaxEngine;
@@ -33,6 +33,7 @@ namespace FlaxEditor.Surface.Elements
         public ComboBoxElement(SurfaceNode parentNode, NodeElementArchetype archetype)
         : base(archetype.ActualPositionX, archetype.ActualPositionY, archetype.Size.X)
         {
+            Height = Constants.BoxRowHeight;
             ParentNode = parentNode;
             Archetype = archetype;
 
@@ -43,7 +44,7 @@ namespace FlaxEditor.Surface.Elements
             {
                 var items = Archetype.Text.Split('\n');
                 AddItems(items);
-                
+
                 OnNodeValuesChanged();
                 ParentNode.ValuesChanged += OnNodeValuesChanged;
             }

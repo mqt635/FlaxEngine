@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.ComponentModel;
@@ -14,7 +14,7 @@ namespace FlaxEngine
         /// <summary>
         /// The value for which all absolute numbers smaller than are considered equal to zero.
         /// </summary>
-        public const double Epsilon = 1e-7f;
+        public const double Epsilon = 1e-16;
 
         /// <summary>
         /// A value specifying the approximation of π which is 180 degrees.
@@ -49,7 +49,7 @@ namespace FlaxEngine
         {
             return Math.Abs(f);
         }
-        
+
         /// <summary>
         /// Returns the arc-cosine of f - the angle in radians whose cosine is f.
         /// </summary>
@@ -388,14 +388,14 @@ namespace FlaxEngine
         {
             return (long)Math.Round(f);
         }
-        
+
         /// <summary>
         /// Returns the sign of f.
         /// </summary>
         /// <param name="f"></param>
         public static double Sign(double f)
         {
-            return f < 0d ? -1d : 1d;
+            return f > 0.0d ? 1.0d : f < 0.0d ? -1.0d : 0.0d;
         }
 
         /// <summary>
@@ -444,8 +444,7 @@ namespace FlaxEngine
         /// <param name="maxSpeed">The maximum speed.</param>
         /// <param name="deltaTime">The delta time (in seconds) since last update.</param>
         /// <returns>The smoothed value.</returns>
-        public static double SmoothDamp(double current, double target, ref double currentVelocity, double smoothTime, [DefaultValue("double.PositiveInfinity")]
-                                        double maxSpeed, [DefaultValue("Time.DeltaTime")] double deltaTime)
+        public static double SmoothDamp(double current, double target, ref double currentVelocity, double smoothTime, [DefaultValue("double.PositiveInfinity")] double maxSpeed, [DefaultValue("Time.DeltaTime")] double deltaTime)
         {
             smoothTime = Max(0.0001d, smoothTime);
             double a = 2d / smoothTime;
@@ -504,8 +503,7 @@ namespace FlaxEngine
         /// <param name="maxSpeed">The maximum speed.</param>
         /// <param name="deltaTime">The delta time (in seconds) since last update.</param>
         /// <returns>The smoothed value.</returns>
-        public static double SmoothDampAngle(double current, double target, ref double currentVelocity, double smoothTime, [DefaultValue("double.PositiveInfinity")]
-                                             double maxSpeed, [DefaultValue("Time.DeltaTime")] double deltaTime)
+        public static double SmoothDampAngle(double current, double target, ref double currentVelocity, double smoothTime, [DefaultValue("double.PositiveInfinity")] double maxSpeed, [DefaultValue("Time.DeltaTime")] double deltaTime)
         {
             target = current + DeltaAngle(current, target);
             return SmoothDamp(current, target, ref currentVelocity, smoothTime, maxSpeed, deltaTime);
@@ -647,6 +645,7 @@ namespace FlaxEngine
 
         /// <summary>
         /// Maps the specified value from the given range into another.
+        /// [Deprecated on 17.04.2023, expires on 17.04.2024]
         /// </summary>
         /// <param name="value">The value to map from range [fromMin; fromMax].</param>
         /// <param name="fromMin">The source range minimum value.</param>
@@ -654,6 +653,7 @@ namespace FlaxEngine
         /// <param name="toMin">The destination range minimum value.</param>
         /// <param name="toMax">The destination range maximum value.</param>
         /// <returns>The mapped value in range [toMin; toMax].</returns>
+        [Obsolete("Use Remap instead")]
         public static double Map(double value, double fromMin, double fromMax, double toMin, double toMax)
         {
             double t = (value - fromMin) / (fromMax - fromMin);
@@ -723,21 +723,12 @@ namespace FlaxEngine
         }
 
         /// <summary>
-        /// Checks if a and b are almost equals, taking into account the magnitude of floating point numbers (unlike
-        /// <see cref="WithinEpsilon" /> method). See Remarks.
-        /// See remarks.
+        /// Checks if a and b are almost equals, taking into account the magnitude of floating point numbers (unlike <see cref="WithinEpsilon" /> method). See Remarks. See remarks.
         /// </summary>
         /// <param name="a">The left value to compare.</param>
         /// <param name="b">The right value to compare.</param>
         /// <returns><c>true</c> if a almost equal to b, <c>false</c> otherwise</returns>
-        /// <remarks>
-        /// The code is using the technique described by Bruce Dawson in
-        /// <a href="http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/">
-        ///   Comparing
-        ///   Floating point numbers 2012 edition
-        /// </a>
-        /// .
-        /// </remarks>
+        /// <remarks>The code is using the technique described by Bruce Dawson in <a href="http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/">Comparing Floating point numbers 2012 edition</a>.</remarks>
         public static unsafe bool NearEqual(double a, double b)
         {
             // Check if the numbers are really close -- needed
@@ -885,44 +876,54 @@ namespace FlaxEngine
         /// <summary>
         /// Given a heading which may be outside the +/- PI range, 'unwind' it back into that range.
         /// </summary>
+        /// <remarks>Optimized version of <see cref="UnwindRadiansAccurate"/> that is it faster and has fixed cost but with large angle values (100 for example) starts to lose accuracy floating point problem.</remarks>
         /// <param name="angle">Angle in radians to unwind.</param>
         /// <returns>Valid angle in radians.</returns>
         public static double UnwindRadians(double angle)
         {
-            // TODO: make it faster?
+            var a = angle - Math.Floor(angle / TwoPi) * TwoPi; // Loop function between 0 and TwoPi
+            return a > Pi ? a - TwoPi : a; // Change range so it become Pi and -Pi
+        }
 
+        /// <summary>
+        /// The same as <see cref="UnwindRadians"/> but is more computation intensive with large <see href="angle"/> and has better accuracy with large <see href="angle"/>.
+        /// <br>cost of this function is <see href="angle"/> % <see cref="Pi"/></br>
+        /// </summary>
+        /// <param name="angle">Angle in radians to unwind.</param>
+        /// <returns>Valid angle in radians.</returns>
+        public static double UnwindRadiansAccurate(double angle)
+        {
             while (angle > Pi)
-            {
                 angle -= TwoPi;
-            }
-
             while (angle < -Pi)
-            {
                 angle += TwoPi;
-            }
-
             return angle;
         }
 
         /// <summary>
-        /// Utility to ensure angle is between +/- 180 degrees by unwinding
+        /// Utility to ensure angle is between +/- 180 degrees by unwinding.
         /// </summary>
+        /// <remarks>Optimized version of <see cref="UnwindDegreesAccurate"/> that is it faster and has fixed cost but with large angle values (100 for example) starts to lose accuracy floating point problem.</remarks>
         /// <param name="angle">Angle in degrees to unwind.</param>
         /// <returns>Valid angle in degrees.</returns>
         public static double UnwindDegrees(double angle)
         {
-            // TODO: make it faster?
+            var a = angle - Math.Floor(angle / 360.0) * 360.0; // Loop function between 0 and 360
+            return a > 180 ? a - 360.0 : a; // Change range so it become 180 and -180
+        }
 
-            while (angle > 180.0f)
-            {
-                angle -= 360.0f;
-            }
-
-            while (angle < -180.0f)
-            {
-                angle += 360.0f;
-            }
-
+        /// <summary>
+        /// The same as <see cref="UnwindDegrees"/> but is more computation intensive with large <see href="angle"/> and has better accuracy with large <see href="angle"/>.
+        /// <br>cost of this function is <see href="angle"/> % 180.0f</br>
+        /// </summary>
+        /// <param name="angle">Angle in radians to unwind.</param>
+        /// <returns>Valid angle in radians.</returns>
+        public static double UnwindDegreesAccurate(double angle)
+        {
+            while (angle > 180.0)
+                angle -= 360.0;
+            while (angle < -180.0)
+                angle += 360.0;
             return angle;
         }
 
@@ -942,8 +943,9 @@ namespace FlaxEngine
         /// Interpolates between two values using a linear function by a given amount.
         /// </summary>
         /// <remarks>
-        /// See http://www.encyclopediaofmath.org/index.php/Linear_interpolation and
-        /// http://fgiesen.wordpress.com/2012/08/15/linear-interpolation-past-present-and-future/
+        /// See:
+        /// <br><seealso href="http://www.encyclopediaofmath.org/index.php/Linear_interpolation"/></br>
+        /// <br><seealso href="http://fgiesen.wordpress.com/2012/08/15/linear-interpolation-past-present-and-future/"/></br>
         /// </remarks>
         /// <param name="from">Value to interpolate from.</param>
         /// <param name="to">Value to interpolate to.</param>
@@ -959,28 +961,26 @@ namespace FlaxEngine
         /// Performs smooth (cubic Hermite) interpolation between 0 and 1.
         /// </summary>
         /// <remarks>
-        /// See https://en.wikipedia.org/wiki/Smoothstep
+        /// See: 
+        /// <br><seealso href="https://en.wikipedia.org/wiki/Smoothstep"/></br>
         /// </remarks>
         /// <param name="amount">Value between 0 and 1 indicating interpolation amount.</param>
         public static double SmoothStep(double amount)
         {
-            return amount <= 0d ? 0d
-                   : amount >= 1d ? 1d
-                   : amount * amount * (3d - 2d * amount);
+            return amount <= 0d ? 0d : amount >= 1d ? 1d : amount * amount * (3d - 2d * amount);
         }
 
         /// <summary>
         /// Performs a smooth(er) interpolation between 0 and 1 with 1st and 2nd order derivatives of zero at endpoints.
         /// </summary>
         /// <remarks>
-        /// See https://en.wikipedia.org/wiki/Smoothstep
+        /// See: 
+        /// <br><seealso href="https://en.wikipedia.org/wiki/Smoothstep"/></br>
         /// </remarks>
         /// <param name="amount">Value between 0 and 1 indicating interpolation amount.</param>
         public static double SmootherStep(double amount)
         {
-            return amount <= 0d ? 0d
-                   : amount >= 1d ? 1d
-                   : amount * amount * amount * (amount * (amount * 6d - 15d) + 10d);
+            return amount <= 0d ? 0d : amount >= 1d ? 1d : amount * amount * amount * (amount * (amount * 6d - 15d) + 10d);
         }
 
         /// <summary>
@@ -993,7 +993,6 @@ namespace FlaxEngine
         {
             if (modulo == 0d)
                 return value;
-
             return value % modulo;
         }
 
@@ -1033,7 +1032,7 @@ namespace FlaxEngine
 
         /// <summary>
         /// Gauss function.
-        /// http://en.wikipedia.org/wiki/Gaussian_function#Two-dimensional_Gaussian_function
+        /// <br><seealso href="http://en.wikipedia.org/wiki/Gaussian_function#Two-dimensional_Gaussian_function"/></br>
         /// </summary>
         /// <param name="amplitude">Curve amplitude.</param>
         /// <param name="x">Position X.</param>

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingType.h"
-#include <ThirdParty/tracy/Tracy.h>
+#include <ThirdParty/tracy/tracy/Tracy.hpp>
 
 #if COMPILE_WITH_PROFILER
 
@@ -17,15 +17,14 @@
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API ProfilerCPU
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(ProfilerCPU);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(ProfilerCPU);
 public:
-
     /// <summary>
     /// Represents single CPU profiling event data.
     /// </summary>
-    API_STRUCT() struct Event
+    API_STRUCT(NoDefault) struct Event
     {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(Event);
+        DECLARE_SCRIPTING_TYPE_MINIMAL(Event);
 
         /// <summary>
         /// The start time (in milliseconds).
@@ -61,7 +60,6 @@ public:
     class EventBuffer : public NonCopyable
     {
     private:
-
         Event* _data;
         int32 _capacity;
         int32 _capacityMask;
@@ -69,12 +67,10 @@ public:
         int32 _count;
 
     public:
-
         EventBuffer();
         ~EventBuffer();
 
     public:
-
         /// <summary>
         /// Gets the amount of the events in the buffer.
         /// </summary>
@@ -90,7 +86,7 @@ public:
         /// <returns>The event</returns>
         Event& Get(int32 index) const
         {
-            ASSERT(index >= 0 && index < _capacity);
+            ASSERT_LOW_LAYER(index >= 0 && index < _capacity);
             return _data[index];
         }
 
@@ -110,11 +106,10 @@ public:
         /// Extracts the buffer data (only ended events starting from the root level with depth=0).
         /// </summary>
         /// <param name="data">The output data.</param>
-        /// <param name="withRemove">True if also remove extracted events to prevent double-gather, false if don't modify the buffer data.</param>
-        void Extract(Array<Event, HeapAllocation>& data, bool withRemove);
+        /// <param name="withRemoval">True if also remove extracted events to prevent double-gather, false if don't modify the buffer data.</param>
+        void Extract(Array<Event, HeapAllocation>& data, bool withRemoval);
 
     public:
-
         /// <summary>
         /// Ring buffer iterator
         /// </summary>
@@ -123,19 +118,41 @@ public:
             friend EventBuffer;
 
         private:
-
             EventBuffer* _buffer;
             int32 _index;
 
-            Iterator(EventBuffer* buffer, const int32 index)
+            FORCE_INLINE Iterator(EventBuffer* buffer, const int32 index)
                 : _buffer(buffer)
                 , _index(index)
             {
             }
 
-            Iterator(const Iterator& i) = default;
-
         public:
+            FORCE_INLINE Iterator(const Iterator& other)
+                : _buffer(other._buffer)
+                , _index(other._index)
+            {
+            }
+
+            FORCE_INLINE Iterator(Iterator&& other) noexcept
+                : _buffer(other._buffer)
+                , _index(other._index)
+            {
+            }
+
+            FORCE_INLINE Iterator& operator=(Iterator&& other)
+            {
+                _buffer = other._buffer;
+                _index = other._index;
+                return *this;
+            }
+
+            FORCE_INLINE Iterator& operator=(const Iterator& other)
+            {
+                _buffer = other._buffer;
+                _index = other._index;
+                return *this;
+            }
 
             FORCE_INLINE int32 Index() const
             {
@@ -144,31 +161,19 @@ public:
 
             FORCE_INLINE Event& Event() const
             {
-                ASSERT(_buffer && _index >= 0 && _index < _buffer->_capacity);
+                ASSERT_LOW_LAYER(_buffer && _index >= 0 && _index < _buffer->_capacity);
                 return _buffer->Get(_index);
             }
 
-        public:
-
-            /// <summary>
-            /// Checks if iterator is in the end of the collection.
-            /// </summary>
-            bool IsEnd() const
+            FORCE_INLINE bool IsEnd() const
             {
-                ASSERT(_buffer);
                 return _index == _buffer->_head;
             }
 
-            /// <summary>
-            /// Checks if iterator is not in the end of the collection.
-            /// </summary>
-            bool IsNotEnd() const
+            FORCE_INLINE bool IsNotEnd() const
             {
-                ASSERT(_buffer);
                 return _index != _buffer->_head;
             }
-
-        public:
 
             FORCE_INLINE bool operator==(const Iterator& v) const
             {
@@ -181,32 +186,27 @@ public:
             }
 
         public:
-
-            Iterator& operator++()
+            FORCE_INLINE Iterator& operator++()
             {
-                ASSERT(_buffer);
                 _index = (_index + 1) & _buffer->_capacityMask;
                 return *this;
             }
 
-            Iterator operator++(int)
+            FORCE_INLINE Iterator operator++(int)
             {
-                ASSERT(_buffer);
                 Iterator temp = *this;
                 _index = (_index + 1) & _buffer->_capacityMask;
                 return temp;
             }
 
-            Iterator& operator--()
+            FORCE_INLINE Iterator& operator--()
             {
-                ASSERT(_buffer);
                 _index = (_index - 1) & _buffer->_capacityMask;
                 return *this;
             }
 
-            Iterator operator--(int)
+            FORCE_INLINE Iterator operator--(int)
             {
-                ASSERT(_buffer);
                 Iterator temp = *this;
                 _index = (_index - 1) & _buffer->_capacityMask;
                 return temp;
@@ -214,7 +214,6 @@ public:
         };
 
     public:
-
         FORCE_INLINE Iterator Begin()
         {
             return Iterator(this, (_head - _count) & _capacityMask);
@@ -238,12 +237,10 @@ public:
     class Thread
     {
     private:
-
         String _name;
         int32 _depth = 0;
 
     public:
-
         Thread(const Char* name)
         {
             _name = name;
@@ -255,14 +252,12 @@ public:
         }
 
     public:
-
         /// <summary>
         /// The current thread.
         /// </summary>
         static THREADLOCAL Thread* Current;
 
     public:
-
         /// <summary>
         /// Gets the name.
         /// </summary>
@@ -277,7 +272,6 @@ public:
         EventBuffer Buffer;
 
     public:
-
         /// <summary>
         /// Begins the event running on a this thread. Call EndEvent with index parameter equal to the returned value by BeginEvent function.
         /// </summary>
@@ -297,7 +291,6 @@ public:
     };
 
 public:
-
     /// <summary>
     /// The registered threads.
     /// </summary>
@@ -309,7 +302,6 @@ public:
     static bool Enabled;
 
 public:
-
     /// <summary>
     /// Determines whether the current (calling) thread is being profiled by the service (it may has no active profile block but is registered).
     /// </summary>
@@ -403,9 +395,11 @@ struct TIsPODType<ProfilerCPU::Event>
 #ifdef TRACY_ENABLE
 #define PROFILE_CPU_SRC_LOC(srcLoc) tracy::ScopedZone ___tracy_scoped_zone( (tracy::SourceLocationData*)&(srcLoc) ); ScopeProfileBlockCPU ProfileBlockCPU((srcLoc).name)
 #define PROFILE_CPU_ASSET(asset) ZoneScoped; const StringView __tracy_asset_name((asset)->GetPath()); ZoneName(*__tracy_asset_name, __tracy_asset_name.Length())
+#define PROFILE_CPU_ACTOR(actor) ZoneScoped; const StringView __tracy_actor_name((actor)->GetName()); ZoneName(*__tracy_actor_name, __tracy_actor_name.Length())
 #else
 #define PROFILE_CPU_SRC_LOC(srcLoc) ScopeProfileBlockCPU ProfileBlockCPU((srcLoc).name)
 #define PROFILE_CPU_ASSET(asset)
+#define PROFILE_CPU_ACTOR(actor)
 #endif
 
 #else
@@ -415,5 +409,9 @@ struct TIsPODType<ProfilerCPU::Event>
 #define PROFILE_CPU_NAMED(name)
 #define PROFILE_CPU_SRC_LOC(srcLoc)
 #define PROFILE_CPU_ASSET(asset)
+#define PROFILE_CPU_ACTOR(actor)
 
 #endif
+
+// CPU-wait zones can be marked with red color for better readability
+#define TracyWaitZoneColor 0xba1904

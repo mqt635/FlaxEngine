@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "TextProcessing.h"
+#include "Engine/Core/Log.h"
 
 TextProcessing::TextProcessing(const char* input, int32 length)
     : _buffer(input)
@@ -8,8 +9,6 @@ TextProcessing::TextProcessing(const char* input, int32 length)
     , _cursor(const_cast<char*>(input))
     , _position(0)
     , _line(1)
-    , Separators(32)
-    , Whitespaces(8)
 {
 }
 
@@ -54,6 +53,8 @@ void TextProcessing::Setup_HLSL()
         32,
     };
     Whitespaces.Set(whitespaces, ARRAY_COUNT(whitespaces));
+    SingleLineComment = SeparatorData('/', '/');
+    MultiLineCommentSeparator = SeparatorData('/', '*');
 }
 
 char TextProcessing::ReadChar()
@@ -123,6 +124,38 @@ void TextProcessing::ReadToken(Token* token)
 
                 token->Separator = Separators[s];
                 ReadChar();
+                
+                // Check for comments
+                if (token->Separator == SingleLineComment)
+                {
+                    // Read whole line
+                    ReadLine();
+
+                    // Read another token
+                    ReadToken(token);
+                }
+                else if (token->Separator == MultiLineCommentSeparator)
+                {
+                    // Read tokens until end sequence
+                    char prev = ' ';
+                    while (CanRead())
+                    {
+                        c = ReadChar();
+                        if (prev == '*' && c == '/')
+                            break;
+                        prev = c;
+                    }
+
+                    // Check if comment is valid (has end before file end)
+                    if (!CanRead())
+                    {
+                        LOG(Warning, "Missing multiline comment ending");
+                    }
+
+                    // Read another token
+                    ReadToken(token);
+                }
+
                 return;
             }
         }

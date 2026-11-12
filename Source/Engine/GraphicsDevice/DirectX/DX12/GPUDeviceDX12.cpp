@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -10,30 +10,380 @@
 #include "GPUTimerQueryDX12.h"
 #include "GPUBufferDX12.h"
 #include "GPUSamplerDX12.h"
+#include "GPUVertexLayoutDX12.h"
 #include "GPUSwapChainDX12.h"
+#include "RootSignatureDX12.h"
+#include "UploadBufferDX12.h"
+#include "CommandQueueDX12.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/CommandLine.h"
 #include "Engine/Graphics/RenderTask.h"
-#include "Engine/Graphics/Async/GPUTasksExecutor.h"
+#include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Config/PlatformSettings.h"
-#include "UploadBufferDX12.h"
-#include "CommandQueueDX12.h"
+#include "Engine/Core/Types/StringBuilder.h"
 #include "Engine/Core/Utilities.h"
 #include "Engine/Threading/Threading.h"
 #include "CommandSignatureDX12.h"
 
+// Inline into this module to leave it as a header-only
+#include <ThirdParty/D3D12MemoryAllocator/D3D12MemAlloc.h>
+#include <ThirdParty/D3D12MemoryAllocator/D3D12MemAlloc.cpp>
+
 static bool CheckDX12Support(IDXGIAdapter* adapter)
 {
+#if PLATFORM_XBOX_SCARLETT || PLATFORM_XBOX_ONE
+    return true;
+#else
     // Try to create device
     if (SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr)))
     {
         return true;
     }
     return false;
+#endif
 }
+
+void* D3D12MA_Allocate(size_t Size, size_t Alignment, void* pPrivateData)
+{
+    PROFILE_MEM(GraphicsCommands);
+    return Platform::Allocate(Size, Alignment);
+}
+
+void D3D12MA_Free(void* pMemory, void* pPrivateData)
+{
+    Platform::Free(pMemory);
+}
+
+GPUVertexLayoutDX12::GPUVertexLayoutDX12(GPUDeviceDX12* device, const Elements& elements, bool explicitOffsets)
+    : GPUResourceDX12<GPUVertexLayout>(device, StringView::Empty)
+    , InputElementsCount(elements.Count())
+{
+    SetElements(elements, explicitOffsets);
+    for (int32 i = 0; i < elements.Count(); i++)
+    {
+        const VertexElement& src = GetElements().Get()[i];
+        D3D12_INPUT_ELEMENT_DESC& dst = InputElements[i];
+        dst.SemanticName = RenderToolsDX::GetVertexInputSemantic(src.Type, dst.SemanticIndex);
+        dst.Format = RenderToolsDX::ToDxgiFormat(src.Format);
+        dst.InputSlot = src.Slot;
+        dst.AlignedByteOffset = src.Offset;
+        dst.InputSlotClass = src.PerInstance ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        dst.InstanceDataStepRate = src.PerInstance ? 1 : 0;
+    }
+}
+
+RootSignatureDX12::RootSignatureDX12()
+{
+    // Clear structures
+    Platform::MemoryClear(this, sizeof(*this));
+
+    // Descriptor tables
+    {
+        // SRVs
+        D3D12_DESCRIPTOR_RANGE& range = _ranges[0];
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = GPU_MAX_SR_BINDED;
+        range.BaseShaderRegister = 0;
+        range.RegisterSpace = 0;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    }
+    {
+        // UAVs
+        D3D12_DESCRIPTOR_RANGE& range = _ranges[1];
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        range.NumDescriptors = GPU_MAX_UA_BINDED;
+        range.BaseShaderRegister = 0;
+        range.RegisterSpace = 0;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    }
+    {
+        // Samplers
+        D3D12_DESCRIPTOR_RANGE& range = _ranges[2];
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        range.NumDescriptors = GPU_MAX_SAMPLER_BINDED - GPU_STATIC_SAMPLERS_COUNT;
+        range.BaseShaderRegister = GPU_STATIC_SAMPLERS_COUNT;
+        range.RegisterSpace = 0;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    }
+
+    // Root parameters
+    for (int32 i = 0; i < GPU_MAX_CB_BINDED; i++)
+    {
+        // CBs
+        D3D12_ROOT_PARAMETER& param = _parameters[DX12_ROOT_SIGNATURE_CB + i];
+        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        param.Descriptor.ShaderRegister = i;
+        param.Descriptor.RegisterSpace = 0;
+    }
+    {
+        // SRVs
+        D3D12_ROOT_PARAMETER& param = _parameters[DX12_ROOT_SIGNATURE_SR];
+        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        param.DescriptorTable.NumDescriptorRanges = 1;
+        param.DescriptorTable.pDescriptorRanges = &_ranges[0];
+    }
+    {
+        // UAVs
+        D3D12_ROOT_PARAMETER& param = _parameters[DX12_ROOT_SIGNATURE_UA];
+        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        param.DescriptorTable.NumDescriptorRanges = 1;
+        param.DescriptorTable.pDescriptorRanges = &_ranges[1];
+    }
+    {
+        // Samplers
+        D3D12_ROOT_PARAMETER& param = _parameters[DX12_ROOT_SIGNATURE_SAMPLER];
+        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        param.DescriptorTable.NumDescriptorRanges = 1;
+        param.DescriptorTable.pDescriptorRanges = &_ranges[2];
+    }
+
+    // Static samplers
+    static_assert(GPU_STATIC_SAMPLERS_COUNT == ARRAY_COUNT(_staticSamplers), "Update static samplers setup.");
+    // Linear Clamp
+    InitSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    // Point Clamp
+    InitSampler(1, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    // Linear Wrap
+    InitSampler(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+    // Point Wrap
+    InitSampler(3, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+#if REVERSE_Z
+    auto comparisionFunc = D3D12_COMPARISON_FUNC_GREATER;
+#else
+    auto comparisionFunc = D3D12_COMPARISON_FUNC_LESS;
+#endif
+    // Shadow
+    InitSampler(4, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, comparisionFunc);
+    // Shadow PCF
+    InitSampler(5, D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, comparisionFunc);
+
+    // Init
+    _desc.NumParameters = ARRAY_COUNT(_parameters);
+    _desc.pParameters = _parameters;
+    _desc.NumStaticSamplers = ARRAY_COUNT(_staticSamplers);
+    _desc.pStaticSamplers = _staticSamplers;
+    _desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+}
+
+void RootSignatureDX12::InitSampler(int32 i, D3D12_FILTER filter, D3D12_TEXTURE_ADDRESS_MODE address, D3D12_COMPARISON_FUNC comparisonFunc)
+{
+    auto& sampler = _staticSamplers[i];
+    sampler.Filter = filter;
+    sampler.AddressU = address;
+    sampler.AddressV = address;
+    sampler.AddressW = address;
+    sampler.MipLODBias = 0.0f;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = comparisonFunc;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+    sampler.MinLOD = 0;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = i;
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+}
+
+ComPtr<ID3DBlob> RootSignatureDX12::Serialize() const
+{
+    ComPtr<ID3DBlob> signature;
+    ComPtr<ID3DBlob> error;
+    VALIDATE_DIRECTX_CALL(D3D12SerializeRootSignature(&_desc, D3D_ROOT_SIGNATURE_VERSION_1_0, &signature, &error));
+    if (error.Get())
+    {
+        LOG(Error, "D3D12SerializeRootSignature failed with error: {}", String((const char*)error->GetBufferPointer()));
+    }
+    return signature;
+}
+
+#if USE_EDITOR
+
+const Char* GetRootSignatureShaderVisibility(D3D12_SHADER_VISIBILITY visibility)
+{
+    switch (visibility)
+    {
+    case D3D12_SHADER_VISIBILITY_VERTEX:
+        return TEXT(", visibility=SHADER_VISIBILITY_VERTEX");
+    case D3D12_SHADER_VISIBILITY_HULL:
+        return TEXT(", visibility=SHADER_VISIBILITY_HULL");
+    case D3D12_SHADER_VISIBILITY_DOMAIN:
+        return TEXT(", visibility=SHADER_VISIBILITY_DOMAIN");
+    case D3D12_SHADER_VISIBILITY_GEOMETRY:
+        return TEXT(", visibility=SHADER_VISIBILITY_GEOMETRY");
+    case D3D12_SHADER_VISIBILITY_PIXEL:
+        return TEXT(", visibility=SHADER_VISIBILITY_PIXEL");
+    case D3D12_SHADER_VISIBILITY_AMPLIFICATION:
+        return TEXT(", visibility=SHADER_VISIBILITY_AMPLIFICATION");
+    case D3D12_SHADER_VISIBILITY_MESH:
+        return TEXT(", visibility=SHADER_VISIBILITY_MESH");
+    case D3D12_SHADER_VISIBILITY_ALL:
+    default:
+        return TEXT(""); // Default
+    }
+}
+
+const Char* GetRootSignatureSamplerFilter(D3D12_FILTER filter)
+{
+    switch (filter)
+    {
+    case D3D12_FILTER_MIN_MAG_MIP_POINT:
+        return TEXT("FILTER_MIN_MAG_MIP_POINT");
+    case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+        return TEXT("FILTER_MIN_MAG_MIP_LINEAR");
+    case D3D12_FILTER_ANISOTROPIC:
+        return TEXT("FILTER_ANISOTROPIC");
+    case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT:
+        return TEXT("FILTER_COMPARISON_MIN_MAG_MIP_POINT");
+    case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+        return TEXT("FILTER_COMPARISON_MIN_MAG_MIP_LINEAR");
+    default:
+        CRASH; // Not implemented
+    }
+}
+
+const Char* GetRootSignatureSamplerAddress(D3D12_TEXTURE_ADDRESS_MODE address)
+{
+    switch (address)
+    {
+    case D3D12_TEXTURE_ADDRESS_MODE_WRAP:
+        return TEXT("TEXTURE_ADDRESS_WRAP");
+    case D3D12_TEXTURE_ADDRESS_MODE_MIRROR:
+        return TEXT("TEXTURE_ADDRESS_MIRROR");
+    case D3D12_TEXTURE_ADDRESS_MODE_CLAMP:
+        return TEXT("TEXTURE_ADDRESS_CLAMP");
+    case D3D12_TEXTURE_ADDRESS_MODE_BORDER:
+        return TEXT("TEXTURE_ADDRESS_BORDER");
+    case D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE:
+        return TEXT("TEXTURE_ADDRESS_MIRROR_ONCE");
+    default:
+        return TEXT("");
+    }
+}
+
+const Char* GetRootSignatureSamplerComparisonFunc(D3D12_COMPARISON_FUNC func)
+{
+    switch (func)
+    {
+    case D3D12_COMPARISON_FUNC_NEVER:
+        return TEXT("COMPARISON_NEVER");
+    case D3D12_COMPARISON_FUNC_LESS:
+        return TEXT("COMPARISON_LESS");
+    case D3D12_COMPARISON_FUNC_EQUAL:
+        return TEXT("COMPARISON_EQUAL");
+    case D3D12_COMPARISON_FUNC_LESS_EQUAL:
+        return TEXT("COMPARISON_LESS_EQUAL");
+    case D3D12_COMPARISON_FUNC_GREATER:
+        return TEXT("COMPARISON_GREATER");
+    case D3D12_COMPARISON_FUNC_NOT_EQUAL:
+        return TEXT("COMPARISON_NOT_EQUAL");
+    case D3D12_COMPARISON_FUNC_GREATER_EQUAL:
+        return TEXT("COMPARISON_GREATER_EQUAL");
+    case D3D12_COMPARISON_FUNC_ALWAYS:
+    default:
+        return TEXT("COMPARISON_ALWAYS");
+    }
+}
+
+void RootSignatureDX12::ToString(StringBuilder& sb, bool singleLine) const
+{
+    // Flags
+    sb.Append(TEXT("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)"));
+
+    // Parameters
+    const Char newLine = singleLine ? ' ' : '\n';
+    for (const D3D12_ROOT_PARAMETER& param : _parameters)
+    {
+        const Char* visibility = GetRootSignatureShaderVisibility(param.ShaderVisibility);
+        switch (param.ParameterType)
+        {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+            sb.AppendFormat(TEXT(",{}DescriptorTable("), newLine);
+            for (uint32 rangeIndex = 0; rangeIndex < param.DescriptorTable.NumDescriptorRanges; rangeIndex++)
+            {
+                if (rangeIndex)
+                    sb.Append(TEXT(", "));
+                const D3D12_DESCRIPTOR_RANGE& range = param.DescriptorTable.pDescriptorRanges[rangeIndex];
+                switch (range.RangeType)
+                {
+                case D3D12_DESCRIPTOR_RANGE_TYPE_SRV:
+                    sb.AppendFormat(TEXT("SRV(t{}"), range.BaseShaderRegister);
+                    break;
+                case D3D12_DESCRIPTOR_RANGE_TYPE_UAV:
+                    sb.AppendFormat(TEXT("UAV(u{}"), range.BaseShaderRegister);
+                    break;
+                case D3D12_DESCRIPTOR_RANGE_TYPE_CBV:
+                    sb.AppendFormat(TEXT("CBV(b{}"), range.BaseShaderRegister);
+                    break;
+                case D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER:
+                    sb.AppendFormat(TEXT("Sampler(s{}"), range.BaseShaderRegister);
+                    break;
+                }
+                if (range.NumDescriptors != 1)
+                {
+                    if (range.NumDescriptors == UINT_MAX)
+                        sb.Append(TEXT(", numDescriptors=unbounded"));
+                    else
+                        sb.AppendFormat(TEXT(", numDescriptors={}"), range.NumDescriptors);
+                }
+                if (range.OffsetInDescriptorsFromTableStart != D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND)
+                    sb.AppendFormat(TEXT(", offset={}"), range.OffsetInDescriptorsFromTableStart);
+                sb.Append(')');
+            }
+            sb.AppendFormat(TEXT("{})"), visibility);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+            sb.AppendFormat(TEXT(",{}RootConstants(num32BitConstants={}, b{}{})"), newLine, param.Constants.Num32BitValues, param.Constants.ShaderRegister, visibility);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+            sb.AppendFormat(TEXT(",{}CBV(b{}{})"), newLine, param.Descriptor.ShaderRegister, visibility);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+            sb.AppendFormat(TEXT(",{}SRV(t{}{})"), newLine, param.Descriptor.ShaderRegister, visibility);
+            break;
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+            sb.AppendFormat(TEXT(",{}UAV(u{}{})"), newLine, param.Descriptor.ShaderRegister, visibility);
+            break;
+        }
+    }
+
+    // Static Samplers
+    for (const D3D12_STATIC_SAMPLER_DESC& sampler : _staticSamplers)
+    {
+        const Char* visibility = GetRootSignatureShaderVisibility(sampler.ShaderVisibility);
+        sb.AppendFormat(TEXT(",{}StaticSampler(s{}"), newLine, sampler.ShaderRegister);
+        sb.AppendFormat(TEXT(", filter={}"), GetRootSignatureSamplerFilter(sampler.Filter));
+        sb.AppendFormat(TEXT(", addressU={}"), GetRootSignatureSamplerAddress(sampler.AddressU));
+        sb.AppendFormat(TEXT(", addressV={}"), GetRootSignatureSamplerAddress(sampler.AddressV));
+        sb.AppendFormat(TEXT(", addressW={}"), GetRootSignatureSamplerAddress(sampler.AddressW));
+        sb.AppendFormat(TEXT(", comparisonFunc={}"), GetRootSignatureSamplerComparisonFunc(sampler.ComparisonFunc));
+        sb.AppendFormat(TEXT(", maxAnisotropy={}"), sampler.MaxAnisotropy);
+        sb.Append(TEXT(", borderColor=STATIC_BORDER_COLOR_OPAQUE_BLACK"));
+        sb.AppendFormat(TEXT("{})"), visibility);
+    }
+}
+
+String RootSignatureDX12::ToString() const
+{
+    StringBuilder sb;
+    ToString(sb);
+    return sb.ToString();
+}
+
+StringAnsi RootSignatureDX12::ToStringAnsi() const
+{
+    StringBuilder sb;
+    ToString(sb);
+    return sb.ToStringAnsi();
+}
+
+#endif
 
 GPUDevice* GPUDeviceDX12::Create()
 {
@@ -56,41 +406,52 @@ GPUDevice* GPUDeviceDX12::Create()
 #endif
 
     // Debug Layer
-#if GPU_ENABLE_DIAGNOSTICS
-    ComPtr<ID3D12Debug> debugLayer;
-    D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer));
-    if (debugLayer)
+#if GPU_ENABLE_DEBUG_LAYER
+    if (CommandLine::Options.GPUDebug.IsTrue())
     {
-        debugLayer->EnableDebugLayer();
-        LOG(Info, "DirectX debugging layer enabled");
-    }
+        ComPtr<ID3D12Debug> debugLayer;
+        D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer));
+        if (debugLayer)
+        {
+            debugLayer->EnableDebugLayer();
+            LOG(Info, "DirectX debugging layer enabled");
+        }
 #if 0
 #ifdef __ID3D12Debug1_FWD_DEFINED__
-    ComPtr<ID3D12Debug1> debugLayer1;
-    D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer1));
-    if (debugLayer1)
-    {
-        // GPU-based validation and synchronized validation for debugging only
-        debugLayer1->SetEnableGPUBasedValidation(true);
-        debugLayer1->SetEnableSynchronizedCommandQueueValidation(true);
-    }
+        ComPtr<ID3D12Debug1> debugLayer1;
+        D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer1));
+        if (debugLayer1)
+        {
+            // GPU-based validation and synchronized validation for debugging only
+            debugLayer1->SetEnableGPUBasedValidation(true);
+            debugLayer1->SetEnableSynchronizedCommandQueueValidation(true);
+        }
 #endif
 #endif
 #ifdef __ID3D12DeviceRemovedExtendedDataSettings_FWD_DEFINED__
-    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
-    VALIDATE_DIRECTX_RESULT(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings)));
-    if (dredSettings)
-    {
-        // Turn on AutoBreadcrumbs and Page Fault reporting
-        dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-    }
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+        D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings));
+        if (dredSettings)
+        {
+            // Turn on AutoBreadcrumbs and Page Fault reporting
+            dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
 #endif
+    }
 #endif
 
     // Create DXGI factory (CreateDXGIFactory2 is supported on Windows 8.1 or newer)
     IDXGIFactory4* dxgiFactory;
-    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory));
+    IDXGIFactory6* dxgiFactory6;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory6));
+    if (hr == S_OK)
+        dxgiFactory = dxgiFactory6;
+    else
+    {
+        dxgiFactory6 = nullptr;
+        hr = CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory));
+    }
     if (hr != S_OK)
     {
         LOG(Error, "Cannot create DXGI adapter. Error code: {0:x}.", hr);
@@ -98,6 +459,7 @@ GPUDevice* GPUDeviceDX12::Create()
     }
 
     // Enumerate the DXGIFactory's adapters
+    int32 selectedAdapterIndex = -1;
     Array<GPUAdapterDX> adapters;
     IDXGIAdapter* tempAdapter;
     for (uint32 index = 0; dxgiFactory->EnumAdapters(index, &tempAdapter) != DXGI_ERROR_NOT_FOUND; index++)
@@ -108,7 +470,7 @@ GPUDevice* GPUDeviceDX12::Create()
         {
             adapter.Index = index;
             adapter.MaxFeatureLevel = D3D_FEATURE_LEVEL_12_0;
-            VALIDATE_DIRECTX_RESULT(tempAdapter->GetDesc(&adapter.Description));
+            VALIDATE_DIRECTX_CALL(tempAdapter->GetDesc(&adapter.Description));
             uint32 outputs = RenderToolsDX::CountAdapterOutputs(tempAdapter);
 
             // Send that info to the log
@@ -119,14 +481,45 @@ GPUDevice* GPUDeviceDX12::Create()
         }
     }
 
+    // Find the best performing adapter and prefer using it instead of the first device
+    const auto gpuPreference = DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE;
+    if (dxgiFactory6 != nullptr && selectedAdapterIndex == -1)
+    {
+        if (dxgiFactory6->EnumAdapterByGpuPreference(0, gpuPreference, IID_PPV_ARGS(&tempAdapter)) != DXGI_ERROR_NOT_FOUND)
+        {
+            GPUAdapterDX adapter;
+            if (tempAdapter && CheckDX12Support(tempAdapter))
+            {
+                DXGI_ADAPTER_DESC desc;
+                VALIDATE_DIRECTX_CALL(tempAdapter->GetDesc(&desc));
+                for (int i = 0; i < adapters.Count(); i++)
+                {
+                    if (adapters[i].Description.AdapterLuid.LowPart == desc.AdapterLuid.LowPart &&
+                        adapters[i].Description.AdapterLuid.HighPart == desc.AdapterLuid.HighPart)
+                    {
+                        selectedAdapterIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Select the adapter to use
-    GPUAdapterDX selectedAdapter = adapters[0];
+    if (selectedAdapterIndex < 0)
+        selectedAdapterIndex = 0;
+    if (adapters.Count() == 0 || selectedAdapterIndex >= adapters.Count())
+    {
+        LOG(Error, "Failed to find valid DirectX adapter!");
+        return nullptr;
+    }
+    GPUAdapterDX selectedAdapter = adapters[selectedAdapterIndex];
     uint32 vendorId = 0;
-    if (CommandLine::Options.NVIDIA)
+    if (CommandLine::Options.NVIDIA.IsTrue())
         vendorId = GPU_VENDOR_ID_NVIDIA;
-    else if (CommandLine::Options.AMD)
+    else if (CommandLine::Options.AMD.IsTrue())
         vendorId = GPU_VENDOR_ID_AMD;
-    else if (CommandLine::Options.Intel)
+    else if (CommandLine::Options.Intel.IsTrue())
         vendorId = GPU_VENDOR_ID_INTEL;
     if (vendorId != 0)
     {
@@ -139,17 +532,14 @@ GPUDevice* GPUDeviceDX12::Create()
             }
         }
     }
-
-    // Validate adapter
     if (!selectedAdapter.IsValid())
     {
         LOG(Error, "Failed to choose valid DirectX adapter!");
         return nullptr;
     }
-
-    // Check if selected adapter does not support DirectX 12
-    if (!selectedAdapter.IsSupportingDX12())
+    if (selectedAdapter.MaxFeatureLevel < D3D_FEATURE_LEVEL_12_0)
     {
+        LOG(Error, "Failed to choose valid DirectX adapter!");
         return nullptr;
     }
 #endif
@@ -181,14 +571,12 @@ static MSAALevel GetMaximumMultisampleCount(ID3D12Device* device, DXGI_FORMAT dx
 
 GPUDeviceDX12::GPUDeviceDX12(IDXGIFactory4* dxgiFactory, GPUAdapterDX* adapter)
     : GPUDeviceDX(RendererType::DirectX12, ShaderProfile::DirectX_SM6, adapter)
-    , _device(nullptr)
     , _factoryDXGI(dxgiFactory)
     , _res2Dispose(256)
     , _rootSignature(nullptr)
     , _commandQueue(nullptr)
     , _mainContext(nullptr)
-    , UploadBuffer(nullptr)
-    , TimestampQueryHeap(this, D3D12_QUERY_HEAP_TYPE_TIMESTAMP, DX12_BACK_BUFFER_COUNT * 1024)
+    , UploadBuffer(this)
     , Heap_CBV_SRV_UAV(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4 * 1024, false)
     , Heap_RTV(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1 * 1024, false)
     , Heap_DSV(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 64, false)
@@ -198,14 +586,43 @@ GPUDeviceDX12::GPUDeviceDX12(IDXGIFactory4* dxgiFactory, GPUAdapterDX* adapter)
 {
 }
 
+GPUDevice::QueueInfo GPUDeviceDX12::GetNativeQueue() const
+{
+    return { _commandQueue->GetCommandQueue() };
+}
+
+GPUMemoryStats GPUDeviceDX12::GetMemoryStats()
+{
+    GPUMemoryStats stats;
+    D3D12MA::Budget localBudget, nonLocalBudget;
+    Allocator->GetBudget(&localBudget, &nonLocalBudget);
+    if (Allocator->IsUMA())
+    {
+        // UMA (Unified Memory Architecture) means no dedicated video memory and the system memory is shared between CPU and GPU
+        stats.UsedSystemMemory = localBudget.UsageBytes;
+        stats.TotalSystemMemory = localBudget.BudgetBytes;
+    }
+    else
+    {
+        // Discrete GPU
+        stats.UsedDedicatedMemory = localBudget.UsageBytes;
+        stats.TotalDedicatedMemory = localBudget.BudgetBytes;
+        stats.UsedSystemMemory = nonLocalBudget.UsageBytes;
+        stats.TotalSystemMemory = nonLocalBudget.BudgetBytes;
+    }
+    return stats;
+}
+
 bool GPUDeviceDX12::Init()
 {
+    HRESULT hr;
 #if PLATFORM_XBOX_SCARLETT || PLATFORM_XBOX_ONE
     // Create DirectX device
     D3D12XBOX_CREATE_DEVICE_PARAMETERS params = {};
     params.Version = D3D12_SDK_VERSION;
-#if GPU_ENABLE_DIAGNOSTICS
-    params.ProcessDebugFlags = D3D12_PROCESS_DEBUG_FLAG_DEBUG_LAYER_ENABLED;
+#if GPU_ENABLE_DEBUG_LAYER
+    if (_debugLayer)
+        params.ProcessDebugFlags = D3D12_PROCESS_DEBUG_FLAG_DEBUG_LAYER_ENABLED;
 #elif !BUILD_RELEASE
     params.ProcessDebugFlags = D3D12XBOX_PROCESS_DEBUG_FLAG_INSTRUMENTED;
 #endif
@@ -215,7 +632,7 @@ bool GPUDeviceDX12::Init()
 #if PLATFORM_XBOX_SCARLETT
     params.DisableDXR = TRUE;
 #endif
-    VALIDATE_DIRECTX_RESULT(D3D12XboxCreateDevice(nullptr, &params, IID_GRAPHICS_PPV_ARGS(&_device)));
+    VALIDATE_DIRECTX_CALL(D3D12XboxCreateDevice(nullptr, &params, IID_GRAPHICS_PPV_ARGS(&_device)));
 
     // Setup adapter
     D3D12XBOX_GPU_HARDWARE_CONFIGURATION hwConfig = {};
@@ -250,40 +667,92 @@ bool GPUDeviceDX12::Init()
     LOG(Info, "Hardware Version: {0}", hwVer);
     updateFrameEvents();
 
+    // Setup display output
+    auto& videoOutput = VideoOutputs.AddOne();
+    videoOutput.Name = hwVer;
+    ComPtr<IDXGIDevice1> dxgiDevice;
+    VALIDATE_DIRECTX_CALL(_device->QueryInterface(IID_GRAPHICS_PPV_ARGS(&dxgiDevice)));
+    ComPtr<IDXGIAdapter> dxgiAdapter;
+    VALIDATE_DIRECTX_CALL(dxgiDevice->GetAdapter(dxgiAdapter.GetAddressOf()));
+    ComPtr<IDXGIOutput> dxgiOutput;
+    VALIDATE_DIRECTX_CALL(dxgiAdapter->EnumOutputs(0, dxgiOutput.GetAddressOf()));
+    DXGI_FORMAT backbufferFormat = RenderToolsDX::ToDxgiFormat(GPU_BACK_BUFFER_PIXEL_FORMAT);
+    UINT modesCount = 0;
+#ifdef _GAMING_XBOX_SCARLETT
+    VALIDATE_DIRECTX_CALL(dxgiOutput->GetDisplayModeList(backbufferFormat, 0, &modesCount, NULL));
+    Array<DXGIXBOX_MODE_DESC> modes;
+    modes.Resize((int32)modesCount);
+    VALIDATE_DIRECTX_CALL(dxgiOutput->GetDisplayModeListX(backbufferFormat, 0, &modesCount, modes.Get()));
+    for (const DXGIXBOX_MODE_DESC& mode : modes)
+    {
+        if (mode.Width > videoOutput.Width)
+        {
+            videoOutput.Width = mode.Width;
+            videoOutput.Height = mode.Height;
+        }
+        videoOutput.RefreshRate = Math::Max(videoOutput.RefreshRate, mode.RefreshRate.Numerator / (float)mode.RefreshRate.Denominator);
+    }
+    modes.Resize(0);
+#else
+    videoOutput.Width = 1920;
+    videoOutput.Height = 1080;
+    videoOutput.RefreshRate = 60;
+#endif
+
 #if PLATFORM_GDK
-    GDKPlatform::OnSuspend.Bind<GPUDeviceDX12, &GPUDeviceDX12::OnSuspend>(this);
-    GDKPlatform::OnResume.Bind<GPUDeviceDX12, &GPUDeviceDX12::OnResume>(this);
+    GDKPlatform::Suspended.Bind<GPUDeviceDX12, &GPUDeviceDX12::OnSuspended>(this);
+    GDKPlatform::Resumed.Bind<GPUDeviceDX12, &GPUDeviceDX12::OnResumed>(this);
 #endif
 #else
     // Get DXGI adapter
-    IDXGIAdapter1* adapter;
+    IDXGIAdapter1* dxgiAdapter;
     ASSERT(_factoryDXGI);
-    if (_factoryDXGI->EnumAdapters1(_adapter->Index, &adapter) == DXGI_ERROR_NOT_FOUND || adapter == nullptr)
+    if (_factoryDXGI->EnumAdapters1(_adapter->Index, &dxgiAdapter) == DXGI_ERROR_NOT_FOUND || dxgiAdapter == nullptr)
     {
         LOG(Warning, "Cannot get the adapter.");
         return true;
     }
-    UpdateOutputs(adapter);
-    {
-        ComPtr<IDXGIFactory5> factory5;
-        _factoryDXGI->QueryInterface(IID_PPV_ARGS(&factory5));
-        if (factory5)
-        {
-            BOOL allowTearing;
-            if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))) && allowTearing)
-            {
-                AllowTearing = true;
-            }
-        }
-    }
+    UpdateOutputs(dxgiAdapter);
 
     // Create DirectX device
-    VALIDATE_DIRECTX_RESULT(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device)));
+    VALIDATE_DIRECTX_CALL(D3D12CreateDevice(dxgiAdapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_device)));
+
+#if PLATFORM_WINDOWS
+    // Detect RenderDoc usage (UUID {A7AA6116-9C8D-4BBA-9083-B4D816B71B78})
+    IUnknown* unknown = nullptr;
+    const GUID uuidRenderDoc = { 0xa7aa6116, 0x9c8d, 0x4bba, { 0x90, 0x83, 0xb4, 0xd8, 0x16, 0xb7, 0x1b, 0x78 } };
+    hr = _device->QueryInterface(uuidRenderDoc, (void**)&unknown);
+    if (SUCCEEDED(hr) && unknown)
+    {
+        IsDebugToolAttached = true;
+        unknown->Release();
+    }
+    if (!IsDebugToolAttached && GetModuleHandleA("renderdoc.dll"))
+        IsDebugToolAttached = true;
+    if (!IsDebugToolAttached && (GetModuleHandleA("Nvda.Graphics.Interception.dll") || GetModuleHandleA("WarpViz.Injection.dll") || GetModuleHandleA("nvperf_grfx_target.dll")))
+        IsDebugToolAttached = true;
+#endif
+
+    // Check if can use screen tearing on a swapchain
+    ComPtr<IDXGIFactory5> factory5;
+    _factoryDXGI->QueryInterface(IID_PPV_ARGS(&factory5));
+    if (factory5)
+    {
+        BOOL allowTearing;
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing)))
+            && allowTearing
+#if PLATFORM_WINDOWS
+            && !IsDebugToolAttached // Disable tearing with RenderDoc (prevents crashing)
+#endif
+        )
+            AllowTearing = true;
+    }
 
     // Debug Layer
-#if GPU_ENABLE_DIAGNOSTICS
+#if GPU_ENABLE_DEBUG_LAYER
     ComPtr<ID3D12InfoQueue> infoQueue;
-    VALIDATE_DIRECTX_RESULT(_device->QueryInterface(IID_PPV_ARGS(&infoQueue)));
+    if (_debugLayer)
+        _device->QueryInterface(IID_PPV_ARGS(&infoQueue));
     if (infoQueue)
     {
         D3D12_INFO_QUEUE_FILTER filter;
@@ -303,6 +772,7 @@ bool GPUDeviceDX12::Init()
             D3D12_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT,
             D3D12_MESSAGE_ID_RESOURCE_BARRIER_DUPLICATE_SUBRESOURCE_TRANSITIONS,
             D3D12_MESSAGE_ID_DRAW_EMPTY_SCISSOR_RECTANGLE,
+            D3D12_MESSAGE_ID_CREATEGRAPHICSPIPELINESTATE_RENDERTARGETVIEW_NOT_SET,
         };
 
         filter.DenyList.NumIDs = ARRAY_COUNT(disabledMessages);
@@ -317,31 +787,41 @@ bool GPUDeviceDX12::Init()
 #endif
 #endif
 
+    // Get newer device interfaces
+#ifdef __ID3D12Device1_FWD_DEFINED__
+    _device->QueryInterface(IID_PPV_ARGS(&_device1));
+#endif
+#ifdef __ID3D12Device2_FWD_DEFINED__
+    _device->QueryInterface(IID_PPV_ARGS(&_device2));
+#endif
+
     // Change state
     _state = DeviceState::Created;
 
     // Spawn some info about the hardware
     D3D12_FEATURE_DATA_D3D12_OPTIONS options;
-    VALIDATE_DIRECTX_RESULT(_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)));
-    LOG(Info, "Tiled Resources Tier: {0}", options.TiledResourcesTier);
-    LOG(Info, "Resource Binding Tier: {0}", options.ResourceBindingTier);
-    LOG(Info, "Conservative Rasterization Tier: {0}", options.ConservativeRasterizationTier);
-    LOG(Info, "Resource Heap Tier: {0}", options.ResourceHeapTier);
+    VALIDATE_DIRECTX_CALL(_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options)));
+    LOG(Info, "Tiled Resources Tier: {0}", (int32)options.TiledResourcesTier);
+    LOG(Info, "Resource Binding Tier: {0}", (int32)options.ResourceBindingTier);
+    LOG(Info, "Resource Heap Tier: {0}", (int32)options.ResourceHeapTier);
 
     // Init device limits
     {
         auto& limits = Limits;
         limits.HasCompute = true;
-        limits.HasTessellation = true;
-        limits.HasGeometryShaders = true;
+        limits.HasTessellation = GPU_ALLOW_TESSELLATION_SHADERS;
+        limits.HasGeometryShaders = GPU_ALLOW_GEOMETRY_SHADERS;
         limits.HasInstancing = true;
         limits.HasVolumeTextureRendering = true;
         limits.HasDrawIndirect = true;
         limits.HasAppendConsumeBuffers = true;
-        limits.HasSeparateRenderTargetBlendState = true;
         limits.HasDepthAsSRV = true;
+        limits.HasDepthClip = true;
         limits.HasReadOnlyDepth = true;
+        PRAGMA_DISABLE_DEPRECATION_WARNINGS
         limits.HasMultisampleDepthAsSRV = true;
+        limits.HasSeparateRenderTargetBlendState = true;
+        PRAGMA_ENABLE_DEPRECATION_WARNINGS
         limits.HasTypedUAVLoad = options.TypedUAVLoadAdditionalFormats != 0;
         limits.MaximumMipLevelsCount = D3D12_REQ_MIP_LEVELS;
         limits.MaximumTexture1DSize = D3D12_REQ_TEXTURE1D_U_DIMENSION;
@@ -356,24 +836,45 @@ bool GPUDeviceDX12::Init()
         {
             const PixelFormat format = static_cast<PixelFormat>(i);
             const DXGI_FORMAT dxgiFormat = RenderToolsDX::ToDxgiFormat(format);
-
             D3D12_FEATURE_DATA_FORMAT_SUPPORT formatInfo = { dxgiFormat };
             if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &formatInfo, sizeof(formatInfo))))
-            {
                 formatInfo.Support1 = D3D12_FORMAT_SUPPORT1_NONE;
-            }
-            const MSAALevel maximumMultisampleCount = GetMaximumMultisampleCount(_device, dxgiFormat);
+            FormatSupport support = (FormatSupport)formatInfo.Support1;
+            if (EnumHasAllFlags(support, FormatSupport::ShaderLoad))
+                support |= FormatSupport::UnorderedAccess;
 
-            FeaturesPerFormat[i] = FormatFeatures(format, maximumMultisampleCount, (FormatSupport)formatInfo.Support1);
+            // Query MSAA quality levels only for the formats that can be used as a multisampled render target.
+            MSAALevel maximumMultisampleCount = MSAALevel::None;
+            if (EnumHasAnyFlags(support, FormatSupport::MultisampleRenderTarget))
+                maximumMultisampleCount = GetMaximumMultisampleCount(_device, dxgiFormat);
+
+            FeaturesPerFormat[i] = FormatFeatures(maximumMultisampleCount, support);
         }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
+        if (SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options2, sizeof(options2))))
+            limits.HasDepthBounds = !!options2.DepthBoundsTestSupported;
     }
 
-#if BUILD_DEBUG && false
+#if USE_EDITOR || !BUILD_RELEASE
 	// Prevent the GPU from overclocking or under-clocking to get consistent timings
-	_device->SetStablePowerState(TRUE);
+    if (CommandLine::Options.ShaderProfile.IsTrue())
+    {
+	    _device->SetStablePowerState(TRUE);
+    }
 #endif
 
     // Setup resources
+    D3D12MA::ALLOCATION_CALLBACKS allocationCallbacks = {};
+    allocationCallbacks.pAllocate = &D3D12MA_Allocate;
+    allocationCallbacks.pFree = &D3D12MA_Free;
+    D3D12MA::ALLOCATOR_DESC allocatorDesc = {};
+    allocatorDesc.pDevice = _device;
+    allocatorDesc.pAdapter = dxgiAdapter;
+    allocatorDesc.Flags = D3D12MA_RECOMMENDED_ALLOCATOR_FLAGS;
+    allocatorDesc.pAllocationCallbacks = &allocationCallbacks;
+    hr = D3D12MA::CreateAllocator(&allocatorDesc, &Allocator);
+    LOG_DIRECTX_RESULT_WITH_RETURN(hr, true);
     _commandQueue = New<CommandQueueDX12>(this, D3D12_COMMAND_LIST_TYPE_DIRECT);
     if (_commandQueue->Init())
         return true;
@@ -458,183 +959,11 @@ bool GPUDeviceDX12::Init()
     }
 
     // Create root signature
-    // TODO: maybe create set of different root signatures? for UAVs, for compute, for simple drawing, for post fx?
     {
-        // Descriptor tables
-        D3D12_DESCRIPTOR_RANGE r[3];
-        // TODO: separate ranges for pixel/vertex visibility and one shared for all?
-        {
-            D3D12_DESCRIPTOR_RANGE& range = r[0];
-            range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-            range.NumDescriptors = GPU_MAX_SR_BINDED;
-            range.BaseShaderRegister = 0;
-            range.RegisterSpace = 0;
-            range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        }
-        {
-            D3D12_DESCRIPTOR_RANGE& range = r[1];
-            range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-            range.NumDescriptors = GPU_MAX_UA_BINDED;
-            range.BaseShaderRegister = 0;
-            range.RegisterSpace = 0;
-            range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        }
-        {
-            D3D12_DESCRIPTOR_RANGE& range = r[2];
-            range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-            range.NumDescriptors = GPU_MAX_SAMPLER_BINDED - GPU_STATIC_SAMPLERS_COUNT;
-            range.BaseShaderRegister = GPU_STATIC_SAMPLERS_COUNT;
-            range.RegisterSpace = 0;
-            range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        }
-
-        // Root parameters
-        D3D12_ROOT_PARAMETER rootParameters[5];
-        {
-            D3D12_ROOT_PARAMETER& rootParam = rootParameters[0];
-            rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-            rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-            rootParam.Descriptor.ShaderRegister = 0;
-            rootParam.Descriptor.RegisterSpace = 0;
-        }
-        {
-            D3D12_ROOT_PARAMETER& rootParam = rootParameters[1];
-            rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-            rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-            rootParam.Descriptor.ShaderRegister = 1;
-            rootParam.Descriptor.RegisterSpace = 0;
-        }
-        {
-            D3D12_ROOT_PARAMETER& rootParam = rootParameters[2];
-            rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-            rootParam.DescriptorTable.NumDescriptorRanges = 1;
-            rootParam.DescriptorTable.pDescriptorRanges = &r[0];
-        }
-        {
-            D3D12_ROOT_PARAMETER& rootParam = rootParameters[3];
-            rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-            rootParam.DescriptorTable.NumDescriptorRanges = 1;
-            rootParam.DescriptorTable.pDescriptorRanges = &r[1];
-        }
-        {
-            D3D12_ROOT_PARAMETER& rootParam = rootParameters[4];
-            rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-            rootParam.DescriptorTable.NumDescriptorRanges = 1;
-            rootParam.DescriptorTable.pDescriptorRanges = &r[2];
-        }
-
-        // Static samplers
-        D3D12_STATIC_SAMPLER_DESC staticSamplers[6];
-        static_assert(GPU_STATIC_SAMPLERS_COUNT == ARRAY_COUNT(staticSamplers), "Update static samplers setup.");
-        // TODO: describe visibilities for the static samples, maybe use all pixel? or again pixel + all combo?
-        // Linear Clamp
-        staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[0].MipLODBias = 0.0f;
-        staticSamplers[0].MaxAnisotropy = 1;
-        staticSamplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[0].MinLOD = 0;
-        staticSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[0].ShaderRegister = 0;
-        staticSamplers[0].RegisterSpace = 0;
-        staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        // Point Clamp
-        staticSamplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-        staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[1].MipLODBias = 0.0f;
-        staticSamplers[1].MaxAnisotropy = 1;
-        staticSamplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[1].MinLOD = 0;
-        staticSamplers[1].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[1].ShaderRegister = 1;
-        staticSamplers[1].RegisterSpace = 0;
-        staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        // Linear Wrap
-        staticSamplers[2].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        staticSamplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[2].MipLODBias = 0.0f;
-        staticSamplers[2].MaxAnisotropy = 1;
-        staticSamplers[2].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[2].MinLOD = 0;
-        staticSamplers[2].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[2].ShaderRegister = 2;
-        staticSamplers[2].RegisterSpace = 0;
-        staticSamplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        // Point Wrap
-        staticSamplers[3].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-        staticSamplers[3].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[3].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[3].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        staticSamplers[3].MipLODBias = 0.0f;
-        staticSamplers[3].MaxAnisotropy = 1;
-        staticSamplers[3].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[3].MinLOD = 0;
-        staticSamplers[3].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[3].ShaderRegister = 3;
-        staticSamplers[3].RegisterSpace = 0;
-        staticSamplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        // Shadow
-        staticSamplers[4].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
-        staticSamplers[4].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[4].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[4].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[4].MipLODBias = 0.0f;
-        staticSamplers[4].MaxAnisotropy = 1;
-        staticSamplers[4].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        staticSamplers[4].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[4].MinLOD = 0;
-        staticSamplers[4].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[4].ShaderRegister = 4;
-        staticSamplers[4].RegisterSpace = 0;
-        staticSamplers[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        // Shadow PCF
-        staticSamplers[5].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
-        staticSamplers[5].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[5].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[5].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        staticSamplers[5].MipLODBias = 0.0f;
-        staticSamplers[5].MaxAnisotropy = 1;
-        staticSamplers[5].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        staticSamplers[5].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
-        staticSamplers[5].MinLOD = 0;
-        staticSamplers[5].MaxLOD = D3D12_FLOAT32_MAX;
-        staticSamplers[5].ShaderRegister = 5;
-        staticSamplers[5].RegisterSpace = 0;
-        staticSamplers[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-        // TODO: static samplers for the shadow pass change into bindable samplers or sth?
-
-        // Init
-        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-        rootSignatureDesc.NumParameters = ARRAY_COUNT(rootParameters);
-        rootSignatureDesc.pParameters = rootParameters;
-        rootSignatureDesc.NumStaticSamplers = ARRAY_COUNT(staticSamplers);
-        rootSignatureDesc.pStaticSamplers = staticSamplers;
-        rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-        // Serialize
-        ComPtr<ID3DBlob> signature;
-        ComPtr<ID3DBlob> error;
-        VALIDATE_DIRECTX_RESULT(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
-
-        // Create
-        VALIDATE_DIRECTX_RESULT(_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&_rootSignature)));
+        RootSignatureDX12 signature;
+        ComPtr<ID3DBlob> signatureBlob = signature.Serialize();
+        VALIDATE_DIRECTX_CALL(_device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&_rootSignature)));
     }
-
-    // Upload buffer
-    UploadBuffer = New<UploadBufferDX12>(this);
-
-    if (TimestampQueryHeap.Init())
-        return true;
 
     // Cached command signatures
     {
@@ -669,7 +998,7 @@ void GPUDeviceDX12::DrawBegin()
     GPUDeviceDX::DrawBegin();
 
     updateRes2Dispose();
-    UploadBuffer->BeginGeneration(Engine::FrameCount);
+    UploadBuffer.BeginGeneration(Engine::FrameCount);
 }
 
 void GPUDeviceDX12::RenderEnd()
@@ -677,8 +1006,22 @@ void GPUDeviceDX12::RenderEnd()
     // Base
     GPUDeviceDX::RenderEnd();
 
-    // Resolve the timestamp queries
-    TimestampQueryHeap.EndQueryBatchAndResolveQueryData(_mainContext);
+    // Resolve the queries
+    for (auto heap : QueryHeaps)
+        heap->EndFrame(_mainContext);
+}
+
+void GPUDeviceDX12::OnCrash()
+{
+    // Dump allocator stats
+    //D3D12MA::TotalStatistics statistics;
+    //Allocator->CalculateStatistics(&statistics);
+    D3D12MA::Budget localBudget, nonLocalBudget;
+    Allocator->GetBudget(&localBudget, &nonLocalBudget);
+    LOG(Info, "[D3D12 Memory] Local budget: {} / {} bytes (blocks: {}, allocs: {})", localBudget.UsageBytes, localBudget.BudgetBytes, localBudget.Stats.BlockCount, localBudget.Stats.AllocationCount);
+    LOG(Info, "[D3D12 Memory] Non-local budget: {} / {} bytes (blocks: {}, allocs: {})", nonLocalBudget.UsageBytes, nonLocalBudget.BudgetBytes, nonLocalBudget.Stats.BlockCount, nonLocalBudget.Stats.AllocationCount);
+
+    GPUDeviceDX::OnCrash();
 }
 
 GPUDeviceDX12::~GPUDeviceDX12()
@@ -707,19 +1050,60 @@ ID3D12CommandQueue* GPUDeviceDX12::GetCommandQueueDX12() const
     return _commandQueue->GetCommandQueue();
 }
 
+GPUQueryDX12 GPUDeviceDX12::AllocQuery(GPUQueryType type)
+{
+    // Get query heap with free space
+    int32 heapIndex = 0;
+    int32 count = GPUQueryDX12::GetQueriesCount(type);
+    for (; heapIndex < QueryHeaps.Count(); heapIndex++)
+    {
+        auto heap = QueryHeaps[heapIndex];
+        if (heap->Type == type && heap->CanAlloc(count))
+            break;
+    }
+    if (heapIndex == QueryHeaps.Count())
+    {
+        // Allocate a new query heap
+        PROFILE_MEM(GraphicsCommands);
+        auto heap = New<QueryHeapDX12>();
+        int32 size = type == GPUQueryType::Timer ? 1024 : 4096;
+        if (heap->Init(this, type, size))
+        {
+            Delete(heap);
+            return {};
+        }
+        QueryHeaps.Add(heap);
+    }
+
+    // Alloc query from the heap
+    GPUQueryDX12 query = {};
+    {
+        static_assert(sizeof(GPUQueryDX12) == sizeof(uint64), "Invalid DX12 query size.");
+        query.Type = (uint16)type;
+        query.Heap = heapIndex;
+        auto heap = QueryHeaps[heapIndex];
+        heap->Alloc(query.Element);
+        if (count == 2)
+            heap->Alloc(query.SecondaryElement);
+    }
+    return query;
+}
+
 void GPUDeviceDX12::Dispose()
 {
     GPUDeviceLock lock(this);
-
-    // Check if has been disposed already
     if (_state == DeviceState::Disposed)
         return;
+
+    // No GPU work to sync with if device failed to initialize
+    const bool isInitialized = _state == DeviceState::Ready;
 
     // Set current state
     _state = DeviceState::Disposing;
 
     // Wait for rendering end
-    WaitForGPU();
+    if (isInitialized)
+        WaitForGPU();
 
     // Pre dispose
     preDispose();
@@ -728,10 +1112,16 @@ void GPUDeviceDX12::Dispose()
     updateRes2Dispose();
 
     // Clear pipeline objects
+    SAFE_DELETE_GPU_RESOURCE(DummyVB);
     for (auto& srv : _nullSrv)
         srv.Release();
     _nullUav.Release();
-    TimestampQueryHeap.Destroy();
+    for (auto* heap : QueryHeaps)
+    {
+        heap->Destroy();
+        Delete(heap);
+    }
+    QueryHeaps.Clear();
     DX_SAFE_RELEASE_CHECK(_rootSignature, 0);
     Heap_CBV_SRV_UAV.ReleaseGPU();
     Heap_RTV.ReleaseGPU();
@@ -739,10 +1129,13 @@ void GPUDeviceDX12::Dispose()
     Heap_Sampler.ReleaseGPU();
     RingHeap_CBV_SRV_UAV.ReleaseGPU();
     RingHeap_Sampler.ReleaseGPU();
-    SAFE_DELETE(UploadBuffer);
+    UploadBuffer.ReleaseGPU();
     SAFE_DELETE(DrawIndirectCommandSignature);
+    SAFE_DELETE(DrawIndexedIndirectCommandSignature);
+    SAFE_DELETE(DispatchIndirectCommandSignature);
     SAFE_DELETE(_mainContext);
     SAFE_DELETE(_commandQueue);
+    SAFE_RELEASE(Allocator);
 
     // Clear DirectX stuff
     SAFE_DELETE(_adapter);
@@ -761,18 +1154,43 @@ void GPUDeviceDX12::WaitForGPU()
     _commandQueue->WaitForGPU();
 }
 
+bool GPUDeviceDX12::GetQueryResult(uint64 queryID, uint64& result, bool wait)
+{
+    GPUQueryDX12 query;
+    query.Raw = queryID;
+    auto heap = QueryHeaps[query.Heap];
+    int32 count = GPUQueryDX12::GetQueriesCount((GPUQueryType)query.Type);
+    if (!wait && (!heap->IsReady(query.Element) || (count != 2 || !heap->IsReady(query.SecondaryElement))))
+        return false;
+    if (query.Type == (uint16)GPUQueryType::Timer)
+    {
+        uint64 timestampFrequency = 1;
+        const uint64 timeBegin = *(uint64*)heap->Resolve(query.SecondaryElement);
+        const uint64 timeEnd = *(uint64*)heap->Resolve(query.Element, &timestampFrequency);
+        result = timeEnd > timeBegin ? (timeEnd - timeBegin) * 1000000ull / timestampFrequency : 0;
+    }
+    else
+    {
+        result = *(uint64*)heap->Resolve(query.Element);
+    }
+    return true;
+}
+
 GPUTexture* GPUDeviceDX12::CreateTexture(const StringView& name)
 {
+    PROFILE_MEM(GraphicsTextures);
     return New<GPUTextureDX12>(this, name);
 }
 
 GPUShader* GPUDeviceDX12::CreateShader(const StringView& name)
 {
+    PROFILE_MEM(GraphicsShaders);
     return New<GPUShaderDX12>(this, name);
 }
 
 GPUPipelineState* GPUDeviceDX12::CreatePipelineState()
 {
+    PROFILE_MEM(GraphicsCommands);
     return New<GPUPipelineStateDX12>(this);
 }
 
@@ -783,6 +1201,7 @@ GPUTimerQuery* GPUDeviceDX12::CreateTimerQuery()
 
 GPUBuffer* GPUDeviceDX12::CreateBuffer(const StringView& name)
 {
+    PROFILE_MEM(GraphicsBuffers);
     return New<GPUBufferDX12>(this, name);
 }
 
@@ -791,21 +1210,33 @@ GPUSampler* GPUDeviceDX12::CreateSampler()
     return New<GPUSamplerDX12>(this);
 }
 
+GPUVertexLayout* GPUDeviceDX12::CreateVertexLayout(const VertexElements& elements, bool explicitOffsets)
+{
+    return New<GPUVertexLayoutDX12>(this, elements, explicitOffsets);
+}
+
 GPUSwapChain* GPUDeviceDX12::CreateSwapChain(Window* window)
 {
     return New<GPUSwapChainDX12>(this, window);
 }
 
-void GPUDeviceDX12::AddResourceToLateRelease(IGraphicsUnknown* resource, uint32 safeFrameCount)
+GPUConstantBuffer* GPUDeviceDX12::CreateConstantBuffer(uint32 size, const StringView& name)
+{
+    PROFILE_MEM(GraphicsShaders);
+    return New<GPUConstantBufferDX12>(this, size, name);
+}
+
+
+void GPUDeviceDX12::AddResourceToLateRelease(IGraphicsUnknown* resource, D3D12MA::Allocation* allocation, uint32 safeFrameCount)
 {
     if (resource == nullptr)
         return;
-
     ScopeLock lock(_res2DisposeLock);
 
     // Add to the list
     DisposeResourceEntry entry;
     entry.Resource = resource;
+    entry.Allocation = allocation;
     entry.TargetFrame = Engine::FrameCount + safeFrameCount;
     _res2Dispose.Add(entry);
 }
@@ -825,6 +1256,8 @@ void GPUDeviceDX12::updateRes2Dispose()
         const DisposeResourceEntry& entry = _res2Dispose[i];
         if (entry.TargetFrame <= currentFrame)
         {
+            if (entry.Allocation)
+                entry.Allocation->Release();
             auto refs = entry.Resource->Release();
             if (refs != 0)
             {
@@ -838,12 +1271,12 @@ void GPUDeviceDX12::updateRes2Dispose()
 
 #if PLATFORM_XBOX_SCARLETT || PLATFORM_XBOX_ONE
 
-void GPUDeviceDX12::OnSuspend()
+void GPUDeviceDX12::OnSuspended()
 {
     _commandQueue->GetCommandQueue()->SuspendX(0);
 }
 
-void GPUDeviceDX12::OnResume()
+void GPUDeviceDX12::OnResumed()
 {
     _commandQueue->GetCommandQueue()->ResumeX();
 
@@ -853,14 +1286,15 @@ void GPUDeviceDX12::OnResume()
 void GPUDeviceDX12::updateFrameEvents()
 {
     ComPtr<IDXGIDevice1> dxgiDevice;
-    VALIDATE_DIRECTX_RESULT(_device->QueryInterface(IID_GRAPHICS_PPV_ARGS(&dxgiDevice)));
+    VALIDATE_DIRECTX_CALL(_device->QueryInterface(IID_GRAPHICS_PPV_ARGS(&dxgiDevice)));
     ComPtr<IDXGIAdapter> dxgiAdapter;
-    VALIDATE_DIRECTX_RESULT(dxgiDevice->GetAdapter(dxgiAdapter.GetAddressOf()));
+    VALIDATE_DIRECTX_CALL(dxgiDevice->GetAdapter(dxgiAdapter.GetAddressOf()));
     dxgiAdapter->GetDesc(&_adapter->Description);
     ComPtr<IDXGIOutput> dxgiOutput;
-    VALIDATE_DIRECTX_RESULT(dxgiAdapter->EnumOutputs(0, dxgiOutput.GetAddressOf()));
-    VALIDATE_DIRECTX_RESULT(_device->SetFrameIntervalX(dxgiOutput.Get(), D3D12XBOX_FRAME_INTERVAL_60_HZ, DX12_BACK_BUFFER_COUNT - 1u, D3D12XBOX_FRAME_INTERVAL_FLAG_NONE));
-    VALIDATE_DIRECTX_RESULT(_device->ScheduleFrameEventX(D3D12XBOX_FRAME_EVENT_ORIGIN, 0U, nullptr, D3D12XBOX_SCHEDULE_FRAME_EVENT_FLAG_NONE));
+    VALIDATE_DIRECTX_CALL(dxgiAdapter->EnumOutputs(0, dxgiOutput.GetAddressOf()));
+    // TODO: support 120/40/30/24 fps
+    VALIDATE_DIRECTX_CALL(_device->SetFrameIntervalX(dxgiOutput.Get(), D3D12XBOX_FRAME_INTERVAL_60_HZ, DX12_BACK_BUFFER_COUNT - 1u, D3D12XBOX_FRAME_INTERVAL_FLAG_NONE));
+    VALIDATE_DIRECTX_CALL(_device->ScheduleFrameEventX(D3D12XBOX_FRAME_EVENT_ORIGIN, 0U, nullptr, D3D12XBOX_SCHEDULE_FRAME_EVENT_FLAG_NONE));
 }
 
 #endif

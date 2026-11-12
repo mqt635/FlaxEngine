@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MATERIAL_GRAPH
 
@@ -8,7 +8,7 @@ void MaterialGenerator::ProcessGroupParameters(Box* box, Node* node, Value& valu
 {
     switch (node->TypeID)
     {
-        // Get
+    // Get
     case 1:
     {
         // Get parameter
@@ -71,13 +71,19 @@ void MaterialGenerator::ProcessGroupParameters(Box* box, Node* node, Value& valu
             case MaterialParameterType::CubeTexture:
             case MaterialParameterType::NormalMap:
             case MaterialParameterType::Texture:
+                sampleTexture(node, value, box, param, true);
+                break;
             case MaterialParameterType::GPUTextureArray:
             case MaterialParameterType::GPUTextureCube:
             case MaterialParameterType::GPUTextureVolume:
             case MaterialParameterType::GPUTexture:
-                sampleTexture(node, value, box, param);
+                sampleTexture(node, value, box, param, false);
                 break;
-            default: CRASH;
+            case MaterialParameterType::GPUBuffer:
+                value = Value(VariantType::Object, param->ShaderName);
+                break;
+            default:
+                CRASH;
                 break;
             }
         }

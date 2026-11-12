@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -30,7 +30,7 @@ namespace Flax.Build
         /// <summary>
         /// The name for the output binary module. Can be used to merge multiple native modules into single library. If set to null or <see cref="string.Empty"/> the module won't be using scripting API features.
         /// </summary>
-        public string BinaryModuleName = null;
+        public string BinaryModuleName;
 
         /// <summary>
         /// True if module has native code to build. Can be used for C#-only modules.
@@ -46,6 +46,11 @@ namespace Flax.Build
         /// True if module can be deployed.
         /// </summary>
         public bool Deploy = true;
+
+        /// <summary>
+        /// Custom module tags. Used by plugins and external tools.
+        /// </summary>
+        public Dictionary<string, string> Tags = new Dictionary<string, string>();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Module"/> class.
@@ -71,6 +76,10 @@ namespace Flax.Build
         {
             options.ScriptingAPI.Defines.Add(GetCSharpBuildDefine(options.Configuration));
             options.ScriptingAPI.Defines.Add(GetCSharpPlatformDefine(options.Platform.Target));
+            if ((options.Platform != null && !options.Platform.HasDynamicCodeExecutionSupport) || Configuration.AOTMode != DotNetAOTModes.None)
+            {
+                options.ScriptingAPI.Defines.Add("USE_AOT");
+            }
         }
 
         internal static string GetCSharpBuildDefine(TargetConfiguration configuration)
@@ -93,9 +102,13 @@ namespace Flax.Build
             case TargetPlatform.UWP: return "PLATFORM_UWP";
             case TargetPlatform.Linux: return "PLATFORM_LINUX";
             case TargetPlatform.PS4: return "PLATFORM_PS4";
+            case TargetPlatform.PS5: return "PLATFORM_PS5";
             case TargetPlatform.XboxScarlett: return "PLATFORM_XBOX_SCARLETT";
             case TargetPlatform.Android: return "PLATFORM_ANDROID";
             case TargetPlatform.Switch: return "PLATFORM_SWITCH";
+            case TargetPlatform.Mac: return "PLATFORM_MAC";
+            case TargetPlatform.iOS: return "PLATFORM_IOS";
+            case TargetPlatform.Web: return "PLATFORM_WEB";
             default: throw new InvalidPlatformException(platform);
             }
         }

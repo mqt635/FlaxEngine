@@ -1,10 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Surface;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEditor.Viewport.Widgets;
+using FlaxEditor.GUI.ContextMenu;
 using Object = FlaxEngine.Object;
+using FlaxEditor.GUI;
+using FlaxEditor.Scripting;
 
 namespace FlaxEditor.Viewport.Previews
 {
@@ -46,6 +50,9 @@ namespace FlaxEditor.Viewport.Previews
         private int _selectedModelIndex;
         private Image _guiMaterialControl;
         private readonly MaterialBase[] _postFxMaterialsCache = new MaterialBase[1];
+        private ContextMenu _modelWidgetButtonMenu;
+        private AssetPicker _customModelPicker;
+        private Model _customModel;
 
         /// <summary>
         /// Gets or sets the material asset to preview. It can be <see cref="FlaxEngine.Material"/> or <see cref="FlaxEngine.MaterialInstance"/>.
@@ -71,13 +78,64 @@ namespace FlaxEditor.Viewport.Previews
             get => _selectedModelIndex;
             set
             {
+                if (value == -1) // Using Custom Model
+                    return;
                 if (value < 0 || value > Models.Length)
                     throw new ArgumentOutOfRangeException();
 
+                if (_customModelPicker != null)
+                    _customModelPicker.Validator.SelectedAsset = null;
                 _selectedModelIndex = value;
                 _previewModel.Model = FlaxEngine.Content.LoadAsyncInternal<Model>("Editor/Primitives/" + Models[value]);
                 _previewModel.Transform = Transforms[value];
             }
+        }
+
+        // Used to automatically update which entry is checked.
+        // TODO: Maybe a better system with predicate bool checks could be used?
+        private void ResetModelContextMenu()
+        {
+            _modelWidgetButtonMenu.ItemsContainer.DisposeChildren();
+
+            // Fill out all models
+            for (int i = 0; i < Models.Length; i++)
+            {
+                var index = i;
+                var button = _modelWidgetButtonMenu.AddButton(Models[index]);
+                button.ButtonClicked += _ => SelectedModelIndex = index;
+                button.Checked = SelectedModelIndex == index && _customModel == null;
+                button.Tag = index;
+            }
+
+            _modelWidgetButtonMenu.AddSeparator();
+            _customModelPicker = new AssetPicker(new ScriptType(typeof(Model)), Float2.Zero);
+
+            // Label button
+            var customModelPickerLabel = _modelWidgetButtonMenu.AddButton("Custom Model:");
+            customModelPickerLabel.CloseMenuOnClick = false;
+            customModelPickerLabel.Checked = _customModel != null;
+
+            // Container button
+            var customModelPickerButton = _modelWidgetButtonMenu.AddButton("");
+            customModelPickerButton.Height = _customModelPicker.Height + 4;
+            customModelPickerButton.CloseMenuOnClick = false;
+            _customModelPicker.Parent = customModelPickerButton;
+            _customModelPicker.Validator.SelectedAsset = _customModel;
+            _customModelPicker.SelectedItemChanged += () =>
+            {
+                _customModel = _customModelPicker.Validator.SelectedAsset as Model;
+                if (_customModelPicker.Validator.SelectedAsset == null)
+                {
+                    SelectedModelIndex = 0;
+                    ResetModelContextMenu();
+                    return;
+                }
+
+                _previewModel.Model = _customModel;
+                _previewModel.Transform = Transforms[0];
+                SelectedModelIndex = -1;
+                ResetModelContextMenu();
+            };
         }
 
         /// <summary>
@@ -90,34 +148,38 @@ namespace FlaxEditor.Viewport.Previews
             // Setup preview scene
             _previewModel = new StaticModel();
             SelectedModelIndex = 0;
+            Task.ViewFlags &= ~ViewFlags.EyeAdaptation;
 
             // Link actors for rendering
             Task.AddCustomActor(_previewModel);
 
             // Create context menu for primitive switching
-            if (useWidgets && ViewWidgetButtonMenu != null)
+            if (useWidgets)
             {
-                ViewWidgetButtonMenu.AddSeparator();
-                var modelSelect = ViewWidgetButtonMenu.AddChildMenu("Model").ContextMenu;
-
-                // Fill out all models 
-                for (int i = 0; i < Models.Length; i++)
+                // Model mode widget
+                var modelMode = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
+                _modelWidgetButtonMenu = new ContextMenu();
+                _modelWidgetButtonMenu.VisibleChanged += control =>
                 {
-                    var button = modelSelect.AddButton(Models[i]);
-                    button.Tag = i;
-                }
-
-                // Link the action
-                modelSelect.ButtonClicked += (button) => SelectedModelIndex = (int)button.Tag;
+                    if (!control.Visible)
+                        return;
+                    ResetModelContextMenu();
+                };
+                new ViewportWidgetButton("Model", SpriteHandle.Invalid, _modelWidgetButtonMenu)
+                {
+                    TooltipText = "Change material model",
+                    Parent = modelMode,
+                };
+                modelMode.Parent = this;
             }
         }
 
         /// <inheritdoc />
-        public override bool HasLoadedAssets
+        public override bool HasContentLoaded
         {
             get
             {
-                if (!base.HasLoadedAssets)
+                if (!base.HasContentLoaded)
                     return false;
                 UpdateMaterial();
                 return true;
@@ -188,11 +250,12 @@ namespace FlaxEditor.Viewport.Previews
             }
 
             // Surface
-            if (_previewModel.Model == null)
-                throw new Exception("Missing preview model asset.");
-            if (_previewModel.Model.WaitForLoaded())
-                throw new Exception("Preview model asset failed to load.");
-            _previewModel.SetMaterial(0, surfaceMaterial);
+            if (_previewModel.Model != null)
+            {
+                if (_previewModel.Model.WaitForLoaded())
+                    throw new Exception("Preview model asset failed to load.");
+                _previewModel.SetMaterial(0, surfaceMaterial);
+            }
             _previewModel.IsActive = usePreviewActor;
 
             // PostFx
@@ -222,6 +285,7 @@ namespace FlaxEditor.Viewport.Previews
             {
                 _guiMaterialControl = new Image
                 {
+                    Offsets = Margin.Zero,
                     AnchorPreset = AnchorPresets.StretchAll,
                     KeepAspectRatio = false,
                     Brush = new MaterialBrush(),
@@ -240,8 +304,7 @@ namespace FlaxEditor.Viewport.Previews
             {
                 _terrain = new Terrain();
                 _terrain.Setup(1, 63);
-                var chunkSize = _terrain.ChunkSize;
-                var heightMapSize = chunkSize * Terrain.PatchEdgeChunksCount + 1;
+                var heightMapSize = _terrain.HeightmapSize;
                 var heightMapLength = heightMapSize * heightMapSize;
                 var heightmap = new float[heightMapLength];
                 var patchCoord = new Int2(0, 0);
@@ -341,6 +404,9 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <inheritdoc />
+        public Asset SurfaceAsset => null;
+
+        /// <inheritdoc />
         string ISurfaceContext.SurfaceName => string.Empty;
 
         /// <inheritdoc />
@@ -360,6 +426,9 @@ namespace FlaxEditor.Viewport.Previews
                 }
             }
         }
+
+        /// <inheritdoc />
+        public VisjectSurfaceContext ParentContext => null;
 
         /// <inheritdoc />
         void ISurfaceContext.OnContextCreated(VisjectSurfaceContext context)

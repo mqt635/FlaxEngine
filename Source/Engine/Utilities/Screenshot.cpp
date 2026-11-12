@@ -1,6 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Screenshot.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Platform/FileSystem.h"
@@ -9,9 +11,9 @@
 #include "Engine/Graphics/GPUResourceProperty.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUSwapChain.h"
-#include "Engine/Engine/Engine.h"
 #include "Engine/Threading/ThreadPoolTask.h"
 #include "Engine/Engine/Globals.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if COMPILE_WITH_TEXTURE_TOOL
 #include "Engine/Tools/TextureTool/TextureTool.h"
 #endif
@@ -24,7 +26,6 @@ class CaptureScreenshot : public ThreadPoolTask
 {
     friend Screenshot;
 private:
-
     TextureData _data;
     GPUTextureReference _texture;
     ScriptingObjectReference<RenderTask> _renderTask;
@@ -32,7 +33,6 @@ private:
     DateTime _startTime;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="CaptureScreenshot"/> class.
     /// </summary>
@@ -60,7 +60,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the texture data container.
     /// </summary>
@@ -71,7 +70,6 @@ public:
     }
 
 protected:
-
     // [ThreadPoolTask]
     bool Run() override;
     void OnFail() override;
@@ -85,6 +83,7 @@ bool CaptureScreenshot::Run()
         LOG(Warning, "Missing target render task.");
         return true;
     }
+    PROFILE_MEM(Graphics);
 
     // TODO: how about a case two or more screenshots at the same second? update counter and check files
 
@@ -150,6 +149,7 @@ void Screenshot::Capture(GPUTexture* target, const StringView& path)
         LOG(Warning, "Cannot take screenshot. Graphics device is not ready.");
         return;
     }
+    PROFILE_MEM(Graphics);
 
     // Faster path for staging textures that contents are ready to access on a CPU
     if (target->IsStaging())
@@ -214,6 +214,7 @@ void Screenshot::Capture(SceneRenderTask* target, const StringView& path)
         LOG(Warning, "Cannot take screenshot. Graphics device is not ready.");
         return;
     }
+    PROFILE_MEM(Graphics);
 
     // Create tasks
     auto saveTask = New<CaptureScreenshot>(target, path);

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,14 +11,12 @@
 class FLAXENGINE_API Sorting
 {
 public:
-
     /// <summary>
     /// Helper collection used by the sorting algorithms. Implements stack using single linear allocation with variable capacity.
     /// </summary>
     class FLAXENGINE_API SortingStack
     {
     public:
-
         static SortingStack& Get();
 
         int32 Count = 0;
@@ -46,7 +44,59 @@ public:
         }
     };
 
+private:
+    template<typename T>
+    static void Merge(T* data, T* tmp, int32 start, int32 mid, int32 end)
+    {
+        int32 h = start;
+        int32 i = start;
+        int32 j = mid + 1;
+
+        while (h <= mid && j <= end)
+        {
+            if (data[h] < data[j])
+                tmp[i] = data[h++];
+            else
+                tmp[i] = data[j++];
+            i++;
+        }
+
+        if (h > mid)
+        {
+            for (int32 k = j; k <= end; k++)
+                tmp[i++] = data[k];
+        }
+        else
+        {
+            for (int32 k = h; k <= mid; k++)
+                tmp[i++] = data[k];
+        }
+
+        for (int32 k = start; k <= end; k++)
+            data[k] = tmp[k];
+    }
+
+    template<typename T>
+    static void MergeSort(T* data, T* tmp, int32 start, int32 end)
+    {
+        if (start >= end)
+            return;
+        const int32 mid = (start + end) / 2;
+        MergeSort(data, tmp, start, mid);
+        MergeSort(data, tmp, mid + 1, end);
+        Merge(data, tmp, start, mid, end);
+    }
+
 public:
+    /// <summary>
+    /// Sorts the linear data array using Quick Sort algorithm (non recursive version, uses temporary stack collection).
+    /// </summary>
+    /// <param name="data">The data container.</param>
+    template<typename T, typename AllocationType = HeapAllocation>
+    FORCE_INLINE static void QuickSort(Array<T, AllocationType>& data)
+    {
+        QuickSort(data.Get(), data.Count());
+    }
 
     /// <summary>
     /// Sorts the linear data array using Quick Sort algorithm (non recursive version, uses temporary stack collection).
@@ -257,6 +307,33 @@ public:
     }
 
     /// <summary>
+    /// Sorts the linear data array using Merge Sort algorithm (recursive version, uses temporary memory).
+    /// </summary>
+    /// <param name="data">The data pointer.</param>
+    /// <param name="count">The elements count.</param>
+    /// <param name="tmp">The additional temporary memory buffer for sorting data. If null then will be automatically allocated within this function call.</param>
+    template<typename T>
+    static void MergeSort(T* data, int32 count, T* tmp = nullptr)
+    {
+        if (count < 2)
+            return;
+        const bool alloc = tmp == nullptr;
+        if (alloc)
+            tmp = (T*)Platform::Allocate(sizeof(T) * count, 16);
+        MergeSort(data, tmp, 0, count - 1);
+        if (alloc)
+            Platform::Free(tmp);
+    }
+
+    template<typename T, typename AllocationType = HeapAllocation, typename TempAllocationType = HeapAllocation>
+    FORCE_INLINE static void MergeSort(Array<T, AllocationType>& data, Array<T, TempAllocationType>* tmp = nullptr)
+    {
+        if (tmp)
+            tmp->Resize(data.Count());
+        MergeSort(data.Get(), data.Count(), tmp ? tmp->Get() : nullptr);
+    }
+
+    /// <summary>
     /// Sorts the linear data array using Radix Sort algorithm (uses temporary keys collection).
     /// </summary>
     /// <param name="inputKeys">The data pointer to the input sorting keys array. When this method completes it contains a pointer to the original data or the temporary depending on the algorithm passes count. Use it as a results container.</param>
@@ -285,9 +362,10 @@ public:
         uint32 histogram[RADIXSORT_HISTOGRAM_SIZE];
         uint16 shift = 0;
         int32 pass = 0;
-        for (; pass < 6; pass++)
+        constexpr int32 passCount = sizeof(T) >= sizeof(uint64) ? 6 : 3;
+        for (; pass < passCount; pass++)
         {
-            Platform::MemoryClear(histogram, sizeof(uint32) * RADIXSORT_HISTOGRAM_SIZE);
+            Platform::MemoryClear(histogram, sizeof(histogram));
 
             bool sorted = true;
             T key = keys[0];
@@ -295,16 +373,14 @@ public:
             for (int32 i = 0; i < count; i++)
             {
                 key = keys[i];
-                const uint16 index = (key >> shift) & RADIXSORT_BIT_MASK;
+                const uint16 index = (key >> (T)shift) & RADIXSORT_BIT_MASK;
                 ++histogram[index];
                 sorted &= prevKey <= key;
                 prevKey = key;
             }
 
             if (sorted)
-            {
                 goto end;
-            }
 
             uint32 offset = 0;
             for (int32 i = 0; i < RADIXSORT_HISTOGRAM_SIZE; ++i)
@@ -317,7 +393,7 @@ public:
             for (int32 i = 0; i < count; i++)
             {
                 const T k = keys[i];
-                const uint16 index = (k >> shift) & RADIXSORT_BIT_MASK;
+                const uint16 index = (k >> (T)shift) & RADIXSORT_BIT_MASK;
                 const uint32 dest = histogram[index]++;
                 tempKeys[dest] = k;
                 tempValues[dest] = values[i];

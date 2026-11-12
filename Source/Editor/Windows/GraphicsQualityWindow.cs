@@ -1,6 +1,5 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System.Collections.Generic;
 using System.ComponentModel;
 using FlaxEditor.CustomEditors;
 using FlaxEngine;
@@ -64,6 +63,22 @@ namespace FlaxEditor.Windows
                 set => Graphics.VolumetricFogQuality = value;
             }
 
+            [DefaultValue(Quality.High)]
+            [EditorOrder(1280), EditorDisplay("Quality"), Tooltip("The Global SDF quality. Controls the volume texture resolution and amount of cascades to use.")]
+            public Quality GlobalSDFQuality
+            {
+                get => Graphics.GlobalSDFQuality;
+                set => Graphics.GlobalSDFQuality = value;
+            }
+
+            [DefaultValue(Quality.High)]
+            [EditorOrder(1290), EditorDisplay("Quality"), Tooltip("The Global Illumination quality. Controls the quality of the GI effect.")]
+            public Quality GIQuality
+            {
+                get => Graphics.GIQuality;
+                set => Graphics.GIQuality = value;
+            }
+
             [DefaultValue(Quality.Medium)]
             [EditorOrder(1300), EditorDisplay("Quality", "Shadows Quality"), Tooltip("The shadows quality.")]
             public Quality ShadowsQuality
@@ -80,22 +95,25 @@ namespace FlaxEditor.Windows
                 set => Graphics.ShadowMapsQuality = value;
             }
 
-            [DefaultValue(false)]
-            [EditorOrder(1320), EditorDisplay("Quality", "Allow CSM Blending"), Tooltip("Enables cascades splits blending for directional light shadows.")]
-            public bool AllowCSMBlending
-            {
-                get => Graphics.AllowCSMBlending;
-                set => Graphics.AllowCSMBlending = value;
-            }
-
             [NoSerialize, DefaultValue(1.0f), Limit(0.05f, 5, 0)]
             [EditorOrder(1400), EditorDisplay("Quality")]
             [Tooltip("The scale of the rendering resolution relative to the output dimensions. If lower than 1 the scene and postprocessing will be rendered at a lower resolution and upscaled to the output backbuffer.")]
-            public float RenderingPercentage
+            public float RenderScale
             {
-                get => MainRenderTask.Instance.RenderingPercentage;
-                set => MainRenderTask.Instance.RenderingPercentage = value;
+                get => MainRenderTask.Instance.RenderScale;
+                set => MainRenderTask.Instance.RenderScale = value;
             }
+
+            [NoSerialize, DefaultValue(RenderingUpscaleLocation.DuringAntiAliasing), VisibleIf(nameof(UpscaleLocation_Visible))]
+            [EditorOrder(1401), EditorDisplay("Quality")]
+            [Tooltip("The image resolution upscale location within rendering pipeline.")]
+            public RenderingUpscaleLocation UpscaleLocation
+            {
+                get => MainRenderTask.Instance.UpscaleLocation;
+                set => MainRenderTask.Instance.UpscaleLocation = value;
+            }
+
+            private bool UpscaleLocation_Visible => MainRenderTask.Instance.RenderScale < 1.0f;
 
             [NoSerialize, DefaultValue(1.0f), Limit(0, 1)]
             [EditorOrder(1500), EditorDisplay("Quality"), Tooltip("The global density scale for all foliage instances. The default value is 1. Use values from range 0-1. Lower values decrease amount of foliage instances in-game. Use it to tweak game performance for slower devices.")]
@@ -150,7 +168,7 @@ namespace FlaxEditor.Windows
         /// <inheritdoc />
         public override void OnInit()
         {
-            if (Editor.ProjectCache.TryGetCustomData(_optionsName, out var options) && !string.IsNullOrEmpty(options))
+            if (Editor.ProjectCache.TryGetCustomData(_optionsName, out string options) && !string.IsNullOrEmpty(options))
             {
                 // Load cached settings
                 JsonSerializer.Deserialize(_viewModel, options);

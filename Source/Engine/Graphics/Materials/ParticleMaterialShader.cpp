@@ -1,29 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ParticleMaterialShader.h"
 #include "MaterialShaderFeatures.h"
 #include "MaterialParams.h"
+#include "Engine/Core/Math/Matrix3x4.h"
 #include "Engine/Renderer/DrawCall.h"
 #include "Engine/Renderer/RenderList.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPULimits.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Particles/Graph/CPU/ParticleEmitterGraph.CPU.h"
 
 PACK_STRUCT(struct ParticleMaterialShaderData {
-    Matrix ViewProjectionMatrix;
-    Matrix WorldMatrix;
-    Matrix ViewMatrix;
-    Vector3 ViewPos;
-    float ViewFar;
-    Vector3 ViewDir;
-    float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
+    Matrix3x4 WorldMatrix;
     uint32 SortedIndicesOffset;
     float PerInstanceRandom;
     int32 ParticleStride;
@@ -36,34 +29,30 @@ PACK_STRUCT(struct ParticleMaterialShaderData {
     int32 ScaleOffset;
     int32 ModelFacingModeOffset;
     float RibbonUVTilingDistance;
-    Vector2 RibbonUVScale;
-    Vector2 RibbonUVOffset;
+    Float2 RibbonUVScale;
+    Float2 RibbonUVOffset;
     int32 RibbonWidthOffset;
     int32 RibbonTwistOffset;
     int32 RibbonFacingVectorOffset;
     uint32 RibbonSegmentCount;
-    Matrix WorldMatrixInverseTransposed;
+    Matrix3x4 WorldMatrixInverseTransposed;
     });
-
-DrawPass ParticleMaterialShader::GetDrawModes() const
-{
-    return _drawModes;
-}
 
 void ParticleMaterialShader::Bind(BindParameters& params)
 {
     // Prepare
     auto context = params.GPUContext;
     auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
-    const uint32 sortedIndicesOffset = drawCall.Particle.Module->SortedIndicesOffset;
+    auto& drawCall = *params.DrawCall;
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(ParticleMaterialShaderData));
     auto materialData = reinterpret_cast<ParticleMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(ParticleMaterialShaderData), cb.Length() - sizeof(ParticleMaterialShaderData));
+    cb = cb.Slice(sizeof(ParticleMaterialShaderData));
     int32 srv = 2;
 
     // Setup features
+    if (EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::GlobalIllumination))
+        GlobalIlluminationFeature::Bind(params, cb, srv);
     ForwardShadingFeature::Bind(params, cb, srv);
 
     // Setup parameters
@@ -90,7 +79,7 @@ void ParticleMaterialShader::Bind(BindParameters& params)
             {
                 const StringView name(param.GetName().Get() + 9, param.GetName().Length() - 9);
                 const int32 offset = drawCall.Particle.Particles->Layout->FindAttributeOffset(name);
-                ASSERT_LOW_LAYER(bindMeta.Constants.Get() && bindMeta.Constants.Length() >= (int32)param.GetBindOffset() + sizeof(int32));
+                ASSERT_LOW_LAYER(bindMeta.Constants.Get() && bindMeta.Constants.Length() >= (int32)(param.GetBindOffset() + sizeof(int32)));
                 *((int32*)(bindMeta.Constants.Get() + param.GetBindOffset())) = offset;
             }
         }
@@ -107,48 +96,41 @@ void ParticleMaterialShader::Bind(BindParameters& params)
         static StringView ParticleScaleOffset(TEXT("Scale"));
         static StringView ParticleModelFacingModeOffset(TEXT("ModelFacingMode"));
 
-        Matrix::Transpose(view.Frustum.GetMatrix(), materialData->ViewProjectionMatrix);
-        Matrix::Transpose(drawCall.World, materialData->WorldMatrix);
-        Matrix::Transpose(view.View, materialData->ViewMatrix);
-        materialData->ViewPos = view.Position;
-        materialData->ViewFar = view.Far;
-        materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = view.ViewInfo;
-        materialData->ScreenSize = view.ScreenSize;
-        materialData->SortedIndicesOffset = drawCall.Particle.Particles->GPU.SortedIndices && params.RenderContext.View.Pass != DrawPass::Depth ? sortedIndicesOffset : 0xFFFFFFFF;
+        materialData->WorldMatrix.SetMatrixTranspose(drawCall.World);
+        materialData->SortedIndicesOffset = drawCall.Particle.Particles->GPU.SortedIndices && params.RenderContext.View.Pass != DrawPass::Depth ? drawCall.Particle.Module->SortedIndicesOffset : 0xFFFFFFFF;
         materialData->PerInstanceRandom = drawCall.PerInstanceRandom;
         materialData->ParticleStride = drawCall.Particle.Particles->Stride;
-        materialData->PositionOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticlePosition, ParticleAttribute::ValueTypes::Vector3);
-        materialData->SpriteSizeOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleSpriteSize, ParticleAttribute::ValueTypes::Vector2);
+        materialData->PositionOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticlePosition, ParticleAttribute::ValueTypes::Float3);
+        materialData->SpriteSizeOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleSpriteSize, ParticleAttribute::ValueTypes::Float2);
         materialData->SpriteFacingModeOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleSpriteFacingMode, ParticleAttribute::ValueTypes::Int, -1);
-        materialData->SpriteFacingVectorOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleSpriteFacingVector, ParticleAttribute::ValueTypes::Vector3);
-        materialData->VelocityOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleVelocityOffset, ParticleAttribute::ValueTypes::Vector3);
-        materialData->RotationOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRotationOffset, ParticleAttribute::ValueTypes::Vector3, -1);
-        materialData->ScaleOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleScaleOffset, ParticleAttribute::ValueTypes::Vector3, -1);
+        materialData->SpriteFacingVectorOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleSpriteFacingVector, ParticleAttribute::ValueTypes::Float3);
+        materialData->VelocityOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleVelocityOffset, ParticleAttribute::ValueTypes::Float3);
+        materialData->RotationOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRotationOffset, ParticleAttribute::ValueTypes::Float3, -1);
+        materialData->ScaleOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleScaleOffset, ParticleAttribute::ValueTypes::Float3, -1);
         materialData->ModelFacingModeOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleModelFacingModeOffset, ParticleAttribute::ValueTypes::Int, -1);
-        Matrix::Invert(drawCall.World, materialData->WorldMatrixInverseTransposed);
+        Matrix worldMatrixInverseTransposed;
+        Matrix::Invert(drawCall.World, worldMatrixInverseTransposed);
+        materialData->WorldMatrixInverseTransposed.SetMatrix(worldMatrixInverseTransposed);
     }
 
     // Select pipeline state based on current pass and render mode
-    bool wireframe = (_info.FeaturesFlags & MaterialFeaturesFlags::Wireframe) != 0 || view.Mode == ViewMode::Wireframe;
     CullMode cullMode = view.Pass == DrawPass::Depth ? CullMode::TwoSided : _info.CullMode;
     PipelineStateCache* psCache = nullptr;
     switch (drawCall.Particle.Module->TypeID)
     {
-        // Sprite Rendering
+    // Sprite Rendering
     case 400:
     {
         psCache = _cacheSprite.GetPS(view.Pass);
         break;
     }
-        // Model Rendering
+    // Model Rendering
     case 403:
     {
         psCache = _cacheModel.GetPS(view.Pass);
         break;
     }
-        // Ribbon Rendering
+    // Ribbon Rendering
     case 404:
     {
         psCache = _cacheRibbon.GetPS(view.Pass);
@@ -159,7 +141,7 @@ void ParticleMaterialShader::Bind(BindParameters& params)
 
         materialData->RibbonWidthOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRibbonWidth, ParticleAttribute::ValueTypes::Float, -1);
         materialData->RibbonTwistOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRibbonTwist, ParticleAttribute::ValueTypes::Float, -1);
-        materialData->RibbonFacingVectorOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRibbonFacingVector, ParticleAttribute::ValueTypes::Vector3, -1);
+        materialData->RibbonFacingVectorOffset = drawCall.Particle.Particles->Layout->FindAttributeOffset(ParticleRibbonFacingVector, ParticleAttribute::ValueTypes::Float3, -1);
 
         materialData->RibbonUVTilingDistance = drawCall.Particle.Ribbon.UVTilingDistance;
         materialData->RibbonUVScale.X = drawCall.Particle.Ribbon.UVScaleX;
@@ -168,14 +150,11 @@ void ParticleMaterialShader::Bind(BindParameters& params)
         materialData->RibbonUVOffset.Y = drawCall.Particle.Ribbon.UVOffsetY;
         materialData->RibbonSegmentCount = drawCall.Particle.Ribbon.SegmentCount;
 
-        if (drawCall.Particle.Ribbon.SegmentDistances)
-            context->BindSR(1, drawCall.Particle.Ribbon.SegmentDistances->View());
-
         break;
     }
     }
     ASSERT(psCache);
-    GPUPipelineState* state = psCache->GetPS(cullMode, wireframe);
+    GPUPipelineState* state = psCache->GetPS(this, cullMode);
 
     // Bind constants
     if (_cb)
@@ -201,30 +180,52 @@ void ParticleMaterialShader::Unload()
 
 bool ParticleMaterialShader::Load()
 {
-    _drawModes = DrawPass::Depth | DrawPass::Forward;
-    GPUPipelineState::Description psDesc = GPUPipelineState::Description::Default;
-    psDesc.DepthTestEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthTest) == 0;
-    psDesc.DepthWriteEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthWrite) == 0;
+    _drawModes = DrawPass::Depth | DrawPass::Forward | DrawPass::Wireframe;
+    auto psDesc = GPUPipelineState::Description::Default;
+    psDesc.DepthEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthTest);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.CullMode = _info.CullMode;
 
     auto vsSprite = _shader->GetVS("VS_Sprite");
     auto vsMesh = _shader->GetVS("VS_Model");
     auto vsRibbon = _shader->GetVS("VS_Ribbon");
+#define INIT_CACHE(type) \
+    psDesc.VS = vsSprite; \
+    _cacheSprite.type.Init(psDesc); \
+    psDesc.VS = vsMesh; \
+    _cacheModel.type.Init(psDesc); \
+    psDesc.VS = vsRibbon; \
+    _cacheRibbon.type.Init(psDesc)
+
+#if GPU_ENABLE_DEVELOPMENT
+    if (_shader->HasShader("PS_QuadOverdraw"))
+    {
+        // Quad Overdraw
+        _drawModes |= DrawPass::QuadOverdraw;
+        psDesc.PS = _shader->GetPS("PS_QuadOverdraw");
+        INIT_CACHE(QuadOverdraw);
+    }
+
+    // Wireframe
+    psDesc.Wireframe = true;
+    psDesc.DepthWriteEnable = false;
+    psDesc.BlendMode = BlendingMode::AlphaBlend;
+    psDesc.PS = GPUDevice::Instance->QuadShader->GetPS("PS_Wireframe");
+    INIT_CACHE(Wireframe);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+#endif
 
     // Check if use transparent distortion pass
     if (_shader->HasShader("PS_Distortion"))
     {
-        _drawModes |= DrawPass::Distortion;
-
         // Accumulate Distortion Pass
+        _drawModes |= DrawPass::Distortion;
         psDesc.PS = _shader->GetPS("PS_Distortion");
         psDesc.BlendMode = BlendingMode::Add;
         psDesc.DepthWriteEnable = false;
-        psDesc.VS = vsSprite;
-        _cacheSprite.Distortion.Init(psDesc);
-        psDesc.VS = vsMesh;
-        _cacheModel.Distortion.Init(psDesc);
-        psDesc.VS = vsRibbon;
-        _cacheRibbon.Distortion.Init(psDesc);
+        INIT_CACHE(Distortion);
     }
 
     // Forward Pass
@@ -243,27 +244,23 @@ bool ParticleMaterialShader::Load()
         psDesc.BlendMode = BlendingMode::Multiply;
         break;
     }
-    psDesc.VS = vsSprite;
-    _cacheSprite.Default.Init(psDesc);
-    psDesc.VS = vsMesh;
-    _cacheModel.Default.Init(psDesc);
-    psDesc.VS = vsRibbon;
-    _cacheRibbon.Default.Init(psDesc);
+    INIT_CACHE(Default);
 
     // Depth Pass
     psDesc = GPUPipelineState::Description::Default;
     psDesc.CullMode = CullMode::TwoSided;
     psDesc.DepthClipEnable = false;
+    psDesc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::None;
     psDesc.PS = _shader->GetPS("PS_Depth");
-    psDesc.VS = vsSprite;
-    _cacheSprite.Depth.Init(psDesc);
-    psDesc.VS = vsMesh;
-    _cacheModel.Depth.Init(psDesc);
-    psDesc.VS = vsRibbon;
-    _cacheRibbon.Depth.Init(psDesc);
+    INIT_CACHE(Depth);
 
     // Lazy initialization
     _cacheVolumetricFog.Desc.PS = nullptr;
+
+#if PLATFORM_PS5
+    // Fix shader binding issues on forward shading materials on PS5
+    _drawModes = DrawPass::None;
+#endif
 
     return false;
 }

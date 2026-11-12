@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.ComponentModel;
@@ -82,7 +82,7 @@ namespace FlaxEditor.Tools.Foliage
                 }
             }
 
-            [EditorOrder(20), EditorDisplay("Model"), Collection(ReadOnly = true), Tooltip("Model materials override collection. Can be used to change a specific material of the mesh to the custom one without editing the asset.")]
+            [EditorOrder(20), EditorDisplay("Model"), Collection(CanResize = true), Tooltip("Model materials override collection. Can be used to change a specific material of the mesh to the custom one without editing the asset.")]
             public MaterialBase[] Materials
             {
                 get
@@ -198,9 +198,9 @@ namespace FlaxEditor.Tools.Foliage
             }
 
             [EditorOrder(215), EditorDisplay("Painting"), Limit(0.0f, 360.0f), Tooltip("The minimum and maximum ground slope angle to paint foliage on it (in degrees).")]
-            public Vector2 PaintGroundSlopeAngleRange
+            public Float2 PaintGroundSlopeAngleRange
             {
-                get => new Vector2(_type.PaintGroundSlopeAngleMin, _type.PaintGroundSlopeAngleMax);
+                get => new Float2(_type.PaintGroundSlopeAngleMin, _type.PaintGroundSlopeAngleMax);
                 set
                 {
                     _type.PaintGroundSlopeAngleMin = value.X;
@@ -215,15 +215,15 @@ namespace FlaxEditor.Tools.Foliage
                 set => _type.PaintScaling = value;
             }
 
-            [EditorOrder(230), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.PositionScaleEditor)), Tooltip("The scale minimum values per axis.")]
-            public Vector3 ScaleMin
+            [EditorOrder(230), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.ScaleEditor)), Tooltip("The scale minimum values per axis.")]
+            public Float3 ScaleMin
             {
                 get => _type.PaintScaleMin;
                 set => _type.PaintScaleMin = value;
             }
 
-            [EditorOrder(240), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.PositionScaleEditor)), Tooltip("The scale maximum values per axis.")]
-            public Vector3 ScaleMax
+            [EditorOrder(240), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.ScaleEditor)), Tooltip("The scale maximum values per axis.")]
+            public Float3 ScaleMax
             {
                 get => _type.PaintScaleMax;
                 set => _type.PaintScaleMax = value;
@@ -232,7 +232,7 @@ namespace FlaxEditor.Tools.Foliage
             //
 
             [EditorOrder(300), EditorDisplay("Placement", "Offset Y"), Tooltip("The per-instance random offset range on axis Y (min-max).")]
-            public Vector2 OffsetY
+            public Float2 OffsetY
             {
                 get => _type.PlacementOffsetY;
                 set => _type.PlacementOffsetY = value;
@@ -302,7 +302,12 @@ namespace FlaxEditor.Tools.Foliage
                 var proxyObject = (ProxyObject)Values[0];
                 proxyObject.SyncOptions();
 
-                _info.Text = string.Format("Instances: {0}, Total: {1}", proxyObject.Foliage.GetFoliageTypeInstancesCount(proxyObject.SelectedFoliageTypeIndex), proxyObject.Foliage.InstancesCount);
+                var instancesCount = proxyObject.Foliage.GetFoliageTypeInstancesCount(proxyObject.SelectedFoliageTypeIndex);
+                var totalCount = proxyObject.Foliage.InstancesCount;
+                if (instancesCount == totalCount)
+                    _info.Text = string.Format("Instances: {0:###,###,###}", instancesCount);
+                else
+                    _info.Text = string.Format("Instances: {0:###,###,###}, Total: {1:###,###,###}", instancesCount, totalCount);
 
                 base.Refresh();
             }
@@ -329,7 +334,8 @@ namespace FlaxEditor.Tools.Foliage
         /// Initializes a new instance of the <see cref="FoliageTypesTab"/> class.
         /// </summary>
         /// <param name="tab">The parent tab.</param>
-        public FoliageTypesTab(FoliageTab tab)
+        /// <param name="mode">The gizmo mode.</param>
+        public FoliageTypesTab(FoliageTab tab, FoliageTypesGizmoMode mode)
         : base("Foliage Types")
         {
             Tab = tab;
@@ -352,6 +358,7 @@ namespace FlaxEditor.Tools.Foliage
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
                 Offsets = new Margin(4, 4, 4, 0),
+                Pivot = Float2.Zero,
                 IsScrollable = true,
                 Parent = splitPanel.Panel1
             };
@@ -375,7 +382,7 @@ namespace FlaxEditor.Tools.Foliage
 
         private void OnModified()
         {
-            Editor.Instance.Scene.MarkSceneEdited(_proxy.Foliage?.Scene);
+            Editor.Instance.Scene.MarkSceneEdited(_proxy.Foliage != null ? _proxy.Foliage.Scene : null);
         }
 
         private void OnSelectedFoliageChanged()
@@ -400,6 +407,7 @@ namespace FlaxEditor.Tools.Foliage
             if (currentIndex != -1)
             {
                 _items.Children[currentIndex].BackgroundColor = Style.Current.BackgroundSelected;
+                _proxy.SyncOptions();
 
                 _presenter.Select(_proxy);
                 _presenter.BuildLayoutOnUpdate();
@@ -408,6 +416,7 @@ namespace FlaxEditor.Tools.Foliage
             {
                 _presenter.Deselect();
             }
+            _presenter.Panel.Focus();
         }
 
         private void RemoveFoliageType(int index)
@@ -430,7 +439,7 @@ namespace FlaxEditor.Tools.Foliage
         private void OnAddFoliageTypeButtonClicked()
         {
             // Show model picker
-            AssetSearchPopup.Show(_addFoliageTypeButton, new Vector2(_addFoliageTypeButton.Width * 0.5f, _addFoliageTypeButton.Height), IsItemValidForFoliageModel, OnItemSelectedForFoliageModel);
+            AssetSearchPopup.Show(_addFoliageTypeButton, new Float2(_addFoliageTypeButton.Width * 0.5f, _addFoliageTypeButton.Height), IsItemValidForFoliageModel, OnItemSelectedForFoliageModel);
         }
 
         private void OnItemSelectedForFoliageModel(AssetItem item)
@@ -481,7 +490,7 @@ namespace FlaxEditor.Tools.Foliage
                         Tag = i,
                         Parent = _items,
                     };
-                    itemView.Clicked += OnFoliageTypeListItemClicked;
+                    itemView.ItemClicked += OnFoliageTypeListItemClicked;
 
                     y += itemView.Height + _items.Spacing;
                 }
@@ -509,7 +518,7 @@ namespace FlaxEditor.Tools.Foliage
 
         private void ArrangeAddFoliageButton()
         {
-            _addFoliageTypeButton.Location = new Vector2((_addFoliageTypeButton.Parent.Width - _addFoliageTypeButton.Width) * 0.5f, _items.Bottom + 4);
+            _addFoliageTypeButton.Location = new Float2((_addFoliageTypeButton.Parent.Width - _addFoliageTypeButton.Width) * 0.5f, _items.Bottom + 4);
         }
 
         internal void CheckFoliageTypesCount()

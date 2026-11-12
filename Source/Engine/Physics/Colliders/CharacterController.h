@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,11 +9,12 @@
 /// Physical objects that allows to easily do player movement constrained by collisions without having to deal with a rigidbody.
 /// </summary>
 /// <seealso cref="Collider" />
-API_CLASS() class FLAXENGINE_API CharacterController : public Collider, public IPhysicsActor
+API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Character Controller\"), ActorToolbox(\"Physics\")")
+class FLAXENGINE_API CharacterController : public Collider, public IPhysicsActor
 {
-DECLARE_SCENE_OBJECT(CharacterController);
+    API_AUTO_SERIALIZATION();
+    DECLARE_SCENE_OBJECT(CharacterController);
 public:
-
     /// <summary>
     /// Specifies which sides a character is colliding with.
     /// </summary>
@@ -41,6 +42,22 @@ public:
     };
 
     /// <summary>
+    /// Specifies how a character controller capsule placement.
+    /// </summary>
+    API_ENUM() enum class OriginModes
+    {
+        /// <summary>
+        /// Character origin starts at capsule center (including Center offset properly).
+        /// </summary>
+        CapsuleCenter,
+
+        /// <summary>
+        /// Character origin starts at capsule base position aka character feet placement.
+        /// </summary>
+        Base,
+    };
+
+    /// <summary>
     /// Specifies how a character controller interacts with non-walkable parts.
     /// </summary>
     API_ENUM() enum class NonWalkableModes
@@ -57,24 +74,25 @@ public:
     };
 
 private:
-
-    PxCapsuleController* _controller;
+    void* _controller;
     float _stepOffset;
     float _slopeLimit;
     float _radius;
     float _height;
     float _minMoveDistance;
     bool _isUpdatingTransform;
+    bool _autoGravity = false;
     Vector3 _upDirection;
+    Vector3 _gravityDisplacement;
     NonWalkableModes _nonWalkableMode;
+    OriginModes _originMode;
     CollisionFlags _lastFlags;
-    uint32 _filterData[4];
 
 public:
     /// <summary>
     /// Gets the radius of the sphere, measured in the object's local space. The sphere radius will be scaled by the actor's world scale.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(100), DefaultValue(50.0f), EditorDisplay(\"Collider\")")
+    API_PROPERTY(Attributes="EditorOrder(100), DefaultValue(50.0f), EditorDisplay(\"Collider\"), ValueCategory(Utils.ValueCategory.Distance)")
     float GetRadius() const;
 
     /// <summary>
@@ -83,20 +101,20 @@ public:
     API_PROPERTY() void SetRadius(float value);
 
     /// <summary>
-    /// Gets the height of the capsule, measured in the object's local space. The capsule height will be scaled by the actor's world scale.
+    /// Gets the height of the capsule as a distance between the two sphere centers at the end of the capsule. The capsule height is measured in the object's local space and will be scaled by the actor's world scale.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(110), DefaultValue(150.0f), EditorDisplay(\"Collider\")")
+    API_PROPERTY(Attributes="EditorOrder(110), DefaultValue(150.0f), EditorDisplay(\"Collider\"), ValueCategory(Utils.ValueCategory.Distance)")
     float GetHeight() const;
 
     /// <summary>
-    /// Sets the height of the capsule, measured in the object's local space. The capsule height will be scaled by the actor's world scale.
+    /// Sets the height of the capsule as a distance between the two sphere centers at the end of the capsule. The capsule height is measured in the object's local space and will be scaled by the actor's world scale.
     /// </summary>
     API_PROPERTY() void SetHeight(float value);
 
     /// <summary>
     /// Gets the slope limit (in degrees). Limits the collider to only climb slopes that are less steep (in degrees) than the indicated value.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(210), DefaultValue(45.0f), Limit(0, 100), EditorDisplay(\"Character Controller\")")
+    API_PROPERTY(Attributes="EditorOrder(210), DefaultValue(45.0f), Limit(0, 100), EditorDisplay(\"Character Controller\"), ValueCategory(Utils.ValueCategory.Angle)")
     float GetSlopeLimit() const;
 
     /// <summary>
@@ -116,9 +134,20 @@ public:
     API_PROPERTY() void SetNonWalkableMode(NonWalkableModes value);
 
     /// <summary>
+    /// Gets the position origin placement mode.
+    /// </summary>
+    API_PROPERTY(Attributes="EditorOrder(216), DefaultValue(OriginModes.CapsuleCenter), EditorDisplay(\"Character Controller\")")
+    OriginModes GetOriginMode() const;
+
+    /// <summary>
+    /// Sets the position origin placement mode.
+    /// </summary>
+    API_PROPERTY() void SetOriginMode(OriginModes value);
+
+    /// <summary>
     /// Gets the step height. The character will step up a stair only if it is closer to the ground than the indicated value. This should not be greater than the Character Controller’s height or it will generate an error.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(220), DefaultValue(30.0f), Limit(0), EditorDisplay(\"Character Controller\")")
+    API_PROPERTY(Attributes="EditorOrder(220), DefaultValue(30.0f), Limit(0), EditorDisplay(\"Character Controller\"), ValueCategory(Utils.ValueCategory.Distance)")
     float GetStepOffset() const;
 
     /// <summary>
@@ -129,7 +158,7 @@ public:
     /// <summary>
     /// Gets the character up vector.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(240), DefaultValue(true), EditorDisplay(\"Character Controller\")")
+    API_PROPERTY(Attributes="EditorOrder(240), DefaultValue(typeof(Vector3), \"0,1,0\"), EditorDisplay(\"Character Controller\"), Limit(-1, 1)")
     Vector3 GetUpDirection() const;
 
     /// <summary>
@@ -140,7 +169,7 @@ public:
     /// <summary>
     /// Gets the minimum move distance of the character controller. The minimum traveled distance to consider. If traveled distance is smaller, the character doesn't move. This is used to stop the recursive motion algorithm when remaining distance to travel is small.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(230), DefaultValue(0.0f), Limit(0, 1000), EditorDisplay(\"Character Controller\")")
+    API_PROPERTY(Attributes="EditorOrder(230), DefaultValue(0.0f), Limit(0, 1000), EditorDisplay(\"Character Controller\"), ValueCategory(Utils.ValueCategory.Distance)")
     float GetMinMoveDistance() const;
 
     /// <summary>
@@ -148,8 +177,21 @@ public:
     /// </summary>
     API_PROPERTY() void SetMinMoveDistance(float value);
 
-public:
+    /// <summary>
+    /// Gets the automatic gravity force applying mode. Can be toggled off if gameplay controls character movement velocity including gravity, or toggled on if gravity should be applied together with root motion from animation movement.
+    /// </summary>
+    API_PROPERTY(Attributes="EditorOrder(250), DefaultValue(false), EditorDisplay(\"Character Controller\")")
+    bool GetAutoGravity() const
+    {
+        return _autoGravity;
+    }
 
+    /// <summary>
+    /// Sets the automatic gravity force applying mode. Can be toggled off if gameplay controls character movement velocity including gravity, or toggled on if gravity should be applied together with root motion from animation movement.
+    /// </summary>
+    API_PROPERTY() void SetAutoGravity(bool value);
+
+public:
     /// <summary>
     /// Gets the linear velocity of the Character Controller. This allows tracking how fast the character is actually moving, for instance when it is stuck at a wall this value will be the near zero vector.
     /// </summary>
@@ -166,11 +208,10 @@ public:
     API_PROPERTY() CollisionFlags GetFlags() const;
 
 public:
-
     /// <summary>
-    /// Moves the character with the given speed. Gravity is automatically applied. It will slide along colliders. Result collision flags is the summary of collisions that occurred during the Move.
+    /// Moves the character with the given speed. Gravity is automatically applied. The speed is multipled by Time.DeltaTime internally. It will slide along colliders. Result collision flags is the summary of collisions that occurred during the Move.
     /// </summary>
-    /// <param name="speed">The movement speed (in units/s).</param>
+    /// <param name="speed">The movement speed (in units/s). The speed is multipled by Time.DeltaTime internally.</param>
     /// <returns>The collision flags. It can be used to trigger various character animations.</returns>
     API_FUNCTION() CollisionFlags SimpleMove(const Vector3& speed);
 
@@ -182,12 +223,13 @@ public:
     API_FUNCTION() CollisionFlags Move(const Vector3& displacement);
 
     /// <summary>
-    /// Gets the native PhysX rigid actor object.
+    /// Updates the character height and center position to ensure its feet position stays the same. This can be used to implement a 'crouch' functionality for example. Maintains the same actor position to stay in the middle of capsule by adjusting center of collider accordingly to height difference.
     /// </summary>
-    PxRigidDynamic* GetPhysXRigidActor() const;
+    /// <param name="height">The height of the capsule, measured in the object's local space.</param>
+    /// <param name="radius">The radius of the capsule, measured in the object's local space.</param>
+    API_FUNCTION() void Resize(float height, float radius);
 
 protected:
-
     /// <summary>
     /// Creates the physics actor.
     /// </summary>
@@ -203,38 +245,37 @@ protected:
     /// </summary>
     void UpdateSize() const;
 
-public:
+private:
+    Vector3 GetControllerPosition() const;
+    void GetControllerSize(float& height, float& radius) const;
 
+public:
     // [Collider]
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
 #endif
-    void Serialize(SerializeStream& stream, const void* otherObj) override;
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     void CreateShape() override;
     void UpdateBounds() override;
     void AddMovement(const Vector3& translation, const Quaternion& rotation) override;
     bool CanAttach(RigidBody* rigidBody) const override;
     RigidBody* GetAttachedRigidBody() const override;
+    void SetCenter(const Vector3& value) override;
 
     // [IPhysicsActor]
-    void OnActiveTransformChanged(const PxTransform& transform) override;
-    PxRigidActor* GetRigidActor() override;
+    void OnActiveTransformChanged() override;
+    void* GetPhysicsActor() const override;
 
 protected:
-
     // [PhysicsActor]
+    ImplementPhysicsDebug;
     void UpdateGeometry() override;
-    void GetGeometry(PxGeometryHolder& geometry) override;
-    void UpdateLayerBits() override;
+    void GetGeometry(CollisionShape& collision) override;
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
-#if USE_EDITOR
-    void DrawPhysicsDebug(RenderView& view) override;
-#endif
     void OnActiveInTreeChanged() override;
     void OnEnable() override;
     void OnDisable() override;
     void OnParentChanged() override;
     void OnTransformChanged() override;
+    void OnPhysicsSceneChanged(PhysicsScene* previous) override;
 };

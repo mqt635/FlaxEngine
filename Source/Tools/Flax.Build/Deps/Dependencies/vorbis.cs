@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -15,54 +15,28 @@ namespace Flax.Deps.Dependencies
     /// <seealso cref="Flax.Deps.Dependency" />
     class vorbis : Dependency
     {
-        /// <inheritdoc />
-        public override TargetPlatform[] Platforms
-        {
-            get
-            {
-                switch (BuildPlatform)
-                {
-                case TargetPlatform.Windows:
-                    return new[]
-                    {
-                        TargetPlatform.Windows,
-                        TargetPlatform.UWP,
-                        TargetPlatform.XboxOne,
-                        TargetPlatform.PS4,
-                        TargetPlatform.XboxScarlett,
-                        TargetPlatform.Android,
-                        TargetPlatform.Switch,
-                    };
-                case TargetPlatform.Linux:
-                    return new[]
-                    {
-                        TargetPlatform.Linux,
-                    };
-                default: return new TargetPlatform[0];
-                }
-            }
-        }
-
         private struct Binary
         {
             public string Filename;
             public string SrcFolder;
+            public string DstFilename;
 
-            public Binary(string filename, string srcFolder)
+            public Binary(string filename, string srcFolder, string dstFilename = null)
             {
                 Filename = filename;
                 SrcFolder = srcFolder;
+                DstFilename = dstFilename;
             }
         }
 
         private bool hasSourcesReady;
         private string root;
         private string rootMsvcLib;
-        private string configurationMsvc;
+        private string _configuration = "Release";
         private List<string> vcxprojContentsWindows;
         private string[] vcxprojPathsWindows;
 
-        private Binary[] binariesToCopyWindows =
+        private Binary[] vorbisBinariesToCopyWindows =
         {
             new Binary("libvorbis_static.lib", "libvorbis"),
             new Binary("libvorbisfile_static.lib", "libvorbisfile"),
@@ -86,27 +60,22 @@ namespace Flax.Deps.Dependencies
 
             hasSourcesReady = true;
 
-            var packagePath = Path.Combine(root, "package.zip");
-            configurationMsvc = "Release";
+            string oggRoot = Path.Combine(root, "libogg");
+            string vorbisRoot = Path.Combine(root, "libvorbis");
 
-            // Get the additional source (ogg dependency)
-            Downloader.DownloadFileFromUrlToPath("http://downloads.xiph.org/releases/ogg/libogg-1.3.3.zip", packagePath);
-            using (ZipArchive archive = ZipFile.Open(packagePath, ZipArchiveMode.Read))
-            {
-                archive.ExtractToDirectory(root);
-                Directory.Move(Path.Combine(root, archive.Entries.First().FullName), Path.Combine(root, "libogg"));
-            }
+            SetupDirectory(oggRoot, false);
+            CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
+            GitResetLocalChanges(oggRoot); // Reset patches
+            GitCheckout(oggRoot, "master", "db5c7a49ce7ebda47b15b78471e78fb7f2483e22");
 
-            // Get the source
-            File.Delete(packagePath);
-            Downloader.DownloadFileFromUrlToPath("http://downloads.xiph.org/releases/vorbis/libvorbis-1.3.6.zip", packagePath);
-            using (ZipArchive archive = ZipFile.Open(packagePath, ZipArchiveMode.Read))
-            {
-                archive.ExtractToDirectory(root);
-                rootMsvcLib = Path.Combine(root, archive.Entries.First().FullName);
-            }
+            SetupDirectory(vorbisRoot, false);
+            CloneGitRepo(vorbisRoot, "https://github.com/xiph/vorbis.git");
+            GitResetLocalChanges(vorbisRoot); // Reset patches
+            GitCheckout(vorbisRoot, "master", "84c023699cdf023a32fa4ded32019f194afcdad0");
 
-            // Patch Windows projects
+            rootMsvcLib = vorbisRoot;
+
+            // Patch Windows projects which use MSBuild
             vcxprojPathsWindows = new[]
             {
                 Path.Combine(rootMsvcLib, "win32", "VS2010", "libvorbis", "libvorbis_static.vcxproj"),
@@ -120,6 +89,36 @@ namespace Flax.Deps.Dependencies
                 contents = contents.Replace("<DebugInformationFormat>ProgramDatabase</DebugInformationFormat>", "<DebugInformationFormat></DebugInformationFormat>");
                 vcxprojContentsWindows[i] = contents.Replace("<WholeProgramOptimization>true</WholeProgramOptimization>", "<WholeProgramOptimization>false</WholeProgramOptimization>");
             }
+
+            // TODO: FIXME for UWP/XBoxOne (use CMake for these too?)
+#if false
+            var packagePath = Path.Combine(root, "package.zip");
+            configurationMsvc = "Release";
+
+            // Get the additional source (ogg dependency)
+            if (!Directory.Exists(Path.Combine(root, "libogg")))
+            {
+                File.Delete(packagePath);
+                Downloader.DownloadFileFromUrlToPath("http://downloads.xiph.org/releases/ogg/libogg-1.3.3.zip", packagePath);
+                using (ZipArchive archive = ZipFile.Open(packagePath, ZipArchiveMode.Read))
+                {
+                    archive.ExtractToDirectory(root);
+                    Directory.Move(Path.Combine(root, archive.Entries.First().FullName), Path.Combine(root, "libogg"));
+                }
+            }
+
+            // Get the source
+            if (!Directory.Exists(Path.Combine(root, "libvorbis")))
+            {
+                File.Delete(packagePath);
+                Downloader.DownloadFileFromUrlToPath("http://downloads.xiph.org/releases/vorbis/libvorbis-1.3.6.zip", packagePath);
+                using (ZipArchive archive = ZipFile.Open(packagePath, ZipArchiveMode.Read))
+                {
+                    archive.ExtractToDirectory(root);
+                    Directory.Move(Path.Combine(root, archive.Entries.First().FullName), Path.Combine(root, "libvorbis"));
+                }
+            }
+#endif
         }
 
         private void BuildMsbuild(BuildOptions options, TargetPlatform platform, TargetArchitecture architecture)
@@ -128,14 +127,14 @@ namespace Flax.Deps.Dependencies
 
             string buildPlatform, buildDir;
             string[] vcxprojPaths;
-            Binary[] binariesToCopy;
+            List<Binary> binariesToCopy = new List<Binary>();
             switch (platform)
             {
             case TargetPlatform.Windows:
+            {
                 buildDir = Path.Combine(rootMsvcLib, "win32", "VS2010");
-                binariesToCopy = binariesToCopyWindows;
                 vcxprojPaths = vcxprojPathsWindows;
-                PatchWindowsTargetPlatformVersion("8.1", "v140");
+                PatchWindowsTargetPlatformVersion("10.0", "v143");
                 switch (architecture)
                 {
                 case TargetArchitecture.x86:
@@ -144,33 +143,18 @@ namespace Flax.Deps.Dependencies
                 case TargetArchitecture.x64:
                     buildPlatform = "x64";
                     break;
-                default: throw new InvalidArchitectureException(architecture);
-                }
-
-                break;
-            case TargetPlatform.UWP:
-                buildDir = Path.Combine(rootMsvcLib, "win32", "VS2010");
-                binariesToCopy = binariesToCopyWindows;
-                vcxprojPaths = vcxprojPathsWindows;
-                PatchWindowsTargetPlatformVersion("10.0.17763.0", "v141");
-                switch (architecture)
-                {
-                case TargetArchitecture.x86:
-                    buildPlatform = "Win32";
-                    break;
-                case TargetArchitecture.x64:
-                    buildPlatform = "x64";
-                    break;
-                case TargetArchitecture.ARM:
-                    buildPlatform = "ARM";
+                case TargetArchitecture.ARM64:
+                    buildPlatform = "ARM64";
                     break;
                 default: throw new InvalidArchitectureException(architecture);
                 }
-
+                binariesToCopy.AddRange(vorbisBinariesToCopyWindows.Select(x => new Binary(x.Filename, Path.Combine(buildDir, x.SrcFolder, buildPlatform, _configuration))));
                 break;
+            }
             case TargetPlatform.PS4:
+            {
                 buildDir = Path.Combine(rootMsvcLib, "PS4");
-                binariesToCopy = new[]
+                var binariesToCopyVorbis = new[]
                 {
                     new Binary("libvorbis.a", "libvorbis"),
                 };
@@ -179,38 +163,173 @@ namespace Flax.Deps.Dependencies
                     Path.Combine(buildDir, "libvorbis", "libvorbis_static.vcxproj"),
                 };
                 buildPlatform = "ORBIS";
+                Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "vorbis"),
+                                        buildDir, true, true);
+                Utilities.FileCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "ogg", "ogg", "config_types.h"),
+                                   Path.Combine(root, "libogg", "include", "ogg", "config_types.h"));
+                binariesToCopy.AddRange(binariesToCopyVorbis.Select(x => new Binary(x.Filename, Path.Combine(buildDir, x.SrcFolder, buildPlatform, _configuration))));
+                break;
+            }
+            case TargetPlatform.PS5:
+            {
+                buildDir = Path.Combine(rootMsvcLib, "PS5");
+                var binariesToCopyVorbis = new[]
+                {
+                    new Binary("libvorbis.a", "libvorbis"),
+                };
+                vcxprojPaths = new[]
+                {
+                    Path.Combine(buildDir, "libvorbis", "libvorbis_static.vcxproj"),
+                };
+                buildPlatform = "PROSPERO";
                 Utilities.DirectoryCopy(
                                         Path.Combine(GetBinariesFolder(options, platform), "Data", "vorbis"),
                                         buildDir, true, true);
                 Utilities.FileCopy(
                                    Path.Combine(GetBinariesFolder(options, platform), "Data", "ogg", "ogg", "config_types.h"),
                                    Path.Combine(root, "libogg", "include", "ogg", "config_types.h"));
+                binariesToCopy.AddRange(binariesToCopyVorbis.Select(x => new Binary(x.Filename, Path.Combine(buildDir, x.SrcFolder, buildPlatform, _configuration))));
                 break;
+            }
             case TargetPlatform.XboxOne:
                 buildDir = Path.Combine(rootMsvcLib, "win32", "VS2010");
-                binariesToCopy = binariesToCopyWindows;
                 vcxprojPaths = vcxprojPathsWindows;
                 buildPlatform = "x64";
-                PatchWindowsTargetPlatformVersion("10.0.19041.0", "v142");
+                PatchWindowsTargetPlatformVersion("10.0", "v143");
+                binariesToCopy.AddRange(vorbisBinariesToCopyWindows.Select(x => new Binary(x.Filename, Path.Combine(buildDir, x.SrcFolder, buildPlatform, _configuration))));
                 break;
             case TargetPlatform.XboxScarlett:
                 buildDir = Path.Combine(rootMsvcLib, "win32", "VS2010");
-                binariesToCopy = binariesToCopyWindows;
                 vcxprojPaths = vcxprojPathsWindows;
                 buildPlatform = "x64";
-                PatchWindowsTargetPlatformVersion("10.0.19041.0", "v142");
+                PatchWindowsTargetPlatformVersion("10.0", "v143");
+                binariesToCopy.AddRange(vorbisBinariesToCopyWindows.Select(x => new Binary(x.Filename, Path.Combine(buildDir, x.SrcFolder, buildPlatform, _configuration))));
                 break;
             default: throw new InvalidPlatformException(platform);
             }
 
             // Build
             foreach (var vcxprojPath in vcxprojPaths)
-                Deploy.VCEnvironment.BuildSolution(vcxprojPath, configurationMsvc, buildPlatform);
+                Deploy.VCEnvironment.BuildSolution(vcxprojPath, _configuration, buildPlatform);
 
             // Copy binaries
             var depsFolder = GetThirdPartyFolder(options, platform, architecture);
             foreach (var filename in binariesToCopy)
-                Utilities.FileCopy(Path.Combine(buildDir, filename.SrcFolder, buildPlatform, configurationMsvc, filename.Filename), Path.Combine(depsFolder, filename.Filename));
+                Utilities.FileCopy(Path.Combine(filename.SrcFolder, filename.Filename), Path.Combine(depsFolder, filename.Filename));
+        }
+
+        private void BuildCmake(BuildOptions options, TargetPlatform platform, TargetArchitecture architecture)
+        {
+            GetSources();
+
+            string oggRoot = Path.Combine(root, "libogg");
+            string vorbisRoot = Path.Combine(root, "libvorbis");
+            var oggBuildDir = Path.Combine(oggRoot, "build-" + architecture.ToString());
+            var vorbisBuildDir = Path.Combine(vorbisRoot, "build-" + architecture.ToString());
+            var installDir = Path.Combine(root, "install");
+
+            string ext;
+            string oggConfig = $"-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE={_configuration} -DCMAKE_INSTALL_PREFIX=\"{installDir}\"";
+            string vorbisConfig = $"-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE={_configuration} -DCMAKE_INSTALL_PREFIX=\"{installDir}\"";
+            string liboggFilename = "libogg";
+            Dictionary<string, string> envVars = new Dictionary<string, string>();
+            (string, string)[] oggBinariesToCopy;
+            Binary[] vorbisBinariesToCopy;
+            switch (platform)
+            {
+            case TargetPlatform.Windows:
+            case TargetPlatform.UWP:
+            case TargetPlatform.XboxOne:
+                oggConfig += " -DBUILD_SHARED_LIBS=OFF";
+                vorbisConfig += " -DBUILD_SHARED_LIBS=OFF";
+                ext = ".lib";
+                liboggFilename = "ogg";
+                break;
+            case TargetPlatform.Linux:
+                oggConfig += " -DCMAKE_POSITION_INDEPENDENT_CODE=ON";
+                vorbisConfig += " -DCMAKE_POSITION_INDEPENDENT_CODE=ON";
+                envVars = new Dictionary<string, string>
+                {
+                    { "CC", "clang-" + LinuxConfiguration.ClangMinVer },
+                    { "CC_FOR_BUILD", "clang-" + LinuxConfiguration.ClangMinVer },
+                    { "CXX", "clang++-" + LinuxConfiguration.ClangMinVer },
+                    { "CMAKE_BUILD_PARALLEL_LEVEL", CmakeBuildParallel },
+                };
+                ext = ".a";
+                break;
+            case TargetPlatform.Mac:
+                //oggConfig += $" -DOGG_INCLUDE_DIR=\"{oggRoot}/install/include\" -DOGG_LIBRARY=\"{oggRoot}/install/lib\"";
+                ext = ".a";
+                break;
+            default: throw new InvalidPlatformException(platform);
+            }
+
+            switch (platform)
+            {
+            case TargetPlatform.Windows:
+            case TargetPlatform.UWP:
+            case TargetPlatform.XboxOne:
+                oggBinariesToCopy =
+                [
+                    ("ogg.lib", "libogg_static.lib")
+                ];
+                vorbisBinariesToCopy =
+                [
+                    new Binary("vorbis.lib", "libvorbis", "libvorbis_static.lib"),
+                    new Binary("vorbisfile.lib", "libvorbisfile", "libvorbisfile_static.lib")
+                ];
+                break;
+            case TargetPlatform.Linux:
+            case TargetPlatform.Mac:
+                oggBinariesToCopy =
+                [
+                    ("libogg.a", "libogg.a")
+                ];
+                vorbisBinariesToCopy =
+                [
+                    new Binary("libvorbis.a", "lib"),
+                    new Binary("libvorbisenc.a", "lib"),
+                    new Binary("libvorbisfile.a", "lib")
+                ];
+                break;
+            default: throw new InvalidPlatformException(platform);
+            }
+
+            vorbisConfig += $" -DOGG_INCLUDE_DIR=\"{Path.Combine(installDir, "include")}\" -DOGG_LIBRARY=\"{Path.Combine(installDir, "lib", liboggFilename + ext)}\"";
+
+            var binariesToCopy = new List<(string, string)>();
+
+            SetupDirectory(installDir, true);
+            // Build ogg
+            {
+                SetupDirectory(oggBuildDir, true);
+                RunCmake(oggRoot, platform, architecture, $"-B\"{oggBuildDir}\" " + oggConfig, envVars);
+                if (platform == TargetPlatform.Windows)
+                    Deploy.VCEnvironment.BuildSolution(Path.Combine(oggBuildDir, "ogg.sln"), _configuration, architecture.ToString());
+                else
+                    BuildCmake(oggBuildDir);
+                Utilities.Run("cmake", $"--build . --config {_configuration} --target install", null, oggBuildDir, Utilities.RunOptions.DefaultTool);
+            }
+            // Build vorbis
+            {
+                SetupDirectory(vorbisBuildDir, true);
+                RunCmake(vorbisRoot, platform, architecture, $"-B\"{vorbisBuildDir}\" " + vorbisConfig);
+                if (platform == TargetPlatform.Windows)
+                    Deploy.VCEnvironment.BuildSolution(Path.Combine(vorbisBuildDir, "vorbis.sln"), _configuration, architecture.ToString());
+                else
+                    BuildCmake(vorbisBuildDir);
+                Utilities.Run("cmake", $"--build . --config {_configuration} --target install", null, vorbisBuildDir, Utilities.RunOptions.DefaultTool);
+            }
+
+            // Copy binaries
+            foreach (var file in oggBinariesToCopy)
+                binariesToCopy.Add((Path.Combine(installDir, "lib", file.Item1), file.Item2));
+            foreach (var file in vorbisBinariesToCopy)
+                binariesToCopy.Add((Path.Combine(installDir, "lib", file.Filename), file.DstFilename ?? file.Filename));
+
+            var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+            foreach (var file in binariesToCopy)
+                Utilities.FileCopy(file.Item1, Path.Combine(depsFolder, file.Item2));
         }
 
         /// <inheritdoc />
@@ -230,138 +349,140 @@ namespace Flax.Deps.Dependencies
 
             foreach (var platform in options.Platforms)
             {
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-                {
-                    BuildMsbuild(options, TargetPlatform.Windows, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.UWP:
-                {
-                    BuildMsbuild(options, TargetPlatform.UWP, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.XboxOne:
-                {
-                    BuildMsbuild(options, TargetPlatform.XboxOne, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.Linux:
-                {
-                    // Note: assumes the libogg-dev package is pre-installed on the system
-
-                    // Get the source
-                    CloneGitRepoFast(root, "https://github.com/xiph/vorbis.git");
-
-                    var envVars = new Dictionary<string, string>
+                    BuildStarted(platform, architecture);
+                    switch (platform)
                     {
-                        { "CC", "clang-7" },
-                        { "CC_FOR_BUILD", "clang-7" }
-                    };
-                    var buildDir = Path.Combine(root, "build");
+                    case TargetPlatform.Windows:
+                    {
+                        BuildCmake(options, TargetPlatform.Windows, architecture);
+                        break;
+                    }
+                    case TargetPlatform.UWP:
+                    {
+                        BuildMsbuild(options, TargetPlatform.UWP, architecture);
+                        break;
+                    }
+                    case TargetPlatform.XboxOne:
+                    {
+                        BuildMsbuild(options, TargetPlatform.XboxOne, architecture);
+                        break;
+                    }
+                    case TargetPlatform.Linux:
+                    {
+                        BuildCmake(options, TargetPlatform.Linux, architecture);
+                        break;
+                    }
+                    case TargetPlatform.PS4:
+                    {
+                        BuildMsbuild(options, TargetPlatform.PS4, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.PS5:
+                    {
+                        BuildMsbuild(options, TargetPlatform.PS5, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.XboxScarlett:
+                    {
+                        BuildMsbuild(options, TargetPlatform.XboxScarlett, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.Android:
+                    {
+                        var oggRoot = Path.Combine(root, "ogg");
+                        var oggBuildDir = Path.Combine(oggRoot, "build");
+                        var buildDir = Path.Combine(root, "build");
 
-                    Utilities.Run(Path.Combine(root, "autogen.sh"), null, null, root, Utilities.RunOptions.Default, envVars);
+                        // Get the source
+                        CloneGitRepoFast(root, "https://github.com/xiph/vorbis.git");
+                        CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
+                        GitCheckout(oggRoot, "master", "4380566a44b8d5e85ad511c9c17eb04197863ec5");
 
-                    // Build for Linux
-                    var toolchain = UnixToolchain.GetToolchainName(TargetPlatform.Linux, TargetArchitecture.x64);
-                    Utilities.Run(Path.Combine(root, "configure"), string.Format("--host={0}", toolchain), null, root, Utilities.RunOptions.Default, envVars);
-                    SetupDirectory(buildDir, true);
-                    Utilities.Run("cmake", "-G \"Unix Makefiles\" -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release ..", null, buildDir, Utilities.RunOptions.None, envVars);
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None, envVars);
-                    var depsFolder = GetThirdPartyFolder(options, TargetPlatform.Linux, TargetArchitecture.x64);
-                    foreach (var file in binariesToCopyUnix)
-                        Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
-                    break;
+                        // Build for Android
+                        SetupDirectory(oggBuildDir, true);
+                        RunCmake(oggBuildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"../install\"");
+                        Utilities.Run("cmake", "--build . --config Release --target install", null, oggBuildDir, Utilities.RunOptions.ConsoleLogOutput);
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, TargetArchitecture.ARM64, string.Format(".. -DCMAKE_BUILD_TYPE=Release  -DOGG_INCLUDE_DIR=\"{0}/install/include\" -DOGG_LIBRARY=\"{0}/install/lib\"", oggRoot));
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        foreach (var file in binariesToCopyUnix)
+                            Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
+                        break;
+                    }
+                    case TargetPlatform.Switch:
+                    {
+                        var oggRoot = Path.Combine(root, "ogg");
+                        var oggBuildDir = Path.Combine(oggRoot, "build");
+                        var buildDir = Path.Combine(root, "build");
+
+                        // Get the source
+                        SetupDirectory(oggRoot, false);
+                        CloneGitRepo(root, "https://github.com/xiph/vorbis.git");
+                        GitCheckout(root, "master", "98eddc72d36e3421519d54b101c09b57e4d4d10d");
+                        CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
+                        GitCheckout(oggRoot, "master", "4380566a44b8d5e85ad511c9c17eb04197863ec5");
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data/ogg"), oggRoot, true, true);
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data/vorbis"), buildDir, true, true);
+
+                        // Build for Switch
+                        SetupDirectory(oggBuildDir, true);
+                        RunCmake(oggBuildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"../install\"");
+                        Utilities.Run("cmake", "--build . --config Release --target install", null, oggBuildDir, Utilities.RunOptions.ConsoleLogOutput);
+                        Utilities.FileCopy(Path.Combine(GetBinariesFolder(options, platform), "Data/ogg", "include", "ogg", "config_types.h"), Path.Combine(oggRoot, "install", "include", "ogg", "config_types.h"));
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, TargetArchitecture.ARM64, string.Format(".. -DCMAKE_BUILD_TYPE=Release -DOGG_INCLUDE_DIR=\"{0}/install/include\" -DOGG_LIBRARY=\"{0}/install/lib\"", oggRoot));
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        foreach (var file in binariesToCopyUnix)
+                            Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
+                        break;
+                    }
+                    case TargetPlatform.Mac:
+                    {
+                        BuildCmake(options, TargetPlatform.Mac, architecture);
+                        break;
+                    }
+                    case TargetPlatform.iOS:
+                    {
+                        var oggRoot = Path.Combine(root, "ogg");
+                        var oggBuildDir = Path.Combine(oggRoot, "build");
+                        var buildDir = Path.Combine(root, "build");
+
+                        // Get the source
+                        CloneGitRepoFast(root, "https://github.com/xiph/vorbis.git");
+                        CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
+                        GitCheckout(oggRoot, "master", "4380566a44b8d5e85ad511c9c17eb04197863ec5");
+
+                        // Build for Mac
+                        SetupDirectory(oggBuildDir, true);
+                        RunCmake(oggBuildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"../install\"");
+                        Utilities.Run("cmake", "--build . --config Release --target install", null, oggBuildDir, Utilities.RunOptions.ConsoleLogOutput);
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, TargetArchitecture.ARM64, string.Format(".. -DCMAKE_BUILD_TYPE=Release  -DOGG_INCLUDE_DIR=\"{0}/install/include\" -DOGG_LIBRARY=\"{0}/install/lib\"", oggRoot));
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
+                        foreach (var file in binariesToCopyUnix)
+                            Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
+                        break;
+                    }
+                    }
                 }
-                case TargetPlatform.PS4:
-                {
-                    BuildMsbuild(options, TargetPlatform.PS4, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.XboxScarlett:
-                {
-                    BuildMsbuild(options, TargetPlatform.XboxScarlett, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.Android:
-                {
-                    var oggRoot = Path.Combine(root, "ogg");
-                    var oggBuildDir = Path.Combine(oggRoot, "build");
-                    var buildDir = Path.Combine(root, "build");
-
-                    // Get the source
-                    CloneGitRepoFast(root, "https://github.com/xiph/vorbis.git");
-                    CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
-                    GitCheckout(oggRoot, "master", "4380566a44b8d5e85ad511c9c17eb04197863ec5");
-
-                    // Build for Android
-                    SetupDirectory(oggBuildDir, true);
-                    RunCmake(oggBuildDir, TargetPlatform.Android, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"../install\"");
-                    Utilities.Run("cmake", "--build . --target install", null, oggBuildDir, Utilities.RunOptions.None);
-                    SetupDirectory(buildDir, true);
-                    RunCmake(buildDir, TargetPlatform.Android, TargetArchitecture.ARM64, string.Format(".. -DCMAKE_BUILD_TYPE=Release  -DOGG_INCLUDE_DIR=\"{0}/install/include\" -DOGG_LIBRARY=\"{0}/install/lib\"", oggRoot));
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None);
-                    var depsFolder = GetThirdPartyFolder(options, TargetPlatform.Android, TargetArchitecture.ARM64);
-                    foreach (var file in binariesToCopyUnix)
-                        Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
-                    break;
-                }
-                case TargetPlatform.Switch:
-                {
-                    var oggRoot = Path.Combine(root, "ogg");
-                    var oggBuildDir = Path.Combine(oggRoot, "build");
-                    var buildDir = Path.Combine(root, "build");
-
-                    // Get the source
-                    CloneGitRepo(root, "https://github.com/xiph/vorbis.git");
-                    GitCheckout(root, "master", "98eddc72d36e3421519d54b101c09b57e4d4d10d");
-                    CloneGitRepo(oggRoot, "https://github.com/xiph/ogg.git");
-                    GitCheckout(oggRoot, "master", "4380566a44b8d5e85ad511c9c17eb04197863ec5");
-                    Utilities.DirectoryCopy(Path.Combine(options.PlatformsFolder, "Switch", "Data", "ogg"), oggRoot, true, true);
-                    Utilities.DirectoryCopy(Path.Combine(options.PlatformsFolder, "Switch", "Data", "vorbis"), buildDir, true, true);
-
-                    // Build for Switch
-                    SetupDirectory(oggBuildDir, true);
-                    RunCmake(oggBuildDir, platform, TargetArchitecture.ARM64, ".. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=\"../install\"");
-                    Utilities.Run("cmake", "--build . --target install", null, oggBuildDir, Utilities.RunOptions.None);
-                    Utilities.FileCopy(Path.Combine(options.PlatformsFolder, "Switch", "Data", "ogg", "include", "ogg", "config_types.h"), Path.Combine(oggRoot, "install", "include", "ogg", "config_types.h"));
-                    SetupDirectory(buildDir, true);
-                    RunCmake(buildDir, platform, TargetArchitecture.ARM64, string.Format(".. -DCMAKE_BUILD_TYPE=Release -DOGG_INCLUDE_DIR=\"{0}/install/include\" -DOGG_LIBRARY=\"{0}/install/lib\"", oggRoot));
-                    Utilities.Run("cmake", "--build .", null, buildDir, Utilities.RunOptions.None);
-                    var depsFolder = GetThirdPartyFolder(options, platform, TargetArchitecture.ARM64);
-                    foreach (var file in binariesToCopyUnix)
-                        Utilities.FileCopy(Path.Combine(buildDir, file.SrcFolder, file.Filename), Path.Combine(depsFolder, file.Filename));
-                    break;
-                }
-                }
-            }
-
-            // Backup files
-            if (hasSourcesReady)
-                root = rootMsvcLib;
-            var srcIncludePath = Path.Combine(root, "include", "vorbis");
-            var dstIncludePath = Path.Combine(options.ThirdPartyFolder, "vorbis");
-            foreach (var filename in filesToKeep)
-            {
-                var src = Path.Combine(dstIncludePath, filename);
-                var dst = Path.Combine(options.IntermediateFolder, filename + ".tmp");
-                Utilities.FileCopy(src, dst);
             }
 
             // Setup headers directory
-            SetupDirectory(dstIncludePath, true);
+            var installDir = Path.Combine(root, "install");
+            var oggOut = Path.Combine(options.ThirdPartyFolder, "ogg");
+            var vorbisOut = Path.Combine(options.ThirdPartyFolder, "vorbis");
 
-            // Deploy header files and restore files
-            Directory.GetFiles(srcIncludePath, "Makefile*").ToList().ForEach(File.Delete);
-            Utilities.DirectoryCopy(srcIncludePath, dstIncludePath, true, true);
-            Utilities.FileCopy(Path.Combine(root, "COPYING"), Path.Combine(dstIncludePath, "COPYING"));
-            foreach (var filename in filesToKeep)
-            {
-                var src = Path.Combine(options.IntermediateFolder, filename + ".tmp");
-                var dst = Path.Combine(dstIncludePath, filename);
-                Utilities.FileCopy(src, dst);
-            }
+            // Deploy header files
+            Utilities.DirectoryCopy(Path.Combine(installDir, "include", "ogg"), oggOut, true, true);
+            Utilities.DirectoryCopy(Path.Combine(installDir, "include", "vorbis"), vorbisOut, true, true);
+
+            Utilities.FileCopy(Path.Combine(root, "libogg", "COPYING"), Path.Combine(oggOut, "COPYING"));
+            Utilities.FileCopy(Path.Combine(root, "libvorbis", "COPYING"), Path.Combine(vorbisOut, "COPYING"));
         }
     }
 }

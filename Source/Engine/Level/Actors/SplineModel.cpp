@@ -1,19 +1,25 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SplineModel.h"
 #include "Spline.h"
-#include "Engine/Engine/Engine.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Matrix3x4.h"
+#include "Engine/Engine/Engine.h"
 #include "Engine/Serialization/Serialization.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Graphics/GPUBufferDescription.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUBuffer.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/GPUContext.h"
+#include "Engine/Graphics/RenderBuffers.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/RenderTools.h"
+#include "Engine/Level/Scene/Scene.h"
 #include "Engine/Level/Scene/SceneRendering.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Renderer/DrawCall.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Renderer/Culling/IOcclusionCulling.h"
 #if USE_EDITOR
 #include "Editor/Editor.h"
 #endif
@@ -23,6 +29,7 @@
 SplineModel::SplineModel(const SpawnParams& params)
     : ModelInstanceActor(params)
 {
+    _drawCategory = SceneRendering::SceneDrawAsync;
     Model.Changed.Bind<SplineModel, &SplineModel::OnModelChanged>(this);
     Model.Loaded.Bind<SplineModel, &SplineModel::OnModelLoaded>(this);
 }
@@ -55,7 +62,7 @@ float SplineModel::GetQuality() const
 void SplineModel::SetQuality(float value)
 {
     value = Math::Clamp(value, 0.0f, 100.0f);
-    if (Math::NearEqual(value, _quality))
+    if (value == _quality)
         return;
     _quality = value;
     OnSplineUpdated();
@@ -68,7 +75,7 @@ float SplineModel::GetBoundsScale() const
 
 void SplineModel::SetBoundsScale(float value)
 {
-    if (Math::NearEqual(_boundsScale, value))
+    if (_boundsScale == value)
         return;
     _boundsScale = value;
     OnSplineUpdated();
@@ -136,7 +143,7 @@ void SplineModel::OnSplineUpdated()
         for (int32 j = 0; j < meshes.Count(); j++)
         {
             const auto& mesh = meshes[j];
-            mesh.GetCorners(corners);
+            mesh.GetBox().GetCorners(corners);
 
             for (int32 i = 0; i < 8; i++)
             {
@@ -171,8 +178,8 @@ void SplineModel::OnSplineUpdated()
             }
         }
     }
-    _meshMinZ = localModelBounds.Minimum.Z;
-    _meshMaxZ = localModelBounds.Maximum.Z;
+    _meshMinZ = (float)localModelBounds.Minimum.Z;
+    _meshMaxZ = (float)localModelBounds.Maximum.Z;
     Transform chunkLocal, chunkWorld, leftTangent, rightTangent;
     Array<Vector3> segmentPoints;
     segmentPoints.Resize(chunksPerSegment);
@@ -181,9 +188,9 @@ void SplineModel::OnSplineUpdated()
         auto& instance = _instances[segment];
         const auto& start = keyframes[segment];
         const auto& end = keyframes[segment + 1];
-        const float length = end.Time - start.Time;
-        AnimationUtils::GetTangent(start.Value, start.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(end.Value, end.TangentIn, length, rightTangent);
+        const float tangentScale = (end.Time - start.Time) / 3.0f;
+        AnimationUtils::GetTangent(start.Value, start.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(end.Value, end.TangentIn, tangentScale, rightTangent);
 
         // Find maximum scale over the segment spline and collect the segment positions for bounds
         segmentPoints.Clear();
@@ -210,7 +217,7 @@ void SplineModel::OnSplineUpdated()
         BoundingSphere::Merge(_sphere, _instances[i].Sphere, _sphere);
     BoundingBox::FromSphere(_sphere, _box);
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateGeometry(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey);
 }
 
 void SplineModel::UpdateDeformationBuffer()
@@ -225,7 +232,7 @@ void SplineModel::UpdateDeformationBuffer()
     const int32 segments = keyframes.Count() - 1;
     const int32 chunksPerSegment = Math::Clamp(Math::CeilToInt(SPLINE_RESOLUTION * _quality), 2, 1024);
     const int32 count = (chunksPerSegment * segments + 1) * 3;
-    const uint32 size = count * sizeof(Vector4);
+    const uint32 size = count * sizeof(Float4);
     if (_deformationBuffer->GetSize() != size)
     {
         if (_deformationBufferData)
@@ -253,12 +260,12 @@ void SplineModel::UpdateDeformationBuffer()
         auto& instance = _instances[segment];
         const auto& start = keyframes[segment];
         const auto& end = keyframes[segment + 1];
-        const float length = end.Time - start.Time;
-        AnimationUtils::GetTangent(start.Value, start.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(end.Value, end.TangentIn, length, rightTangent);
+        const float tangentScale = (end.Time - start.Time) / 3.0f;
+        AnimationUtils::GetTangent(start.Value, start.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(end.Value, end.TangentIn, tangentScale, rightTangent);
         for (int32 chunk = 0; chunk < chunksPerSegment; chunk++)
         {
-            const float alpha = (chunk == chunksPerSegment - 1)? 1.0f : ((float)chunk * chunksPerSegmentInv);
+            const float alpha = (chunk == chunksPerSegment - 1) ? 1.0f : ((float)chunk * chunksPerSegmentInv);
 
             // Evaluate transformation at the curve
             AnimationUtils::Bezier(start.Value, leftTangent, rightTangent, end.Value, alpha, transform);
@@ -288,10 +295,10 @@ void SplineModel::UpdateDeformationBuffer()
     {
         const auto& start = keyframes[segments - 1];
         const auto& end = keyframes[segments];
-        const float length = end.Time - start.Time;
+        const float tangentScale = (end.Time - start.Time) / 3.0f;
         const float alpha = 1.0f - ZeroTolerance; // Offset to prevent zero derivative at the end of the curve
-        AnimationUtils::GetTangent(start.Value, start.TangentOut, length, leftTangent);
-        AnimationUtils::GetTangent(end.Value, end.TangentIn, length, rightTangent);
+        AnimationUtils::GetTangent(start.Value, start.TangentOut, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(end.Value, end.TangentIn, tangentScale, rightTangent);
         AnimationUtils::Bezier(start.Value, leftTangent, rightTangent, end.Value, alpha, transform);
         Vector3 direction;
         AnimationUtils::BezierFirstDerivative(start.Value.Translation, leftTangent.Translation, rightTangent.Translation, end.Value.Translation, alpha, direction);
@@ -309,8 +316,7 @@ void SplineModel::UpdateDeformationBuffer()
     }
 
     // Flush data with GPU
-    auto context = GPUDevice::Instance->GetMainContext();
-    context->UpdateBuffer(_deformationBuffer, _deformationBufferData, size);
+    GPUDevice::Instance->GetMainContext()->UpdateBuffer(_deformationBuffer, _deformationBufferData, size);
 
     // Static splines are rarely updated so release scratch memory
     if (IsTransformStatic())
@@ -339,23 +345,77 @@ void SplineModel::OnParentChanged()
     OnSplineUpdated();
 }
 
+const Span<MaterialSlot> SplineModel::GetMaterialSlots() const
+{
+    const auto model = Model.Get();
+    if (model && !model->WaitForLoaded())
+        return ToSpan(model->MaterialSlots);
+    return Span<MaterialSlot>();
+}
+
+MaterialBase* SplineModel::GetMaterial(int32 entryIndex)
+{
+    if (Model)
+        Model->WaitForLoaded();
+    else
+        return nullptr;
+    CHECK_RETURN(entryIndex >= 0 && entryIndex < Model->MaterialSlots.Count(), nullptr);
+    MaterialBase* material = entryIndex < Entries.Count() ? Entries[entryIndex].Material.Get() : nullptr;
+    if (!material)
+    {
+        material = Model->MaterialSlots[entryIndex].Material.Get();
+        if (!material)
+            material = GPUDevice::Instance->GetDefaultDeformableMaterial();
+    }
+    return material;
+}
+
+ModelBase* SplineModel::GetModel()
+{
+    return Model.Get();
+}
+
+void SplineModel::UpdateBounds()
+{
+    OnSplineUpdated();
+}
+
 bool SplineModel::HasContentLoaded() const
 {
     return (Model == nullptr || Model->IsLoaded()) && Entries.HasContentLoaded();
 }
 
-void SplineModel::Draw(RenderContext& renderContext)
+void SplineModel::Draw(RenderContextBatch& renderContextBatch)
 {
-    const DrawPass actorDrawModes = (DrawPass)(DrawModes & renderContext.View.Pass);
-    if (!_spline || !Model || !Model->IsLoaded() || !Model->CanBeRendered() || actorDrawModes == DrawPass::None)
-        return;
     auto model = Model.Get();
+    if (!_spline || !model || !model->IsLoaded() || !model->CanBeRendered())
+        return;
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
+    if (renderContext.View.Pass == DrawPass::GlobalSDF)
+        return; // TODO: Spline Model rendering to Global SDF
+    if (renderContext.View.Pass == DrawPass::GlobalSurfaceAtlas)
+        return; // TODO: Spline Model rendering to Global Surface Atlas
+    auto drawState = renderContext.Buffers->GetGeometryDrawState(&GetScene()->Rendering, _sceneRenderingKey, this);
+    ACTOR_GET_WORLD_MATRIX(this, view, world);
+    DrawPass drawModes = DrawModes;
+    if (drawState && EnumHasAllFlags(renderContext.View.Flags, ViewFlags::OcclusionCulling) && renderContextBatch.Buffers->OcclusionCulling && !renderContextBatch.Buffers->OcclusionCulling->IsVisible(_box, *drawState))
+    {
+        // Draw shadows-only (or cull)
+        drawModes &= DrawPass::Depth;
+        if (renderContextBatch.Contexts.Count() == 1 || drawModes == DrawPass::None)
+            return;
+    }
+    GEOMETRY_DRAW_STATE_EVENT_BEGIN(drawState, world);
     if (!Entries.IsValidFor(model))
         Entries.Setup(model);
 
     // Build mesh deformation buffer for the whole spline
     if (_deformationDirty)
+    {
+        RenderContext::GPULocker.Lock();
         UpdateDeformationBuffer();
+        RenderContext::GPULocker.Unlock();
+    }
 
     // Draw all segments
     DrawCall drawCall;
@@ -366,15 +426,17 @@ void SplineModel::Draw(RenderContext& renderContext)
     drawCall.Deformable.MeshMaxZ = _meshMaxZ;
     drawCall.Deformable.GeometrySize = _box.GetSize();
     drawCall.PerInstanceRandom = GetPerInstanceRandom();
+    drawCall.SetStencilValue(_layer);
     _preTransform.GetWorld(drawCall.Deformable.LocalMatrix);
     const Transform splineTransform = GetTransform();
-    splineTransform.GetWorld(drawCall.World);
+    renderContext.View.GetWorldMatrix(splineTransform, drawCall.World);
     drawCall.ObjectPosition = drawCall.World.GetTranslation() + drawCall.Deformable.LocalMatrix.GetTranslation();
-    const float worldDeterminantSign = drawCall.World.RotDeterminant() * drawCall.Deformable.LocalMatrix.RotDeterminant();
+    drawCall.ObjectRadius = (float)_sphere.Radius; // TODO: use radius for the spline chunk rather than whole spline
     for (int32 segment = 0; segment < _instances.Count(); segment++)
     {
         auto& instance = _instances[segment];
-        if (!renderContext.View.CullingFrustum.Intersects(instance.Sphere))
+        BoundingSphere instanceSphere(instance.Sphere.Center - renderContext.View.Origin, instance.Sphere.Radius);
+        if (!(renderContext.View.IsCullingDisabled || renderContext.View.CullingFrustum.Intersects(instanceSphere)))
             continue;
         drawCall.Deformable.Segment = (float)segment;
 
@@ -386,7 +448,7 @@ void SplineModel::Draw(RenderContext& renderContext)
         }
         else
         {
-            lodIndex = RenderTools::ComputeModelLOD(model, instance.Sphere.Center, instance.Sphere.Radius, renderContext);
+            lodIndex = RenderTools::ComputeModelLOD(model, instanceSphere.Center, (float)instanceSphere.Radius, renderContext);
             if (lodIndex == -1)
                 continue;
         }
@@ -405,12 +467,6 @@ void SplineModel::Draw(RenderContext& renderContext)
                 continue;
             const MaterialSlot& slot = model->MaterialSlots[mesh->GetMaterialSlotIndex()];
 
-            // Check if skip rendering
-            const auto shadowsMode = static_cast<ShadowsCastingMode>(entry.ShadowsMode & slot.ShadowsMode);
-            const auto drawModes = static_cast<DrawPass>(actorDrawModes & renderContext.View.GetShadowsDrawPassMask(shadowsMode));
-            if (drawModes == DrawPass::None)
-                continue;
-
             // Select material
             MaterialBase* material = nullptr;
             if (entry.Material && entry.Material->IsLoaded())
@@ -422,21 +478,23 @@ void SplineModel::Draw(RenderContext& renderContext)
             if (!material || !material->IsDeformable())
                 continue;
 
+            // Check if skip rendering
+            const auto shadowsMode = entry.ShadowsMode & slot.ShadowsMode;
+            const auto meshDrawModes = drawModes & material->GetDrawModes();
+            if (meshDrawModes == DrawPass::None)
+                continue;
+
             // Submit draw call
             mesh->GetDrawCallGeometry(drawCall);
             drawCall.Material = material;
-            drawCall.WorldDeterminantSign = Math::FloatSelect(worldDeterminantSign * instance.RotDeterminant, 1, -1);
-            renderContext.List->AddDrawCall(drawModes, _staticFlags, drawCall, entry.ReceiveDecals);
+            renderContext.List->AddDrawCall(renderContextBatch, meshDrawModes, _staticFlags, shadowsMode, instanceSphere, drawCall, entry.ReceiveDecals);
         }
     }
+
+    GEOMETRY_DRAW_STATE_EVENT_END(drawState, world);
 }
 
-void SplineModel::DrawGeneric(RenderContext& renderContext)
-{
-    Draw(renderContext);
-}
-
-bool SplineModel::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool SplineModel::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return false;
 }
@@ -455,9 +513,7 @@ void SplineModel::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE_MEMBER(PreTransform, _preTransform)
     SERIALIZE(Model);
     SERIALIZE(DrawModes);
-
-    stream.JKEY("Buffer");
-    stream.Object(&Entries, other ? &other->Entries : nullptr);
+    SERIALIZE_MEMBER(Buffer, Entries);
 }
 
 void SplineModel::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
@@ -472,16 +528,20 @@ void SplineModel::Deserialize(DeserializeStream& stream, ISerializeModifier* mod
     DESERIALIZE_MEMBER(PreTransform, _preTransform);
     DESERIALIZE(Model);
     DESERIALIZE(DrawModes);
+    DESERIALIZE_MEMBER(Buffer, Entries);
 
-    Entries.DeserializeIfExists(stream, "Buffer", modifier);
-}
-
-void SplineModel::OnTransformChanged()
-{
-    // Base
-    ModelInstanceActor::OnTransformChanged();
-
-    OnSplineUpdated();
+    // [Deprecated on 07.02.2022, expires on 07.02.2024]
+    if (modifier->EngineBuild <= 6330)
+    {
+        MARK_CONTENT_DEPRECATED();
+        DrawModes |= DrawPass::GlobalSDF;
+    }
+    // [Deprecated on 27.04.2022, expires on 27.04.2024]
+    if (modifier->EngineBuild <= 6331)
+    {
+        MARK_CONTENT_DEPRECATED();
+        DrawModes |= DrawPass::GlobalSurfaceAtlas;
+    }
 }
 
 void SplineModel::OnActiveInTreeChanged()

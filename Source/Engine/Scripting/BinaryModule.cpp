@@ -1,18 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BinaryModule.h"
 #include "ScriptingObject.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/Utilities.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "ManagedCLR/MAssembly.h"
 #include "ManagedCLR/MClass.h"
-#include "ManagedCLR/MType.h"
 #include "ManagedCLR/MMethod.h"
 #include "ManagedCLR/MField.h"
+#include "ManagedCLR/MProperty.h"
 #include "ManagedCLR/MUtils.h"
+#include "ManagedCLR/MException.h"
 #include "FlaxEngine.Gen.h"
-#include "MException.h"
 #include "Scripting.h"
 #include "Events.h"
 
@@ -21,8 +23,24 @@ Delegate<ScriptingObject*, Span<Variant>, ScriptingTypeHandle, StringView> Scrip
 
 ManagedBinaryModule* GetBinaryModuleCorlib()
 {
-    static ManagedBinaryModule assembly("corlib", MAssemblyOptions(false)); // Don't precache all corlib classes
+#if COMPILE_WITHOUT_CSHARP
+    return nullptr;
+#else
+    static ManagedBinaryModule assembly("corlib");
     return &assembly;
+#endif
+}
+
+MMethod* MClass::FindMethod(const char* name, int32 numParams, bool checkBaseClasses) const
+{
+    MMethod* method = GetMethod(name, numParams);
+    if (!method && checkBaseClasses)
+    {
+        MClass* base = GetBaseClass();
+        if (base)
+            method = base->FindMethod(name, numParams, true);
+    }
+    return method;
 }
 
 ScriptingTypeHandle::ScriptingTypeHandle(const ScriptingTypeInitializer& initializer)
@@ -45,8 +63,31 @@ String ScriptingTypeHandle::ToString(bool withAssembly) const
 
 const ScriptingType& ScriptingTypeHandle::GetType() const
 {
-    ASSERT_LOW_LAYER(Module);
+    ASSERT(Module);
     return Module->Types[TypeIndex];
+}
+
+#if USE_CSHARP
+
+MClass* ScriptingTypeHandle::GetClass() const
+{
+    ASSERT(Module && Module->Types[TypeIndex].ManagedClass);
+    return Module->Types[TypeIndex].ManagedClass;
+}
+
+#endif
+
+bool ScriptingTypeHandle::IsSubclassOf(ScriptingTypeHandle c) const
+{
+    auto type = *this;
+    if (type == c)
+        return false;
+    for (; type; type = type.GetType().GetBaseType())
+    {
+        if (type == c)
+            return true;
+    }
+    return false;
 }
 
 bool ScriptingTypeHandle::IsAssignableFrom(ScriptingTypeHandle c) const
@@ -163,6 +204,20 @@ ScriptingType::ScriptingType(const StringAnsiView& fullname, BinaryModule* modul
     Struct.SetField = setField;
 }
 
+ScriptingType::ScriptingType(const StringAnsiView& fullname, BinaryModule* module, int32 size, EnumItem* items, bool stringSerialization)
+    : ManagedClass(nullptr)
+    , Module(module)
+    , InitRuntime(DefaultInitRuntime)
+    , Fullname(fullname)
+    , Type(ScriptingTypes::Enum)
+    , BaseTypePtr(nullptr)
+    , Interfaces(nullptr)
+    , Size(size)
+{
+    Enum.Items = items;
+    Enum.StringSerialization = stringSerialization;
+}
+
 ScriptingType::ScriptingType(const StringAnsiView& fullname, BinaryModule* module, InitRuntimeHandler initRuntime, SetupScriptVTableHandler setupScriptVTable, SetupScriptObjectVTableHandler setupScriptObjectVTable, GetInterfaceWrapper getInterfaceWrapper)
     : ManagedClass(nullptr)
     , Module(module)
@@ -215,6 +270,8 @@ ScriptingType::ScriptingType(const ScriptingType& other)
         Class.Dtor = other.Class.Dtor;
         break;
     case ScriptingTypes::Enum:
+        Enum.Items = other.Enum.Items;
+        Enum.StringSerialization = other.Enum.StringSerialization;
         break;
     case ScriptingTypes::Interface:
         Interface.SetupScriptVTable = other.Interface.SetupScriptVTable;
@@ -267,6 +324,8 @@ ScriptingType::ScriptingType(ScriptingType&& other)
         Class.Dtor = other.Class.Dtor;
         break;
     case ScriptingTypes::Enum:
+        Enum.Items = other.Enum.Items;
+        Enum.StringSerialization = other.Enum.StringSerialization;
         break;
     case ScriptingTypes::Interface:
         Interface.SetupScriptVTable = other.Interface.SetupScriptVTable;
@@ -298,6 +357,15 @@ ScriptingType::~ScriptingType()
         break;
     default: ;
     }
+}
+
+void ScriptingType::DefaultInitRuntime()
+{
+}
+
+ScriptingObject* ScriptingType::DefaultSpawn(const ScriptingObjectSpawnParams& params)
+{
+    return nullptr;
 }
 
 ScriptingTypeHandle ScriptingType::GetHandle() const
@@ -384,6 +452,7 @@ void ScriptingType::SetupScriptVTable(ScriptingTypeHandle baseTypeHandle)
     }
 }
 
+NO_SANITIZE_ADDRESS
 void ScriptingType::SetupScriptObjectVTable(void* object, ScriptingTypeHandle baseTypeHandle, int32 wrapperIndex)
 {
     // Analyze vtable size
@@ -422,8 +491,8 @@ void ScriptingType::SetupScriptObjectVTable(void* object, ScriptingTypeHandle ba
     }
 
     // Duplicate vtable
-    Script.VTable = (void**)((byte*)Platform::Allocate(totalSize, 16) + prefixSize);
-    Platform::MemoryCopy((byte*)Script.VTable - prefixSize, (byte*)vtable - prefixSize, prefixSize + size);
+    void** scriptVTable = (void**)((byte*)Platform::Allocate(totalSize, 16) + prefixSize);
+    Utilities::UnsafeMemoryCopy((byte*)scriptVTable - prefixSize, (byte*)vtable - prefixSize, prefixSize + size);
 
     // Override vtable entries
     if (interfacesCount)
@@ -437,7 +506,7 @@ void ScriptingType::SetupScriptObjectVTable(void* object, ScriptingTypeHandle ba
         if (eType.Script.SetupScriptObjectVTable)
         {
             // Override vtable entries for this class
-            eType.Script.SetupScriptObjectVTable(Script.ScriptVTable, Script.ScriptVTableBase, Script.VTable, entriesCount, wrapperIndex);
+            eType.Script.SetupScriptObjectVTable(Script.ScriptVTable, Script.ScriptVTableBase, scriptVTable, entriesCount, wrapperIndex);
         }
 
         auto interfaces = eType.Interfaces;
@@ -456,13 +525,13 @@ void ScriptingType::SetupScriptObjectVTable(void* object, ScriptingTypeHandle ba
                     const int32 interfaceSize = interfaceCount * sizeof(void*);
 
                     // Duplicate interface vtable
-                    Platform::MemoryCopy((byte*)Script.VTable + interfaceOffset, (byte*)vtableInterface - prefixSize, prefixSize + interfaceSize);
+                    Utilities::UnsafeMemoryCopy((byte*)scriptVTable + interfaceOffset, (byte*)vtableInterface - prefixSize, prefixSize + interfaceSize);
 
                     // Override interface vtable entries
                     const auto scriptOffset = interfaces->ScriptVTableOffset;
                     const auto nativeOffset = interfaceOffset + prefixSize;
-                    void** interfaceVTable = (void**)((byte*)Script.VTable + nativeOffset);
-                    interfaceType.Interface.SetupScriptObjectVTable(Script.ScriptVTable + scriptOffset, Script.ScriptVTableBase + scriptOffset, interfaceVTable, interfaceCount, wrapperIndex);
+                    void** interfaceVTable = (void**)((byte*)scriptVTable + nativeOffset);
+                    interfaceType.Interface.SetupScriptObjectVTable(scriptVTable + scriptOffset, Script.ScriptVTableBase + scriptOffset, interfaceVTable, interfaceCount, wrapperIndex);
 
                     Script.InterfacesOffsets[interfacesCount++] = (uint16)nativeOffset;
                     interfaceOffset += prefixSize + interfaceSize;
@@ -472,6 +541,9 @@ void ScriptingType::SetupScriptObjectVTable(void* object, ScriptingTypeHandle ba
         }
         e = eType.GetBaseType();
     }
+
+    // Assign once it's ready
+    Script.VTable = scriptVTable;
 }
 
 void ScriptingType::HackObjectVTable(void* object, ScriptingTypeHandle baseTypeHandle, int32 wrapperIndex)
@@ -481,7 +553,12 @@ void ScriptingType::HackObjectVTable(void* object, ScriptingTypeHandle baseTypeH
     if (!Script.VTable)
     {
         // Ensure to have valid Script VTable hacked
-        SetupScriptObjectVTable(object, baseTypeHandle, wrapperIndex);
+        BinaryModule::Locker.Lock();
+        if (!Script.VTable)
+        {
+            SetupScriptObjectVTable(object, baseTypeHandle, wrapperIndex);
+        }
+        BinaryModule::Locker.Unlock();
     }
 
     // Override object vtable with hacked one that has calls to overriden scripting functions
@@ -519,65 +596,69 @@ String ScriptingType::ToString() const
     return String(Fullname.Get(), Fullname.Length());
 }
 
+StringAnsiView ScriptingType::GetName() const
+{
+    int32 lastDotIndex = Fullname.FindLast('.');
+    if (lastDotIndex != -1)
+    {
+        lastDotIndex++;
+        return StringAnsiView(Fullname.Get() + lastDotIndex, Fullname.Length() - lastDotIndex);
+    }
+    return Fullname;
+}
+
+#if BUILD_DEBUG || USE_EDITOR
+#define INIT_TYPE(...) \
+    module->Types.AddUninitialized(); \
+    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, ##__VA_ARGS__); \
+    if (module->TypeNameToTypeIndex.ContainsKey(fullname)) \
+        LOG(Error, "Duplicated native typename {0} from module {1}.", String(fullname), String(module->GetName())); \
+    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+#else
+#define INIT_TYPE(...) \
+    module->Types.AddUninitialized(); \
+    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, ##__VA_ARGS__); \
+    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+#endif
+
 ScriptingTypeInitializer::ScriptingTypeInitializer(BinaryModule* module, const StringAnsiView& fullname, int32 size, ScriptingType::InitRuntimeHandler initRuntime, ScriptingType::SpawnHandler spawn, ScriptingTypeInitializer* baseType, ScriptingType::SetupScriptVTableHandler setupScriptVTable, ScriptingType::SetupScriptObjectVTableHandler setupScriptObjectVTable, const ScriptingType::InterfaceImplementation* interfaces)
     : ScriptingTypeHandle(module, module->Types.Count())
 {
     // Script
-    module->Types.AddUninitialized();
-    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, size, initRuntime, spawn, baseType, setupScriptVTable, setupScriptObjectVTable, interfaces);
-#if BUILD_DEBUG
-    if (module->TypeNameToTypeIndex.ContainsKey(fullname))
-    {
-        LOG(Error, "Duplicated native typename {0} from module {1}.", String(fullname), String(module->GetName()));
-    }
-#endif
-    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+    INIT_TYPE(size, initRuntime, spawn, baseType, setupScriptVTable, setupScriptObjectVTable, interfaces);
 }
 
 ScriptingTypeInitializer::ScriptingTypeInitializer(BinaryModule* module, const StringAnsiView& fullname, int32 size, ScriptingType::InitRuntimeHandler initRuntime, ScriptingType::Ctor ctor, ScriptingType::Dtor dtor, ScriptingTypeInitializer* baseType, const ScriptingType::InterfaceImplementation* interfaces)
     : ScriptingTypeHandle(module, module->Types.Count())
 {
     // Class
-    module->Types.AddUninitialized();
-    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, size, initRuntime, ctor, dtor, baseType, interfaces);
-#if BUILD_DEBUG
-    if (module->TypeNameToTypeIndex.ContainsKey(fullname))
-    {
-        LOG(Error, "Duplicated native typename {0} from module {1}.", String(fullname), String(module->GetName()));
-    }
-#endif
-    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+    INIT_TYPE(size, initRuntime, ctor, dtor, baseType, interfaces);
 }
 
 ScriptingTypeInitializer::ScriptingTypeInitializer(BinaryModule* module, const StringAnsiView& fullname, int32 size, ScriptingType::InitRuntimeHandler initRuntime, ScriptingType::Ctor ctor, ScriptingType::Dtor dtor, ScriptingType::Copy copy, ScriptingType::Box box, ScriptingType::Unbox unbox, ScriptingType::GetField getField, ScriptingType::SetField setField, ScriptingTypeInitializer* baseType, const ScriptingType::InterfaceImplementation* interfaces)
     : ScriptingTypeHandle(module, module->Types.Count())
 {
     // Structure
-    module->Types.AddUninitialized();
-    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, size, initRuntime, ctor, dtor, copy, box, unbox, getField, setField, baseType, interfaces);
-#if BUILD_DEBUG
-    if (module->TypeNameToTypeIndex.ContainsKey(fullname))
-    {
-        LOG(Error, "Duplicated native typename {0} from module {1}.", String(fullname), String(module->GetName()));
-    }
-#endif
-    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+    INIT_TYPE(size, initRuntime, ctor, dtor, copy, box, unbox, getField, setField, baseType, interfaces);
+}
+
+ScriptingTypeInitializer::ScriptingTypeInitializer(BinaryModule* module, const StringAnsiView& fullname, int32 size, ScriptingType::EnumItem* items, bool stringSerialization)
+    : ScriptingTypeHandle(module, module->Types.Count())
+{
+    // Enum
+    INIT_TYPE(size, items, stringSerialization);
 }
 
 ScriptingTypeInitializer::ScriptingTypeInitializer(BinaryModule* module, const StringAnsiView& fullname, ScriptingType::InitRuntimeHandler initRuntime, ScriptingType::SetupScriptVTableHandler setupScriptVTable, ScriptingType::SetupScriptObjectVTableHandler setupScriptObjectVTable, ScriptingType::GetInterfaceWrapper getInterfaceWrapper)
     : ScriptingTypeHandle(module, module->Types.Count())
 {
     // Interface
-    module->Types.AddUninitialized();
-    new(module->Types.Get() + TypeIndex)ScriptingType(fullname, module, initRuntime, setupScriptVTable, setupScriptObjectVTable, getInterfaceWrapper);
-#if BUILD_DEBUG
-    if (module->TypeNameToTypeIndex.ContainsKey(fullname))
-    {
-        LOG(Error, "Duplicated native typename {0} from module {1}.", String(fullname), String(module->GetName()));
-    }
-#endif
-    module->TypeNameToTypeIndex[fullname] = TypeIndex;
+    INIT_TYPE(initRuntime, setupScriptVTable, setupScriptObjectVTable, getInterfaceWrapper);
 }
+
+#undef INIT_TYPE
+
+CriticalSection BinaryModule::Locker;
 
 BinaryModule::BinaryModulesList& BinaryModule::GetModules()
 {
@@ -602,6 +683,8 @@ BinaryModule* BinaryModule::GetModule(const StringAnsiView& name)
 
 BinaryModule::BinaryModule()
 {
+    CanReload = USE_EDITOR;
+
     // Register
     GetModules().Add(this);
 }
@@ -613,12 +696,30 @@ void* BinaryModule::FindMethod(const ScriptingTypeHandle& typeHandle, const Scri
 
 void BinaryModule::Destroy(bool isReloading)
 {
+    // Destroy any default script instances
+    for (const auto& type : Types)
+    {
+        if (type.Type == ScriptingTypes::Script && type.Script.DefaultInstance)
+        {
+            Delete(type.Script.DefaultInstance);
+            type.Script.DefaultInstance = nullptr;
+        }
+    }
+
+    // Remove any scripting events
+    for (auto i = ScriptingEvents::EventsTable.Begin(); i.IsNotEnd(); ++i)
+    {
+        const ScriptingTypeHandle type = i->Key.First;
+        if (type.Module == this)
+            ScriptingEvents::EventsTable.Remove(i);
+    }
+
     // Unregister
     GetModules().RemoveKeepOrder(this);
 }
 
-ManagedBinaryModule::ManagedBinaryModule(const StringAnsiView& name, const MAssemblyOptions& options)
-    : ManagedBinaryModule(New<MAssembly>(nullptr, name, options))
+ManagedBinaryModule::ManagedBinaryModule(const StringAnsiView& name)
+    : ManagedBinaryModule(New<MAssembly>(nullptr, name))
 {
 }
 
@@ -630,6 +731,7 @@ ManagedBinaryModule::ManagedBinaryModule(MAssembly* assembly)
     assembly->Loading.Bind<ManagedBinaryModule, &ManagedBinaryModule::OnLoading>(this);
     assembly->Loaded.Bind<ManagedBinaryModule, &ManagedBinaryModule::OnLoaded>(this);
     assembly->Unloading.Bind<ManagedBinaryModule, &ManagedBinaryModule::OnUnloading>(this);
+    assembly->Unloaded.Bind<ManagedBinaryModule, &ManagedBinaryModule::OnUnloaded>(this);
 
     if (Assembly->IsLoaded())
     {
@@ -666,9 +768,16 @@ ManagedBinaryModule* ManagedBinaryModule::GetModule(const MAssembly* assembly)
 
 ScriptingObject* ManagedBinaryModule::ManagedObjectSpawn(const ScriptingObjectSpawnParams& params)
 {
+    PROFILE_MEM(ScriptingCSharp);
+
     // Create native object
     ScriptingTypeHandle managedTypeHandle = params.Type;
     const ScriptingType* managedTypePtr = &managedTypeHandle.GetType();
+    if (managedTypePtr->ManagedClass && managedTypePtr->ManagedClass->IsAbstract())
+    {
+        LOG(Error, "Failed to spawn abstract type '{}'", managedTypePtr->ToString());
+        return nullptr;
+    }
     while (managedTypePtr->Script.Spawn != &ManagedObjectSpawn)
     {
         managedTypeHandle = managedTypePtr->GetBaseType();
@@ -695,14 +804,23 @@ ScriptingObject* ManagedBinaryModule::ManagedObjectSpawn(const ScriptingObjectSp
     // Mark as managed type
     object->Flags |= ObjectFlags::IsManagedType;
 
+    // Initialize managed instance (ScriptingObject ctor copies managed object handle)
+    if (!params.Managed)
+    {
+        // Invoke managed ctor (to match C++ logic)
+        object->CreateManaged();
+    }
+
     return object;
 }
+
+#if !COMPILE_WITHOUT_CSHARP
 
 namespace
 {
     MMethod* FindMethod(MClass* mclass, const MMethod* referenceMethod)
     {
-        const Array<MMethod*>& methods = mclass->GetMethods();
+        const auto& methods = mclass->GetMethods();
         for (int32 i = 0; i < methods.Count(); i++)
         {
             MMethod* method = methods[i];
@@ -719,68 +837,51 @@ namespace
     }
 }
 
-MMethod* ManagedBinaryModule::FindMethod(MClass* mclass, const ScriptingTypeMethodSignature& signature)
+#endif
+
+MMethod* ManagedBinaryModule::FindMethod(const MClass* mclass, const ScriptingTypeMethodSignature& signature)
 {
-    if (!mclass)
-        return nullptr;
-    const auto& methods = mclass->GetMethods();
-    for (MMethod* method : methods)
-    {
-        MonoMethodSignature* sig = mono_method_signature(method->GetNative());
-        if (method->IsStatic() != signature.IsStatic ||
-            method->GetName() != signature.Name ||
-            (int32)mono_signature_get_param_count(sig) != signature.Params.Count())
-            continue;
-        void* sigParams = nullptr;
-        mono_signature_get_params(sig, &sigParams);
-        bool isValid = true;
-        for (int32 paramIdx = 0; paramIdx < signature.Params.Count(); paramIdx++)
-        {
-            auto& param = signature.Params[paramIdx];
-            if (param.IsOut != (mono_signature_param_is_out(sig, paramIdx) != 0) ||
-                MUtils::GetClass(param.Type) != mono_class_from_mono_type(((MonoType**)sigParams)[paramIdx]))
-            {
-                isValid = false;
-                break;
-            }
-        }
-        if (isValid && MUtils::GetClass(signature.ReturnType) == mono_class_from_mono_type(mono_signature_get_return_type(sig)))
-            return method;
-    }
+#if USE_CSHARP
+    return mclass ? mclass->GetMethod(signature) : nullptr;
+#else
     return nullptr;
+#endif
 }
 
-ManagedBinaryModule* ManagedBinaryModule::FindModule(MonoClass* klass)
+#if USE_CSHARP
+
+ManagedBinaryModule* ManagedBinaryModule::FindModule(const MClass* klass)
 {
-    // TODO: consider caching lookup table MonoImage* -> ManagedBinaryModule*
     ManagedBinaryModule* module = nullptr;
-    MonoImage* mImage = mono_class_get_image(klass);
-    auto& modules = BinaryModule::GetModules();
-    for (auto e : modules)
+    if (klass && klass->GetAssembly())
     {
-        auto managedModule = dynamic_cast<ManagedBinaryModule*>(e);
-        if (managedModule && managedModule->Assembly->GetMonoImage() == mImage)
+        auto& modules = BinaryModule::GetModules();
+        for (auto e : modules)
         {
-            module = managedModule;
-            break;
+            auto managedModule = dynamic_cast<ManagedBinaryModule*>(e);
+            if (managedModule && managedModule->Assembly == klass->GetAssembly())
+            {
+                module = managedModule;
+                break;
+            }
         }
     }
     return module;
 }
 
-ScriptingTypeHandle ManagedBinaryModule::FindType(MonoClass* klass)
+ScriptingTypeHandle ManagedBinaryModule::FindType(const MClass* klass)
 {
     auto typeModule = FindModule(klass);
     if (typeModule)
     {
         int32 typeIndex;
         if (typeModule->ClassToTypeIndex.TryGet(klass, typeIndex))
-        {
             return ScriptingTypeHandle(typeModule, typeIndex);
-        }
     }
     return ScriptingTypeHandle();
 }
+
+#endif
 
 void ManagedBinaryModule::OnLoading(MAssembly* assembly)
 {
@@ -793,20 +894,23 @@ void ManagedBinaryModule::OnLoading(MAssembly* assembly)
 
 void ManagedBinaryModule::OnLoaded(MAssembly* assembly)
 {
+#if !COMPILE_WITHOUT_CSHARP
     PROFILE_CPU();
+    PROFILE_MEM(ScriptingCSharp);
     ASSERT(ClassToTypeIndex.IsEmpty());
+    ScopeLock lock(Locker);
 
     const auto& classes = assembly->GetClasses();
 
     // Cache managed types information
-    ClassToTypeIndex.EnsureCapacity(Types.Count() * 4);
+    ClassToTypeIndex.EnsureCapacity(Types.Count());
     for (int32 typeIndex = 0; typeIndex < Types.Count(); typeIndex++)
     {
         ScriptingType& type = Types[typeIndex];
         ASSERT(type.ManagedClass == nullptr);
 
         // Cache class
-        const MString typeName(type.Fullname.Get(), type.Fullname.Length());
+        const StringAnsi typeName(type.Fullname.Get(), type.Fullname.Length());
         classes.TryGet(typeName, type.ManagedClass);
         if (type.ManagedClass == nullptr)
         {
@@ -815,7 +919,7 @@ void ManagedBinaryModule::OnLoaded(MAssembly* assembly)
         }
 
         // Cache klass -> type index lookup
-        MonoClass* klass = type.ManagedClass->GetNative();
+        MClass* klass = type.ManagedClass;
 #if !BUILD_RELEASE
         if (ClassToTypeIndex.ContainsKey(klass))
         {
@@ -849,31 +953,52 @@ void ManagedBinaryModule::OnLoaded(MAssembly* assembly)
             InitType(mclass);
         }
     }
+
+    // Invoke module initializers
+    if (flaxEngine->Assembly->IsLoaded() && this != flaxEngine)
+    {
+        const MClass* attribute = flaxEngine->Assembly->GetClass("FlaxEngine.ModuleInitializerAttribute");
+        ASSERT_LOW_LAYER(attribute);
+        for (auto i = classes.Begin(); i.IsNotEnd(); ++i)
+        {
+            MClass* mclass = i->Value;
+            if (mclass->IsStatic() && !mclass->IsInterface() && mclass->HasAttribute(attribute))
+            {
+                const auto& methods = mclass->GetMethods();
+                for (const MMethod* method : methods)
+                {
+                    if (method->GetParametersCount() == 0)
+                    {
+                        MObject* exception = nullptr;
+                        method->Invoke(nullptr, nullptr, &exception);
+                        if (exception)
+                        {
+                            MException ex(exception);
+                            String methodName = String(method->GetName());
+                            ex.Log(LogType::Error, methodName.Get());
+                            LOG(Error, "Failed to call module initializer for class {0} from assembly {1}.", String(mclass->GetFullName()), assembly->ToString());
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
 }
 
 void ManagedBinaryModule::InitType(MClass* mclass)
 {
+#if !COMPILE_WITHOUT_CSHARP
     // Skip if already initialized
-    const MString& typeName = mclass->GetFullName();
+    const StringAnsiView typeName = mclass->GetFullName();
     if (TypeNameToTypeIndex.ContainsKey(typeName))
         return;
+    PROFILE_MEM(ScriptingCSharp);
 
     // Find first native base C++ class of this C# class
-    MClass* baseClass = nullptr;
-    MonoClass* baseKlass = mono_class_get_parent(mclass->GetNative());
-    MonoImage* baseKlassImage = mono_class_get_image(baseKlass);
+    MClass* baseClass = mclass->GetBaseClass();
     ScriptingTypeHandle baseType;
-    auto& modules = GetModules();
-    for (int32 i = 0; i < modules.Count(); i++)
-    {
-        auto e = dynamic_cast<ManagedBinaryModule*>(modules[i]);
-        if (e && e->Assembly->GetMonoImage() == baseKlassImage)
-        {
-            baseType.Module = e;
-            baseClass = e->Assembly->GetClass(baseKlass);
-            break;
-        }
-    }
+    baseType.Module = FindModule(baseClass);
     if (!baseClass)
     {
         LOG(Error, "Missing base class for managed class {0} from assembly {1}.", String(typeName), Assembly->ToString());
@@ -881,12 +1006,33 @@ void ManagedBinaryModule::InitType(MClass* mclass)
     }
     if (baseType.Module == this)
         InitType(baseClass); // Ensure base is initialized before
+
     baseType.Module->TypeNameToTypeIndex.TryGet(baseClass->GetFullName(), *(int32*)&baseType.TypeIndex);
-    if (!baseType)
+
+    // So we must special case this flow of a generic class of which its possible the generic base class is not in the same module
+    if (baseType.TypeIndex == -1 && baseClass->IsGeneric())
     {
-        LOG(Error, "Missing base class for managed class {0} from assembly {1}.", String(typeName), Assembly->ToString());
+        auto genericNameIndex = baseClass->GetFullName().FindLast('`');
+        // we add 2 because of the way generic names work its `N
+        auto genericClassName = baseClass->GetFullName().Substring(0, genericNameIndex + 2);
+
+        // We check for the generic class name instead of the baseclass fullname
+        baseType.Module->TypeNameToTypeIndex.TryGet(genericClassName, *(int32*)&baseType.TypeIndex);
+    }
+
+    if (baseType.TypeIndex == -1 || baseType.Module == nullptr)
+    {
+        if (baseType.Module)
+        {
+            LOG(Error, "Missing base class for managed class {0} from assembly {1}.", String(baseClass->GetFullName()), baseType.Module->GetName().ToString());
+        }
+        else
+        {
+            LOG(Error, "Missing base class for managed class {0} from unknown assembly.", String(baseClass->GetFullName()));
+        }
         return;
     }
+
     ScriptingTypeHandle nativeType = baseType;
     while (true)
     {
@@ -908,13 +1054,12 @@ void ManagedBinaryModule::InitType(MClass* mclass)
     _managedMemoryBlocks.Add(typeNameData);
 
     // Initialize scripting interfaces implemented in C#
-    MonoClass* interfaceKlass;
-    void* interfaceIt = nullptr;
     int32 interfacesCount = 0;
-    MonoClass* klass = mclass->GetNative();
-    while (interfaceKlass = mono_class_get_interfaces(klass, &interfaceIt))
+    MClass* klass = mclass;
+    const auto& interfaceClasses = klass->GetInterfaces();
+    for (const MClass* interfaceClass : interfaceClasses)
     {
-        const ScriptingTypeHandle interfaceType = FindType(interfaceKlass);
+        const ScriptingTypeHandle interfaceType = FindType(interfaceClass);
         if (interfaceType)
             interfacesCount++;
     }
@@ -923,10 +1068,9 @@ void ManagedBinaryModule::InitType(MClass* mclass)
     {
         interfaces = (ScriptingType::InterfaceImplementation*)Allocator::Allocate((interfacesCount + 1) * sizeof(ScriptingType::InterfaceImplementation));
         interfacesCount = 0;
-        interfaceIt = nullptr;
-        while (interfaceKlass = mono_class_get_interfaces(klass, &interfaceIt))
+        for (const MClass* interfaceClass : interfaceClasses)
         {
-            const ScriptingTypeHandle interfaceTypeHandle = FindType(interfaceKlass);
+            const ScriptingTypeHandle interfaceTypeHandle = FindType(interfaceClass);
             if (!interfaceTypeHandle)
                 continue;
             auto& interface = interfaces[interfacesCount++];
@@ -950,7 +1094,7 @@ void ManagedBinaryModule::InitType(MClass* mclass)
     auto& type = Types[typeIndex];
     type.ManagedClass = mclass;
 
-    // Register Mono class
+    // Register C# class
     ASSERT(!ClassToTypeIndex.ContainsKey(klass));
     ClassToTypeIndex[klass] = typeIndex;
 
@@ -975,11 +1119,9 @@ void ManagedBinaryModule::InitType(MClass* mclass)
                 // Special case if method was found but the base class uses generic arguments
                 if (method && baseClass->IsGeneric())
                 {
-                    // TODO: encapsulate it into MClass to support inflated methods
-                    auto parentClass = mono_class_get_parent(mclass->GetNative());
-                    auto parentMethod = mono_class_get_method_from_name(parentClass, referenceMethod->GetName().Get(), 0);
-                    auto inflatedMethod = mono_class_inflate_generic_method(parentMethod, nullptr);
-                    method = New<MMethod>(inflatedMethod, baseClass);
+                    MClass* parentClass = mclass->GetBaseClass();
+                    MMethod* parentMethod = parentClass->GetMethod(referenceMethod->GetName().Get(), 0);
+                    method = parentMethod->InflateGeneric();
                 }
 
                 baseClass = baseClass->GetBaseClass();
@@ -992,19 +1134,27 @@ void ManagedBinaryModule::InitType(MClass* mclass)
         // Move to the next entry (table is null terminated)
         scriptVTable++;
     }
+#endif
 }
 
 void ManagedBinaryModule::OnUnloading(MAssembly* assembly)
 {
     PROFILE_CPU();
 
-    // Clear managed-only types
+    // Clear managed types typenames
     for (int32 i = _firstManagedTypeIndex; i < Types.Count(); i++)
     {
         const ScriptingType& type = Types[i];
-        const MString typeName(type.Fullname.Get(), type.Fullname.Length());
-        TypeNameToTypeIndex.Remove(typeName);
+        TypeNameToTypeIndex.Remove(type.Fullname);
     }
+}
+
+void ManagedBinaryModule::OnUnloaded(MAssembly* assembly)
+{
+    PROFILE_CPU();
+    PROFILE_MEM(ScriptingCSharp);
+
+    // Clear managed-only types
     Types.Resize(_firstManagedTypeIndex);
     for (int32 i = 0; i < _managedMemoryBlocks.Count(); i++)
         Allocator::Free(_managedMemoryBlocks[i]);
@@ -1020,7 +1170,9 @@ void ManagedBinaryModule::OnUnloading(MAssembly* assembly)
             type.Script.ScriptVTable = nullptr;
         }
     }
+#if !COMPILE_WITHOUT_CSHARP
     ClassToTypeIndex.Clear();
+#endif
 }
 
 const StringAnsi& ManagedBinaryModule::GetName() const
@@ -1030,7 +1182,21 @@ const StringAnsi& ManagedBinaryModule::GetName() const
 
 bool ManagedBinaryModule::IsLoaded() const
 {
+#if COMPILE_WITHOUT_CSHARP
+    return true;
+#else
     return Assembly->IsLoaded();
+#endif
+}
+
+void ManagedBinaryModule::GetMethods(const ScriptingTypeHandle& typeHandle, Array<void*>& methods)
+{
+    const ScriptingType& type = typeHandle.GetType();
+    if (type.ManagedClass)
+    {
+        const auto& mMethods = type.ManagedClass->GetMethods();
+        methods.Add((void* const*)mMethods.Get(), mMethods.Count());
+    }
 }
 
 void* ManagedBinaryModule::FindMethod(const ScriptingTypeHandle& typeHandle, const StringAnsiView& name, int32 numParams)
@@ -1047,11 +1213,9 @@ void* ManagedBinaryModule::FindMethod(const ScriptingTypeHandle& typeHandle, con
 
 bool ManagedBinaryModule::InvokeMethod(void* method, const Variant& instance, Span<Variant> paramValues, Variant& result)
 {
+#if USE_CSHARP
     const auto mMethod = (MMethod*)method;
-    MonoMethodSignature* signature = mono_method_signature(mMethod->GetNative());
-    void* signatureParams = nullptr;
-    mono_signature_get_params(signature, &signatureParams);
-    const int32 parametersCount = mono_signature_get_param_count(signature);
+    const int32 parametersCount = mMethod->GetParametersCount();;
     if (paramValues.Length() != parametersCount)
     {
         LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) with invalid parameters amount ({3})", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount, paramValues.Length());
@@ -1063,46 +1227,64 @@ bool ManagedBinaryModule::InvokeMethod(void* method, const Variant& instance, Sp
     const bool withInterfaces = !mMethod->IsStatic() && mMethod->GetParentClass()->IsInterface();
     if (!mMethod->IsStatic())
     {
-        // Box instance into C# object
-        MonoObject* instanceObject = MUtils::BoxVariant(instance);
-
-        // Validate instance
-        if (!instanceObject || !mono_class_is_subclass_of(mono_object_get_class(instanceObject), mMethod->GetParentClass()->GetNative(), withInterfaces))
+        // Box instance into C# object (and validate the type)
+        MObject* instanceObject = MUtils::BoxVariant(instance);
+        if (!instanceObject)
         {
-            if (!instanceObject)
-                LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) without object instance", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount);
-            else
-                LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) with invalid object instance of type '{3}'", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount, String(MUtils::GetClassFullname(instanceObject)));
+            LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) without object instance", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount);
+            return true;
+        }
+        const MClass* instanceObjectClass = MCore::Object::GetClass(instanceObject);
+        if (!instanceObjectClass->IsSubClassOf(mMethod->GetParentClass(), withInterfaces))
+        {
+            LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) with invalid object instance of type '{3}'", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount, String(MUtils::GetClassFullname(instanceObject)));
             return true;
         }
 
+#if USE_NETCORE
+        mInstance = instanceObject;
+#else
         // For value-types instance is the actual boxed object data, not te object itself
-        mInstance = mono_class_is_valuetype(mono_object_get_class(instanceObject)) ? mono_object_unbox(instanceObject) : instanceObject;
+        mInstance = instanceObjectClass->IsValueType() ? MCore::Object::Unbox(instanceObject) : instanceObject;
+#endif
     }
 
     // Marshal parameters
     void** params = (void**)alloca(parametersCount * sizeof(void*));
+    void** outParams = nullptr;
     bool failed = false;
     bool hasOutParams = false;
     for (int32 paramIdx = 0; paramIdx < parametersCount; paramIdx++)
     {
-        auto& paramValue = paramValues[paramIdx];
-        const bool isOut = mono_signature_param_is_out(signature, paramIdx) != 0;
+        Variant& paramValue = paramValues[paramIdx];
+        const bool isOut = mMethod->GetParameterIsOut(paramIdx);
         hasOutParams |= isOut;
 
         // Marshal parameter for managed method
-        MType paramType(((MonoType**)signatureParams)[paramIdx]);
+        MType* paramType = mMethod->GetParameterType(paramIdx);
         params[paramIdx] = MUtils::VariantToManagedArgPtr(paramValue, paramType, failed);
         if (failed)
         {
-            LOG(Error, "Failed to marshal parameter {5}:{4} of method '{0}.{1}' (args count: {2}), value type: {6}, value: {3}", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount, paramValue, paramType.ToString(), paramIdx, paramValue.Type);
+            LOG(Error, "Failed to marshal parameter {5}:{4} of method '{0}.{1}' (args count: {2}), value type: {6}, value: {3}", String(mMethod->GetParentClass()->GetFullName()), String(mMethod->GetName()), parametersCount, paramValue, MCore::Type::ToString(paramType), paramIdx, paramValue.Type);
             return true;
+        }
+        if (isOut && MCore::Type::IsReference(paramType) && MCore::Type::GetType(paramType) == MTypes::Object)
+        {
+            // Object passed as out param so pass pointer to the value storage for proper marshalling
+            if (!outParams)
+                outParams = (void**)alloca(parametersCount * sizeof(void*));
+            outParams[paramIdx] = params[paramIdx];
+            params[paramIdx] = &outParams[paramIdx];
         }
     }
 
     // Invoke the method
-    MonoObject* exception = nullptr;
-    MonoObject* resultObject = withInterfaces ? mMethod->InvokeVirtual((MonoObject*)mInstance, params, &exception) : mMethod->Invoke(mInstance, params, &exception);
+    MObject* exception = nullptr;
+#if USE_NETCORE // NetCore uses the same path for both virtual and non-virtual calls
+    MObject* resultObject = mMethod->Invoke(mInstance, params, &exception);
+#else
+    MObject* resultObject = withInterfaces ? mMethod->InvokeVirtual((MObject*)mInstance, params, &exception) : mMethod->Invoke(mInstance, params, &exception);
+#endif
     if (exception)
     {
         MException ex(exception);
@@ -1135,18 +1317,17 @@ bool ManagedBinaryModule::InvokeMethod(void* method, const Variant& instance, Sp
     {
         for (int32 paramIdx = 0; paramIdx < parametersCount; paramIdx++)
         {
-            const bool isOut = mono_signature_param_is_out(signature, paramIdx) != 0;
-            if (isOut)
+            if (mMethod->GetParameterIsOut(paramIdx))
             {
                 auto& paramValue = paramValues[paramIdx];
                 auto param = params[paramIdx];
                 switch (paramValue.Type.Type)
                 {
                 case VariantType::String:
-                    paramValue.SetString(MUtils::ToString((MonoString*)param));
+                    paramValue.SetString(MUtils::ToString((MString*)param));
                     break;
                 case VariantType::Object:
-                    paramValue = MUtils::UnboxVariant((MonoObject*)param);
+                    paramValue = MUtils::UnboxVariant((MObject*)param);
                     break;
                 case VariantType::Structure:
                 {
@@ -1154,8 +1335,16 @@ bool ManagedBinaryModule::InvokeMethod(void* method, const Variant& instance, Sp
                     if (paramTypeHandle)
                     {
                         auto& valueType = paramTypeHandle.GetType();
-                        valueType.Struct.Unbox(paramValue.AsBlob.Data, (MonoObject*)((byte*)param - sizeof(MonoObject)));
+                        MObject* boxed = MCore::Object::Box(param, valueType.ManagedClass);
+                        valueType.Struct.Unbox(paramValue.AsBlob.Data, boxed);
                     }
+                    break;
+                }
+                default:
+                {
+                    MType* paramType = mMethod->GetParameterType(paramIdx);
+                    if (MCore::Type::IsReference(paramType) && MCore::Type::GetType(paramType) == MTypes::Object)
+                        paramValue = MUtils::UnboxVariant((MObject*)outParams[paramIdx]);
                     break;
                 }
                 }
@@ -1164,95 +1353,207 @@ bool ManagedBinaryModule::InvokeMethod(void* method, const Variant& instance, Sp
     }
 
     return false;
+#else
+    return true;
+#endif
 }
 
 void ManagedBinaryModule::GetMethodSignature(void* method, ScriptingTypeMethodSignature& signature)
 {
+#if USE_CSHARP
     const auto mMethod = (MMethod*)method;
     signature.Name = mMethod->GetName();
     signature.IsStatic = mMethod->IsStatic();
-    MonoMethodSignature* sig = mono_method_signature(mMethod->GetNative());
-    signature.ReturnType = MoveTemp(MUtils::UnboxVariantType(mono_signature_get_return_type(sig)));
-    void* signatureParams = nullptr;
-    mono_signature_get_params(sig, &signatureParams);
-    const int32 paramsCount = (int32)mono_signature_get_param_count(sig);
+    signature.ReturnType = MoveTemp(MUtils::UnboxVariantType(mMethod->GetReturnType()));
+    const int32 paramsCount = mMethod->GetParametersCount();
     signature.Params.Resize(paramsCount);
     for (int32 paramIdx = 0; paramIdx < paramsCount; paramIdx++)
     {
         auto& param = signature.Params[paramIdx];
-        param.Type = MoveTemp(MUtils::UnboxVariantType(((MonoType**)signatureParams)[paramIdx]));
-        param.IsOut = mono_signature_param_is_out(sig, paramIdx) != 0;
+        param.Type = MoveTemp(MUtils::UnboxVariantType(mMethod->GetParameterType(paramIdx)));
+        param.IsOut = mMethod->GetParameterIsOut(paramIdx);
+    }
+#endif
+}
+
+// Pointers with the highest bit turned on are properties
+#if PLATFORM_64BITS
+#define ManagedBinaryModuleFieldIsPropertyBit (uintptr)(1ull << 63)
+#else
+#define ManagedBinaryModuleFieldIsPropertyBit (uintptr)(1ul << 31)
+#endif
+#define GetManagedBinaryModulePropertyHandle(ptr) ((uintptr)ptr & ~ManagedBinaryModuleFieldIsPropertyBit)
+#define SetManagedBinaryModulePropertyHandle(ptr) (void*)((uintptr)ptr | ManagedBinaryModuleFieldIsPropertyBit)
+
+void ManagedBinaryModule::GetFields(const ScriptingTypeHandle& typeHandle, Array<void*>& fields)
+{
+    const ScriptingType& type = typeHandle.GetType();
+    if (type.ManagedClass)
+    {
+        const auto& mFields = type.ManagedClass->GetFields();
+        const auto& mProperties = type.ManagedClass->GetProperties();
+        fields.EnsureCapacity(fields.Count() + mFields.Count() + mProperties.Count());
+        for (MField* field : mFields)
+            fields.Add(field);
+        for (MProperty* property : mProperties)
+            fields.Add(SetManagedBinaryModulePropertyHandle(property));
     }
 }
 
 void* ManagedBinaryModule::FindField(const ScriptingTypeHandle& typeHandle, const StringAnsiView& name)
 {
     const ScriptingType& type = typeHandle.GetType();
-    return type.ManagedClass ? type.ManagedClass->GetField(name.Get()) : nullptr;
+    void* result = type.ManagedClass ? type.ManagedClass->GetField(name.Get()) : nullptr;
+    if (!result && type.ManagedClass)
+    {
+        result = type.ManagedClass->GetProperty(name.Get());
+        if (result)
+            result = SetManagedBinaryModulePropertyHandle(result);
+    }
+    return result;
 }
 
 void ManagedBinaryModule::GetFieldSignature(void* field, ScriptingTypeFieldSignature& fieldSignature)
 {
-    const auto mField = (MField*)field;
-    fieldSignature.Name = mField->GetName();
-    fieldSignature.ValueType = MoveTemp(MUtils::UnboxVariantType(mField->GetType().GetNative()));
-    fieldSignature.IsStatic = mField->IsStatic();
+#if USE_CSHARP
+    if ((uintptr)field & ManagedBinaryModuleFieldIsPropertyBit)
+    {
+        const auto mProperty = (MProperty*)GetManagedBinaryModulePropertyHandle(field);
+        fieldSignature.Name = mProperty->GetName();
+        fieldSignature.ValueType = MoveTemp(MUtils::UnboxVariantType(mProperty->GetType()));
+        fieldSignature.IsStatic = mProperty->IsStatic();
+    }
+    else
+    {
+        const auto mField = (MField*)field;
+        fieldSignature.Name = mField->GetName();
+        fieldSignature.ValueType = MoveTemp(MUtils::UnboxVariantType(mField->GetType()));
+        fieldSignature.IsStatic = mField->IsStatic();
+    }
+#endif
 }
 
 bool ManagedBinaryModule::GetFieldValue(void* field, const Variant& instance, Variant& result)
 {
-    const auto mField = (MField*)field;
+#if USE_CSHARP
+    bool isStatic;
+    MClass* parentClass;
+    StringAnsiView name;
+    if ((uintptr)field & ManagedBinaryModuleFieldIsPropertyBit)
+    {
+        const auto mProperty = (MProperty*)((uintptr)field & ~ManagedBinaryModuleFieldIsPropertyBit);
+        isStatic = mProperty->IsStatic();
+        parentClass = mProperty->GetParentClass();
+        name = mProperty->GetName();
+    }
+    else
+    {
+        const auto mField = (MField*)field;
+        isStatic = mField->IsStatic();
+        parentClass = mField->GetParentClass();
+        name = mField->GetName();
+    }
 
     // Get instance object
-    MonoObject* instanceObject = nullptr;
-    if (!mField->IsStatic())
+    MObject* instanceObject = nullptr;
+    if (!isStatic)
     {
         // Box instance into C# object
         instanceObject = MUtils::BoxVariant(instance);
 
         // Validate instance
-        if (!instanceObject || !mono_class_is_subclass_of(mono_object_get_class(instanceObject), mField->GetParentClass()->GetNative(), false))
+        if (!instanceObject || !MCore::Object::GetClass(instanceObject)->IsSubClassOf(parentClass))
         {
             if (!instanceObject)
-                LOG(Error, "Failed to get field '{0}.{1}' without object instance", String(mField->GetParentClass()->GetFullName()), String(mField->GetName()));
+            {
+                LOG(Error, "Failed to get '{0}.{1}' without object instance", String(parentClass->GetFullName()), String(name));
+            }
             else
-                LOG(Error, "Failed to get field '{0}.{1}' with invalid object instance of type '{2}'", String(mField->GetParentClass()->GetFullName()), String(mField->GetName()), String(MUtils::GetClassFullname(instanceObject)));
+            {
+                LOG(Error, "Failed to get '{0}.{1}' with invalid object instance of type '{2}'", String(parentClass->GetFullName()), String(name), String(MUtils::GetClassFullname(instanceObject)));
+            }
             return true;
         }
     }
 
     // Get the value
-    MonoObject* resultObject = mField->GetValueBoxed(instanceObject);
+    MObject* resultObject;
+    if ((uintptr)field & ManagedBinaryModuleFieldIsPropertyBit)
+    {
+        const auto mProperty = (MProperty*)((uintptr)field & ~ManagedBinaryModuleFieldIsPropertyBit);
+        resultObject = mProperty->GetValue(instanceObject, nullptr);
+    }
+    else
+    {
+        const auto mField = (MField*)field;
+        resultObject = mField->GetValueBoxed(instanceObject);
+    }
     result = MUtils::UnboxVariant(resultObject);
     return false;
+#else
+    return true;
+#endif
 }
 
 bool ManagedBinaryModule::SetFieldValue(void* field, const Variant& instance, Variant& value)
 {
-    const auto mField = (MField*)field;
+#if USE_CSHARP
+    bool isStatic;
+    MClass* parentClass;
+    StringAnsiView name;
+    if ((uintptr)field & ManagedBinaryModuleFieldIsPropertyBit)
+    {
+        const auto mProperty = (MProperty*)((uintptr)field & ~ManagedBinaryModuleFieldIsPropertyBit);
+        isStatic = mProperty->IsStatic();
+        parentClass = mProperty->GetParentClass();
+        name = mProperty->GetName();
+    }
+    else
+    {
+        const auto mField = (MField*)field;
+        isStatic = mField->IsStatic();
+        parentClass = mField->GetParentClass();
+        name = mField->GetName();
+    }
 
     // Get instance object
-    MonoObject* instanceObject = nullptr;
-    if (!mField->IsStatic())
+    MObject* instanceObject = nullptr;
+    if (!isStatic)
     {
         // Box instance into C# object
         instanceObject = MUtils::BoxVariant(instance);
 
         // Validate instance
-        if (!instanceObject || !mono_class_is_subclass_of(mono_object_get_class(instanceObject), mField->GetParentClass()->GetNative(), false))
+        if (!instanceObject || !MCore::Object::GetClass(instanceObject)->IsSubClassOf(parentClass))
         {
             if (!instanceObject)
-                LOG(Error, "Failed to set field '{0}.{1}' without object instance", String(mField->GetParentClass()->GetFullName()), String(mField->GetName()));
+            {
+                LOG(Error, "Failed to set '{0}.{1}' without object instance", String(parentClass->GetFullName()), String(name));
+            }
             else
-                LOG(Error, "Failed to set field '{0}.{1}' with invalid object instance of type '{2}'", String(mField->GetParentClass()->GetFullName()), String(mField->GetName()), String(MUtils::GetClassFullname(instanceObject)));
+            {
+                LOG(Error, "Failed to set '{0}.{1}' with invalid object instance of type '{2}'", String(parentClass->GetFullName()), String(name), String(MUtils::GetClassFullname(instanceObject)));
+            }
             return true;
         }
     }
 
     // Set the value
     bool failed = false;
-    mField->SetValue(instanceObject, MUtils::VariantToManagedArgPtr(value, mField->GetType(), failed));
+    if ((uintptr)field & ManagedBinaryModuleFieldIsPropertyBit)
+    {
+        const auto mProperty = (MProperty*)((uintptr)field & ~ManagedBinaryModuleFieldIsPropertyBit);
+        mProperty->SetValue(instanceObject, MUtils::VariantToManagedArgPtr(value, mProperty->GetType(), failed), nullptr);
+    }
+    else
+    {
+        const auto mField = (MField*)field;
+        mField->SetValue(instanceObject, MUtils::VariantToManagedArgPtr(value, mField->GetType(), failed));
+    }
     return failed;
+#else
+    return true;
+#endif
 }
 
 void ManagedBinaryModule::Destroy(bool isReloading)
@@ -1263,8 +1564,8 @@ void ManagedBinaryModule::Destroy(bool isReloading)
     Assembly->Unload(isReloading);
 }
 
-NativeBinaryModule::NativeBinaryModule(const StringAnsiView& name, const MAssemblyOptions& options)
-    : NativeBinaryModule(New<MAssembly>(nullptr, name, options))
+NativeBinaryModule::NativeBinaryModule(const StringAnsiView& name)
+    : NativeBinaryModule(New<MAssembly>(nullptr, name))
 {
 }
 
@@ -1277,6 +1578,10 @@ NativeBinaryModule::NativeBinaryModule(MAssembly* assembly)
 void NativeBinaryModule::Destroy(bool isReloading)
 {
     ManagedBinaryModule::Destroy(isReloading);
+
+    // Skip native code unloading from core libs
+    if (this == GetBinaryModuleCorlib() || this == GetBinaryModuleFlaxEngine())
+        return;
 
     // Release native library
     const auto library = Library;

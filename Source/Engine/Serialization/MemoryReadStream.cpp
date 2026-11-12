@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MemoryReadStream.h"
+#include "Engine/Platform/Platform.h"
 
 MemoryReadStream::MemoryReadStream()
     : _buffer(nullptr)
@@ -20,6 +21,14 @@ void MemoryReadStream::Init(const byte* bytes, uint32 length)
 {
     _buffer = _position = bytes;
     _length = length;
+}
+
+void* MemoryReadStream::Move(uint32 bytes)
+{
+    ASSERT(GetLength() - GetPosition() >= bytes);
+    const auto result = (void*)_position;
+    _position += bytes;
+    return result;
 }
 
 void MemoryReadStream::Flush()
@@ -52,7 +61,11 @@ void MemoryReadStream::ReadBytes(void* data, uint32 bytes)
 {
     if (bytes > 0)
     {
-        ASSERT(data && GetLength() - GetPosition() >= bytes);
+        if (!data || GetLength() - GetPosition() < bytes)
+        {
+            _hasError = true;
+            return;
+        }
         Platform::MemoryCopy(data, _position, bytes);
         _position += bytes;
     }

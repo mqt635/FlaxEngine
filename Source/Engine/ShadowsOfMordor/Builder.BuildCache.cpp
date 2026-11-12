@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Builder.h"
 #include "Engine/Level/Scene/Lightmap.h"
@@ -6,6 +6,7 @@
 #include "Engine/Content/Content.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
 #include "Engine/ContentImporters/ImportTexture.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUBufferDescription.h"
 #include "Engine/Graphics/GPUDevice.h"
@@ -102,7 +103,7 @@ void ShadowsOfMordor::Builder::SceneBuildCache::UpdateLightmaps()
         // Download buffer data
         if (lightmapEntry.LightmapData->DownloadData(ImportLightmapTextureData))
         {
-            LOG(Warning, "Cannot download LightmapData.");
+            LOG(Error, "Cannot download LightmapData.");
             return;
         }
 
@@ -122,7 +123,11 @@ void ShadowsOfMordor::Builder::SceneBuildCache::UpdateLightmaps()
             ImportTexture::Options options;
             options.Type = TextureFormatType::HdrRGBA;
             options.IndependentChannels = true;
+#if PLATFORM_WINDOWS
             options.Compress = Scene->GetLightmapSettings().CompressLightmaps;
+#else
+            options.Compress = false; // TODO: use better BC7 compressor that would handle alpha more precisely (otherwise lightmaps have artifacts, see TextureTool.stb.cpp)
+#endif
             options.GenerateMipMaps = true;
             options.IsAtlas = false;
             options.sRGB = false;
@@ -213,8 +218,8 @@ bool ShadowsOfMordor::Builder::SceneBuildCache::onImportLightmap(TextureData& im
     mip.Data.Allocate(mip.DepthPitch);
 
 #if HEMISPHERES_IRRADIANCE_FORMAT == HEMISPHERES_FORMAT_R32G32B32A32
-    auto pos = (Vector4*)mip.Data.Get();
-    const auto textureData = ImportLightmapTextureData.Get<Vector4>();
+    auto pos = (Float4*)mip.Data.Get();
+    const auto textureData = ImportLightmapTextureData.Get<Float4>();
     for (int32 y = 0; y < image.Height; y++)
     {
         for (int32 x = 0; x < image.Width; x++)

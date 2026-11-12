@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,15 +11,16 @@
 /// <summary>
 /// Skybox actor renders sky using custom cube texture or material.
 /// </summary>
-API_CLASS() class FLAXENGINE_API Skybox : public Actor, public ISkyRenderer
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Sky/Sky Box\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API Skybox : public Actor, public ISkyRenderer
 {
-DECLARE_SCENE_OBJECT(Skybox);
+    DECLARE_SCENE_OBJECT(Skybox);
 private:
-
     AssetReference<MaterialInstance> _proxyMaterial;
+    int32 _sceneRenderingKey = -1;
+    Float3 _rotationEuler;
 
 public:
-
     /// <summary>
     /// The cube texture to draw.
     /// </summary>
@@ -51,30 +52,29 @@ public:
     float Exposure = 0.0f;
 
 private:
-
     void setupProxy();
 
 public:
-
     // [Actor]
 #if USE_EDITOR
-    BoundingBox GetEditorBox() const override
+    BoundingBox GetEditorBoundingBox() const override
     {
         const Vector3 size(50);
         return BoundingBox(_transform.Translation - size, _transform.Translation + size);
     }
 #endif
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     bool HasContentLoaded() const override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
     // [ISkyRenderer]
+    bool IsDynamicSky() const override;
+    float GetIndirectLightingIntensity() const override;
     void ApplySky(GPUContext* context, RenderContext& renderContext, const Matrix& world) override;
 
 protected:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;

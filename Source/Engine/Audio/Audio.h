@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,14 +11,13 @@
 /// <summary>
 /// The audio service used for music and sound effects playback.
 /// </summary>
-API_CLASS(Static) class FLAXENGINE_API Audio
+API_CLASS(Static, Attributes="DebugCommand") class FLAXENGINE_API Audio
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Audio);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Audio);
     friend class AudioStreamingHandler;
     friend class AudioClip;
 
 public:
-
     /// <summary>
     /// The audio listeners collection registered by the service.
     /// </summary>
@@ -44,8 +43,17 @@ public:
     /// </summary>
     API_EVENT() static Action ActiveDeviceChanged;
 
-public:
+    /// <summary>
+    /// Event called when a new audio device is connected to the system.
+    /// </summary>
+    API_EVENT() static Action DeviceAdded;
 
+    /// <summary>
+    /// Event called when an audio device is disconnected from the system.
+    /// </summary>
+    API_EVENT() static Action DeviceRemoved;
+
+public:
     /// <summary>
     /// Gets the active device.
     /// </summary>
@@ -53,10 +61,16 @@ public:
     API_PROPERTY() static AudioDevice* GetActiveDevice();
 
     /// <summary>
-    /// Gets the index of the active device.
+    /// Gets the index of the active device. Returns -1 if set to system default mode.
     /// </summary>
     /// <returns>The active device index.</returns>
     API_PROPERTY() static int32 GetActiveDeviceIndex();
+
+    /// <summary>
+    /// Gets the resolved index in Devices array of the device currently playing (resolves system default mode to the actual device index).
+    /// </summary>
+    /// <returns>The resolved active device index.</returns>
+    API_PROPERTY() static int32 GetActiveDeviceResolvedIndex();
 
     /// <summary>
     /// Sets the index of the active device.
@@ -64,8 +78,23 @@ public:
     /// <param name="index">The index.</param>
     API_PROPERTY() static void SetActiveDeviceIndex(int32 index);
 
-public:
+    /// <summary>
+    /// Sets the index of the active device without notifying backend.
+    /// </summary>
+    /// <param name="index">The index.</param>
+    static void SetActiveDeviceIndexSilent(int32 index);
 
+    /// <summary>
+    /// Gets the internal device name explicitly selected by the user (empty if using dynamic system default device).
+    /// </summary>
+    static const StringAnsi& GetExplicitDeviceName();
+
+    /// <summary>
+    /// Sets the system default internal device name.
+    /// </summary>
+    static void SetSystemDefaultDeviceName(const StringAnsi& name);
+
+public:
     /// <summary>
     /// Gets the master volume applied to all the audio sources (normalized to range 0-1).
     /// </summary>
@@ -90,11 +119,14 @@ public:
     /// <param name="value">The value.</param>
     API_PROPERTY() static void SetDopplerFactor(float value);
 
-public:
+    /// <summary>
+    /// Gets the preference to use HRTF audio (when available on platform). Default is true.
+    /// </summary>
+    API_PROPERTY() static bool GetEnableHRTF();
 
-    static void OnAddListener(AudioListener* listener);
-    static void OnRemoveListener(AudioListener* listener);
-
-    static void OnAddSource(AudioSource* source);
-    static void OnRemoveSource(AudioSource* source);
+    /// <summary>
+    /// Sets the preference to use HRTF audio (when available on platform). Default is true.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    API_PROPERTY() static void SetEnableHRTF(bool value);
 };

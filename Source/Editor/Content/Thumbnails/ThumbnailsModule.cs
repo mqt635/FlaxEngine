@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -21,15 +21,11 @@ namespace FlaxEditor.Content.Thumbnails
         /// </summary>
         public const float MinimumRequiredResourcesQuality = 0.8f;
 
-        // TODO: free atlas slots for deleted assets
-
         private readonly List<PreviewsCache> _cache = new List<PreviewsCache>(4);
         private readonly string _cacheFolder;
-
-        private DateTime _lastFlushTime;
-
         private readonly List<ThumbnailRequest> _requests = new List<ThumbnailRequest>(128);
         private readonly PreviewRoot _guiRoot = new PreviewRoot();
+        private DateTime _lastFlushTime;
         private RenderTask _task;
         private GPUTexture _output;
 
@@ -49,6 +45,8 @@ namespace FlaxEditor.Content.Thumbnails
         {
             if (item == null)
                 throw new ArgumentNullException();
+            if (_task == null)
+                return;
 
             // Check if use default icon
             var defaultThumbnail = item.DefaultThumbnail;
@@ -88,7 +86,6 @@ namespace FlaxEditor.Content.Thumbnails
                         }
                     }
 
-                    // Add request
                     AddRequest(assetItem, proxy);
                 }
             }
@@ -118,11 +115,128 @@ namespace FlaxEditor.Content.Thumbnails
                 for (int i = 0; i < _cache.Count; i++)
                 {
                     if (_cache[i].ReleaseSlot(assetItem.ID))
-                    {
                         break;
-                    }
                 }
             }
+        }
+
+        internal static bool HasMinimumQuality(TextureBase asset)
+        {
+            // Don't block thumbnails queue when texture fails to stream in (eg. unsupported format)
+            if (asset.HasStreamingError)
+                return true;
+
+            // Check if enough mip levels are loaded
+            var mipLevels = asset.MipLevels;
+            var minMipLevels = Mathf.Min(mipLevels, 7);
+            if (asset.IsLoaded && asset.ResidentMipLevels >= Mathf.Max(minMipLevels, (int)(mipLevels * MinimumRequiredResourcesQuality)))
+                return true;
+
+            // Inform streaming about resource usage to stream it in for the thumbnail
+            asset.SetStreamingVisible();
+
+            return false;
+        }
+
+        internal static bool HasMinimumQuality(ModelBase asset)
+        {
+            if (!asset.IsLoaded)
+                return false;
+            var lods = asset.LODsCount;
+            var slots = asset.MaterialSlots;
+
+            // Check if all materials are loaded (incl. dependent resources)
+            foreach (var slot in slots)
+            {
+                if (slot.Material && !HasMinimumQuality(slot.Material))
+                    return false;
+            }
+
+            // Check if enough LODs are loaded
+            if (asset.LoadedLODs >= Mathf.Max(1, (int)(lods * MinimumRequiredResourcesQuality)))
+                return true;
+
+            // TODO: impl SetStreamingVisible for models similar to textures (ModelsStreamingHandler needs to use it)
+
+            return false;
+        }
+
+        internal static bool HasMinimumQuality(MaterialBase asset)
+        {
+            if (asset is MaterialInstance asInstance)
+                return HasMinimumQuality(asInstance);
+            return HasMinimumQualityInternal(asset);
+        }
+
+        internal static bool HasMinimumQuality(Material asset)
+        {
+            return HasMinimumQualityInternal(asset);
+        }
+
+        internal static bool HasMinimumQuality(MaterialInstance asset)
+        {
+            if (!HasMinimumQualityInternal(asset))
+                return false;
+            var baseMaterial = asset.BaseMaterial;
+            return baseMaterial == null || HasMinimumQualityInternal(baseMaterial);
+        }
+
+        internal static bool HasMinimumQuality(Prefab asset)
+        {
+            if (!asset.IsLoaded)
+                return false;
+            var defaultInstance = asset.GetDefaultInstance();
+            return defaultInstance == null || HasMinimumQualityInternal(defaultInstance);
+        }
+
+        private static bool HasMinimumQualityInternal(MaterialBase asset)
+        {
+            if (!asset.IsLoaded)
+                return false;
+            var parameters = asset.Parameters;
+            foreach (var parameter in parameters)
+            {
+                if (parameter.Value is TextureBase asTexture && !HasMinimumQuality(asTexture))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool HasMinimumQualityInternal(Actor actor)
+        {
+            if (!actor.IsActive)
+                return true;
+
+            if (actor is ModelInstanceActor modelInstance)
+            {
+                var model = modelInstance.GetModel();
+                if (model && !HasMinimumQuality(model))
+                    return false;
+                var slots = modelInstance.MaterialSlots;
+                foreach (var slot in slots)
+                {
+                    if (slot.Material && !HasMinimumQuality(slot.Material))
+                        return false;
+                }
+            }
+            if (actor is SpriteRender spriteRender)
+            {
+                if (spriteRender.Material && !HasMinimumQuality(spriteRender.Material))
+                    return false;
+            }
+            if (actor is TextRender textRender)
+            {
+                if (textRender.Material && !HasMinimumQuality(textRender.Material))
+                    return false;
+            }
+
+            for (int i = 0; i < actor.ChildrenCount; i++)
+            {
+                if (!HasMinimumQualityInternal(actor.GetChild(i)))
+                    return false;
+            }
+
+            return true;
         }
 
         #region IContentItemOwner
@@ -130,13 +244,7 @@ namespace FlaxEditor.Content.Thumbnails
         /// <inheritdoc />
         void IContentItemOwner.OnItemDeleted(ContentItem item)
         {
-            if (item is AssetItem assetItem)
-            {
-                lock (_requests)
-                {
-                    RemoveRequest(assetItem);
-                }
-            }
+            DeletePreview(item);
         }
 
         /// <inheritdoc />
@@ -166,11 +274,12 @@ namespace FlaxEditor.Content.Thumbnails
         /// <inheritdoc />
         public override void OnInit()
         {
+            if (Editor.IsHeadlessMode || (GPUDevice.Instance != null && GPUDevice.Instance.RendererType == RendererType.Null))
+                return;
+
             // Create cache folder
             if (!Directory.Exists(_cacheFolder))
-            {
                 Directory.CreateDirectory(_cacheFolder);
-            }
 
             // Find atlases in a Editor cache directory
             var files = Directory.GetFiles(_cacheFolder, "cache_*.flax", SearchOption.TopDirectoryOnly);
@@ -242,21 +351,35 @@ namespace FlaxEditor.Content.Thumbnails
                 if (!atlas.IsReady)
                     return;
 
-                // Setup
-                _guiRoot.RemoveChildren();
-                _guiRoot.AccentColor = request.Proxy.AccentColor;
+                try
+                {
+                    // Setup
+                    _guiRoot.RemoveChildren();
 
-                // Call proxy to prepare for thumbnail rendering
-                request.Proxy.OnThumbnailDrawBegin(request, _guiRoot, context);
-                _guiRoot.UnlockChildrenRecursive();
+                    // Call proxy to prepare for thumbnail rendering
+                    request.Proxy.OnThumbnailDrawBegin(request, _guiRoot, context);
+                    _guiRoot.UnlockChildrenRecursive();
 
-                // Draw preview
-                context.Clear(_output.View(), Color.Black);
-                Render2D.CallDrawing(_guiRoot, context, _output);
+                    // Draw preview
+                    context.Clear(_output.View(), Color.Black);
+                    Render2D.CallDrawing(_guiRoot, context, _output);
 
-                // Call proxy and cleanup UI (delete create controls, shared controls should be unlinked during OnThumbnailDrawEnd event)
-                request.Proxy.OnThumbnailDrawEnd(request, _guiRoot);
-                _guiRoot.DisposeChildren();
+                    // Call proxy and cleanup UI (delete create controls, shared controls should be unlinked during OnThumbnailDrawEnd event)
+                    request.Proxy.OnThumbnailDrawEnd(request, _guiRoot);
+                }
+                catch (Exception ex)
+                {
+                    // Handle internal errors gracefully (eg. when asset is corrupted and proxy fails)
+                    Editor.LogError("Failed to render thumbnail icon for asset: " + request.Item);
+                    Editor.LogWarning(ex);
+                    request.FinishRender(ref SpriteHandle.Invalid);
+                    RemoveRequest(request);
+                    return;
+                }
+                finally
+                {
+                    _guiRoot.DisposeChildren();
+                }
 
                 // Copy backbuffer with rendered preview into atlas
                 SpriteHandle icon = atlas.OccupySlot(_output, request.Item.ID);
@@ -323,18 +446,16 @@ namespace FlaxEditor.Content.Thumbnails
             for (int i = 0; i < maxChecks; i++)
             {
                 var request = _requests[i];
-
                 try
                 {
                     if (request.IsReady)
-                    {
                         return request;
-                    }
                 }
                 catch (Exception ex)
                 {
-                    Editor.LogWarning(ex);
                     Editor.LogWarning($"Failed to prepare thumbnail rendering for {request.Item.ShortName}.");
+                    Editor.LogWarning(ex);
+                    _requests.RemoveAt(i--);
                 }
             }
 
@@ -353,7 +474,6 @@ namespace FlaxEditor.Content.Thumbnails
             // Create atlas
             if (PreviewsCache.Create(path))
             {
-                // Error
                 Editor.LogError("Failed to create thumbnails atlas.");
                 return null;
             }
@@ -362,7 +482,6 @@ namespace FlaxEditor.Content.Thumbnails
             var atlas = FlaxEngine.Content.LoadAsync<PreviewsCache>(path);
             if (atlas == null)
             {
-                // Error
                 Editor.LogError("Failed to load thumbnails atlas.");
                 return null;
             }
@@ -414,11 +533,8 @@ namespace FlaxEditor.Content.Thumbnails
         public override void OnUpdate()
         {
             // Wait some frames before start generating previews (late init feature)
-            if (Time.TimeSinceStartup < 1.0f || HasAllAtlasesLoaded() == false)
-            {
-                // Back
+            if (Time.TimeSinceStartup < 1.0f || HasAllAtlasesLoaded() == false || _task == null)
                 return;
-            }
 
             lock (_requests)
             {
@@ -431,12 +547,12 @@ namespace FlaxEditor.Content.Thumbnails
                     // Prepare requests
                     bool isAnyReady = false;
                     int checks = Mathf.Min(10, _requests.Count);
-                    for (int i = 0; i < checks; i++)
+                    for (int i = 0; i < checks && i < _requests.Count; i++)
                     {
                         var request = _requests[i];
-
                         try
                         {
+                            request.Update();
                             if (request.IsReady)
                             {
                                 isAnyReady = true;
@@ -445,11 +561,16 @@ namespace FlaxEditor.Content.Thumbnails
                             {
                                 request.Prepare();
                             }
+                            else if (request.State == ThumbnailRequest.States.Failed)
+                            {
+                                _requests.RemoveAt(i--);
+                            }
                         }
                         catch (Exception ex)
                         {
-                            Editor.LogWarning(ex);
                             Editor.LogWarning($"Failed to prepare thumbnail rendering for {request.Item.ShortName}.");
+                            Editor.LogWarning(ex);
+                            _requests.RemoveAt(i--);
                         }
                     }
 
@@ -495,28 +616,12 @@ namespace FlaxEditor.Content.Thumbnails
         /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
         private class PreviewRoot : ContainerControl
         {
-            /// <summary>
-            /// The item accent color to draw.
-            /// </summary>
-            public Color AccentColor;
-
             /// <inheritdoc />
             public PreviewRoot()
             : base(0, 0, PreviewsCache.AssetIconSize, PreviewsCache.AssetIconSize)
             {
                 AutoFocus = false;
-                AccentColor = Color.Pink;
                 IsLayoutLocked = false;
-            }
-
-            /// <inheritdoc />
-            public override void Draw()
-            {
-                base.Draw();
-
-                // Draw accent
-                const float accentHeight = 2;
-                Render2D.FillRectangle(new Rectangle(0, Height - accentHeight, Width, accentHeight), AccentColor);
             }
         }
     }

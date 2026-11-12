@@ -1,18 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Loader;
+using FlaxEngine.Interop;
 
 namespace FlaxEngine
 {
     /// <summary>
     /// Class with helper functions.
     /// </summary>
-    public static class Utils
+    public static partial class Utils
     {
         /// <summary>
         /// Copies data from one memory location to another using an unmanaged memory pointers.
@@ -21,7 +23,7 @@ namespace FlaxEngine
         /// <param name="source">The source location.</param>
         /// <param name="destination">The destination location.</param>
         /// <param name="length">The length (amount of bytes to copy).</param>
-        [Obsolete("Use MemoryCopy with long length and source/destination swapped to match C++ API.")]
+        [Obsolete("Use MemoryCopy with long length and source/destination parameters swapped instead")]
         public static void MemoryCopy(IntPtr source, IntPtr destination, int length)
         {
             // [Deprecated on 30.05.2021, expires on 30.05.2022]
@@ -35,8 +37,8 @@ namespace FlaxEngine
         /// <param name="source">The source location.</param>
         /// <param name="destination">The destination location.</param>
         /// <param name="length">The length (amount of bytes to copy).</param>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void MemoryCopy(IntPtr destination, IntPtr source, ulong length);
+        [LibraryImport("FlaxEngine", EntryPoint = "PlatformInternal_MemoryCopy")]
+        public static partial void MemoryCopy(IntPtr destination, IntPtr source, ulong length);
 
         /// <summary>
         /// Clears the memory region with zeros.
@@ -44,8 +46,8 @@ namespace FlaxEngine
         /// <remarks>Uses low-level platform impl.</remarks>
         /// <param name="dst">Destination memory address</param>
         /// <param name="size">Size of the memory to clear in bytes</param>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void MemoryClear(IntPtr dst, ulong size);
+        [LibraryImport("FlaxEngine", EntryPoint = "PlatformInternal_MemoryClear")]
+        public static partial void MemoryClear(IntPtr dst, ulong size);
 
         /// <summary>
         /// Compares two blocks of the memory.
@@ -54,8 +56,8 @@ namespace FlaxEngine
         /// <param name="buf1">The first buffer address.</param>
         /// <param name="buf2">The second buffer address.</param>
         /// <param name="size">Size of the memory to compare in bytes.</param>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern int MemoryCompare(IntPtr buf1, IntPtr buf2, ulong size);
+        [LibraryImport("FlaxEngine", EntryPoint = "PlatformInternal_MemoryCompare")]
+        public static partial int MemoryCompare(IntPtr buf1, IntPtr buf2, ulong size);
 
         /// <summary>
         /// Rounds the floating point value up to 1 decimal place.
@@ -89,12 +91,14 @@ namespace FlaxEngine
 
         /// <summary>
         /// Gets the empty array of the given type (shared one).
+        /// [Deprecated in v1.13]
         /// </summary>
         /// <typeparam name="T">The type.</typeparam>
         /// <returns>The empty array object.</returns>
+        [Obsolete("Use Array.Empty instead.")]
         public static T[] GetEmptyArray<T>()
         {
-            return Enumerable.Empty<T>() as T[];
+            return Array.Empty<T>();
         }
 
         /// <summary>
@@ -179,13 +183,22 @@ namespace FlaxEngine
         }
 
         /// <summary>
+        /// Gets all currently loaded assemblies in the runtime.
+        /// </summary>
+        /// <returns>List of assemblies</returns>
+        public static Assembly[] GetAssemblies()
+        {
+            return AssemblyLoadContext.Default.Assemblies.Concat(NativeInterop.scriptingAssemblyLoadContext.Assemblies).ToArray();
+        }
+
+        /// <summary>
         /// Gets the assembly with the given name.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>The assembly or null if not found.</returns>
         public static Assembly GetAssemblyByName(string name)
         {
-            return GetAssemblyByName(name, AppDomain.CurrentDomain.GetAssemblies());
+            return GetAssemblyByName(name, GetAssemblies());
         }
 
         /// <summary>
@@ -209,13 +222,120 @@ namespace FlaxEngine
             return result;
         }
 
-        internal static T[] ExtractArrayFromList<T>(List<T> list)
+        /// <summary>
+        /// Gets the location of the assembly.
+        /// </summary>
+        /// <param name="assembly">The assembly.</param>
+        /// <returns>Path in the filesystem</returns>
+        public static string GetAssemblyLocation(Assembly assembly)
         {
-            return list != null ? (T[])Internal_ExtractArrayFromList(list) : null;
+            var location = assembly.Location;
+            if (!string.IsNullOrEmpty(location))
+                return location;
+            if (Interop.NativeInterop.AssemblyLocations.TryGetValue(assembly.FullName, out location))
+                return location;
+            return null;
         }
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern Array Internal_ExtractArrayFromList(object list);
+        private class ExtractArrayFromListContext<T>
+        {
+            public static FieldInfo itemsField;
+        }
+
+        internal static T[] ExtractArrayFromList<T>(List<T> list)
+        {
+            if (list == null)
+                return null;
+
+            if (ExtractArrayFromListContext<T>.itemsField == null)
+            {
+                Type listType = typeof(List<T>);
+                ExtractArrayFromListContext<T>.itemsField = listType.GetField("_items", BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+
+            return (T[])ExtractArrayFromListContext<T>.itemsField.GetValue(list); // boxing is slower;
+        }
+
+        internal static Float2[] ConvertCollection(Vector2[] v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            Float2[] result = null;
+            if (v != null && v.Length != 0)
+            {
+                result = new Float2[v.Length];
+                for (int i = 0; i < v.Length; i++)
+                    result[i] = v[i];
+            }
+            return result;
+        }
+
+        internal static List<Float2> ConvertCollection(List<Vector2> v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            List<Float2> result = null;
+            if (v != null && v.Count != 0)
+            {
+                result = new List<Float2>();
+                result.Capacity = v.Count;
+                for (int i = 0; i < v.Count; i++)
+                    result.Add(v[i]);
+            }
+            return result;
+        }
+
+        internal static Float3[] ConvertCollection(Vector3[] v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            Float3[] result = null;
+            if (v != null && v.Length != 0)
+            {
+                result = new Float3[v.Length];
+                for (int i = 0; i < v.Length; i++)
+                    result[i] = v[i];
+            }
+            return result;
+        }
+
+        internal static List<Float3> ConvertCollection(List<Vector3> v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            List<Float3> result = null;
+            if (v != null && v.Count != 0)
+            {
+                result = new List<Float3>();
+                result.Capacity = v.Count;
+                for (int i = 0; i < v.Count; i++)
+                    result.Add(v[i]);
+            }
+            return result;
+        }
+
+        internal static Float4[] ConvertCollection(Vector4[] v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            Float4[] result = null;
+            if (v != null && v.Length != 0)
+            {
+                result = new Float4[v.Length];
+                for (int i = 0; i < v.Length; i++)
+                    result[i] = v[i];
+            }
+            return result;
+        }
+
+        internal static List<Float4> ConvertCollection(List<Vector4> v)
+        {
+            // [Deprecated on 26.05.2022, expires on 26.05.2024]
+            List<Float4> result = null;
+            if (v != null && v.Count != 0)
+            {
+                result = new List<Float4>();
+                result.Capacity = v.Count;
+                for (int i = 0; i < v.Count; i++)
+                    result.Add(v[i]);
+            }
+            return result;
+        }
 
         /// <summary>
         /// Reads the color from the binary stream.
@@ -265,6 +385,105 @@ namespace FlaxEngine
         public static Vector4 ReadVector4(this BinaryReader stream)
         {
             return new Vector4(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Vector2 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        /// <returns>The value.</returns>
+        public static Vector2 ReadVector2(this BinaryReader stream, bool useDouble)
+        {
+            if (useDouble)
+                return new Vector2(stream.ReadDouble(), stream.ReadDouble());
+            return new Vector2(stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Vector3 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        /// <returns>The value.</returns>
+        public static Vector3 ReadVector3(this BinaryReader stream, bool useDouble)
+        {
+            if (useDouble)
+                return new Vector3(stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble());
+            return new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Vector4 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        /// <returns>The value.</returns>
+        public static Vector4 ReadVector4(this BinaryReader stream, bool useDouble)
+        {
+            if (useDouble)
+                return new Vector4(stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble());
+            return new Vector4(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Float2 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Float2 ReadFloat2(this BinaryReader stream)
+        {
+            return new Float2(stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Float3 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Float3 ReadFloat3(this BinaryReader stream)
+        {
+            return new Float3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Float4 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Float4 ReadFloat4(this BinaryReader stream)
+        {
+            return new Float4(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
+        }
+
+        /// <summary>
+        /// Reads the Double2 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Double2 ReadDouble2(this BinaryReader stream)
+        {
+            return new Double2(stream.ReadDouble(), stream.ReadDouble());
+        }
+
+        /// <summary>
+        /// Reads the Double3 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Double3 ReadDouble3(this BinaryReader stream)
+        {
+            return new Double3(stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble());
+        }
+
+        /// <summary>
+        /// Reads the Double4 from the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <returns>The value.</returns>
+        public static Double4 ReadDouble4(this BinaryReader stream)
+        {
+            return new Double4(stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble(), stream.ReadDouble());
         }
 
         /// <summary>
@@ -357,6 +576,34 @@ namespace FlaxEngine
             return new Matrix(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
         }
 
+        internal static byte[] ReadJsonBytes(this BinaryReader stream)
+        {
+            // ReadStream::ReadJson
+            var engineBuild = stream.ReadInt32();
+            var size = stream.ReadInt32();
+            return stream.ReadBytes(size);
+        }
+
+        /// <summary>
+        /// Deserializes object from Json by reading it as a raw data (ver+length+bytes).
+        /// </summary>
+        /// <remarks>Reads version number, data length and actual data bytes from the stream.</remarks>
+        /// <param name="stream">The stream.</param>
+        /// <param name="obj">The object to deserialize.</param>
+        public static void ReadJson(this BinaryReader stream, ISerializable obj)
+        {
+            // ReadStream::ReadJson
+            var engineBuild = stream.ReadInt32();
+            var size = stream.ReadInt32();
+            if (obj != null)
+            {
+                var data = stream.ReadBytes(size);
+                Json.JsonSerializer.LoadFromBytes(obj, data, engineBuild);
+            }
+            else
+                stream.BaseStream.Seek(size, SeekOrigin.Current);
+        }
+
         /// <summary>
         /// Writes the color to the binary stream.
         /// </summary>
@@ -390,6 +637,108 @@ namespace FlaxEngine
         /// <param name="value">The value to write.</param>
         public static void Write(this BinaryWriter stream, Vector2 value)
         {
+            stream.Write((float)value.X);
+            stream.Write((float)value.Y);
+        }
+
+        /// <summary>
+        /// Writes the Vector3 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Vector3 value)
+        {
+            stream.Write((float)value.X);
+            stream.Write((float)value.Y);
+            stream.Write((float)value.Z);
+        }
+
+        /// <summary>
+        /// Writes the Vector4 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Vector4 value)
+        {
+            stream.Write((float)value.X);
+            stream.Write((float)value.Y);
+            stream.Write((float)value.Z);
+            stream.Write((float)value.W);
+        }
+
+        /// <summary>
+        /// Writes the Vector2 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        public static void Write(this BinaryWriter stream, Vector2 value, bool useDouble)
+        {
+            if (useDouble)
+            {
+                stream.Write((double)value.X);
+                stream.Write((double)value.Y);
+            }
+            else
+            {
+                stream.Write((float)value.X);
+                stream.Write((float)value.Y);
+            }
+        }
+
+        /// <summary>
+        /// Writes the Vector3 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        public static void Write(this BinaryWriter stream, Vector3 value, bool useDouble)
+        {
+            if (useDouble)
+            {
+                stream.Write((double)value.X);
+                stream.Write((double)value.Y);
+                stream.Write((double)value.Z);
+            }
+            else
+            {
+                stream.Write((float)value.X);
+                stream.Write((float)value.Y);
+                stream.Write((float)value.Z);
+            }
+        }
+
+        /// <summary>
+        /// Writes the Vector4 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="useDouble">True to explicitly use 64-bit precision for serialized data, otherwise will use 32-bit precision.</param>
+        public static void Write(this BinaryWriter stream, Vector4 value, bool useDouble)
+        {
+            if (useDouble)
+            {
+                stream.Write((double)value.X);
+                stream.Write((double)value.Y);
+                stream.Write((double)value.Z);
+                stream.Write((double)value.W);
+            }
+            else
+            {
+                stream.Write((float)value.X);
+                stream.Write((float)value.Y);
+                stream.Write((float)value.Z);
+                stream.Write((float)value.W);
+            }
+        }
+
+        /// <summary>
+        /// Writes the Vector2 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Float2 value)
+        {
             stream.Write(value.X);
             stream.Write(value.Y);
         }
@@ -399,7 +748,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="stream">The stream.</param>
         /// <param name="value">The value to write.</param>
-        public static void Write(this BinaryWriter stream, Vector3 value)
+        public static void Write(this BinaryWriter stream, Float3 value)
         {
             stream.Write(value.X);
             stream.Write(value.Y);
@@ -411,7 +760,43 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="stream">The stream.</param>
         /// <param name="value">The value to write.</param>
-        public static void Write(this BinaryWriter stream, Vector4 value)
+        public static void Write(this BinaryWriter stream, Float4 value)
+        {
+            stream.Write(value.X);
+            stream.Write(value.Y);
+            stream.Write(value.Z);
+            stream.Write(value.W);
+        }
+
+        /// <summary>
+        /// Writes the Vector2 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Double2 value)
+        {
+            stream.Write(value.X);
+            stream.Write(value.Y);
+        }
+
+        /// <summary>
+        /// Writes the Vector3 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Double3 value)
+        {
+            stream.Write(value.X);
+            stream.Write(value.Y);
+            stream.Write(value.Z);
+        }
+
+        /// <summary>
+        /// Writes the Vector4 to the binary stream.
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <param name="value">The value to write.</param>
+        public static void Write(this BinaryWriter stream, Double4 value)
         {
             stream.Write(value.X);
             stream.Write(value.Y);
@@ -547,6 +932,149 @@ namespace FlaxEngine
             stream.Write(value.M42);
             stream.Write(value.M43);
             stream.Write(value.M44);
+        }
+
+        internal static void WriteJsonBytes(this BinaryWriter stream, byte[] bytes)
+        {
+            // WriteStream::WriteJson
+            stream.Write(Globals.EngineBuildNumber);
+            if (bytes != null)
+            {
+                stream.Write(bytes.Length);
+                stream.Write(bytes);
+            }
+            else
+                stream.Write(0);
+        }
+
+        /// <summary>
+        /// Serializes object to Json and writes it as a raw data (ver+length+bytes).
+        /// </summary>
+        /// <param name="stream">The stream.</param>
+        /// <remarks>Writes version number, data length and actual data bytes to the stream.</remarks>
+        /// <param name="obj">The object to serialize.</param>
+        public static void WriteJson(this BinaryWriter stream, ISerializable obj)
+        {
+            // WriteStream::WriteJson
+            stream.Write(Globals.EngineBuildNumber);
+            if (obj != null)
+            {
+                var bytes = Json.JsonSerializer.SaveToBytes(obj);
+                stream.Write(bytes.Length);
+                stream.Write(bytes);
+            }
+            else
+                stream.Write(0);
+        }
+
+        /// <summary>
+        /// Initializes the structure (value type) by inflating it with values from <see cref="System.ComponentModel.DefaultValueAttribute"/> (recursive).
+        /// </summary>
+        /// <param name="obj">The object to initialize.</param>
+        /// <param name="type">The structure type.</param>
+        public static void InitStructure(object obj, Type type)
+        {
+            var fields = type.GetFields(BindingFlags.Default | BindingFlags.Instance | BindingFlags.Public);
+            for (var i = 0; i < fields.Length; i++)
+            {
+                var field = fields[i];
+                var fieldType = field.FieldType;
+                var attr = field.GetCustomAttribute<System.ComponentModel.DefaultValueAttribute>();
+                if (attr != null)
+                {
+                    var value = attr.Value;
+                    if (value != null && value.GetType() != fieldType)
+                        value = Convert.ChangeType(value, fieldType);
+                    field.SetValue(obj, value);
+                }
+                else if (fieldType.IsValueType)
+                {
+                    var fieldValue = Activator.CreateInstance(fieldType);
+                    InitStructure(fieldValue, fieldType);
+                    field.SetValue(obj, fieldValue);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the array of method parameter types.
+        /// </summary>
+        /// <param name="method">The method to get it's parameters.</param>
+        /// <returns>Method parameters array.</returns>
+        public static Type[] GetParameterTypes(this MethodBase method)
+        {
+            Type[] parameterTypes;
+            var parameters = method.GetParameters();
+            if (parameters.Length != 0)
+            {
+                parameterTypes = new Type[parameters.Length];
+                for (int i = 0; i < parameters.Length; i++)
+                    parameterTypes[i] = parameters[i].ParameterType;
+            }
+            else
+                parameterTypes = Array.Empty<Type>();
+            return parameterTypes;
+        }
+
+        /// <summary>
+        /// A category of number values used for formatting and input fields.
+        /// </summary>
+        public enum ValueCategory
+        {
+            /// <summary>
+            /// Nothing.
+            /// </summary>
+            None,
+
+            /// <summary>
+            /// Distance (eg. meters).
+            /// </summary>
+            Distance,
+
+            /// <summary>
+            /// Area (eg. m^2).
+            /// </summary>
+            Area,
+
+            /// <summary>
+            /// Volume (eg. m^3).
+            /// </summary>
+            Volume,
+
+            /// <summary>
+            /// Mass (eg. kilograms).
+            /// </summary>
+            Mass,
+
+            /// <summary>
+            /// Angle (eg. degrees).
+            /// </summary>
+            Angle,
+
+            /// <summary>
+            /// Speed (distance / time).
+            /// </summary>
+            Speed,
+
+            /// <summary>
+            /// Acceleration (distance^2 / time).
+            /// </summary>
+            Acceleration,
+
+            /// <summary>
+            /// Time (eg. seconds).
+            /// </summary>
+            Time,
+
+            /// <summary>
+            /// Force (mass * distance / time^2).
+            /// </summary>
+            Force,
+
+            /// <summary>
+            /// Torque (mass * distance^2 / time^2).
+            /// </summary>
+            Torque,
         }
     }
 }

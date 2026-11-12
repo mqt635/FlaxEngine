@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Packed.h"
 #include "Vector2.h"
@@ -6,37 +6,57 @@
 #include "Vector4.h"
 #include "Color.h"
 
-Float1010102::Float1010102(float x, float y, float z, float w)
+FloatR10G10B10A2::FloatR10G10B10A2(uint32 packed)
+    : Value(packed)
 {
-    x = Math::Clamp(x, 0.0f, 1.0f);
-    y = Math::Clamp(y, 0.0f, 1.0f);
-    z = Math::Clamp(z, 0.0f, 1.0f);
-    w = Math::Clamp(w, 0.0f, 1.0f);
+}
+
+FloatR10G10B10A2::FloatR10G10B10A2(float x, float y, float z, float w)
+{
+    x = Math::Saturate(x);
+    y = Math::Saturate(y);
+    z = Math::Saturate(z);
+    w = Math::Saturate(w);
 
     x = Math::Round(x * 1023.0f);
     y = Math::Round(y * 1023.0f);
     z = Math::Round(z * 1023.0f);
     w = Math::Round(w * 3.0f);
 
-    Value = ((uint32)w << 30) |
-            (((uint32)z & 0x3FF) << 20) |
-            (((uint32)y & 0x3FF) << 10) |
-            (((uint32)x & 0x3FF));
+    Value = ((uint32)w << 30) | (((uint32)z & 0x3FF) << 20) | (((uint32)y & 0x3FF) << 10) | (((uint32)x & 0x3FF));
 }
 
-Float1010102::Float1010102(const Vector3& v, float alpha)
-    : Float1010102(v.X, v.Y, v.Z, alpha)
+FloatR10G10B10A2::FloatR10G10B10A2(const Float3& v, float alpha)
+    : FloatR10G10B10A2(v.X, v.Y, v.Z, alpha)
 {
 }
 
-Float1010102::Float1010102(const float* values)
-    : Float1010102(values[0], values[1], values[2], values[3])
+FloatR10G10B10A2::FloatR10G10B10A2(const Float4& v)
+    : FloatR10G10B10A2(v.X, v.Y, v.Z, v.W)
 {
 }
 
-Float1010102::operator Vector4() const
+FloatR10G10B10A2::FloatR10G10B10A2(const float* values)
+    : FloatR10G10B10A2(values[0], values[1], values[2], values[3])
 {
-    Vector4 vectorOut;
+}
+
+Float3 FloatR10G10B10A2::ToFloat3() const
+{
+    Float3 vectorOut;
+    uint32 tmp;
+    tmp = Value & 0x3FF;
+    vectorOut.X = (float)tmp / 1023.f;
+    tmp = (Value >> 10) & 0x3FF;
+    vectorOut.Y = (float)tmp / 1023.f;
+    tmp = (Value >> 20) & 0x3FF;
+    vectorOut.Z = (float)tmp / 1023.f;
+    return vectorOut;
+}
+
+Float4 FloatR10G10B10A2::ToFloat4() const
+{
+    Float4 vectorOut;
     uint32 tmp;
     tmp = Value & 0x3FF;
     vectorOut.X = (float)tmp / 1023.f;
@@ -45,19 +65,6 @@ Float1010102::operator Vector4() const
     tmp = (Value >> 20) & 0x3FF;
     vectorOut.Z = (float)tmp / 1023.f;
     vectorOut.W = (float)(Value >> 30) / 3.f;
-    return vectorOut;
-}
-
-Vector3 Float1010102::ToVector3() const
-{
-    Vector3 vectorOut;
-    uint32 tmp;
-    tmp = Value & 0x3FF;
-    vectorOut.X = (float)tmp / 1023.f;
-    tmp = (Value >> 10) & 0x3FF;
-    vectorOut.Y = (float)tmp / 1023.f;
-    tmp = (Value >> 20) & 0x3FF;
-    vectorOut.Z = (float)tmp / 1023.f;
     return vectorOut;
 }
 
@@ -172,12 +179,12 @@ FloatR11G11B10::FloatR11G11B10(float x, float y, float z)
     Value = (result[0] & 0x7ff) | ((result[1] & 0x7ff) << 11) | ((result[2] & 0x3ff) << 22);
 }
 
-FloatR11G11B10::FloatR11G11B10(const Vector3& v)
+FloatR11G11B10::FloatR11G11B10(const Float3& v)
     : FloatR11G11B10(v.X, v.Y, v.Z)
 {
 }
 
-FloatR11G11B10::FloatR11G11B10(const Vector4& v)
+FloatR11G11B10::FloatR11G11B10(const Float4& v)
     : FloatR11G11B10(v.X, v.Y, v.Z)
 {
 }
@@ -192,12 +199,12 @@ FloatR11G11B10::FloatR11G11B10(const float* values)
 {
 }
 
-FloatR11G11B10::operator Vector3() const
+FloatR11G11B10::operator Float3() const
 {
-    return ToVector3();
+    return ToFloat3();
 }
 
-Vector3 FloatR11G11B10::ToVector3() const
+Float3 FloatR11G11B10::ToFloat3() const
 {
     // Reference: https://github.com/microsoft/DirectXMath
 
@@ -309,20 +316,20 @@ Vector3 FloatR11G11B10::ToVector3() const
         result[2] = ((exponent + 112) << 23) | (mantissa << 18);
     }
 
-    return Vector3((float*)result);
+    return Float3((float*)result);
 }
 
-Vector2 RG16UNorm::ToVector2() const
+Float2 RG16UNorm::ToFloat2() const
 {
-    return Vector2(
+    return Float2(
         (float)X / MAX_uint16,
         (float)Y / MAX_uint16
     );
 }
 
-Vector4 RGBA16UNorm::ToVector4() const
+Float4 RGBA16UNorm::ToFloat4() const
 {
-    return Vector4(
+    return Float4(
         (float)X / MAX_uint16,
         (float)Y / MAX_uint16,
         (float)Z / MAX_uint16,

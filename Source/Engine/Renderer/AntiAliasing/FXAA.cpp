@@ -1,45 +1,41 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FXAA.h"
 #include "Engine/Content/Assets/Shader.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Graphics/GPUContext.h"
+#include "Engine/Graphics/GPUPass.h"
 #include "Engine/Graphics/Graphics.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
+
+GPU_CB_STRUCT(Data {
+    Float4 ScreenSize;
+    });
+
+String FXAA::ToString() const
+{
+    return TEXT("FXAA");
+}
 
 bool FXAA::Init()
 {
-    // Create pipeline state
     _psFXAA.CreatePipelineStates();
-
-    // Load shader
-    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/FXAA"));
+    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/AntiAliasing/FXAA"));
     if (_shader == nullptr)
         return true;
-#if COMPILE_WITH_DEV_ENV
-    _shader.Get()->OnReloading.Bind<FXAA, &FXAA::OnShaderReloading>(this);
-#endif
-
+    BIND_SHADER_RELOADING(_shader, FXAA, OnShaderReloading);
     return false;
 }
 
 bool FXAA::setupResources()
 {
-    // Check shader
     if (!_shader->IsLoaded())
     {
         return true;
     }
-    const auto shader = _shader->GetShader();
+    const auto shader = _shader->GPU;
+    CHECK_INVALID_SHADER_PASS_CB_SIZE(shader, 0, Data);
 
-    // Validate shader constant buffer size
-    if (shader->GetCB(0)->GetSize() != sizeof(Data))
-    {
-        REPORT_INVALID_SHADER_PASS_CB_SIZE(shader, 0, Data);
-        return true;
-    }
-
-    // Create pipeline state
     GPUPipelineState::Description psDesc;
     if (!_psFXAA.IsValid())
     {
@@ -56,7 +52,6 @@ void FXAA::Dispose()
     // Base
     RendererPass::Dispose();
 
-    // Cleanup
     _psFXAA.Delete();
     _shader = nullptr;
 }
@@ -64,29 +59,27 @@ void FXAA::Dispose()
 void FXAA::Render(RenderContext& renderContext, GPUTexture* input, GPUTextureView* output)
 {
     auto context = GPUDevice::Instance->GetMainContext();
-    const auto qualityLevel = Math::Clamp(static_cast<int32>(Graphics::AAQuality), 0, static_cast<int32>(Quality::MAX) - 1);
 
-    // Ensure to have valid data
+    auto rtAction = GPUDrawPassAction::Store;
+    GPUDrawPass drawPass(context, ToSpan(&output, 1), ToSpan(&rtAction, 1));
     if (checkIfSkipPass())
     {
         // Resources are missing. Do not perform rendering, just copy input frame.
-        context->SetRenderTarget(output);
         context->Draw(input);
         return;
     }
-
     PROFILE_GPU_CPU("Fast Approximate Antialiasing");
-
+     
     // Bind input
     Data data;
     data.ScreenSize = renderContext.View.ScreenSize;
-    const auto cb = _shader->GetShader()->GetCB(0);
+    const auto cb = _shader->GPU->GetCB(0);
     context->UpdateCB(cb, &data);
     context->BindCB(0, cb);
     context->BindSR(0, input);
 
     // Render
-    context->SetRenderTarget(output);
+    const auto qualityLevel = Math::Clamp(static_cast<int32>(Graphics::AAQuality), 0, static_cast<int32>(Quality::MAX) - 1);
     context->SetState(_psFXAA.Get(qualityLevel));
     context->DrawFullscreenTriangle();
 }

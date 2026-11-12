@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -7,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://github.com/KhronosGroup/glslang
 /// </summary>
-public class glslang : DepsModule
+public class glslang : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -16,9 +16,6 @@ public class glslang : DepsModule
 
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "LICENSE.txt";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -39,6 +36,7 @@ public class glslang : DepsModule
             options.OutputFiles.Add(Path.Combine(depsRoot, "SPIRV.lib"));
             break;
         case TargetPlatform.Linux:
+        case TargetPlatform.Mac:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libGenericCodeGen.a"));
             options.OutputFiles.Add(Path.Combine(depsRoot, "libglslang.a"));
             options.OutputFiles.Add(Path.Combine(depsRoot, "libHLSL.a"));

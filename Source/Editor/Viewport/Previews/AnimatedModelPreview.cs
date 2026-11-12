@@ -1,10 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI.ContextMenu;
-using FlaxEngine;
 using FlaxEditor.GUI.Input;
-using FlaxEngine.GUI;
+using FlaxEngine;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Viewport.Previews
@@ -15,13 +14,17 @@ namespace FlaxEditor.Viewport.Previews
     /// <seealso cref="AssetPreview" />
     public class AnimatedModelPreview : AssetPreview
     {
-        private ContextMenuButton _showNodesButton, _showBoundsButton, _showFloorButton;
-        private bool _showNodes, _showBounds, _showFloor, _showCurrentLOD;
         private AnimatedModel _previewModel;
+        private ContextMenuButton _showNodesButton, _showBoundsButton, _showFloorButton, _showNodesNamesButton, _nodeNameSizeButton;
+        private bool _showNodes, _showBounds, _showFloor, _showNodesNames;
         private StaticModel _floorModel;
-        private ContextMenuButton _showCurrentLODButton;
-        private bool _playAnimation;
+        private bool _playAnimation, _playAnimationOnce, _autoAdjustCamera = true;
         private float _playSpeed = 1.0f;
+
+        /// <summary>
+        /// Snaps the preview actor to the world origin.
+        /// </summary>
+        protected bool _snapToOrigin = true;
 
         /// <summary>
         /// Gets or sets the skinned model asset to preview.
@@ -94,6 +97,31 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <summary>
+        /// Gets or sets a value indicating whether show animated model skeleton nodes names debug view.
+        /// </summary>
+        public bool ShowNodesNames
+        {
+            get => _showNodesNames;
+            set
+            {
+                if (_showNodesNames == value)
+                    return;
+                _showNodesNames = value;
+                if (value)
+                    ShowDebugDraw = true;
+                if (_showNodesNamesButton != null)
+                    _showNodesNamesButton.Checked = value;
+                if (_nodeNameSizeButton != null)
+                    _nodeNameSizeButton.Enabled = value;
+            }
+        }
+
+        /// <summary>
+        /// The font size used in the node name debug draw.
+        /// </summary>
+        public int NodeNamesSize = 10;
+
+        /// <summary>
         /// Gets or sets a value indicating whether show animated model bounding box debug view.
         /// </summary>
         public bool ShowBounds
@@ -127,7 +155,7 @@ namespace FlaxEditor.Viewport.Previews
                     _floorModel = new StaticModel
                     {
                         Position = new Vector3(0, -25, 0),
-                        Scale = new Vector3(5, 0.5f, 5),
+                        Scale = new Float3(5, 0.5f, 5),
                         Model = FlaxEngine.Content.LoadAsync<Model>(StringUtils.CombinePaths(Globals.EngineContentFolder, "Editor/Primitives/Cube.flax")),
                     };
                 }
@@ -158,14 +186,15 @@ namespace FlaxEditor.Viewport.Previews
         : base(useWidgets)
         {
             Task.Begin += OnBegin;
+            ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
 
             // Setup preview scene
             _previewModel = new AnimatedModel
             {
                 UseTimeScale = false,
                 UpdateWhenOffscreen = true,
-                //_previewModel.BoundsScale = 1000.0f;
-                UpdateMode = AnimatedModel.AnimationUpdateMode.Manual
+                BoundsScale = 1.0f,
+                UpdateMode = AnimatedModel.AnimationUpdateMode.Manual,
             };
             Task.AddCustomActor(_previewModel);
 
@@ -173,32 +202,33 @@ namespace FlaxEditor.Viewport.Previews
             {
                 // Show Bounds
                 _showBoundsButton = ViewWidgetShowMenu.AddButton("Bounds", () => ShowBounds = !ShowBounds);
+                _showBoundsButton.CloseMenuOnClick = false;
 
                 // Show Skeleton
                 _showNodesButton = ViewWidgetShowMenu.AddButton("Skeleton", () => ShowNodes = !ShowNodes);
+                _showNodesButton.CloseMenuOnClick = false;
+
+                // Show Skeleton Names
+                _showNodesNamesButton = ViewWidgetShowMenu.AddButton("Skeleton Names", () => ShowNodesNames = !ShowNodesNames);
+                _showNodesNamesButton.CloseMenuOnClick = false;
 
                 // Show Floor
                 _showFloorButton = ViewWidgetShowMenu.AddButton("Floor", button => ShowFloor = !ShowFloor);
                 _showFloorButton.IndexInParent = 1;
+                _showFloorButton.CloseMenuOnClick = false;
 
-                // Show Current LOD
-                _showCurrentLODButton = ViewWidgetShowMenu.AddButton("Current LOD", button =>
+                // Skeleton Names Size
+                _nodeNameSizeButton = ViewWidgetButtonMenu.AddButton("Skeleton Names Size");
+                _nodeNameSizeButton.CloseMenuOnClick = false;
+                var nodeNameSizeValue = new IntValueBox(NodeNamesSize, 118, 2, 70.0f, 1, 32)
                 {
-                    _showCurrentLOD = !_showCurrentLOD;
-                    _showCurrentLODButton.Icon = _showCurrentLOD ? Style.Current.CheckBoxTick : SpriteHandle.Invalid;
-                });
-                _showCurrentLODButton.IndexInParent = 2;
+                    Parent = _nodeNameSizeButton
+                };
+                _nodeNameSizeButton.Enabled = ShowNodesNames;
+                nodeNameSizeValue.ValueChanged += () => NodeNamesSize = nodeNameSizeValue.Value;
 
-                // Preview LOD
-                {
-                    var previewLOD = ViewWidgetButtonMenu.AddButton("Preview LOD");
-                    var previewLODValue = new IntValueBox(-1, 90, 2, 70.0f, -1, 10, 0.02f)
-                    {
-                        Parent = previewLOD
-                    };
-                    previewLODValue.ValueChanged += () => _previewModel.ForcedLOD = previewLODValue.Value;
-                    ViewWidgetButtonMenu.VisibleChanged += control => previewLODValue.Value = _previewModel.ForcedLOD;
-                }
+                // Hide not needed buttons
+                ViewWidgetButtonMenu.GetChildMenu("View Layers").Visible = false;
             }
 
             // Enable shadows
@@ -234,12 +264,68 @@ namespace FlaxEditor.Viewport.Previews
             _previewModel.UpdateAnimation();
         }
 
+        /// <summary>
+        /// Sets the weight of the blend shape and updates the preview model (if not animated right now).
+        /// </summary>
+        /// <param name="name">The blend shape name.</param>
+        /// <param name="value">The normalized weight of the blend shape (in range -1:1).</param>
+        public void SetBlendShapeWeight(string name, float value)
+        {
+            _previewModel.SetBlendShapeWeight(name, value);
+            _playAnimationOnce = true;
+        }
+
+        /// <summary>
+        /// Gets the skinned model bounds. Handles skeleton-only assets.
+        /// </summary>
+        /// <returns>The local bounds.</returns>
+        public BoundingBox GetBounds()
+        {
+            var box = BoundingBox.Zero;
+            var skinnedModel = SkinnedModel;
+            if (skinnedModel && skinnedModel.IsLoaded)
+            {
+                if (skinnedModel.LODs.Length != 0)
+                {
+                    // Use model geometry bounds
+                    box = skinnedModel.GetBox();
+                }
+                else
+                {
+                    // Use skeleton bounds
+                    _previewModel.GetCurrentPose(out var pose);
+                    if (pose != null && pose.Length != 0)
+                    {
+                        var point = pose[0].TranslationVector;
+                        box = new BoundingBox(point, point);
+                        for (int i = 1; i < pose.Length; i++)
+                        {
+                            point = pose[i].TranslationVector;
+                            box.Minimum = Vector3.Min(box.Minimum, point);
+                            box.Maximum = Vector3.Max(box.Maximum, point);
+                        }
+                    }
+                }
+            }
+            return box;
+        }
+
         private void OnBegin(RenderTask task, GPUContext context)
         {
+            if (_autoAdjustCamera && SkinnedModel && SkinnedModel.IsLoaded)
+            {
+                // Control camera's near/far planes to properly cover object
+                _autoAdjustCamera = false;
+                ModelPreview.AdjustCamera(this, SkinnedModel.GetBox());
+            }
+
             if (!ScaleToFit)
             {
-                _previewModel.Scale = Vector3.One;
-                _previewModel.Position = Vector3.Zero;
+                if (_snapToOrigin)
+                {
+                    _previewModel.Scale = Vector3.One;
+                    _previewModel.Position = Vector3.Zero;
+                }
                 return;
             }
 
@@ -248,50 +334,18 @@ namespace FlaxEditor.Viewport.Previews
             if (skinnedModel && skinnedModel.IsLoaded)
             {
                 float targetSize = 50.0f;
-                BoundingBox box = skinnedModel.GetBox();
-                float maxSize = Mathf.Max(0.001f, box.Size.MaxValue);
+                BoundingBox box = GetBounds();
+                float maxSize = Mathf.Max(0.001f, (float)box.Size.MaxValue);
                 float scale = targetSize / maxSize;
                 _previewModel.Scale = new Vector3(scale);
                 _previewModel.Position = box.Center * (-0.5f * scale) + new Vector3(0, -10, 0);
             }
         }
 
-        private int ComputeLODIndex(SkinnedModel model)
+        private void OnScriptsReloadBegin()
         {
-            if (PreviewActor.ForcedLOD != -1)
-                return PreviewActor.ForcedLOD;
-
-            // Based on RenderTools::ComputeModelLOD
-            CreateProjectionMatrix(out var projectionMatrix);
-            float screenMultiple = 0.5f * Mathf.Max(projectionMatrix.M11, projectionMatrix.M22);
-            var sphere = PreviewActor.Sphere;
-            var viewOrigin = ViewPosition;
-            float distSqr = Vector3.DistanceSquared(ref sphere.Center, ref viewOrigin);
-            var screenRadiusSquared = Mathf.Square(screenMultiple * sphere.Radius) / Mathf.Max(1.0f, distSqr);
-
-            // Check if model is being culled
-            if (Mathf.Square(model.MinScreenSize * 0.5f) > screenRadiusSquared)
-                return -1;
-
-            // Skip if no need to calculate LOD
-            if (model.LoadedLODs == 0)
-                return -1;
-            var lods = model.LODs;
-            if (lods.Length == 0)
-                return -1;
-            if (lods.Length == 1)
-                return 0;
-
-            // Iterate backwards and return the first matching LOD
-            for (int lodIndex = lods.Length - 1; lodIndex >= 0; lodIndex--)
-            {
-                if (Mathf.Square(lods[lodIndex].ScreenSize * 0.5f) >= screenRadiusSquared)
-                {
-                    return lodIndex + PreviewActor.LODBias;
-                }
-            }
-
-            return 0;
+            // Prevent any crashes due to dangling references to anim events
+            _previewModel?.ResetAnimation();
         }
 
         /// <inheritdoc />
@@ -300,37 +354,52 @@ namespace FlaxEditor.Viewport.Previews
             base.OnDebugDraw(context, ref renderContext);
 
             // Draw skeleton nodes
-            if (_showNodes)
+            if (_showNodes || _showNodesNames)
             {
-                _previewModel.GetCurrentPose(out var pose);
+                _previewModel.GetCurrentPose(out var pose, true);
                 var nodes = _previewModel.SkinnedModel?.Nodes;
                 if (pose != null && pose.Length != 0 && nodes != null)
                 {
-                    // Draw bounding box at the node locations
                     var nodesMask = NodesMask != null && NodesMask.Length == nodes.Length ? NodesMask : null;
-                    var localBox = new OrientedBoundingBox(new Vector3(-1.0f), new Vector3(1.0f));
-                    for (int nodeIndex = 0; nodeIndex < pose.Length; nodeIndex++)
+                    if (_showNodes)
                     {
-                        if (nodesMask != null && !nodesMask[nodeIndex])
-                            continue;
-                        var transform = pose[nodeIndex];
-                        transform.Decompose(out var scale, out Matrix _, out _);
-                        transform = Matrix.Invert(Matrix.Scaling(scale)) * transform;
-                        var box = localBox * transform;
-                        DebugDraw.DrawWireBox(box, Color.Green, 0, false);
-                    }
-
-                    // Nodes connections
-                    for (int nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
-                    {
-                        int parentIndex = nodes[nodeIndex].ParentIndex;
-                        if (parentIndex != -1)
+                        // Draw bounding box at the node locations
+                        var boxSize = Mathf.Min(1.0f, _previewModel.BoundingSphere.Radius / 100.0f);
+                        var localBox = new OrientedBoundingBox(new Vector3(-boxSize), new Vector3(boxSize));
+                        for (int nodeIndex = 0; nodeIndex < pose.Length; nodeIndex++)
                         {
-                            if (nodesMask != null && (!nodesMask[nodeIndex] || !nodesMask[parentIndex]))
+                            if (nodesMask != null && !nodesMask[nodeIndex])
                                 continue;
-                            var parentPos = pose[parentIndex].TranslationVector;
-                            var bonePos = pose[nodeIndex].TranslationVector;
-                            DebugDraw.DrawLine(parentPos, bonePos, Color.Green, 0, false);
+                            var transform = pose[nodeIndex];
+                            transform.Decompose(out var scale, out Matrix3x3 _, out _);
+                            transform = Matrix.Invert(Matrix.Scaling(scale)) * transform;
+                            var box = localBox * transform;
+                            DebugDraw.DrawWireBox(box, Color.Green, 0, false);
+                        }
+
+                        // Nodes connections
+                        for (int nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
+                        {
+                            int parentIndex = nodes[nodeIndex].ParentIndex;
+                            if (parentIndex != -1)
+                            {
+                                if (nodesMask != null && (!nodesMask[nodeIndex] || !nodesMask[parentIndex]))
+                                    continue;
+                                var parentPos = pose[parentIndex].TranslationVector;
+                                var bonePos = pose[nodeIndex].TranslationVector;
+                                DebugDraw.DrawLine(parentPos, bonePos, Color.Green, 0, false);
+                            }
+                        }
+                    }
+                    if (_showNodesNames)
+                    {
+                        // Nodes names
+                        for (int nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
+                        {
+                            if (nodesMask != null && !nodesMask[nodeIndex])
+                                continue;
+                            //var t = new Transform(pose[nodeIndex].TranslationVector, Quaternion.Identity, new Float3(0.1f));
+                            DebugDraw.DrawText(nodes[nodeIndex].Name, pose[nodeIndex].TranslationVector, Color.White, NodeNamesSize, 0.0f, 0.25f);
                         }
                     }
                 }
@@ -339,38 +408,7 @@ namespace FlaxEditor.Viewport.Previews
             // Draw bounds
             if (_showBounds)
             {
-                DebugDraw.DrawWireBox(_previewModel.Box, Color.Violet.RGBMultiplied(0.8f), 0, false);
-            }
-        }
-
-        /// <inheritdoc />
-        public override void Draw()
-        {
-            base.Draw();
-
-            var skinnedModel = _previewModel.SkinnedModel;
-            if (_showCurrentLOD && skinnedModel)
-            {
-                var lodIndex = ComputeLODIndex(skinnedModel);
-                string text = string.Format("Current LOD: {0}", lodIndex);
-                if (lodIndex != -1)
-                {
-                    var lods = skinnedModel.LODs;
-                    lodIndex = Mathf.Clamp(lodIndex + PreviewActor.LODBias, 0, lods.Length - 1);
-                    var lod = lods[lodIndex];
-                    int triangleCount = 0, vertexCount = 0;
-                    for (int meshIndex = 0; meshIndex < lod.Meshes.Length; meshIndex++)
-                    {
-                        var mesh = lod.Meshes[meshIndex];
-                        triangleCount += mesh.TriangleCount;
-                        vertexCount += mesh.VertexCount;
-                    }
-                    text += string.Format("\nTriangles: {0:N0}\nVertices: {1:N0}", triangleCount, vertexCount);
-                }
-                var font = Style.Current.FontMedium;
-                var pos = new Vector2(10, 50);
-                Render2D.DrawText(font, text, new Rectangle(pos + Vector2.One, Size), Color.Black);
-                Render2D.DrawText(font, text, new Rectangle(pos, Size), Color.White);
+                DebugDrawBounds(_previewModel.BoundingBox);
             }
         }
 
@@ -380,8 +418,9 @@ namespace FlaxEditor.Viewport.Previews
             base.Update(deltaTime);
 
             // Manually update animation
-            if (PlayAnimation)
+            if (PlayAnimation || _playAnimationOnce)
             {
+                _playAnimationOnce = false;
                 _previewModel.UpdateAnimation();
             }
             else
@@ -392,29 +431,41 @@ namespace FlaxEditor.Viewport.Previews
             }
         }
 
+        /// <summary>
+        /// Resets the camera to focus on a object.
+        /// </summary>
+        public void ResetCamera()
+        {
+            ViewportCamera.SetArcBallView(_previewModel.BoundingBox);
+        }
+
         /// <inheritdoc />
         public override bool OnKeyDown(KeyboardKeys key)
         {
             switch (key)
             {
             case KeyboardKeys.F:
-                // Pay respect..
-                ViewportCamera.SetArcBallView(_previewModel.Box);
-                break;
+                ResetCamera();
+                return true;
+            case KeyboardKeys.Spacebar:
+                PlayAnimation = !PlayAnimation;
+                return true;
             }
+
             return base.OnKeyDown(key);
         }
 
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
             Object.Destroy(ref _floorModel);
             Object.Destroy(ref _previewModel);
             NodesMask = null;
             _showNodesButton = null;
             _showBoundsButton = null;
             _showFloorButton = null;
-            _showCurrentLODButton = null;
+            _showNodesNamesButton = null;
 
             base.OnDestroy();
         }

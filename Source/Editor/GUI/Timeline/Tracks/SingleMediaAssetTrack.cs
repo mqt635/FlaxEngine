@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI.Timeline.Undo;
@@ -39,7 +39,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 if (AssetID == value?.ID)
                     return;
                 AssetID = value?.ID ?? Guid.Empty;
-                _picker.SelectedAsset = value;
+                _picker.Validator.SelectedAsset = value;
                 OnAssetChanged();
                 Timeline?.MarkAsEdited();
             }
@@ -51,7 +51,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         {
             var width = 50.0f;
             var height = 36.0f;
-            _picker = new AssetPicker(new ScriptType(typeof(TAsset)), Vector2.Zero)
+            _picker = new AssetPicker(new ScriptType(typeof(TAsset)), Float2.Zero)
             {
                 AnchorPreset = AnchorPresets.MiddleRight,
                 Offsets = new Margin(-width - 2 + _muteCheckbox.Offsets.Left, width, height * -0.5f, height),
@@ -63,10 +63,10 @@ namespace FlaxEditor.GUI.Timeline.Tracks
 
         private void OnPickerSelectedItemChanged()
         {
-            if (Asset == (TAsset)_picker.SelectedAsset)
+            if (Asset == (TAsset)_picker.Validator.SelectedAsset)
                 return;
             using (new TrackUndoBlock(this))
-                Asset = (TAsset)_picker.SelectedAsset;
+                Asset = (TAsset)_picker.Validator.SelectedAsset;
         }
 
         /// <summary>

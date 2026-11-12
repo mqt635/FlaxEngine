@@ -1,12 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Core/Common.h"
-#include "Engine/Core/Math/BoundingSphere.h"
-#include "Engine/Core/Math/BoundingBox.h"
-#include "Engine/Core/Math/Int4.h"
-#include "Engine/Serialization/Stream.h"
+#include "Engine/Core/Types/Guid.h"
 #include "Engine/Graphics/Enums.h"
 #include "Types.h"
 #include "Config.h"
@@ -14,13 +10,14 @@
 #include "BlendShape.h"
 #include "Engine/Animations/AnimationData.h"
 
+class WriteStream;
+
 /// <summary>
 /// Data container for the common model meshes data. Supports holding all types of data related to the models pipeline.
 /// </summary>
 class FLAXENGINE_API MeshData
 {
 public:
-
     /// <summary>
     /// The slot index in the model materials to use during rendering.
     /// </summary>
@@ -39,32 +36,34 @@ public:
     /// <summary>
     /// Mesh positions buffer
     /// </summary>
-    Array<Vector3> Positions;
+    Array<Float3> Positions;
 
     /// <summary>
-    /// Texture coordinates
+    /// Texture coordinates (list of channels)
     /// </summary>
-    Array<Vector2> UVs;
+    Array<Array<Float2>, FixedAllocation<MODEL_MAX_UV>> UVs;
 
     /// <summary>
     /// Normals vector
     /// </summary>
-    Array<Vector3> Normals;
+    Array<Float3> Normals;
 
     /// <summary>
     /// Tangents vectors
     /// </summary>
-    Array<Vector3> Tangents;
+    Array<Float3> Tangents;
+
+    /// <summary>
+    /// Bitangents vectors signs (used for bitangent reconstruction). Can be +1 or -1.
+    /// bitangent = cross(normal, tangent) * sign
+    /// sign = dot(cross(bitangent, normal), tangent)
+    /// </summary>
+    Array<float> BitangentSigns;
 
     /// <summary>
     /// Mesh index buffer
     /// </summary>
     Array<uint32> Indices;
-
-    /// <summary>
-    /// Lightmap UVs
-    /// </summary>
-    Array<Vector2> LightmapUVs;
 
     /// <summary>
     /// Vertex colors
@@ -79,25 +78,34 @@ public:
     /// <summary>
     /// Skinned mesh index buffer (max 4 per bone)
     /// </summary>
-    Array<Vector4> BlendWeights;
+    Array<Float4> BlendWeights;
 
     /// <summary>
     /// Blend shapes used by this mesh
     /// </summary>
     Array<BlendShape> BlendShapes;
 
-public:
+    /// <summary>
+    /// Lightmap texture coordinates channel index. Value -1 indicates that channel is not available.
+    /// </summary>
+    int32 LightmapUVsIndex = -1;
 
     /// <summary>
-    /// Determines whether this instance has any mesh data.
+    /// Local translation for this mesh to be at it's local origin.
     /// </summary>
-    FORCE_INLINE bool HasData() const
-    {
-        return Indices.HasItems();
-    }
+    Vector3 OriginTranslation = Vector3::Zero;
+
+    /// <summary>
+    /// Orientation for this mesh at its local origin.
+    /// </summary>
+    Quaternion OriginOrientation = Quaternion::Identity;
+
+    /// <summary>
+    /// Meshes scaling.
+    /// </summary>
+    Vector3 Scaling = Vector3::One;
 
 public:
-
     /// <summary>
     /// Clear arrays
     /// </summary>
@@ -111,7 +119,8 @@ public:
     /// <param name="preserveContents">Failed if clear data otherwise will try to preserve the buffers contents.</param>
     /// <param name="withColors">True if use vertex colors buffer.</param>
     /// <param name="withSkin">True if use vertex blend indices and weights buffer.</param>
-    void EnsureCapacity(int32 vertices, int32 indices, bool preserveContents = false, bool withColors = true, bool withSkin = true);
+    /// <param name="texcoords">Amount of texture coordinate channels to use.</param>
+    void EnsureCapacity(int32 vertices, int32 indices, bool preserveContents = false, bool withColors = true, bool withSkin = true, int32 texcoords = 1);
 
     /// <summary>
     /// Swaps the vertex and index buffers contents (without a data copy) with the other mesh.
@@ -125,27 +134,13 @@ public:
     void Release();
 
 public:
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
     /// <summary>
     /// Init from model vertices array
     /// </summary>
     /// <param name="vertices">Array of vertices</param>
     /// <param name="verticesCount">Amount of vertices</param>
     void InitFromModelVertices(ModelVertex19* vertices, uint32 verticesCount);
-
-    /// <summary>
-    /// Init from model vertices array
-    /// </summary>
-    /// <param name="vertices">Array of vertices</param>
-    /// <param name="verticesCount">Amount of vertices</param>
-    void InitFromModelVertices(ModelVertex18* vertices, uint32 verticesCount);
-
-    /// <summary>
-    /// Init from model vertices array
-    /// </summary>
-    /// <param name="vertices">Array of vertices</param>
-    /// <param name="verticesCount">Amount of vertices</param>
-    void InitFromModelVertices(ModelVertex15* vertices, uint32 verticesCount);
 
     /// <summary>
     /// Init from model vertices array
@@ -163,14 +158,7 @@ public:
     /// <param name="vb2">Array of data for vertex buffer 2</param>
     /// <param name="verticesCount">Amount of vertices</param>
     void InitFromModelVertices(VB0ElementType18* vb0, VB1ElementType18* vb1, VB2ElementType18* vb2, uint32 verticesCount);
-
-    /// <summary>
-    /// Init from model vertices array
-    /// </summary>
-    /// <param name="vb0">Array of data for vertex buffer 0</param>
-    /// <param name="vb1">Array of data for vertex buffer 1</param>
-    /// <param name="verticesCount">Amount of vertices</param>
-    void InitFromModelVertices(VB0ElementType15* vb0, VB1ElementType15* vb1, uint32 verticesCount);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
     /// <summary>
     /// Sets the index buffer data.
@@ -180,44 +168,30 @@ public:
     void SetIndexBuffer(void* data, uint32 indicesCount);
 
 public:
-
-    /// <summary>
-    /// Pack mesh data to the stream
-    /// </summary>
-    /// <param name="stream">Output stream</param>
-    /// <returns>True if cannot save data, otherwise false</returns>
-    bool Pack2Model(WriteStream* stream) const;
-
-    /// <summary>
-    /// Pack skinned mesh data to the stream
-    /// </summary>
-    /// <param name="stream">Output stream</param>
-    /// <returns>True if cannot save data, otherwise false</returns>
-    bool Pack2SkinnedModel(WriteStream* stream) const;
-
     /// <summary>
     /// Calculate bounding box for the mesh
     /// </summary>
     /// <param name="result">Output box</param>
-    void CalculateBox(BoundingBox& result) const
-    {
-        if (Positions.HasItems())
-            BoundingBox::FromPoints(Positions.Get(), Positions.Count(), result);
-    }
+    void CalculateBox(BoundingBox& result) const;
 
     /// <summary>
     /// Calculate bounding sphere for the mesh
     /// </summary>
     /// <param name="result">Output sphere</param>
-    void CalculateSphere(BoundingSphere& result) const
-    {
-        if (Positions.HasItems())
-            BoundingSphere::FromPoints(Positions.Get(), Positions.Count(), result);
-    }
+    void CalculateSphere(BoundingSphere& result) const;
 
-public:
+    /// <summary>
+    /// Calculates bounding box and sphere for the mesh.
+    /// </summary>
+    /// <param name="box">Output box.</param>
+    /// <param name="sphere">Output sphere.</param>
+    void CalculateBounds(BoundingBox& box, BoundingSphere& sphere) const;
 
 #if COMPILE_WITH_MODEL_TOOL
+    /// <summary>
+    /// Setups Lightmap UVs based on the option.
+    /// </summary>
+    void SetLightmapUVsSource(ModelLightmapUVsSource source);
 
     /// <summary>
     /// Generate lightmap uvs for the mesh entry
@@ -236,7 +210,7 @@ public:
     /// <param name="position">The target position to check.</param>
     /// <param name="epsilon">The position comparision epsilon.</param>
     /// <param name="result">The output vertices indices array.</param>
-    void FindPositions(const Vector3& position, float epsilon, Array<int32>& result);
+    void FindPositions(const Float3& position, float epsilon, Array<int32>& result);
 
     /// <summary>
     /// Generates the normal vectors for the mesh geometry.
@@ -254,15 +228,21 @@ public:
 
     /// <summary>
     /// Reorders all triangles for improved vertex cache locality. It tries to arrange all triangles to fans and to render triangles which share vertices directly one after the other.
+    /// [Deprecated in v1.13]
     /// </summary>
+    DEPRECATED("Use Optimize instead as it does more advanced optimizations on index buffer.")
     void ImproveCacheLocality();
+
+    /// <summary>
+    /// Optimizes mesh vertex and index buffers for runtime rendering. Uses 'meshoptimizer' library.
+    /// </summary>
+    void Optimize();
 
     /// <summary>
     /// Sums the area of all triangles in the mesh.
     /// </summary>
     /// <returns>The area sum of all mesh triangles.</returns>
     float CalculateTrianglesArea() const;
-
 #endif
 
     /// <summary>
@@ -274,16 +254,7 @@ public:
     /// <summary>
     /// Normalizes the blend weights. Requires to have vertices with positions and blend weights setup.
     /// </summary>
-    void NormalizeBlendWeights()
-    {
-        ASSERT(Positions.Count() == BlendWeights.Count());
-        for (int32 i = 0; i < Positions.Count(); i++)
-        {
-            const float sum = BlendWeights[i].SumValues();
-            const float invSum = sum > ZeroTolerance ? 1.0f / sum : 0.0f;
-            BlendWeights[i] *= invSum;
-        }
-    }
+    void NormalizeBlendWeights();
 
     /// <summary>
     /// Merges this mesh data with the specified other mesh.
@@ -313,6 +284,11 @@ struct FLAXENGINE_API TextureEntry
     /// The texture contents hint based on the usage/context.
     /// </summary>
     TypeHint Type;
+
+    /// <summary>
+    /// Hints that texture contents are in sRGB color format.
+    /// </summary>
+    bool sRGB = false;
 
     /// <summary>
     /// The texture asset identifier.
@@ -361,30 +337,56 @@ struct FLAXENGINE_API MaterialSlotEntry
 
     struct
     {
+        float Value = 0.5f;
+        int32 TextureIndex = -1;
+        uint8 Channel = 0;
+    } Roughness;
+
+    struct
+    {
+        float Value = 0.0f;
+        int32 TextureIndex = -1;
+        uint8 Channel = 0;
+    } Metalness;
+
+    struct
+    {
         int32 TextureIndex = -1;
     } Normals;
 
     bool TwoSided = false;
+    bool Wireframe = false;
 
-    bool UsesProperties() const
-    {
-        return Diffuse.Color != Color::White ||
-                Diffuse.TextureIndex != -1 ||
-                Emissive.Color != Color::Transparent ||
-                Emissive.TextureIndex != -1 ||
-                !Math::IsOne(Opacity.Value) ||
-                Opacity.TextureIndex != -1 ||
-                Normals.TextureIndex != -1;
-    }
+    bool UsesProperties() const;
+    static float ShininessToRoughness(float shininess);
+};
+
+/// <summary>
+/// Data container for model hierarchy node.
+/// </summary>
+struct FLAXENGINE_API ModelDataNode
+{
+    /// <summary>
+    /// The parent node index. The root node uses value -1.
+    /// </summary>
+    int32 ParentIndex;
+
+    /// <summary>
+    /// The local transformation of the node, relative to the parent node.
+    /// </summary>
+    Transform LocalTransform;
+
+    /// <summary>
+    /// The name of this node.
+    /// </summary>
+    String Name;
 };
 
 /// <summary>
 /// Data container for LOD metadata and sub meshes.
 /// </summary>
-class FLAXENGINE_API ModelLodData
+struct FLAXENGINE_API ModelLodData
 {
-public:
-
     /// <summary>
     /// The screen size to switch LODs. Bottom limit of the model screen size to render this LOD.
     /// </summary>
@@ -395,22 +397,15 @@ public:
     /// </summary>
     Array<MeshData*> Meshes;
 
-public:
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="ModelLodData"/> class.
-    /// </summary>
-    ModelLodData()
-    {
-    }
-
     /// <summary>
     /// Finalizes an instance of the <see cref="ModelLodData"/> class.
     /// </summary>
-    ~ModelLodData()
-    {
-        Meshes.ClearDelete();
-    }
+    ~ModelLodData();
+
+    /// <summary>
+    /// Gets the bounding box combined for all meshes in this model LOD.
+    /// </summary>
+    BoundingBox GetBox() const;
 };
 
 /// <summary>
@@ -419,7 +414,6 @@ public:
 class FLAXENGINE_API ModelData
 {
 public:
-
     /// <summary>
     /// The minimum screen size to draw model (the bottom limit).
     /// </summary>
@@ -436,7 +430,7 @@ public:
     Array<MaterialSlotEntry> Materials;
 
     /// <summary>
-    /// Array with all LODs. The first element is the top most LOD0 followed by the LOD1, LOD2, etc.
+    /// Array with all Level Of Details that contain meshes. The first element is the top most LOD0 followed by the LOD1, LOD2, etc.
     /// </summary>
     Array<ModelLodData> LODs;
 
@@ -446,41 +440,32 @@ public:
     SkeletonData Skeleton;
 
     /// <summary>
+    /// The scene nodes (in hierarchy).
+    /// </summary>
+    Array<ModelDataNode> Nodes;
+
+    /// <summary>
     /// The node animations.
     /// </summary>
-    AnimationData Animation;
+    Array<AnimationData> Animations;
 
 public:
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="ModelData"/> class.
-    /// </summary>
-    ModelData()
+    // See ModelTool::PositionFormat
+    enum class PositionFormats
     {
-    }
+        Float32,
+        Float16,
+        Automatic,
+    } PositionFormat = PositionFormats::Automatic;
+
+    // See ModelTool::TexCoordFormats
+    enum class TexCoordFormats
+    {
+        Float16,
+        UNorm8,
+    } TexCoordFormat = TexCoordFormats::Float16;
 
 public:
-
-    /// <summary>
-    /// Gets the valid level of details count.
-    /// </summary>
-    /// <returns>The LOD count.</returns>
-    FORCE_INLINE int32 GetLODsCount() const
-    {
-        return LODs.Count();
-    }
-
-    /// <summary>
-    /// Determines whether this instance has valid skeleton structure.
-    /// </summary>
-    /// <returns>True if has skeleton, otherwise false.</returns>
-    FORCE_INLINE bool HasSkeleton() const
-    {
-        return Skeleton.Bones.HasItems();
-    }
-
-public:
-
     /// <summary>
     /// Automatically calculates the screen size for every model LOD for a proper transitions.
     /// </summary>
@@ -491,27 +476,4 @@ public:
     /// </summary>
     /// <param name="matrix">The matrix to use for the transformation.</param>
     void TransformBuffer(const Matrix& matrix);
-
-public:
-
-    /// <summary>
-    /// Pack mesh data to the header stream
-    /// </summary>
-    /// <param name="stream">Output stream</param>
-    /// <returns>True if cannot save data, otherwise false</returns>
-    bool Pack2ModelHeader(WriteStream* stream) const;
-
-    /// <summary>
-    /// Pack skinned mesh data to the header stream
-    /// </summary>
-    /// <param name="stream">Output stream</param>
-    /// <returns>True if cannot save data, otherwise false</returns>
-    bool Pack2SkinnedModelHeader(WriteStream* stream) const;
-
-    /// <summary>
-    /// Pack animation data to the header stream
-    /// </summary>
-    /// <param name="stream">Output stream</param>
-    /// <returns>True if cannot save data, otherwise false</returns>
-    bool Pack2AnimationHeader(WriteStream* stream) const;
 };

@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
 using System.Text;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.GUI.Timeline.Tracks
 {
@@ -50,7 +51,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 throw new Exception("Invalid track data.");
 
             var keyframes = new KeyframesEditor.Keyframe[keyframesCount];
-            var propertyType = Scripting.TypeUtils.GetType(e.MemberTypeName);
+            var propertyType = TypeUtils.GetType(e.MemberTypeName);
             if (!propertyType)
             {
                 e.Keyframes.ResetKeyframes();

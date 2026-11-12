@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,11 +10,10 @@ template<int Size>
 class GPUPipelineStatePermutations
 {
 public:
-
+    enum { StaticSize = Size };
     GPUPipelineState* States[Size];
 
 public:
-
     GPUPipelineStatePermutations()
     {
         Platform::MemoryClear(States, sizeof(States));
@@ -26,7 +25,6 @@ public:
     }
 
 public:
-
     bool IsValid() const
     {
         for (int i = 0; i < Size; i++)
@@ -42,16 +40,17 @@ public:
 
     FORCE_INLINE GPUPipelineState* Get(int index) const
     {
+        ASSERT_LOW_LAYER(index >= 0 && index < Size);
         return States[index];
     }
 
     FORCE_INLINE GPUPipelineState*& operator[](int32 index)
     {
+        ASSERT_LOW_LAYER(index >= 0 && index < Size);
         return States[index];
     }
 
 public:
-
     void CreatePipelineStates()
     {
         for (int i = 0; i < Size; i++)
@@ -87,11 +86,9 @@ template<int Size>
 class GPUPipelineStatePermutationsPs : public GPUPipelineStatePermutations<Size>
 {
 public:
-
     typedef GPUPipelineStatePermutations<Size> Base;
 
 public:
-
     GPUPipelineStatePermutationsPs()
     {
     }
@@ -101,14 +98,13 @@ public:
     }
 
 public:
-
-    bool Create(GPUPipelineState::Description& desc, GPUShader* shader, const StringAnsiView& psName)
+    bool Create(GPUPipelineState::Description& desc, GPUShader* shader, const StringAnsiView& psName, int32 permutationOffset = 0)
     {
         for (int i = 0; i < Size; i++)
         {
             ASSERT(Base::States[i]);
 
-            desc.PS = shader->GetPS(psName, i);
+            desc.PS = shader->GetPS(psName, i + permutationOffset);
             if (Base::States[i]->Init(desc))
                 return true;
         }
@@ -121,11 +117,9 @@ template<int Size>
 class ComputeShaderPermutation
 {
 public:
-
     GPUShaderProgramCS* Shaders[Size];
 
 public:
-
     ComputeShaderPermutation()
     {
         Platform::MemoryClear(Shaders, sizeof(Shaders));
@@ -136,14 +130,13 @@ public:
     }
 
 public:
-
     FORCE_INLINE GPUShaderProgramCS* Get(const int index) const
     {
+        ASSERT_LOW_LAYER(index >= 0 && index < Size);
         return Shaders[index];
     }
 
 public:
-
     void Clear()
     {
         Platform::MemoryClear(Shaders, sizeof(Shaders));

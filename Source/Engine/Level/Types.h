@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Config.h"
-#include "Engine/Core/Enums.h"
+#include "Engine/Core/Types/BaseTypes.h"
 
 // Level system types
 class SceneObject;
@@ -54,8 +54,6 @@ class AudioListener;
 class AnimatedModel;
 class BoneSocket;
 class Decal;
-class UICanvas;
-class UIControl;
 
 // Default extension for JSON scene files
 #define DEFAULT_SCENE_EXTENSION TEXT("scene")
@@ -100,9 +98,14 @@ API_ENUM(Attributes="Flags") enum class StaticFlags
     Navigation = 1 << 3,
 
     /// <summary>
-    /// Objects is fully static on the scene.
+    /// Object is considered to have static shadowing (casting and receiving).
     /// </summary>
-    FullyStatic = Transform | ReflectionProbe | Lightmap | Navigation,
+    Shadow = 1 << 4,
+
+    /// <summary>
+    /// Object is fully static in the scene.
+    /// </summary>
+    FullyStatic = ReflectionProbe | Lightmap | Transform | Navigation | Shadow,
 
     /// <summary>
     /// Maximum value of the enum (force to int).

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,13 +12,11 @@
 class ActorsCache
 {
 public:
-
     typedef ActorsLookup ActorsLookupType;
     typedef Array<Actor*> ActorsListType;
     typedef Array<SceneObject*> SceneObjectsListType;
 
 public:
-
     /// <summary>
     /// Gets the actors lookup cached. Safe allocation, per thread, uses caching.
     /// </summary>

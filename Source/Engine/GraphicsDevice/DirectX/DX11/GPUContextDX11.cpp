@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX11
 
@@ -9,10 +9,20 @@
 #include "GPUTextureDX11.h"
 #include "GPUBufferDX11.h"
 #include "GPUSamplerDX11.h"
+#include "GPUVertexLayoutDX11.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
+#include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Core/Math/Viewport.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Profiler/RenderStats.h"
+#if COMPILE_WITH_NVAPI
+#include <ThirdParty/nvapi/nvapi.h>
+extern bool EnableNvapi;
+#endif
+#if COMPILE_WITH_AGS
+#include <ThirdParty/AGS/amd_ags.h>
+extern AGSContext* AgsContext;
+#endif
 
 #define DX11_CLEAR_SR_ON_STAGE_DISABLE 0
 
@@ -23,18 +33,18 @@ ID3D11ShaderResourceView* EmptySRHandles[GPU_MAX_SR_BINDED] = {};
 // Ensure to match the indirect commands arguments layout
 static_assert(sizeof(GPUDispatchIndirectArgs) == sizeof(uint32) * 3, "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountX) == sizeof(uint32) * 0, "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountX");
-static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == sizeof(uint32) * 1,"Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
+static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == sizeof(uint32) * 1, "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountZ) == sizeof(uint32) * 2, "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountZ");
 //
 static_assert(sizeof(GPUDrawIndirectArgs) == sizeof(D3D11_DRAW_INSTANCED_INDIRECT_ARGS), "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, VerticesCount) == OFFSET_OF(D3D11_DRAW_INSTANCED_INDIRECT_ARGS, VertexCountPerInstance), "Wrong offset for GPUDrawIndirectArgs::VerticesCount");
-static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(D3D11_DRAW_INSTANCED_INDIRECT_ARGS, InstanceCount),"Wrong offset for GPUDrawIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(D3D11_DRAW_INSTANCED_INDIRECT_ARGS, InstanceCount), "Wrong offset for GPUDrawIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartVertex) == OFFSET_OF(D3D11_DRAW_INSTANCED_INDIRECT_ARGS, StartVertexLocation), "Wrong offset for GPUDrawIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartInstance) == OFFSET_OF(D3D11_DRAW_INSTANCED_INDIRECT_ARGS, StartInstanceLocation), "Wrong offset for GPUDrawIndirectArgs::StartInstance");
 //
 static_assert(sizeof(GPUDrawIndexedIndirectArgs) == sizeof(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS), "Wrong size of GPUDrawIndexedIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, IndicesCount) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, IndexCountPerInstance), "Wrong offset for GPUDrawIndexedIndirectArgs::IndicesCount");
-static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, InstanceCount),"Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, InstanceCount), "Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartIndex) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, StartIndexLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartIndex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartVertex) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, BaseVertexLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartInstance) == OFFSET_OF(D3D11_DRAW_INDEXED_INSTANCED_INDIRECT_ARGS, StartInstanceLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartInstance");
@@ -49,8 +59,8 @@ GPUContextDX11::GPUContextDX11(GPUDeviceDX11* device, ID3D11DeviceContext* conte
     , _omDirtyFlag(false)
     , _rtCount(0)
     , _rtDepth(nullptr)
-    , _uaOutput(nullptr)
-    , _srDirtyFlag(false)
+    , _srMaskDirtyGraphics(0)
+    , _srMaskDirtyCompute(0)
     , _uaDirtyFlag(false)
     , _cbDirtyFlag(false)
     , _currentState(nullptr)
@@ -61,13 +71,20 @@ GPUContextDX11::GPUContextDX11(GPUDeviceDX11* device, ID3D11DeviceContext* conte
 #endif
 
     // Only DirectX 11 supports more than 1 UAV
-    _maxUASlotsForCS = GPU_MAX_UA_BINDED;
+    _maxUASlots = GPU_MAX_UA_BINDED;
     if (_device->GetRendererType() != RendererType::DirectX11)
-        _maxUASlotsForCS = 1;
+        _maxUASlots = 1;
+
+#if GPU_ENABLE_TRACY
+    _tracyContext = tracy::CreateD3D11Context(device->GetDevice(), context);
+#endif
 }
 
 GPUContextDX11::~GPUContextDX11()
 {
+#if GPU_ENABLE_TRACY
+    tracy::DestroyD3D11Context(_tracyContext);
+#endif
 #if GPU_ALLOW_PROFILE_EVENTS
     SAFE_RELEASE(_userDefinedAnnotations);
 #endif
@@ -79,14 +96,19 @@ void GPUContextDX11::FrameBegin()
     GPUContext::FrameBegin();
 
     // Setup
+    _flushOnDispatch = false;
+    _depthBounds = false;
     _omDirtyFlag = false;
     _uaDirtyFlag = false;
-    _srDirtyFlag = false;
     _cbDirtyFlag = false;
+    _iaInputLayoutDirtyFlag = false;
+    _srMaskDirtyGraphics = 0;
+    _srMaskDirtyCompute = 0;
     _rtCount = 0;
+    _vertexLayout = nullptr;
+    _currentCompute = nullptr;
     _currentState = nullptr;
     _rtDepth = nullptr;
-    _uaOutput = nullptr;
     Platform::MemoryClear(_rtHandles, sizeof(_rtHandles));
     Platform::MemoryClear(_srHandles, sizeof(_srHandles));
     Platform::MemoryClear(_uaHandles, sizeof(_uaHandles));
@@ -99,12 +121,24 @@ void GPUContextDX11::FrameBegin()
     CurrentRasterizerState = nullptr;
     CurrentDepthStencilState = nullptr;
     CurrentVS = nullptr;
+#if GPU_ALLOW_TESSELLATION_SHADERS
     CurrentHS = nullptr;
     CurrentDS = nullptr;
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
     CurrentGS = nullptr;
+#endif
     CurrentPS = nullptr;
     CurrentCS = nullptr;
     CurrentPrimitiveTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    CurrentStencilRef = 0;
+    CurrentBlendFactor = Float4::One;
+    
+    // Bind dummy vertex buffer (used by missing bindings)
+    auto dummyVB = (GPUBufferDX11*)_device->GetDummyVB();
+    ID3D11Buffer* dummyVBBuffer = dummyVB->GetBuffer();
+    UINT stride = dummyVB->GetStride(), offset = 0;
+    _context->IASetVertexBuffers(GPU_MAX_VB_BINDED, 1, &dummyVBBuffer, &stride, &offset);
 
     // Bind static samplers
     ID3D11SamplerState* samplers[] =
@@ -114,12 +148,23 @@ void GPUContextDX11::FrameBegin()
         _device->_samplerLinearWrap,
         _device->_samplerPointWrap,
         _device->_samplerShadow,
-        _device->_samplerShadowPCF
+        _device->_samplerShadowLinear
     };
     _context->VSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
+#if GPU_ALLOW_TESSELLATION_SHADERS
     _context->DSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
+#endif
     _context->PSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
     _context->CSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
+}
+
+void GPUContextDX11::OnPresent()
+{
+    GPUContext::OnPresent();
+
+#if GPU_ENABLE_TRACY
+    tracy::CollectD3D11Context(_tracyContext);
+#endif
 }
 
 #if GPU_ALLOW_PROFILE_EVENTS
@@ -128,10 +173,20 @@ void GPUContextDX11::EventBegin(const Char* name)
 {
     if (_userDefinedAnnotations)
         _userDefinedAnnotations->BeginEvent(name);
+
+#if GPU_ENABLE_TRACY
+    char buffer[60];
+    int32 bufferSize = StringUtils::Copy(buffer, name, sizeof(buffer));
+    tracy::BeginD3D11ZoneScope(_tracyZone, _tracyContext, buffer, bufferSize);
+#endif
 }
 
 void GPUContextDX11::EventEnd()
 {
+#if GPU_ENABLE_TRACY
+    tracy::EndD3D11ZoneScope(_tracyZone);
+#endif
+
     if (_userDefinedAnnotations)
         _userDefinedAnnotations->EndEvent();
 }
@@ -151,41 +206,60 @@ bool GPUContextDX11::IsDepthBufferBinded()
 void GPUContextDX11::Clear(GPUTextureView* rt, const Color& color)
 {
     auto rtDX11 = static_cast<GPUTextureViewDX11*>(rt);
-
     if (rtDX11)
     {
         _context->ClearRenderTargetView(rtDX11->RTV(), color.Raw);
     }
 }
 
-void GPUContextDX11::ClearDepth(GPUTextureView* depthBuffer, float depthValue)
+void GPUContextDX11::ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue)
 {
     auto depthBufferDX11 = static_cast<GPUTextureViewDX11*>(depthBuffer);
-
     if (depthBufferDX11)
     {
         ASSERT(depthBufferDX11->DSV());
-        _context->ClearDepthStencilView(depthBufferDX11->DSV(), D3D11_CLEAR_DEPTH, depthValue, 0xff);
+        UINT clearFlags = D3D11_CLEAR_DEPTH;
+        if (PixelFormatExtensions::HasStencil(depthBufferDX11->GetFormat()))
+            clearFlags |= D3D11_CLEAR_STENCIL;
+        _context->ClearDepthStencilView(depthBufferDX11->DSV(), clearFlags, depthValue, stencilValue);
     }
 }
 
-void GPUContextDX11::ClearUA(GPUBuffer* buf, const Vector4& value)
+void GPUContextDX11::ClearUA(GPUBuffer* buf, const Float4& value)
 {
     ASSERT(buf != nullptr && buf->IsUnorderedAccess());
-
     auto uav = ((GPUBufferViewDX11*)buf->View())->UAV();
+    _context->ClearUnorderedAccessViewFloat(uav, value.Raw);
+}
 
+void GPUContextDX11::ClearUA(GPUBuffer* buf, const uint32 value[4])
+{
+    ASSERT(buf != nullptr && buf->IsUnorderedAccess());
+    auto uav = ((GPUBufferViewDX11*)buf->View())->UAV();
+    _context->ClearUnorderedAccessViewUint(uav, value);
+}
+
+void GPUContextDX11::ClearUA(GPUTexture* texture, const uint32 value[4])
+{
+    ASSERT(texture != nullptr && texture->IsUnorderedAccess());
+    auto uav = ((GPUTextureViewDX11*)texture->View())->UAV();
+    _context->ClearUnorderedAccessViewUint(uav, value);
+}
+
+void GPUContextDX11::ClearUA(GPUTexture* texture, const Float4& value)
+{
+    ASSERT(texture != nullptr && texture->IsUnorderedAccess());
+    auto uav = ((GPUTextureViewDX11*)(texture->IsVolume() ? texture->ViewVolume() : texture->View()))->UAV();
     _context->ClearUnorderedAccessViewFloat(uav, value.Raw);
 }
 
 void GPUContextDX11::ResetRenderTarget()
 {
-    if (_rtCount != 0 || _uaOutput || _rtDepth)
+    if (_rtCount != 0 || _rtDepth)
     {
         _omDirtyFlag = true;
         _rtCount = 0;
         _rtDepth = nullptr;
-        _uaOutput = nullptr;
 
         Platform::MemoryClear(_rtHandles, sizeof(_rtHandles));
 
@@ -200,13 +274,12 @@ void GPUContextDX11::SetRenderTarget(GPUTextureView* rt)
     ID3D11RenderTargetView* rtv = rtDX11 ? rtDX11->RTV() : nullptr;
     int32 newRtCount = rtv ? 1 : 0;
 
-    if (_rtCount != newRtCount || _rtHandles[0] != rtv || _rtDepth != nullptr || _uaOutput)
+    if (_rtCount != newRtCount || _rtHandles[0] != rtv || _rtDepth != nullptr)
     {
         _omDirtyFlag = true;
         _rtCount = newRtCount;
         _rtDepth = nullptr;
         _rtHandles[0] = rtv;
-        _uaOutput = nullptr;
     }
 }
 
@@ -219,69 +292,69 @@ void GPUContextDX11::SetRenderTarget(GPUTextureView* depthBuffer, GPUTextureView
     ID3D11DepthStencilView* dsv = depthBufferDX11 ? depthBufferDX11->DSV() : nullptr;
     int32 newRtCount = rtv ? 1 : 0;
 
-    if (_rtCount != newRtCount || _rtHandles[0] != rtv || _rtDepth != dsv || _uaOutput)
+    if (_rtCount != newRtCount || _rtHandles[0] != rtv || _rtDepth != dsv)
     {
         _omDirtyFlag = true;
         _rtCount = newRtCount;
         _rtDepth = dsv;
         _rtHandles[0] = rtv;
-        _uaOutput = nullptr;
     }
 }
 
 void GPUContextDX11::SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts)
 {
-    ASSERT(Math::IsInRange(rts.Length(), 1, GPU_MAX_RT_BINDED));
+    ASSERT(Math::IsInRange(rts.Length(), 0, GPU_MAX_RT_BINDED));
 
     auto depthBufferDX11 = static_cast<GPUTextureViewDX11*>(depthBuffer);
     ID3D11DepthStencilView* dsv = depthBufferDX11 ? depthBufferDX11->DSV() : nullptr;
 
-    ID3D11RenderTargetView* rtvs[GPU_MAX_RT_BINDED];
+    __declspec(align(16)) ID3D11RenderTargetView* rtvs[GPU_MAX_RT_BINDED];
     for (int32 i = 0; i < rts.Length(); i++)
     {
-        auto rtDX11 = reinterpret_cast<GPUTextureViewDX11*>(rts[i]);
+        auto rtDX11 = reinterpret_cast<GPUTextureViewDX11*>(rts.Get()[i]);
         rtvs[i] = rtDX11 ? rtDX11->RTV() : nullptr;
     }
     int32 rtvsSize = sizeof(ID3D11RenderTargetView*) * rts.Length();
 
-    if (_rtCount != rts.Length() || _rtDepth != dsv || _uaOutput || Platform::MemoryCompare(_rtHandles, rtvs, rtvsSize) != 0)
+    if (_rtCount != rts.Length() || _rtDepth != dsv || Platform::MemoryCompare(_rtHandles, rtvs, rtvsSize) != 0)
     {
         _omDirtyFlag = true;
         _rtCount = rts.Length();
         _rtDepth = dsv;
-        _uaOutput = nullptr;
         Platform::MemoryCopy(_rtHandles, rtvs, rtvsSize);
     }
 }
 
-void GPUContextDX11::SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput)
+void GPUContextDX11::SetBlendFactor(const Float4& value)
 {
-    auto rtDX11 = reinterpret_cast<GPUTextureViewDX11*>(rt);
-    auto uaOutputDX11 = reinterpret_cast<GPUBufferDX11*>(uaOutput);
+    CurrentBlendFactor = value;
+    if (CurrentBlendState)
+        _context->OMSetBlendState(CurrentBlendState, CurrentBlendFactor.Raw, D3D11_DEFAULT_SAMPLE_MASK);
+}
 
-    ID3D11RenderTargetView* rtv = rtDX11 ? rtDX11->RTV() : nullptr;
-    ID3D11UnorderedAccessView* uav = uaOutputDX11 ? ((GPUBufferViewDX11*)uaOutputDX11->View())->UAV() : nullptr;
-    int32 newRtCount = rtv ? 1 : 0;
-
-    if (_rtCount != newRtCount || _rtHandles[0] != rtv || _rtDepth != nullptr || _uaOutput != uav)
+void GPUContextDX11::SetStencilRef(uint32 value)
+{
+    if (CurrentStencilRef != value)
     {
-        _omDirtyFlag = true;
-        _rtCount = newRtCount;
-        _rtDepth = nullptr;
-        _rtHandles[0] = rtv;
-        _uaOutput = uav;
+        CurrentStencilRef = value;
+        _context->OMSetDepthStencilState(CurrentDepthStencilState, CurrentStencilRef);
     }
 }
 
 void GPUContextDX11::ResetSR()
 {
-    _srDirtyFlag = false;
+    _srMaskDirtyGraphics = MAX_uint32;
+    _srMaskDirtyCompute = MAX_uint32;
     Platform::MemoryClear(_srHandles, sizeof(_srHandles));
 
     _context->VSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
+#if GPU_ALLOW_TESSELLATION_SHADERS
     _context->HSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
     _context->DSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
     _context->GSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
+#endif
     _context->PSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
     _context->CSSetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles);
 }
@@ -291,7 +364,8 @@ void GPUContextDX11::ResetUA()
     _uaDirtyFlag = false;
     Platform::MemoryClear(_uaHandles, sizeof(_uaHandles));
 
-    _context->CSSetUnorderedAccessViews(0, _maxUASlotsForCS, _uaHandles, nullptr);
+    _context->CSSetUnorderedAccessViews(0, _maxUASlots, _uaHandles, nullptr);
+    _context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, nullptr, nullptr, 0, 0, nullptr, nullptr);
 }
 
 void GPUContextDX11::ResetCB()
@@ -300,9 +374,13 @@ void GPUContextDX11::ResetCB()
     Platform::MemoryClear(_cbHandles, sizeof(_cbHandles));
 
     _context->VSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
+#if GPU_ALLOW_TESSELLATION_SHADERS
     _context->HSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
     _context->DSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
     _context->GSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
+#endif
     _context->PSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
     _context->CSSetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles);
 }
@@ -327,11 +405,16 @@ void GPUContextDX11::BindCB(int32 slot, GPUConstantBuffer* cb)
 
 void GPUContextDX11::BindSR(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_SR_BINDED);
+    if (view && ((IShaderResourceDX11*)view->GetNativePtr())->SRV() == nullptr)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::SRV);
+#endif
     auto handle = view ? ((IShaderResourceDX11*)view->GetNativePtr())->SRV() : nullptr;
     if (_srHandles[slot] != handle)
     {
-        _srDirtyFlag = true;
+        _srMaskDirtyGraphics |= 1 << slot;
+        _srMaskDirtyCompute |= 1 << slot;
         _srHandles[slot] = handle;
         if (view)
             *view->LastRenderTime = _lastRenderTime;
@@ -340,7 +423,11 @@ void GPUContextDX11::BindSR(int32 slot, GPUResourceView* view)
 
 void GPUContextDX11::BindUA(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_UA_BINDED);
+    if (view && ((IShaderResourceDX11*)view->GetNativePtr())->UAV() == nullptr)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::UAV);
+#endif
     auto handle = view ? ((IShaderResourceDX11*)view->GetNativePtr())->UAV() : nullptr;
     if (_uaHandles[slot] != handle)
     {
@@ -351,14 +438,14 @@ void GPUContextDX11::BindUA(int32 slot, GPUResourceView* view)
     }
 }
 
-void GPUContextDX11::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets)
+void GPUContextDX11::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets, GPUVertexLayout* vertexLayout)
 {
     ASSERT(vertexBuffers.Length() >= 0 && vertexBuffers.Length() <= GPU_MAX_VB_BINDED);
 
     bool vbEdited = false;
     for (int32 i = 0; i < vertexBuffers.Length(); i++)
     {
-        const auto vbDX11 = static_cast<GPUBufferDX11*>(vertexBuffers[i]);
+        const auto vbDX11 = static_cast<GPUBufferDX11*>(vertexBuffers.Get()[i]);
         const auto vb = vbDX11 ? vbDX11->GetBuffer() : nullptr;
         vbEdited |= vb != _vbHandles[i];
         _vbHandles[i] = vb;
@@ -372,6 +459,13 @@ void GPUContextDX11::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32*
     if (vbEdited)
     {
         _context->IASetVertexBuffers(0, vertexBuffers.Length(), _vbHandles, _vbStrides, _vbOffsets);
+    }
+    if (!vertexLayout)
+        vertexLayout = GPUVertexLayout::Get(vertexBuffers);
+    if (_vertexLayout != vertexLayout)
+    {
+        _vertexLayout = (GPUVertexLayoutDX11*)vertexLayout;
+        _iaInputLayoutDirtyFlag = true;
     }
 }
 
@@ -389,7 +483,9 @@ void GPUContextDX11::BindSampler(int32 slot, GPUSampler* sampler)
 {
     const auto samplerDX11 = sampler ? static_cast<GPUSamplerDX11*>(sampler)->SamplerState : nullptr;
     _context->VSSetSamplers(slot, 1, &samplerDX11);
+#if GPU_ALLOW_TESSELLATION_SHADERS
     _context->DSSetSamplers(slot, 1, &samplerDX11);
+#endif
     _context->PSSetSamplers(slot, 1, &samplerDX11);
     _context->CSSetSamplers(slot, 1, &samplerDX11);
 }
@@ -403,43 +499,24 @@ void GPUContextDX11::UpdateCB(GPUConstantBuffer* cb, const void* data)
         return;
 
     _context->UpdateSubresource(cbDX11->GetBuffer(), 0, nullptr, data, size, 1);
+    RENDER_STAT_DATA_UPLOAD(size);
 }
 
 void GPUContextDX11::Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCountX, uint32 threadGroupCountY, uint32 threadGroupCountZ)
 {
-    CurrentCS = (GPUShaderProgramCSDX11*)shader;
-
-    // Flush
-    flushCBs();
-    flushSRVs();
-    flushUAVs();
-    flushOM();
-
-    // Dispatch
-    _context->CSSetShader((ID3D11ComputeShader*)shader->GetBufferHandle(), nullptr, 0);
+    onDispatch(shader);
     _context->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     RENDER_STAT_DISPATCH_CALL();
-
     CurrentCS = nullptr;
 }
 
 void GPUContextDX11::DispatchIndirect(GPUShaderProgramCS* shader, GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    CurrentCS = (GPUShaderProgramCSDX11*)shader;
-
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
     auto bufferForArgsDX11 = (GPUBufferDX11*)bufferForArgs;
-
-    // Flush
-    flushCBs();
-    flushSRVs();
-    flushUAVs();
-    flushOM();
-
-    // Dispatch
-    _context->CSSetShader((ID3D11ComputeShader*)shader->GetBufferHandle(), nullptr, 0);
+    onDispatch(shader);
     _context->DispatchIndirect(bufferForArgsDX11->GetBuffer(), offsetForArgs);
     RENDER_STAT_DISPATCH_CALL();
-
     CurrentCS = nullptr;
 }
 
@@ -457,30 +534,29 @@ void GPUContextDX11::ResolveMultisample(GPUTexture* sourceMultisampleTexture, GP
 
 void GPUContextDX11::DrawInstanced(uint32 verticesCount, uint32 instanceCount, int32 startInstance, int32 startVertex)
 {
+    if (_currentState == nullptr)
+        return;
     onDrawCall();
-    if (instanceCount > 1)
-        _context->DrawInstanced(verticesCount, instanceCount, startVertex, startInstance);
-    else
-        _context->Draw(verticesCount, startVertex);
+    ASSERT(CurrentPrimitiveTopology != 0);
+    _context->DrawInstanced(verticesCount, instanceCount, startVertex, startInstance);
     RENDER_STAT_DRAW_CALL(verticesCount * instanceCount, verticesCount * instanceCount / 3);
 }
 
 void GPUContextDX11::DrawIndexedInstanced(uint32 indicesCount, uint32 instanceCount, int32 startInstance, int32 startVertex, int32 startIndex)
 {
+    if (_currentState == nullptr)
+        return;
     onDrawCall();
-    if (instanceCount > 1)
-        _context->DrawIndexedInstanced(indicesCount, instanceCount, startIndex, startVertex, startInstance);
-    else
-        _context->DrawIndexed(indicesCount, startIndex, startVertex);
-    RENDER_STAT_DRAW_CALL(0, indicesCount / 3 * instanceCount);
+    _context->DrawIndexedInstanced(indicesCount, instanceCount, startIndex, startVertex, startInstance);
+    RENDER_STAT_DRAW_CALL(indicesCount * instanceCount, indicesCount / 3 * instanceCount);
 }
 
 void GPUContextDX11::DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
-
+    if (_currentState == nullptr)
+        return;
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
     const auto bufferForArgsDX11 = static_cast<GPUBufferDX11*>(bufferForArgs);
-
     onDrawCall();
     _context->DrawInstancedIndirect(bufferForArgsDX11->GetBuffer(), offsetForArgs);
     RENDER_STAT_DRAW_CALL(0, 0);
@@ -488,13 +564,102 @@ void GPUContextDX11::DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offs
 
 void GPUContextDX11::DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
-
+    if (_currentState == nullptr)
+        return;
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
     const auto bufferForArgsDX11 = static_cast<GPUBufferDX11*>(bufferForArgs);
-
     onDrawCall();
     _context->DrawIndexedInstancedIndirect(bufferForArgsDX11->GetBuffer(), offsetForArgs);
     RENDER_STAT_DRAW_CALL(0, 0);
+}
+
+uint64 GPUContextDX11::BeginQuery(GPUQueryType type)
+{
+    // Allocate a pooled query
+    uint16 queryIndex;
+    static_assert(ARRAY_COUNT(_device->_readyQueries) == (int32)GPUQueryType::MAX, "Invalid query types count");
+    if (_device->_readyQueries[(int32)type].HasItems())
+    {
+        // Use query from cached list
+        queryIndex = _device->_readyQueries[(int32)type].Pop();
+    }
+    else
+    {
+        // Add a new query
+        queryIndex = _device->_queries.Count();
+        auto& query = _device->_queries.AddOne();
+        query.Type = type;
+        D3D11_QUERY_DESC queryDesc;
+        switch (type)
+        {
+        case GPUQueryType::Timer:
+            queryDesc.Query = D3D11_QUERY_TIMESTAMP;
+            break;
+        case GPUQueryType::Occlusion:
+            queryDesc.Query = D3D11_QUERY_OCCLUSION;
+            break;
+        case GPUQueryType::BinaryOcclusion:
+            queryDesc.Query = D3D11_QUERY_OCCLUSION_PREDICATE;
+            break;
+        }
+        queryDesc.MiscFlags = 0;
+        HRESULT hr = _device->GetDevice()->CreateQuery(&queryDesc, &query.Query);
+        LOG_DIRECTX_RESULT_WITH_RETURN(hr, 0);
+        if (type == GPUQueryType::Timer)
+        {
+            // Timer queries need additional one for begin and end disjoint
+            hr = _device->GetDevice()->CreateQuery(&queryDesc, &query.TimerBeginQuery);
+            LOG_DIRECTX_RESULT_WITH_RETURN(hr, 0);
+            queryDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            hr = _device->GetDevice()->CreateQuery(&queryDesc, &query.DisjointQuery);
+            LOG_DIRECTX_RESULT_WITH_RETURN(hr, 0);
+        }
+    }
+    static_assert(sizeof(GPUQueryDX11) == sizeof(uint64), "Invalid query size.");
+    GPUQueryDX11 q = {};
+    q.Type = (uint16)type;
+    q.Index = queryIndex;
+    q.Padding = 1; // Ensure Raw is never 0, even for the first query
+
+    // Begin query
+    {
+        auto& query = _device->_queries[queryIndex];
+        ASSERT_LOW_LAYER(query.State == GPUQueryDataDX11::Ready);
+        ASSERT_LOW_LAYER(query.Type == type);
+        query.State = GPUQueryDataDX11::Begin;
+        query.TTL = 50; // Auto-destroy after some frames when user fails to call GetQueryResult
+        auto context = _device->GetIM();
+        if (type == GPUQueryType::Timer)
+        {
+            context->Begin(query.DisjointQuery);
+            context->End(query.TimerBeginQuery);
+        }
+        else
+        {
+            context->Begin(query.Query);
+        }
+    }
+
+    return q.Raw;
+}
+
+void GPUContextDX11::EndQuery(uint64 queryID)
+{
+    if (!queryID)
+        return;
+
+    // End query
+    GPUQueryDX11 q;
+    q.Raw = queryID;
+    auto& query = _device->_queries[q.Index];
+    ASSERT_LOW_LAYER(query.State == GPUQueryDataDX11::Begin);
+    query.State = GPUQueryDataDX11::End;
+    auto context = _device->GetIM();
+    context->End(query.Query);
+    if (q.Type == (uint16)GPUQueryType::Timer)
+    {
+        context->End(query.DisjointQuery);
+    }
 }
 
 void GPUContextDX11::SetViewport(const Viewport& viewport)
@@ -512,6 +677,28 @@ void GPUContextDX11::SetScissor(const Rectangle& scissorRect)
     _context->RSSetScissorRects(1, &rect);
 }
 
+void GPUContextDX11::SetDepthBounds(float minDepth, float maxDepth)
+{
+    SetDepthBounds(true, minDepth, maxDepth);
+}
+
+void GPUContextDX11::SetDepthBounds(bool enable, float minDepth, float maxDepth)
+{
+    _depthBounds = true;
+#if COMPILE_WITH_NVAPI
+    if (EnableNvapi)
+    {
+        NvAPI_D3D11_SetDepthBoundsTest(_context, enable, minDepth, maxDepth);
+    }
+#endif
+#if COMPILE_WITH_AGS
+    if (AgsContext)
+    {
+        agsDriverExtensionsDX11_SetDepthBounds(AgsContext, _context, enable, minDepth, maxDepth);
+    }
+#endif
+}
+
 GPUPipelineState* GPUContextDX11::GetState() const
 {
     return _currentState;
@@ -527,35 +714,41 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
         ID3D11RasterizerState* rasterizerState = nullptr;
         ID3D11DepthStencilState* depthStencilState = nullptr;
         GPUShaderProgramVSDX11* vs = nullptr;
+#if GPU_ALLOW_TESSELLATION_SHADERS
         GPUShaderProgramHSDX11* hs = nullptr;
         GPUShaderProgramDSDX11* ds = nullptr;
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
         GPUShaderProgramGSDX11* gs = nullptr;
+#endif
         GPUShaderProgramPSDX11* ps = nullptr;
         D3D11_PRIMITIVE_TOPOLOGY primitiveTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-
         if (state)
         {
             ASSERT(_currentState->IsValid());
-
             blendState = _currentState->BlendState;
             rasterizerState = _device->RasterizerStates[_currentState->RasterizerStateIndex];
-            depthStencilState = _device->DepthStencilStates[_currentState->DepthStencilStateIndex];
-
+            //depthStencilState = _device->DepthStencilStates2[_currentState->DepthStencilStateIndex];
+            depthStencilState = _currentState->DepthStencilState;
             ASSERT(_currentState->VS != nullptr);
             vs = _currentState->VS;
+#if GPU_ALLOW_TESSELLATION_SHADERS
             hs = _currentState->HS;
             ds = _currentState->DS;
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
             gs = _currentState->GS;
+#endif
             ps = _currentState->PS;
-
             primitiveTopology = _currentState->PrimitiveTopology;
         }
 
         // Per pipeline stage state caching
+        bool shaderEnabled = false;
         if (CurrentDepthStencilState != depthStencilState)
         {
             CurrentDepthStencilState = depthStencilState;
-            _context->OMSetDepthStencilState(depthStencilState, 0);
+            _context->OMSetDepthStencilState(depthStencilState, CurrentStencilRef);
         }
         if (CurrentRasterizerState != rasterizerState)
         {
@@ -565,11 +758,11 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
         if (CurrentBlendState != blendState)
         {
             CurrentBlendState = blendState;
-            FLOAT blendFactor[4] = { 1, 1, 1, 1 };
-            _context->OMSetBlendState(blendState, blendFactor, D3D11_DEFAULT_SAMPLE_MASK);
+            _context->OMSetBlendState(blendState, CurrentBlendFactor.Raw, D3D11_DEFAULT_SAMPLE_MASK);
         }
         if (CurrentVS != vs)
         {
+            shaderEnabled |= CurrentVS == nullptr;
 #if DX11_CLEAR_SR_ON_STAGE_DISABLE
 			if (CurrentVS && !vs)
 			{
@@ -578,10 +771,12 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
 #endif
             CurrentVS = vs;
             _context->VSSetShader(vs ? vs->GetBufferHandleDX11() : nullptr, nullptr, 0);
-            _context->IASetInputLayout(vs ? vs->GetInputLayoutDX11() : nullptr);
+            _iaInputLayoutDirtyFlag = true;
         }
+#if GPU_ALLOW_TESSELLATION_SHADERS
         if (CurrentHS != hs)
         {
+            shaderEnabled |= CurrentHS == nullptr;
 #if DX11_CLEAR_SR_ON_STAGE_DISABLE
 			if (CurrentHS && !hs)
 			{
@@ -593,6 +788,7 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
         }
         if (CurrentDS != ds)
         {
+            shaderEnabled |= CurrentDS == nullptr;
 #if DX11_CLEAR_SR_ON_STAGE_DISABLE
 			if (CurrentDS && !ds)
 			{
@@ -602,8 +798,11 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
             CurrentDS = ds;
             _context->DSSetShader(ds ? ds->GetBufferHandleDX11() : nullptr, nullptr, 0);
         }
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
         if (CurrentGS != gs)
         {
+            shaderEnabled |= CurrentGS == nullptr;
 #if DX11_CLEAR_SR_ON_STAGE_DISABLE
 			if (CurrentGS && !gs)
 			{
@@ -613,8 +812,10 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
             CurrentGS = gs;
             _context->GSSetShader(gs ? gs->GetBufferHandleDX11() : nullptr, nullptr, 0);
         }
+#endif
         if (CurrentPS != ps)
         {
+            shaderEnabled |= CurrentPS == nullptr;
 #if DX11_CLEAR_SR_ON_STAGE_DISABLE
 			if (CurrentPS && !ps)
 			{
@@ -629,12 +830,19 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
             CurrentPrimitiveTopology = primitiveTopology;
             _context->IASetPrimitiveTopology(primitiveTopology);
         }
+        if (shaderEnabled)
+        {
+            // Fix bug when binding constant buffer or texture, then binding PSO with tess and the drawing (data binded before tess shader is active was missing)
+            // TODO: use per-shader dirty flags
+            _cbDirtyFlag = true;
+            _srMaskDirtyGraphics = MAX_uint32;
+        }
 
         RENDER_STAT_PS_STATE_CHANGE();
     }
 }
 
-void GPUContextDX11::ClearState()
+void GPUContextDX11::ResetState()
 {
     if (!_context)
         return;
@@ -659,7 +867,9 @@ void GPUContextDX11::ClearState()
         _device->_samplerShadowPCF
     };
     _context->VSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
+#if GPU_ALLOW_TESSELLATION_SHADERS
     _context->DSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
+#endif
     _context->PSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
     _context->CSSetSamplers(0, ARRAY_COUNT(samplers), samplers);
 #endif
@@ -671,6 +881,7 @@ void GPUContextDX11::FlushState()
     flushCBs();
     flushSRVs();
     flushUAVs();
+    flushIA();
     flushOM();
 }
 
@@ -683,7 +894,7 @@ void GPUContextDX11::Flush()
 void GPUContextDX11::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 size, uint32 offset)
 {
     ASSERT(data);
-    ASSERT(buffer && buffer->GetSize() >= size);
+    ASSERT(buffer && buffer->GetSize() >= size + offset);
 
     auto bufferDX11 = (GPUBufferDX11*)buffer;
 
@@ -697,7 +908,7 @@ void GPUContextDX11::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 si
             LOG_DIRECTX_RESULT(result);
             return;
         }
-        Platform::MemoryCopy(map.pData, data, size);
+        Platform::MemoryCopy((byte*)map.pData + offset, data, size);
         _context->Unmap(bufferDX11->GetResource(), 0);
     }
     else
@@ -711,6 +922,7 @@ void GPUContextDX11::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 si
         box.bottom = 1;
         _context->UpdateSubresource(bufferDX11->GetResource(), 0, &box, data, size, 0);
     }
+    RENDER_STAT_DATA_UPLOAD(size);
 }
 
 void GPUContextDX11::CopyBuffer(GPUBuffer* dstBuffer, GPUBuffer* srcBuffer, uint32 size, uint32 dstOffset, uint32 srcOffset)
@@ -737,7 +949,11 @@ void GPUContextDX11::UpdateTexture(GPUTexture* texture, int32 arrayIndex, int32 
     auto textureDX11 = static_cast<GPUTextureDX11*>(texture);
 
     const int32 subresourceIndex = RenderToolsDX::CalcSubresourceIndex(mipIndex, arrayIndex, texture->MipLevels());
-    _context->UpdateSubresource(textureDX11->GetResource(), subresourceIndex, nullptr, data, static_cast<UINT>(rowPitch), slicePitch);
+    uint32 depthPitch = slicePitch;
+    if (texture->IsVolume())
+        depthPitch /= Math::Max(1, texture->Depth() >> mipIndex);
+    _context->UpdateSubresource(textureDX11->GetResource(), subresourceIndex, nullptr, data, (UINT)rowPitch, (UINT)depthPitch);
+    RENDER_STAT_DATA_UPLOAD(slicePitch);
 
     //D3D11_MAPPED_SUBRESOURCE mapped;
     //_device->GetIM()->Map(_resource, textureMipIndex, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
@@ -789,64 +1005,96 @@ void GPUContextDX11::CopySubresource(GPUResource* dstResource, uint32 dstSubreso
     _context->CopySubresourceRegion(dstResourceDX11->GetResource(), dstSubresource, 0, 0, 0, srcResourceDX11->GetResource(), srcSubresource, nullptr);
 }
 
+void GPUContextDX11::OverlapUA(bool end)
+{
+    // DirectX 11 doesn't support UAV barriers control but custom GPU driver extensions allow to manually specify overlap sections.
+#if COMPILE_WITH_NVAPI
+    if (EnableNvapi)
+    {
+        if (end)
+            NvAPI_D3D11_EndUAVOverlap(_context);
+        else
+            NvAPI_D3D11_BeginUAVOverlap(_context);
+        _flushOnDispatch |= end;
+        return;
+    }
+#endif
+#if COMPILE_WITH_AGS
+    if (AgsContext)
+    {
+        if (end)
+            agsDriverExtensionsDX11_EndUAVOverlap(AgsContext, _context);
+        else
+            agsDriverExtensionsDX11_BeginUAVOverlap(AgsContext, _context);
+        _flushOnDispatch |= end;
+        return;
+    }
+#endif
+    // TODO: add support for Intel extensions to overlap UAV writes (INTC_D3D11_BeginUAVOverlap/INTC_D3D11_EndUAVOverlap)
+}
+
 void GPUContextDX11::flushSRVs()
 {
-    // Check if need to flush shader resources
-    if (_srDirtyFlag)
+#define FLUSH_STAGE(STAGE) if (Current##STAGE) _context->STAGE##SetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles)
+    if (CurrentCS)
     {
-        // Clear flag
-        _srDirtyFlag = false;
-
-        // Flush with the driver
-        // TODO: don't bind SRV to all stages and all slots (use mask for bind diff?)
-#define FLUSH_STAGE(STAGE) \
-		if (Current##STAGE) \
-		{ \
-			_context->STAGE##SetShaderResources(0, ARRAY_COUNT(_srHandles), _srHandles); \
-		}
-        FLUSH_STAGE(VS);
-        FLUSH_STAGE(HS);
-        FLUSH_STAGE(DS);
-        FLUSH_STAGE(GS);
-        FLUSH_STAGE(PS);
-        FLUSH_STAGE(CS);
-#undef FLUSH_STAGE
+        if (_srMaskDirtyCompute)
+        {
+            _srMaskDirtyCompute = 0;
+            FLUSH_STAGE(CS);
+        }
     }
+    else
+    {
+        if (_srMaskDirtyGraphics)
+        {
+            _srMaskDirtyGraphics = 0;
+            FLUSH_STAGE(VS);
+#if GPU_ALLOW_TESSELLATION_SHADERS
+            FLUSH_STAGE(HS);
+            FLUSH_STAGE(DS);
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
+            FLUSH_STAGE(GS);
+#endif
+            FLUSH_STAGE(PS);
+        }
+    }
+#undef FLUSH_STAGE
 }
 
 void GPUContextDX11::flushUAVs()
 {
-    // Check if need to flush unordered access
     if (_uaDirtyFlag)
     {
-        // Clear flag
         _uaDirtyFlag = false;
 
         // Flush with the driver
         uint32 initialCounts[GPU_MAX_UA_BINDED] = { 0 };
-        _context->CSSetUnorderedAccessViews(0, _maxUASlotsForCS, _uaHandles, initialCounts);
+        if (CurrentCS)
+            _context->CSSetUnorderedAccessViews(0, _maxUASlots, _uaHandles, initialCounts);
+        else
+            _context->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, nullptr, nullptr, _rtCount, _maxUASlots - _rtCount, _uaHandles + _rtCount, initialCounts);
     }
 }
 
 void GPUContextDX11::flushCBs()
 {
-    // Check if need to flush constant buffers
     if (_cbDirtyFlag)
     {
-        // Clear flag
         _cbDirtyFlag = false;
 
         // Flush with the driver
         // TODO: don't bind CBV to all stages and all slots (use mask for bind diff? eg. cache mask from last flush and check if there is a diff + include mask from diff slots?)
-#define FLUSH_STAGE(STAGE) \
-		if (Current##STAGE) \
-		{ \
-			_context->STAGE##SetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles); \
-		}
+#define FLUSH_STAGE(STAGE) if (Current##STAGE) _context->STAGE##SetConstantBuffers(0, ARRAY_COUNT(_cbHandles), _cbHandles)
         FLUSH_STAGE(VS);
+#if GPU_ALLOW_TESSELLATION_SHADERS
         FLUSH_STAGE(HS);
         FLUSH_STAGE(DS);
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
         FLUSH_STAGE(GS);
+#endif
         FLUSH_STAGE(PS);
         FLUSH_STAGE(CS);
 #undef FLUSH_STAGE
@@ -855,51 +1103,80 @@ void GPUContextDX11::flushCBs()
 
 void GPUContextDX11::flushOM()
 {
-    // Check if need to flush output merger state or/and unordered access views
     if (_omDirtyFlag)
     {
-#if _DEBUG
-		// Validate binded render targets amount
-		int32 rtCount = 0;
-		for (int i = 0; i < ARRAY_COUNT(_rtHandles) && i < _rtCount; i++)
-		{
-			if (_rtHandles[i] != nullptr)
-				rtCount++;
-			else
-				break;
-		}
-		ASSERT(rtCount == _rtCount);
-#endif
-
-        // Check if don't use UAVs and set output merger render targets table
-        if (_uaOutput == nullptr)
-        {
-            _context->OMSetRenderTargets(_rtCount, _rtHandles, _rtDepth);
-        }
-        else
-        {
-            // Note: current dx11 content implementation assumes that there must be one or more render targets binded in order to use uav output
-            ASSERT(_rtCount > 0);
-
-            uint32 initialCounts[1] = { 0 };
-            // TODO: set -1 if buffer had no ResetCounter call since last time
-            _context->OMSetRenderTargetsAndUnorderedAccessViews(_rtCount, _rtHandles, _rtDepth, _rtCount, 1, &_uaOutput, initialCounts);
-        }
-
-        // Clear flag
         _omDirtyFlag = false;
+        int32 uaCount = 0;
+        for (int32 i = _maxUASlots - 1; i >= 0; i--)
+        {
+            if (_uaHandles[i])
+            {
+                uaCount = i + 1;
+                break;
+            }
+        }
+
+        // Flush with the driver
+        if (uaCount > 0)
+            _context->OMSetRenderTargetsAndUnorderedAccessViews(_rtCount, _rtHandles, _rtDepth, 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+        else
+            _context->OMSetRenderTargets(_rtCount, _rtHandles, _rtDepth);
+    }
+}
+
+void GPUContextDX11::flushIA()
+{
+    if (_iaInputLayoutDirtyFlag)
+    {
+        _iaInputLayoutDirtyFlag = false;
+        ID3D11InputLayout* inputLayout = CurrentVS ? CurrentVS->GetInputLayout(_vertexLayout) : nullptr;
+#if GPU_ENABLE_ASSERTION_LOW_LAYERS
+        if (!inputLayout && CurrentVS && !_vertexLayout && _vbHandles[0])
+        {
+            LOG(Error, "Missing Vertex Layout (not assigned to GPUBuffer). Vertex Shader won't read valid data resulting incorrect visuals.");
+        }
+#endif
+        _context->IASetInputLayout(inputLayout);
     }
 }
 
 void GPUContextDX11::onDrawCall()
 {
-    ASSERT(_currentState);
+    if (_depthBounds && (!_currentState || !_currentState->DepthBounds))
+    {
+        // Auto-disable depth bounds
+        SetDepthBounds(false, 0.0f, 1.0f);
+    }
 
-    // Flush
+    _flushOnDispatch = false;
+    flushCBs();
+    flushSRVs();
+    flushUAVs();
+    flushIA();
+    flushOM();
+}
+
+void GPUContextDX11::onDispatch(GPUShaderProgramCS* shader)
+{
+    CurrentCS = (GPUShaderProgramCSDX11*)shader;
+
     flushCBs();
     flushSRVs();
     flushUAVs();
     flushOM();
+
+    if (_flushOnDispatch)
+    {
+        _flushOnDispatch = false;
+        _context->Flush();
+    }
+
+    auto compute = (ID3D11ComputeShader*)shader->GetBufferHandle();
+    if (_currentCompute != compute)
+    {
+        _currentCompute = compute;
+        _context->CSSetShader(compute, nullptr, 0);
+    }
 }
 
 #endif

@@ -1,16 +1,19 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Delegate.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Math/BoundingSphere.h"
+#include "Engine/Core/Math/BoundingFrustum.h"
 #include "Engine/Level/Actor.h"
-#include "Engine/Level/Types.h"
 
 class SceneRenderTask;
+class SceneRendering;
+class IPhysicsDebug;
 struct PostProcessSettings;
 struct RenderContext;
+struct RenderContextBatch;
 struct RenderView;
 
 /// <summary>
@@ -19,7 +22,6 @@ struct RenderView;
 class FLAXENGINE_API IPostFxSettingsProvider
 {
 public:
-
     /// <summary>
     /// Collects the settings for rendering of the specified task.
     /// </summary>
@@ -35,55 +37,95 @@ public:
 };
 
 /// <summary>
+/// Interface for objects to plug into Scene Rendering and listen for its evens such as static actors changes which are relevant for drawing cache.
+/// </summary>
+/// <seealso cref="SceneRendering"/>
+class FLAXENGINE_API ISceneRenderingListener
+{
+    friend SceneRendering;
+private:
+    Array<SceneRendering*, InlinedAllocation<8>> _scenes;
+public:
+    ~ISceneRenderingListener();
+
+    // Actor properties that were modified.
+    enum UpdateFlags
+    {
+        Visual = 1, // Visual appearance of the object (eg. material changed).
+        Bounds = 2, // Object bounding volume was changed (eg. after scaling).
+        Layer = 4, // Object changed layer.
+        StaticFlags = 8, // Object changed static state.
+        AutoDelayDuringRendering = 16, // Conditionally allow updating data during rendering when writes are locked.
+        DrawModes = 32, // Object changed draw modes flags.
+        Auto = Visual | Bounds | Layer, // Default set of flags for common changes.
+    };
+
+    // Starts listening to the scene rendering events.
+    void ListenSceneRendering(SceneRendering* scene);
+
+    // Events called by Scene Rendering
+    virtual void OnSceneRenderingAddActor(SceneRendering* scene, int32 key, Actor* a) = 0;
+    virtual void OnSceneRenderingUpdateActor(SceneRendering* scene, int32 key, Actor* a, const BoundingSphere& prevBounds, UpdateFlags flags = Auto) = 0;
+    virtual void OnSceneRenderingRemoveActor(SceneRendering* scene, int32 key, Actor* a) = 0;
+    virtual void OnSceneRenderingClear(SceneRendering* scene) = 0;
+};
+
+DECLARE_ENUM_OPERATORS(ISceneRenderingListener::UpdateFlags);
+
+/// <summary>
 /// Scene rendering helper subsystem that boosts the level rendering by providing efficient objects cache and culling implementation.
 /// </summary>
 class FLAXENGINE_API SceneRendering
 {
-    friend Scene;
 #if USE_EDITOR
-    typedef Function<void(RenderView&)> PhysicsDebugCallback;
+    typedef Function<void(RenderView&)> LightsDebugCallback;
     friend class ViewportIconsRendererService;
 #endif
-    struct DrawEntry
+public:
+    struct DrawActor
     {
         Actor* Actor;
         uint32 LayerMask;
+        int8 NoCulling : 1;
         BoundingSphere Bounds;
     };
 
-    struct DrawEntries
+    /// <summary>
+    /// Drawing categories for separate draw stages.
+    /// </summary>
+    enum DrawCategory
     {
-        Array<DrawEntry> List;
-
-        int32 Add(Actor* obj);
-        void Update(Actor* obj, int32 key);
-        void Remove(Actor* obj, int32 key);
-        void Clear();
-        void CullAndDraw(RenderContext& renderContext);
-        void CullAndDrawOffline(RenderContext& renderContext);
+        SceneDraw = 0,
+        SceneDrawAsync,
+        PreRender,
+        PostRender,
+        MAX
     };
 
-private:
-
-    Scene* Scene;
-    DrawEntries Geometry;
-    DrawEntries Common;
-    Array<Actor*> CommonNoCulling;
+    Array<DrawActor> Actors[MAX];
+    Array<int32> FreeActors[MAX];
     Array<IPostFxSettingsProvider*> PostFxProviders;
+    ReadWriteLock Locker;
+
+private:
+    bool _isRendering = false;
 #if USE_EDITOR
-    Array<PhysicsDebugCallback> PhysicsDebug;
+    Array<IPhysicsDebug*> PhysicsDebug;
+    Array<LightsDebugCallback> LightsDebug;
     Array<Actor*> ViewportIcons;
 #endif
 
-    explicit SceneRendering(::Scene* scene);
+    // Listener - some rendering systems cache state of the scene (eg. in RenderBuffers::CustomBuffer), this extensions allows those systems to invalidate cache and handle scene changes
+    friend ISceneRenderingListener;
+    Array<ISceneRenderingListener*, InlinedAllocation<8>> _listeners;
 
 public:
-
     /// <summary>
     /// Draws the scene. Performs the optimized actors culling and draw calls submission for the current render pass (defined by the render view).
     /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    void Draw(RenderContext& renderContext);
+    /// <param name="renderContextBatch">The rendering context batch.</param>
+    /// <param name="category">The actors category to draw.</param>
+    void Draw(RenderContextBatch& renderContextBatch, DrawCategory category = SceneDraw);
 
     /// <summary>
     /// Collects the post fx volumes for the given rendering view.
@@ -97,48 +139,9 @@ public:
     void Clear();
 
 public:
-
-    FORCE_INLINE int32 AddGeometry(Actor* obj)
-    {
-        return Geometry.Add(obj);
-    }
-
-    FORCE_INLINE void UpdateGeometry(Actor* obj, int32 key)
-    {
-        Geometry.Update(obj, key);
-    }
-
-    FORCE_INLINE void RemoveGeometry(Actor* obj, int32& key)
-    {
-        Geometry.Remove(obj, key);
-        key = -1;
-    }
-
-    FORCE_INLINE int32 AddCommon(Actor* obj)
-    {
-        return Common.Add(obj);
-    }
-
-    FORCE_INLINE void UpdateCommon(Actor* obj, int32 key)
-    {
-        Common.Update(obj, key);
-    }
-
-    FORCE_INLINE void RemoveCommon(Actor* obj, int32& key)
-    {
-        Common.Remove(obj, key);
-        key = -1;
-    }
-
-    FORCE_INLINE void AddCommonNoCulling(Actor* obj)
-    {
-        CommonNoCulling.Add(obj);
-    }
-
-    FORCE_INLINE void RemoveCommonNoCulling(Actor* obj)
-    {
-        CommonNoCulling.Remove(obj);
-    }
+    void AddActor(Actor* a, int32& key);
+    void UpdateActor(Actor* a, int32& key, ISceneRenderingListener::UpdateFlags flags = ISceneRenderingListener::Auto);
+    void RemoveActor(Actor* a, int32& key);
 
     FORCE_INLINE void AddPostFxProvider(IPostFxSettingsProvider* obj)
     {
@@ -151,21 +154,30 @@ public:
     }
 
 #if USE_EDITOR
-
-    template<class T, void(T::*Method)(RenderView&)>
-    FORCE_INLINE void AddPhysicsDebug(T* obj)
+    FORCE_INLINE void AddPhysicsDebug(IPhysicsDebug* obj)
     {
-        PhysicsDebugCallback f;
-        f.Bind<T, Method>(obj);
-        PhysicsDebug.Add(f);
+        PhysicsDebug.Add(obj);
+    }
+
+    FORCE_INLINE void RemovePhysicsDebug(IPhysicsDebug* obj)
+    {
+        PhysicsDebug.Remove(obj);
     }
 
     template<class T, void(T::*Method)(RenderView&)>
-    void RemovePhysicsDebug(T* obj)
+    FORCE_INLINE void AddLightsDebug(T* obj)
     {
-        PhysicsDebugCallback f;
+        LightsDebugCallback f;
         f.Bind<T, Method>(obj);
-        PhysicsDebug.Remove(f);
+        LightsDebug.Add(f);
+    }
+
+    template<class T, void(T::*Method)(RenderView&)>
+    void RemoveLightsDebug(T* obj)
+    {
+        LightsDebugCallback f;
+        f.Bind<T, Method>(obj);
+        LightsDebug.Remove(f);
     }
 
     FORCE_INLINE void AddViewportIcon(Actor* obj)
@@ -177,6 +189,14 @@ public:
     {
         ViewportIcons.Remove(obj);
     }
-
 #endif
+
+private:
+    Array<BoundingFrustum> _drawFrustumsData;
+    DrawActor* _drawListData;
+    int32 _drawListSize;
+    int32 _drawListJobs;
+    RenderContextBatch* _drawBatch;
+
+    void DrawActorsJob(int32 i);
 };

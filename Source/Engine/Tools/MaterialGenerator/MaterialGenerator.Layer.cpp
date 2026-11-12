@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MATERIAL_GRAPH
 
@@ -13,24 +13,25 @@
 MaterialGenerator::MaterialGraphBoxesMapping MaterialGenerator::MaterialGraphBoxesMappings[] =
 {
     { 0, nullptr, MaterialTreeType::PixelShader, MaterialValue::Zero },
-    { 1, TEXT("Color"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Vector3) },
+    { 1, TEXT("Color"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Float3) },
     { 2, TEXT("Mask"), MaterialTreeType::PixelShader, MaterialValue::InitForOne(VariantType::Float) },
-    { 3, TEXT("Emissive"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Vector3) },
+    { 3, TEXT("Emissive"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Float3) },
     { 4, TEXT("Metalness"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Float) },
     { 5, TEXT("Specular"), MaterialTreeType::PixelShader, MaterialValue::InitForHalf(VariantType::Float) },
     { 6, TEXT("Roughness"), MaterialTreeType::PixelShader, MaterialValue::InitForHalf(VariantType::Float) },
     { 7, TEXT("AO"), MaterialTreeType::PixelShader, MaterialValue::InitForOne(VariantType::Float) },
-    { 8, TEXT("TangentNormal"), MaterialTreeType::PixelShader, MaterialValue(VariantType::Vector3, TEXT("float3(0, 0, 1.0)")) },
+    { 8, TEXT("TangentNormal"), MaterialTreeType::PixelShader, MaterialValue(VariantType::Float3, TEXT("float3(0, 0, 1.0)")) },
     { 9, TEXT("Opacity"), MaterialTreeType::PixelShader, MaterialValue::InitForOne(VariantType::Float) },
     { 10, TEXT("Refraction"), MaterialTreeType::PixelShader, MaterialValue::InitForOne(VariantType::Float) },
-    { 11, TEXT("PositionOffset"), MaterialTreeType::VertexShader, MaterialValue::InitForZero(VariantType::Vector3) },
+    { 11, TEXT("PositionOffset"), MaterialTreeType::VertexShader, MaterialValue::InitForZero(VariantType::Float3) },
     { 12, TEXT("TessellationMultiplier"), MaterialTreeType::VertexShader, MaterialValue(VariantType::Float, TEXT("4.0f")) },
-    { 13, TEXT("WorldDisplacement"), MaterialTreeType::DomainShader, MaterialValue::InitForZero(VariantType::Vector3) },
-    { 14, TEXT("SubsurfaceColor"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Vector3) },
+    { 13, TEXT("WorldDisplacement"), MaterialTreeType::DomainShader, MaterialValue::InitForZero(VariantType::Float3) },
+    { 14, TEXT("SubsurfaceColor"), MaterialTreeType::PixelShader, MaterialValue::InitForZero(VariantType::Float3) },
 };
 
 const MaterialGenerator::MaterialGraphBoxesMapping& MaterialGenerator::GetMaterialRootNodeBox(MaterialGraphBoxes box)
 {
+    static_assert(ARRAY_COUNT(MaterialGenerator::MaterialGraphBoxesMappings) == 15, "Invalid amount of boxes added for root node. Please update the code above");
     return MaterialGraphBoxesMappings[static_cast<int32>(box)];
 }
 
@@ -42,32 +43,15 @@ void MaterialGenerator::AddLayer(MaterialLayer* layer)
 MaterialLayer* MaterialGenerator::GetLayer(const Guid& id, Node* caller)
 {
     // Find layer first
-    for (int32 i = 0; i < _layers.Count(); i++)
+    for (MaterialLayer* layer : _layers)
     {
-        if (_layers[i]->ID == id)
-        {
-            // Found
-            return _layers[i];
-        }
+        if (layer->ID == id)
+            return layer;
     }
 
     // Load asset
-    Asset* asset = Assets.LoadAsync<MaterialBase>(id);
-    if (asset == nullptr || asset->WaitForLoaded(30000))
-    {
-        OnError(caller, nullptr, TEXT("Failed to load material asset."));
-        return nullptr;
-    }
-
-    // Special case for engine exit event
-    if (Engine::ShouldExit())
-    {
-        // End
-        return nullptr;
-    }
-
-    // Check if load failed
-    if (!asset->IsLoaded())
+    Asset* asset = Assets.Load<MaterialBase>(id);
+    if (asset == nullptr)
     {
         OnError(caller, nullptr, TEXT("Failed to load material asset."));
         return nullptr;
@@ -78,13 +62,11 @@ MaterialLayer* MaterialGenerator::GetLayer(const Guid& id, Node* caller)
     Asset* iterator = asset;
     while (material == nullptr)
     {
-        // Wait for material to be loaded
         if (iterator->WaitForLoaded())
         {
             OnError(caller, nullptr, TEXT("Material asset load failed."));
             return nullptr;
         }
-
         if (iterator->GetTypeName() == MaterialInstance::TypeName)
         {
             auto instance = ((MaterialInstance*)iterator);
@@ -184,22 +166,17 @@ void MaterialGenerator::prepareLayer(MaterialLayer* layer, bool allowVisiblePara
     ASSERT(layer->HasAnyVariableName() == false);
 
     // Add all parameters to be saved in the result material parameters collection (perform merge)
-    bool isRooLayer = GetRootLayer() == layer;
+    bool isRootLayer = GetRootLayer() == layer;
     for (int32 j = 0; j < layer->Graph.Parameters.Count(); j++)
     {
         const auto param = &layer->Graph.Parameters[j];
 
         // For all not root layers (sub-layers) we won't to change theirs ID in order to prevent duplicated ID)
         m.SrcId = param->Identifier;
-        if (isRooLayer)
+        m.DstId = param->Identifier;
+        if (!isRootLayer)
         {
-            // Use the same ID (so we can edit it)
-            m.DstId = param->Identifier;
-        }
-        else
-        {
-            // Generate new ID
-            m.DstId = param->Identifier;
+            // Generate new ID (stable permutation based on the original ID)
             m.DstId.A += _parameters.Count() * 17 + 13;
         }
         layer->ParamIdsMappings.Add(m);
@@ -242,17 +219,29 @@ void MaterialGenerator::prepareLayer(MaterialLayer* layer, bool allowVisiblePara
             mp.Type = MaterialParameterType::Float;
             mp.AsFloat = (float)param->Value.AsDouble;
             break;
-        case VariantType::Vector2:
+        case VariantType::Float2:
             mp.Type = MaterialParameterType::Vector2;
-            mp.AsVector2 = param->Value.AsVector2();
+            mp.AsFloat2 = param->Value.AsFloat2();
             break;
-        case VariantType::Vector3:
+        case VariantType::Float3:
             mp.Type = MaterialParameterType::Vector3;
-            mp.AsVector3 = param->Value.AsVector3();
+            mp.AsFloat3 = param->Value.AsFloat3();
             break;
-        case VariantType::Vector4:
+        case VariantType::Float4:
             mp.Type = MaterialParameterType::Vector4;
-            *(Vector4*)&mp.AsData = param->Value.AsVector4();
+            *(Float4*)&mp.AsData = param->Value.AsFloat4();
+            break;
+        case VariantType::Double2:
+            mp.Type = MaterialParameterType::Vector2;
+            mp.AsFloat2 = (Float2)param->Value.AsDouble2();
+            break;
+        case VariantType::Double3:
+            mp.Type = MaterialParameterType::Vector3;
+            mp.AsFloat3 = (Float3)param->Value.AsDouble3();
+            break;
+        case VariantType::Double4:
+            mp.Type = MaterialParameterType::Vector4;
+            *(Float4*)&mp.AsData = (Float4)param->Value.AsDouble4();
             break;
         case VariantType::Color:
             mp.Type = MaterialParameterType::Color;
@@ -291,6 +280,8 @@ void MaterialGenerator::prepareLayer(MaterialLayer* layer, bool allowVisiblePara
             }
             if (StringUtils::Compare(param->Type.TypeName, "FlaxEngine.GPUTexture") == 0)
                 mp.Type = MaterialParameterType::GPUTexture;
+            else if (StringUtils::Compare(param->Type.TypeName, "FlaxEngine.GPUBuffer") == 0)
+                mp.Type = MaterialParameterType::GPUBuffer;
             else
                 OnError(nullptr, nullptr, String::Format(TEXT("Invalid or unsupported material parameter type {0}."), param->Type));
             mp.AsGuid = (Guid)param->Value;

@@ -1,0 +1,140 @@
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System.IO;
+using System.Collections.Generic;
+using Flax.Build;
+
+namespace Flax.Deps.Dependencies
+{
+    /// <summary>
+    /// ASTC texture format compression lib.
+    /// </summary>
+    /// <seealso cref="Flax.Deps.Dependency" />
+    class astc : Dependency
+    {
+        /// <inheritdoc />
+        public override TargetPlatform[] Platforms
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetPlatform.Windows,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetPlatform.Mac,
+                    };
+                case TargetPlatform.Linux:
+                    return new[]
+                    {
+                        TargetPlatform.Linux,
+                    };
+                default: return new TargetPlatform[0];
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public override TargetArchitecture[] Architectures
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Mac:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                case TargetPlatform.Linux:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                    };
+                default: return new TargetArchitecture[0];
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public override void Build(BuildOptions options)
+        {
+            var root = options.IntermediateFolder;
+
+            // Get the source
+            var commit = "aeece2f609db959d1c5e43e4f00bd177ea130575"; // 4.6.1
+            CloneGitRepo(root, "https://github.com/ARM-software/astc-encoder.git", commit);
+
+            // Fix compilation on macOS
+            Utilities.ReplaceInFile(Path.Combine(root, "Source/cmake_core.cmake"), "-ffp-model=precise", "");
+
+            foreach (var platform in options.Platforms)
+            {
+                foreach (var architecture in options.Architectures)
+                {
+                    BuildStarted(platform, architecture);
+                    switch (platform)
+                    {
+                    case TargetPlatform.Windows:
+                    {
+                        string buildDir = Path.Combine(root, "build-" + architecture);
+                        var isa = architecture == TargetArchitecture.ARM64 ? "-DASTCENC_ISA_NEON=ON" : "-DASTCENC_ISA_SSE2=ON";
+                        var lib = architecture == TargetArchitecture.ARM64 ? "astcenc-neon-static.lib" : "astcenc-sse2-static.lib";
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_BUILD_TYPE=Release -DASTCENC_CLI=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL " + isa);
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        Utilities.FileCopy(Path.Combine(buildDir, "Source/Release", lib), Path.Combine(depsFolder, "astcenc.lib"));
+                        break;
+                    }
+                    case TargetPlatform.Mac:
+                    {
+                        string buildDir = Path.Combine(root, "build-" + architecture);
+                        var isa = architecture == TargetArchitecture.ARM64 ? "-DASTCENC_ISA_NEON=ON" : "-DASTCENC_ISA_SSE2=ON";
+                        var lib = architecture == TargetArchitecture.ARM64 ? "libastcenc-neon-static.a" : "libastcenc-sse2-static.a";
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_BUILD_TYPE=Release -DASTCENC_UNIVERSAL_BUILD=OFF -DASTCENC_UNIVERSAL_BINARY=OFF -DASTCENC_INVARIANCE=OFF " + isa);
+                        BuildCmake(buildDir);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        Utilities.FileCopy(Path.Combine(buildDir, "Source", lib), Path.Combine(depsFolder, "libastcenc.a"));
+                        break;
+                    }
+                    case TargetPlatform.Linux:
+                    {
+                        var envVars = new Dictionary<string, string>
+                        {
+                            { "CXX", "clang-" + LinuxConfiguration.ClangMinVer },
+                            { "CMAKE_BUILD_PARALLEL_LEVEL", CmakeBuildParallel },
+                        };
+                        string buildDir = Path.Combine(root, "build-" + architecture);
+                        var isa = architecture == TargetArchitecture.ARM64 ? "-DASTCENC_ISA_NEON=ON" : "-DASTCENC_ISA_SSE2=ON";
+                        var lib = architecture == TargetArchitecture.ARM64 ? "libastcenc-neon-static.a" : "libastcenc-sse2-static.a";
+                        SetupDirectory(buildDir, true);
+                        RunCmake(buildDir, platform, architecture, ".. -DCMAKE_BUILD_TYPE=Release -DASTCENC_CLI=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON " + isa, envVars);
+                        BuildCmake(buildDir, envVars);
+                        var depsFolder = GetThirdPartyFolder(options, platform, architecture);
+                        Utilities.FileCopy(Path.Combine(buildDir, "Source", lib), Path.Combine(depsFolder, "libastcenc.a"));
+                        break;
+                    }
+                    }
+                }
+            }
+
+            // Copy header and license
+            Utilities.FileCopy(Path.Combine(root, "LICENSE.txt"), Path.Combine(options.ThirdPartyFolder, "astc/LICENSE.txt"));
+            Utilities.FileCopy(Path.Combine(root, "Source/astcenc.h"), Path.Combine(options.ThirdPartyFolder, "astc/astcenc.h"));
+        }
+    }
+}

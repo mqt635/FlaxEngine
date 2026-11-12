@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -23,6 +23,7 @@ private:
 #if PLATFORM_WINDOWS
     HWND _windowHandle;
     IDXGISwapChain* _swapChain;
+    bool _allowTearing, _isFullscreen;
 #else
 	IUnknown* _windowHandle;
 	IDXGISwapChain1* _swapChain;

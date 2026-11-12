@@ -1,15 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Linq;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.GUI.Dialogs;
+using FlaxEditor.GUI.Input;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
     /// <summary>
-    /// Custom implementation of the inspector used to edit Vector4 color value type properties with color grading trackball.
+    /// Custom implementation of the inspector used to edit Float4 color value type properties with color grading trackball.
     /// </summary>
     public sealed class ColorTrackball : CustomEditor
     {
@@ -17,6 +18,7 @@ namespace FlaxEditor.CustomEditors.Editors
         private FloatValueElement _yElement;
         private FloatValueElement _zElement;
         private FloatValueElement _wElement;
+        private ColorValueBox _colorBox;
         private CustomElement<ColorSelector> _trackball;
 
         /// <inheritdoc />
@@ -25,7 +27,7 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <inheritdoc />
         public override void Initialize(LayoutElementsContainer layout)
         {
-            float trackBallSize = 80.0f;
+            float trackBallSize = 100f;
             float margin = 4.0f;
 
             // Panel
@@ -44,15 +46,16 @@ namespace FlaxEditor.CustomEditors.Editors
             // Trackball
             _trackball = masterPanel.Custom<ColorSelector>();
             _trackball.CustomControl.ColorChanged += OnColorWheelChanged;
+            _trackball.CustomControl.SlidingEnd += ClearToken;
 
             // Scale editor
             {
-                var grid = masterPanel.CustomContainer<UniformGridPanel>();
+                var grid = masterPanel.UniformGrid();
                 var gridControl = grid.CustomControl;
                 gridControl.SlotPadding = new Margin(4, 2, 2, 2);
                 gridControl.ClipChildren = false;
                 gridControl.SlotsHorizontally = 1;
-                gridControl.SlotsVertically = 4;
+                gridControl.SlotsVertically = 5;
 
                 LimitAttribute limit = null;
                 var attributes = Values.GetAttributes();
@@ -60,7 +63,8 @@ namespace FlaxEditor.CustomEditors.Editors
                 {
                     limit = (LimitAttribute)attributes.FirstOrDefault(x => x is LimitAttribute);
                 }
-
+                _colorBox = grid.Custom<ColorValueBox>().CustomControl;
+                _colorBox.ValueChanged += OnColorBoxChanged;
                 _xElement = CreateFloatEditor(grid, limit, Color.Red);
                 _yElement = CreateFloatEditor(grid, limit, Color.Green);
                 _zElement = CreateFloatEditor(grid, limit, Color.Blue);
@@ -72,11 +76,12 @@ namespace FlaxEditor.CustomEditors.Editors
         {
             var element = layout.FloatValue();
             element.SetLimits(limit);
-            element.FloatValue.ValueChanged += OnValueChanged;
+            element.ValueBox.ValueChanged += OnValueChanged;
+            element.ValueBox.SlidingEnd += ClearToken;
             var back = FlaxEngine.GUI.Style.Current.TextBoxBackground;
             var grayOutFactor = 0.6f;
-            element.FloatValue.BorderColor = Color.Lerp(borderColor, back, grayOutFactor);
-            element.FloatValue.BorderSelectedColor = borderColor;
+            element.ValueBox.BorderColor = Color.Lerp(borderColor, back, grayOutFactor);
+            element.ValueBox.BorderSelectedColor = borderColor;
             return element;
         }
 
@@ -85,7 +90,17 @@ namespace FlaxEditor.CustomEditors.Editors
             if (IsSetBlocked)
                 return;
 
-            SetValue(new Vector4(color.R, color.G, color.B, _wElement.FloatValue.Value));
+            var isSliding = _trackball.CustomControl.IsSliding;
+            var token = isSliding ? this : null;
+            var value = new Float4(color.R, color.G, color.B, _wElement.ValueBox.Value);
+            SetValue(value, token);
+        }
+
+        private void OnColorBoxChanged()
+        {
+            var token = _colorBox.IsSliding ? this : null;
+            var color = _colorBox.Value;
+            SetValue(new Float4(color.R, color.G, color.B, color.A), token);
         }
 
         private void OnValueChanged()
@@ -93,11 +108,10 @@ namespace FlaxEditor.CustomEditors.Editors
             if (IsSetBlocked)
                 return;
 
-            SetValue(new Vector4(
-                         _xElement.FloatValue.Value,
-                         _yElement.FloatValue.Value,
-                         _zElement.FloatValue.Value,
-                         _wElement.FloatValue.Value));
+            var isSliding = _xElement.IsSliding || _yElement.IsSliding || _zElement.IsSliding || _wElement.IsSliding;
+            var token = isSliding ? this : null;
+            var value = new Float4(_xElement.ValueBox.Value, _yElement.ValueBox.Value, _zElement.ValueBox.Value, _wElement.ValueBox.Value);
+            SetValue(value, token);
         }
 
         /// <inheritdoc />
@@ -107,8 +121,8 @@ namespace FlaxEditor.CustomEditors.Editors
 
             if (!HasDifferentValues)
             {
-                var value = (Vector4)Values[0];
-                var color = new Vector3(value);
+                var value = (Float4)Values[0];
+                var color = new Float3(value);
                 var scale = value.W;
                 float min = color.MinValue;
                 float max = color.MaxValue;
@@ -126,7 +140,8 @@ namespace FlaxEditor.CustomEditors.Editors
                 _yElement.Value = color.Y;
                 _zElement.Value = color.Z;
                 _wElement.Value = scale;
-                _trackball.CustomControl.Color = Vector3.Abs(color);
+                _colorBox.Value = new Color(color.X, color.Y, color.Z, scale);
+                _trackball.CustomControl.Color = Float3.Abs(color);
             }
         }
     }

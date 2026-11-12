@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -16,13 +16,11 @@ namespace Log
     class FLAXENGINE_API Exception : public Object
     {
     protected:
-
         String _message;
         String _additionalInfo;
         LogType _level;
 
     public:
-
         /// <summary>
         /// Creates default exception without additional data
         /// </summary>
@@ -53,14 +51,12 @@ namespace Log
         }
 
     public:
-
         /// <summary>
         /// Virtual destructor
         /// </summary>
         virtual ~Exception();
 
     public:
-
         /// <summary>
         /// Gets a message that describes the current exception.
         /// </summary>
@@ -128,7 +124,6 @@ namespace Log
         // TODO: implement StackTrace caching: https://www.codeproject.com/kb/threads/stackwalker.aspx
 
     public:
-
         // [Object]
         String ToString() const final override
         {

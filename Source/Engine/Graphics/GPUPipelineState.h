@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,22 +8,51 @@
 #include "GPUResource.h"
 
 /// <summary>
+/// Stencil operation modes.
+/// </summary>
+API_ENUM() enum class StencilOperation : byte
+{
+    // Keep the existing stencil data.
+    Keep,
+    // Set the stencil data to 0.
+    Zero,
+    // Set the stencil data to the reference value (set via GPUContext::SetStencilRef).
+    Replace,
+    // Increment the stencil value by 1, and clamp the result.
+    IncrementSaturated,
+    // Decrement the stencil value by 1, and clamp the result.
+    DecrementSaturated,
+    // Invert the stencil data.
+    Invert,
+    // Increment the stencil value by 1, and wrap the result if necessary.
+    Increment,
+    // Decrement the stencil value by 1, and wrap the result if necessary.
+    Decrement,
+
+    API_ENUM(Attributes="HideInEditor") MAX
+};
+
+/// <summary>
 /// Describes full graphics pipeline state within single object.
 /// </summary>
 API_CLASS(Sealed) class FLAXENGINE_API GPUPipelineState : public GPUResource
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUPipelineState);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUPipelineState);
     static GPUPipelineState* Spawn(const SpawnParams& params);
     static GPUPipelineState* New();
 
 public:
-
     /// <summary>
     /// Pipeline state description
     /// </summary>
-    API_STRUCT() struct Description
+    API_STRUCT() struct FLAXENGINE_API Description
     {
-    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Description);
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(Description);
+
+        /// <summary>
+        /// Enable/disable depth (DepthFunc and DepthWriteEnable)
+        /// </summary>
+        API_FIELD() bool DepthEnable;
 
         /// <summary>
         /// Enable/disable depth write
@@ -31,19 +60,54 @@ public:
         API_FIELD() bool DepthWriteEnable;
 
         /// <summary>
-        /// Enable/disable depth test
-        /// </summary>
-        API_FIELD() bool DepthTestEnable;
-
-        /// <summary>
         /// Enable/disable depth clipping
         /// </summary>
         API_FIELD() bool DepthClipEnable;
 
         /// <summary>
+        /// Enable/disable depth bounds testing (min/max values provided via GPUContext::SetDepthBounds)
+        /// </summary>
+        API_FIELD() bool DepthBoundsEnable;
+
+        /// <summary>
         /// A function that compares depth data against existing depth data
         /// </summary>
         API_FIELD() ComparisonFunc DepthFunc;
+
+        /// <summary>
+        /// Enable/disable stencil buffer usage
+        /// </summary>
+        API_FIELD() bool StencilEnable;
+
+        /// <summary>
+        /// The read mask applied to the reference value and each stencil buffer entry to determine the significant bits for the stencil test.
+        /// </summary>
+        API_FIELD() uint8 StencilReadMask;
+
+        /// <summary>
+        /// The write mask applied to values written into the stencil buffer.
+        /// </summary>
+        API_FIELD() uint8 StencilWriteMask;
+
+        /// <summary>
+        /// The comparison function for the stencil test.
+        /// </summary>
+        API_FIELD() ComparisonFunc StencilFunc;
+        
+        /// <summary>
+        /// The stencil operation to perform when stencil testing fails.
+        /// </summary>
+        API_FIELD() StencilOperation StencilFailOp;
+        
+        /// <summary>
+        /// The stencil operation to perform when stencil testing passes and depth testing fails.
+        /// </summary>
+        API_FIELD() StencilOperation StencilDepthFailOp;
+        
+        /// <summary>
+        /// The stencil operation to perform when stencil testing and depth testing both pass.
+        /// </summary>
+        API_FIELD() StencilOperation StencilPassOp;
 
         /// <summary>
         /// Vertex shader program
@@ -73,7 +137,7 @@ public:
         /// <summary>
         /// Input primitives topology
         /// </summary>
-        API_FIELD() PrimitiveTopologyType PrimitiveTopologyType;
+        API_FIELD() PrimitiveTopologyType PrimitiveTopology;
 
         /// <summary>
         /// True if use wireframe rendering, otherwise false
@@ -91,7 +155,6 @@ public:
         API_FIELD() BlendingMode BlendMode;
 
     public:
-
         /// <summary>
         /// Default description
         /// </summary>
@@ -109,20 +172,25 @@ public:
     };
 
 protected:
-
     ShaderBindings _meta;
 
-public:
+    GPUPipelineState();
 
-#if BUILD_DEBUG
+public:
+#if !BUILD_RELEASE
     /// <summary>
     /// The description of the pipeline state cached on creation in debug builds. Can be used to help with rendering crashes or issues and validation.
     /// </summary>
     Description DebugDesc;
+
+    typedef Array<char, InlinedAllocation<200>> DebugName;
+    void GetDebugName(DebugName& name) const;
+#endif
+#if GPU_ENABLE_DEVELOPMENT
+    int32 Complexity;
 #endif
 
 public:
-
     /// <summary>
     /// Gets constant buffers usage mask (each set bit marks usage of the constant buffer at the bit index slot). Combined from all the used shader stages.
     /// </summary>
@@ -147,8 +215,15 @@ public:
         return _meta.UsedUAsMask;
     }
 
-public:
+    /// <summary>
+    /// Gets texture samplers mask (each set bit marks usage of the sampler slot at the bit index slot). Combined from all the used shader stages.
+    /// </summary>
+    FORCE_INLINE uint32 GetUsedSamplersMask() const
+    {
+        return _meta.UsedSamplersMask;
+    }
 
+public:
     /// <summary>
     /// Returns true if pipeline state is valid and ready to use
     /// </summary>
@@ -163,5 +238,5 @@ public:
 
 public:
     // [GPUResource]
-    ResourceType GetResourceType() const final override;
+    GPUResourceType GetResourceType() const final override;
 };

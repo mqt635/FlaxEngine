@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,16 +15,16 @@ class Spline;
 /// <seealso cref="Spline" />
 API_CLASS() class FLAXENGINE_API SplineCollider : public Collider
 {
-DECLARE_SCENE_OBJECT(SplineCollider);
+    API_AUTO_SERIALIZATION();
+    DECLARE_SCENE_OBJECT(SplineCollider);
 private:
     Spline* _spline = nullptr;
-    PxTriangleMesh* _triangleMesh = nullptr;
-    Array<Vector3> _vertexBuffer;
+    void* _triangleMesh = nullptr;
+    Array<Float3> _vertexBuffer;
     Array<int32> _indexBuffer;
     Transform _preTransform = Transform::Identity;
 
 public:
-
     /// <summary>
     /// Linked collision data asset that contains convex mesh or triangle mesh used to represent a spline collider shape.
     /// </summary>
@@ -47,34 +47,27 @@ public:
     /// </summary>
     /// <param name="vertexBuffer">The output vertex buffer.</param>
     /// <param name="indexBuffer">The output index buffer.</param>
-    void ExtractGeometry(Array<Vector3>& vertexBuffer, Array<int32>& indexBuffer) const;
+    void ExtractGeometry(Array<Float3>& vertexBuffer, Array<int32>& indexBuffer) const;
 
 private:
-
     void OnCollisionDataChanged();
     void OnCollisionDataLoaded();
     void OnSplineUpdated();
 
 public:
-
     // [Collider]
     bool CanAttach(RigidBody* rigidBody) const override;
     bool CanBeTrigger() const override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
 #endif
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
-    void Serialize(SerializeStream& stream, const void* otherObj) override;
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
     void OnParentChanged() override;
     void EndPlay() override;
 
 protected:
-
     // [Collider]
-#if USE_EDITOR
-    void DrawPhysicsDebug(RenderView& view) override;
-#endif
+    ImplementPhysicsDebug;
     void UpdateBounds() override;
-    void GetGeometry(PxGeometryHolder& geometry) override;
+    void GetGeometry(CollisionShape& collision) override;
 };

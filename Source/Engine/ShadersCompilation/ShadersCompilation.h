@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@ class Asset;
 class FLAXENGINE_API ShadersCompilation
 {
 public:
-
     /// <summary>
     /// Compiles the shader.
     /// </summary>
@@ -43,10 +42,23 @@ public:
     /// <param name="includes">The output included.</param>
     static void ExtractShaderIncludes(byte* shaderCache, int32 shaderCacheLength, Array<String>& includes);
 
-private:
+    // Resolves shader path name into absolute file path. Resolves './<ProjectName>/ShaderFile.hlsl' cases into a full path.
+    static String ResolveShaderPath(StringView path);
+    // Compacts the full shader file path into portable format with project name prefix such as './<ProjectName>/ShaderFile.hlsl'.
+    static String CompactShaderPath(StringView path);
 
-    static ShaderCompiler* CreateCompiler(ShaderProfile profile);
-    static ShaderCompiler* RequestCompiler(ShaderProfile profile);
+#if USE_EDITOR
+    /// <summary>
+    /// Checks whether a shader asset embeds the current source file contents.
+    /// </summary>
+    /// <param name="sourcePath">The shader source file path.</param>
+    /// <param name="assetPath">The shader asset file path.</param>
+    /// <returns>True when the embedded source matches, otherwise false.</returns>
+    static bool IsShaderSourceAssetUpToDate(const StringView& sourcePath, const StringView& assetPath);
+#endif
+
+private:
+    static ShaderCompiler* RequestCompiler(ShaderProfile profile, PlatformType platform);
     static void FreeCompiler(ShaderCompiler* compiler);
 };
 

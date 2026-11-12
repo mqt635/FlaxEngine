@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content;
@@ -53,11 +53,13 @@ namespace FlaxEditor.Windows.Assets
             {
                 Parent = this
             };
-            _toolstrip.AddButton(editor.Icons.Search64, () => Editor.Windows.ContentWin.Select(_item)).LinkTooltip("Show and select in Content Window");
+            _toolstrip.AddButton(editor.Icons.Search64, ShowInContent).LinkTooltip("Show and select in Content Window.");
 
             InputActions.Add(options => options.Save, Save);
 
             UpdateTitle();
+
+            ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
         }
 
         /// <summary>
@@ -116,7 +118,7 @@ namespace FlaxEditor.Windows.Assets
                 {
                     // Ask user for further action
                     var result = MessageBox.Show(
-                        string.Format("Asset \'{0}\' has been edited. Save before closing?", _item.Path),
+                        string.Format("Asset \'{0}\' has been edited.\nSave before closing?", _item.Path),
                         "Save before closing?",
                         MessageBoxButtons.YesNoCancel
                     );
@@ -130,15 +132,34 @@ namespace FlaxEditor.Windows.Assets
                         // Cancel closing
                         return true;
                     }
+                    else
+                    {
+                        // Discard and close
+                        DiscardChanges();
+                    }
                 }
             }
 
             return base.OnClosing(reason);
         }
 
+        /// <summary>
+        /// Discards unsaved asset changes before closing the window.
+        /// </summary>
+        protected virtual void DiscardChanges()
+        {
+        }
+
+        private void ShowInContent()
+        {
+            Editor.Windows.ContentWin.Select(_item);
+        }
+
         /// <inheritdoc />
         protected override void OnClose()
         {
+            ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
+
             if (_item != null)
             {
                 // Ensure to remove linkage to the item
@@ -151,6 +172,8 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
+
             if (_item != null)
             {
                 // Ensure to remove linkage to the item
@@ -158,6 +181,23 @@ namespace FlaxEditor.Windows.Assets
             }
 
             base.OnDestroy();
+        }
+
+        /// <summary>
+        /// Called when scripts reloading begins.
+        /// </summary>
+        protected virtual void OnScriptsReloadBegin()
+        {
+            if (!IsHidden)
+            {
+                if (IsEdited && _item != null)
+                {
+                    Editor.Log($"Auto-saving local changes to asset '{_item.Path}' before reloading code");
+                    Save();
+                }
+                Editor.Instance.Windows.AddToRestore(this);
+                Close(ClosingReason.ScriptsReload);
+            }
         }
 
         #region IEditable Implementation
@@ -236,7 +276,8 @@ namespace FlaxEditor.Windows.Assets
             base.OnShowContextMenu(menu);
 
             menu.AddButton("Save", Save).Enabled = IsEdited;
-            menu.AddButton("Copy name", () => Clipboard.Text = Item.NamePath);
+            menu.AddButton("Copy Name", () => Clipboard.Text = Item.NamePath);
+            menu.AddButton("Show In Content", ShowInContent);
 
             menu.AddSeparator();
         }
@@ -309,6 +350,19 @@ namespace FlaxEditor.Windows.Assets
         }
 
         /// <summary>
+        /// Drops any loaded asset data and refreshes the UI state.
+        /// </summary>
+        public void RefreshAsset()
+        {
+            if (_asset == null || _asset.WaitForLoaded())
+                return;
+
+            OnAssetLoaded();
+            MarkAsEdited();
+            Save();
+        }
+
+        /// <summary>
         /// Reloads the asset (window will receive <see cref="OnAssetLoaded"/> or <see cref="OnAssetLoadFailed"/> events).
         /// </summary>
         public void ReloadAsset()
@@ -375,14 +429,16 @@ namespace FlaxEditor.Windows.Assets
         protected override void OnShow()
         {
             // Check if has no asset (but has item linked)
-            if (_asset == null && _item != null)
+            var item = _item;
+            if (_asset == null && item != null)
             {
                 // Load asset
                 _asset = LoadAsset();
                 if (_asset == null)
                 {
-                    Editor.LogError(string.Format("Cannot load asset \'{0}\' ({1})", _item.Path, typeof(T)));
+                    Editor.LogError(string.Format("Cannot load asset \'{0}\' ({1})", item.Path, typeof(T)));
                     Close();
+                    Editor.ContentDatabase.RefreshFolder(item, false);
                     return;
                 }
 
@@ -489,6 +545,16 @@ namespace FlaxEditor.Windows.Assets
             _item.RefreshThumbnail();
 
             return false;
+        }
+
+        /// <summary>
+        /// Loads the asset from the original location to reflect the state (eg. after original asset reimport).
+        /// </summary>
+        protected virtual void LoadFromOriginal()
+        {
+            _asset = LoadAsset();
+            OnAssetLoaded();
+            ClearEditedFlag();
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ImportFont.h"
 
@@ -12,12 +12,14 @@
 CreateAssetResult ImportFont::Import(CreateAssetContext& context)
 {
     // Base
-    IMPORT_SETUP(FontAsset, 3);
+    IMPORT_SETUP(FontAsset, 5);
 
     // Setup header
     FontOptions options;
     options.Hinting = FontHinting::Default;
     options.Flags = FontFlags::AntiAliasing;
+    options.RasterMode = FontRasterMode::Bitmap;
+    options.MSDFSize = 32.0f;
     context.Data.CustomData.Copy(&options);
 
     // Open the file

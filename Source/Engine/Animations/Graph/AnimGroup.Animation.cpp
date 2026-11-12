@@ -1,15 +1,189 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "AnimGraph.h"
+#include "Engine/Core/Types/VariantValueCast.h"
 #include "Engine/Content/Assets/Animation.h"
 #include "Engine/Content/Assets/SkeletonMask.h"
 #include "Engine/Content/Assets/AnimationGraphFunction.h"
 #include "Engine/Animations/AlphaBlend.h"
+#include "Engine/Animations/AnimEvent.h"
 #include "Engine/Animations/InverseKinematics.h"
+#include "Engine/Level/Actors/AnimatedModel.h"
+#include "Engine/Physics/Physics.h"
+
+struct AnimSampleData
+{
+    Animation* Anim;
+    float TimePos;
+    float PrevTimePos;
+    float Length;
+    float Speed;
+    Float4 Data;
+    ANIM_GRAPH_MULTI_BLEND_INDEX MultiBlendIndex; // Index of the animation in the multi-blend node data array
+
+    AnimSampleData(AnimGraphExecutor* executor, const MultiBlendInputs& inputs, AnimGraphNode* node, ANIM_GRAPH_MULTI_BLEND_INDEX multiBlendIndex)
+        : TimePos(0.0f)
+        , PrevTimePos(0.0f)
+        , MultiBlendIndex(multiBlendIndex)
+    {
+        Data = node->Values[inputs.AnimationsStartIndex + multiBlendIndex * 2].AsFloat4();
+        Speed = Data.W;
+        AnimGraphBox* box;
+        switch (inputs.Sources)
+        {
+        case MultiBlendAnimationSources::Default:
+            // Animation asset
+            Anim = node->Assets[multiBlendIndex].As<Animation>();
+            Length = Anim ? Anim->GetLength() : 0;
+            break;
+        case MultiBlendAnimationSources::InputAnimations:
+            // Animation input
+            box = node->TryGetBox(MultiBlendInputs::AnimationInputsStartIndex + multiBlendIndex);
+            Anim = TVariantValueCast<Animation*>::Cast(executor->tryGetValue(box, Variant::Null));
+            Length = Anim ? Anim->GetLength() : 0;
+            break;
+        default:
+            CRASH;
+            break;
+        }
+    }
+};
+
+MultiBlendInputs::MultiBlendInputs(AnimGraphNode* node)
+{
+    Range = node->Values[0].AsFloat4();
+    Speed = (float)node->Values[1];
+    Loop = (bool)node->Values[2];
+    StartTime = (float)node->Values[3];
+    SyncLength = false;
+    if (node->Values.Count() > 4 && node->Values[4].Type.IsScalar())
+    {
+        Sources = (MultiBlendAnimationSources)(int32)node->Values[4];
+        AnimationsStartIndex = 5;
+    }
+}
+
+MultiBlendInputs::MultiBlendInputs(AnimGraphExecutor* executor, AnimGraphNode* node)
+{
+    Range = node->Values[0].AsFloat4();
+    Speed = (float)executor->tryGetValue(node->GetBox(1), node->Values[1]);
+    Loop = (bool)executor->tryGetValue(node->GetBox(2), node->Values[2]);
+    StartTime = (float)executor->tryGetValue(node->GetBox(3), node->Values[3]);
+    SyncLength = false; // TODO: make it configurable via node settings? (change node->Values[2] to contain flags)
+    if (node->Values.Count() > 4 && node->Values[4].Type.IsScalar())
+    {
+        Sources = (MultiBlendAnimationSources)(int32)node->Values[4];
+        AnimationsStartIndex = 5;
+    }
+}
+
+float MultiBlendInputs::ComputeMultiBlendLength(AnimGraphExecutor* executor, AnimGraphNode* node) const
+{
+    ANIM_GRAPH_PROFILE_EVENT("Setup Multi Blend Length");
+    float length = 0.0f;
+    switch (Sources)
+    {
+    case MultiBlendAnimationSources::Default:
+        // Read total duration time of all blend point animation
+        // TODO: lock graph or graph asset here? make it thread safe
+        for (int32 i = 0; i < node->Assets.Count(); i++)
+        {
+            auto& asset = node->Assets[i];
+            if (asset)
+            {
+                // TODO: maybe don't update if not all anims are loaded? just skip the node with the bind pose?
+                if (asset->WaitForLoaded())
+                {
+                    asset = nullptr;
+                    LOG(Warning, "Failed to load one of the animations.");
+                }
+                else
+                {
+                    const auto anim = asset.As<Animation>();
+                    const auto aData = node->Values[AnimationsStartIndex + i * 2].AsFloat4();
+                    length = Math::Max(length, anim->GetLength() * Math::Abs(aData.W));
+                }
+            }
+        }
+        break;
+    case MultiBlendAnimationSources::InputAnimations:
+        for (int32 i = 0; i * 2 + AnimationsStartIndex < node->Values.Count(); i++)
+        {
+            auto box = node->TryGetBox(MultiBlendInputs::AnimationInputsStartIndex + i);
+            if (!box)
+                break;
+            auto anim = TVariantValueCast<Animation*>::Cast(executor->tryGetValue(box, Variant::Null));
+            if (anim)
+            {
+                const auto aData = node->Values[AnimationsStartIndex + i * 2].AsFloat4();
+                length = Math::Max(length, anim->GetLength() * Math::Abs(aData.W));
+            }
+        }
+        break;
+    }
+    return length;
+}
+
+struct MultiBlendAnimData
+{
+    float TimePosition;
+    ANIM_GRAPH_MULTI_BLEND_INDEX Animation;
+
+    typedef Array<MultiBlendAnimData, FixedAllocation<AnimGraphInstanceData::MultiBlendBucket::MaxCount>> List;
+
+    static void BeforeSample(const AnimGraphContext& context, const AnimGraphInstanceData::MultiBlendBucket& bucket, const List& prevList, AnimSampleData& sample, float speed = 1.0f)
+    {
+        // Find time position in the previous frame
+        sample.PrevTimePos = 0.0f;
+        for (const auto& e : prevList)
+        {
+            if (e.Animation == sample.MultiBlendIndex)
+            {
+                sample.PrevTimePos = e.TimePosition;
+                break;
+            }
+        }
+
+        if (speed * context.DeltaTime < 0.0f && bucket.LastUpdateFrame < context.CurrentFrameIndex - 1)
+        {
+            // If speed is negative and it's the first node update then start playing from end
+            sample.PrevTimePos = sample.Length;
+        }
+
+        // Calculate new time position
+        sample.TimePos = sample.PrevTimePos + context.DeltaTime * speed;
+    }
+
+    static void AfterSample(List& newList, const AnimSampleData& sample)
+    {
+        CHECK(newList.Count() < AnimGraphInstanceData::MultiBlendBucket::MaxCount);
+
+        // Save animation position for the next frame
+        newList.Add({ sample.TimePos, sample.MultiBlendIndex });
+    }
+
+    static void GetList(const AnimGraphInstanceData::MultiBlendBucket& multiBlend, List& list)
+    {
+        list.Resize(multiBlend.Count);
+        for (int32 i = 0; i < multiBlend.Count; i++)
+            list[i] = { multiBlend.TimePositions[i], multiBlend.Animations[i] };
+    }
+
+    static void SetList(AnimGraphInstanceData::MultiBlendBucket& multiBlend, const List& list)
+    {
+        multiBlend.Count = list.Count();
+        for (int32 i = 0; i < multiBlend.Count; i++)
+        {
+            auto& e = list[i];
+            multiBlend.TimePositions[i] = e.TimePosition;
+            multiBlend.Animations[i] = e.Animation;
+        }
+    }
+};
 
 namespace
 {
-    void BlendAdditiveWeightedRotation(Quaternion& base, Quaternion& additive, float weight)
+    FORCE_INLINE void BlendAdditiveWeightedRotation(Quaternion& base, Quaternion& additive, float weight)
     {
         // Pick a shortest path between rotation to fix blending artifacts
         additive *= weight;
@@ -17,6 +191,107 @@ namespace
             additive *= -1;
         base += additive;
     }
+
+    FORCE_INLINE void NormalizeRotations(AnimGraphImpulse* nodes, RootMotionExtraction rootMotionMode)
+    {
+        for (int32 i = 0; i < nodes->Nodes.Count(); i++)
+        {
+            nodes->Nodes.Get()[i].Orientation.Normalize();
+        }
+        if (rootMotionMode != RootMotionExtraction::NoExtraction)
+        {
+            nodes->RootMotion.Orientation.Normalize();
+        }
+    }
+}
+
+// Utility for retargeting animation poses between skeletons.
+struct Retargeting
+{
+private:
+    const Matrix* _sourcePosePtr, * _targetPosePtr;
+    const SkeletonData* _sourceSkeleton, *_targetSkeleton;
+    const SkinnedModel::SkeletonMapping* _sourceMapping;
+
+public:
+    void Init(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& sourceMapping)
+    {
+        ASSERT_LOW_LAYER(targetSkeleton.Nodes.Count() == sourceMapping.NodesMapping.Length());
+        
+        // Cache world-space poses for source and target skeletons to avoid redundant calculations during retargeting
+        _sourcePosePtr = sourceSkeleton.GetNodesPose().Get();
+        _targetPosePtr = targetSkeleton.GetNodesPose().Get();
+
+        _sourceSkeleton = &sourceSkeleton;
+        _targetSkeleton = &targetSkeleton;
+        _sourceMapping = &sourceMapping;
+    }
+
+    void RetargetNode(const Transform& source, Transform& target, int32 sourceIndex, int32 targetIndex)
+    {
+        // sourceSkeleton - skeleton of Anim Graph
+        // targetSkeleton - visual mesh skeleton
+        // target - anim graph input/output transformation of that node
+        const SkeletonNode& targetNode = _targetSkeleton->Nodes.Get()[targetIndex];
+        if (sourceIndex == -1)
+        {
+            // Use T-pose
+            target = targetNode.LocalTransform;
+        }
+        else
+        {
+            // [Reference: https://wickedengine.net/2022/09/animation-retargeting/comment-page-1/]
+
+            // Calculate T-Pose of source node, target node and target parent node
+            const Matrix* sourcePosePtr = _sourcePosePtr;
+            const Matrix* targetPosePtr = _targetPosePtr;
+            const Matrix& bindMatrix = sourcePosePtr[sourceIndex];
+            const Matrix& targetMatrix = targetPosePtr[targetIndex];
+            Matrix inverseParentMatrix;
+            if (targetNode.ParentIndex != -1)
+                Matrix::Invert(targetPosePtr[targetNode.ParentIndex], inverseParentMatrix);
+            else
+                inverseParentMatrix = Matrix::Identity;
+
+            // Target node animation is world-space difference of the animated source node inside the target's parent node world-space
+            const SkeletonNode& sourceNode = _sourceSkeleton->Nodes.Get()[sourceIndex];
+            Matrix localMatrix = source.GetWorld();
+            if (sourceNode.ParentIndex != -1)
+                localMatrix = localMatrix * sourcePosePtr[sourceNode.ParentIndex];
+            localMatrix = Matrix::Invert(bindMatrix) * localMatrix;
+            localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
+
+            // Extract local node transformation
+            localMatrix.Decompose(target);
+        }
+    }
+
+    FORCE_INLINE void RetargetPose(const Transform* sourceNodes, Transform* targetNodes)
+    {
+        for (int32 targetIndex = 0; targetIndex < _targetSkeleton->Nodes.Count(); targetIndex++)
+        {
+            const int32 sourceIndex = _sourceMapping->NodesMapping.Get()[targetIndex];
+            RetargetNode(sourceNodes[sourceIndex], targetNodes[targetIndex], sourceIndex, targetIndex);
+        }
+    }
+};
+
+void RetargetSkeletonPose(const SkeletonData& sourceSkeleton, const SkeletonData& targetSkeleton, const SkinnedModel::SkeletonMapping& mapping, const Transform* sourceNodes, Transform* targetNodes)
+{
+    Retargeting retargeting;
+    retargeting.Init(sourceSkeleton, targetSkeleton, mapping);
+    retargeting.RetargetPose(sourceNodes, targetNodes);
+}
+
+AnimGraphTraceEvent& AnimGraphContext::AddTraceEvent(const AnimGraphNode* node)
+{
+    auto& trace = Data->TraceEvents.AddOne();
+    trace.Value = 0.0f;
+    trace.NodeId = node->ID;
+    const auto* nodePath = NodePath.Get();
+    for (int32 i = 0; i < NodePath.Count(); i++)
+        trace.NodePath[i] = nodePath[i];
+    return trace;
 }
 
 int32 AnimGraphExecutor::GetRootNodeIndex(Animation* anim)
@@ -38,72 +313,106 @@ int32 AnimGraphExecutor::GetRootNodeIndex(Animation* anim)
     return rootNodeIndex;
 }
 
-void AnimGraphExecutor::UpdateRootMotion(const Animation::NodeToChannel* mapping, Animation* anim, float pos, float prevPos, Transform& rootNode, RootMotionData& rootMotion)
+void AnimGraphExecutor::ProcessAnimEvents(AnimGraphNode* node, bool loop, float length, float animPos, float animPrevPos, Animation* anim, float speed)
 {
-    // Pick node
-    const int32 rootNodeIndex = GetRootNodeIndex(anim);
+    if (anim->Events.Count() == 0)
+        return;
+    ANIM_GRAPH_PROFILE_EVENT("Events");
+    auto& context = *Context.Get();
+    float eventTimeMin = animPrevPos;
+    float eventTimeMax = animPos;
 
-    // Extract it's current motion
-    const Transform rootNow = rootNode;
-    const Transform refPose = GetEmptyNodes()->Nodes[rootNodeIndex];
-    rootNode = refPose;
-
-    // Apply
-    const int32 nodeToChannel = mapping->At(rootNodeIndex);
-    if (_rootMotionMode == RootMotionMode::Enable && nodeToChannel != -1)
+    if (eventTimeMin > eventTimeMax)
     {
-        const NodeAnimationData& rootChannel = anim->Data.Channels[nodeToChannel];
+        Swap(eventTimeMin, eventTimeMax);
+    }
 
-        // Get the root bone transformation in the previous update
-        Transform rootBefore = refPose;
-        rootChannel.Evaluate(prevPos, &rootBefore, false);
-
-        // Check if animation looped
-        if (pos < prevPos)
+    const float eventTime = (float)(animPos / anim->Data.FramesPerSecond);
+    const float eventDeltaTime = (float)((animPos - animPrevPos) / anim->Data.FramesPerSecond);
+    const int32 animDuration = Math::CeilToInt(anim->GetDuration());
+    for (const auto& track : anim->Events)
+    {
+        for (const auto& k : track.Second.GetKeyframes())
         {
-            const float length = anim->GetLength();
-            const float endPos = length * static_cast<float>(anim->Data.FramesPerSecond);
-            const float timeToEnd = endPos - prevPos;
+            if (!k.Value.Instance)
+                continue;
+            const float duration = k.Value.Duration > 1 ? k.Value.Duration : 0.0f;
+#define ADD_OUTGOING_EVENT(type) context.Data->OutgoingEvents.Add({ k.Value.Instance, (AnimatedModel*)context.Data->Object, anim, eventTime, eventDeltaTime, AnimGraphInstanceData::OutgoingEvent::type })
+            if ((k.Time <= eventTimeMax && eventTimeMin <= k.Time + duration
+                && (Math::FloorToInt(animPos) != 0 && Math::CeilToInt(animPrevPos) != animDuration
+                    && Math::FloorToInt(animPrevPos) != 0 && Math::CeilToInt(animPos) != animDuration))
+                // Handle the edge case of an event on 0 or on max animation duration during looping
+                || (!loop && duration == 0.0f && Math::CeilToInt(animPos) == animDuration && Math::CeilToInt(animPrevPos) == animDuration - 1 && Math::NearEqual(k.Time, anim->GetDuration()))
+                || (loop && Math::FloorToInt(animPos) == 0 && Math::CeilToInt(animPrevPos) == animDuration && k.Time == 0.0f)
+                || (loop && Math::FloorToInt(animPrevPos) == 0 && Math::CeilToInt(animPos) == animDuration && k.Time == 0.0f)
+                || (loop && Math::FloorToInt(animPos) == 0 && Math::CeilToInt(animPrevPos) == animDuration && Math::NearEqual(k.Time, anim->GetDuration()))
+                || (loop && Math::FloorToInt(animPrevPos) == 0 && Math::CeilToInt(animPos) == animDuration && Math::NearEqual(k.Time, anim->GetDuration()))
+                || (Math::FloorToInt(animPos) == 1 && Math::FloorToInt(animPrevPos) == 0 && k.Time == 1.0f)
+                || (Math::FloorToInt(animPos) == 0 && Math::FloorToInt(animPrevPos) == 1 && k.Time == 1.0f)
+                || (Math::CeilToInt(animPos) == animDuration && Math::CeilToInt(animPrevPos) == animDuration - 1 && Math::NearEqual(k.Time, anim->GetDuration() - 1.0f))
+                || (Math::CeilToInt(animPos) == animDuration - 1 && Math::CeilToInt(animPrevPos) == animDuration && Math::NearEqual(k.Time, anim->GetDuration() - 1.0f))
+                || (Math::FloorToInt(animPos) == 0 && Math::FloorToInt(animPrevPos) == 0 && k.Time == 0.0f)
+                )
+            {
+                int32 stateIndex = -1;
+                if (duration > 1)
+                {
+                    // Begin for continuous event
+                    for (stateIndex = 0; stateIndex < context.Data->ActiveEvents.Count(); stateIndex++)
+                    {
+                        const auto& e = context.Data->ActiveEvents[stateIndex];
+                        if (e.Instance == k.Value.Instance && e.Node == node)
+                            break;
+                    }
+                    if (stateIndex == context.Data->ActiveEvents.Count())
+                    {
+                        ASSERT(k.Value.Instance->Is<AnimContinuousEvent>());
+                        auto& e = context.Data->ActiveEvents.AddOne();
+                        e.Instance = (AnimContinuousEvent*)k.Value.Instance;
+                        e.Anim = anim;
+                        e.Node = node;
+                        ADD_OUTGOING_EVENT(OnBegin);
+                    }
+                }
 
-            Transform rootBegin = refPose;
-            rootChannel.Evaluate(0, &rootBegin, false);
-
-            Transform rootEnd = refPose;
-            rootChannel.Evaluate(endPos, &rootEnd, false);
-
-            //rootChannel.Evaluate(pos - timeToEnd, &rootNow, true);
-
-            // Complex motion calculation to preserve the looped movement
-            // (end - before + now - begin)
-            // It sums the motion since the last update to anim end and since the start to now
-            rootMotion.Translation = rootEnd.Translation - rootBefore.Translation + rootNow.Translation - rootBegin.Translation;
-            rootMotion.Rotation = rootEnd.Orientation * rootBefore.Orientation.Conjugated() * (rootNow.Orientation * rootBegin.Orientation.Conjugated());
-            //rootMotion.Rotation = Quaternion::Identity;
-        }
-        else
-        {
-            // Simple motion delta
-            // (now - before)
-            rootMotion.Translation = rootNow.Translation - rootBefore.Translation;
-            rootMotion.Rotation = rootBefore.Orientation.Conjugated() * rootNow.Orientation;
+                // Event
+                ADD_OUTGOING_EVENT(OnEvent);
+                if (stateIndex != -1)
+                    context.Data->ActiveEvents[stateIndex].Hit = true;
+            }
+            else if (duration > 1)
+            {
+                // End for continuous event
+                for (int32 i = 0; i < context.Data->ActiveEvents.Count(); i++)
+                {
+                    const auto& e = context.Data->ActiveEvents[i];
+                    if (e.Instance == k.Value.Instance && e.Node == node)
+                    {
+                        ADD_OUTGOING_EVENT(OnEnd);
+                        context.Data->ActiveEvents.RemoveAt(i);
+                        break;
+                    }
+                }
+            }
+#undef ADD_OUTGOING_EVENT
         }
     }
 }
 
-float GetAnimPos(float& timePos, float startTimePos, bool loop, float length)
+float GetAnimPos(float& timePos, float startTimePos, float speed, bool loop, float length)
 {
     // Apply animation offset and looping to calculate the animation sampling position within [0;length]
-    float result = startTimePos + timePos;
+    float result = startTimePos + timePos * speed;
     if (result < 0.0f)
     {
         if (loop)
         {
             // Animation looped (revered playback)
-            result = length - result;
+            result = length + Math::Mod(result, length);
         }
         else
         {
-            // Animation ended (revered playback)
+            // Animation ended (reversed playback)
             result = 0;
         }
         timePos = result;
@@ -114,287 +423,374 @@ float GetAnimPos(float& timePos, float startTimePos, bool loop, float length)
         {
             // Animation looped
             result = Math::Mod(result, length);
+
+            // Remove start time offset to properly loop from animation start during the next frame
+            timePos = result - startTimePos;
         }
         else
         {
             // Animation ended
-            result = length;
+            timePos = result = length;
         }
-        timePos = result;
     }
     return result;
 }
 
-float GetAnimSamplePos(float length, Animation* anim, float pos, float speed)
+float GetAnimSamplePos(float length, Animation* anim, float pos)
 {
     // Convert into animation local time (track length may be bigger so fill the gaps with animation clip and include playback speed)
     // Also, scale the animation to fit the total animation node length without cut in a middle
-    const auto animLength = anim->GetLength();
-    const int32 cyclesCount = Math::FloorToInt(length / animLength);
+    const float animLength = anim->GetLength();
+    if (animLength <= ANIM_GRAPH_BLEND_THRESHOLD)
+        return 0;
+    const int32 cyclesCount = Math::Max(Math::FloorToInt(length / animLength), 1);
     const float cycleLength = animLength * (float)cyclesCount;
     const float adjustRateScale = length / cycleLength;
-    auto animPos = pos * speed * adjustRateScale;
-    while (animPos > animLength)
+    float animPos = pos * adjustRateScale;
+    animPos = Math::Mod(animPos, animLength);
     {
         animPos -= animLength;
     }
     if (animPos < 0)
         animPos = animLength + animPos;
-    animPos *= static_cast<float>(anim->Data.FramesPerSecond);
+    animPos = (float)(animPos * anim->Data.FramesPerSecond);
     return animPos;
+}
+
+FORCE_INLINE void GetAnimPos(bool loop, float length, float speed, float startTimePos, float prevTimePos, float& newTimePos, float& pos, float& prevPos)
+{
+    // Calculate actual time position within the animation node (defined by length and loop mode)
+    pos = GetAnimPos(newTimePos, startTimePos, speed, loop, length);
+    prevPos = GetAnimPos(prevTimePos, startTimePos, speed, loop, length);
+}
+
+void AnimGraphExecutor::ProcessAnimation(AnimGraphImpulse* nodes, AnimGraphNode* node, bool loop, float length, float pos, float prevPos, Animation* anim, float speed, float weight, ProcessAnimationMode mode, BitArray<InlinedAllocation<8>>* usedNodes)
+{
+    PROFILE_CPU_ASSET(anim);
+
+    // Get animation position (animation track position for channels sampling)
+    const float animPos = GetAnimSamplePos(length, anim, pos);
+    const float animPrevPos = GetAnimSamplePos(length, anim, prevPos);
+
+    // Add to trace
+    auto& context = *Context.Get();
+    if (context.Data->EnableTracing)
+    {
+        auto& trace = context.AddTraceEvent(node);
+        trace.Asset = anim;
+        trace.Value = animPos;
+    }
+
+    // Evaluate nested animations
+    BitArray<InlinedAllocation<8>> usedNodesThis;
+    if (anim->NestedAnims.Count() != 0)
+    {
+        if (usedNodes == nullptr)
+        {
+            // Per-channel bit to indicate which channels were used by nested
+            usedNodesThis.Resize(nodes->Nodes.Count());
+            usedNodesThis.SetAll(false);
+            usedNodes = &usedNodesThis;
+        }
+
+        for (auto& e : anim->NestedAnims)
+        {
+            const auto& nestedAnim = e.Second;
+            float nestedAnimPos = animPos - nestedAnim.Time;
+            if (nestedAnimPos >= 0.0f &&
+                nestedAnimPos < nestedAnim.Duration &&
+                nestedAnim.Enabled &&
+                nestedAnim.Anim &&
+                nestedAnim.Anim->IsLoaded())
+            {
+                // Get nested animation time position
+                float nestedAnimPrevPos = animPrevPos - nestedAnim.Time;
+                const float nestedAnimLength = nestedAnim.Anim->GetLength();
+                const float nestedAnimSpeed = nestedAnim.Speed * speed;
+                const float frameRateMatchScale = (float)(nestedAnimSpeed / anim->Data.FramesPerSecond);
+                nestedAnimPos = nestedAnimPos * frameRateMatchScale;
+                nestedAnimPrevPos = nestedAnimPrevPos * frameRateMatchScale;
+                GetAnimPos(nestedAnim.Loop, nestedAnimLength, speed, nestedAnim.StartTime, nestedAnimPrevPos, nestedAnimPos, nestedAnimPos, nestedAnimPrevPos);
+
+                ProcessAnimation(nodes, node, true, nestedAnimLength, nestedAnimPos, nestedAnimPrevPos, nestedAnim.Anim, 1.0f, weight, mode, usedNodes);
+            }
+        }
+    }
+
+    // Get skeleton nodes mapping descriptor
+    const SkinnedModel::SkeletonMapping mapping = _graph.BaseModel->GetSkeletonMapping(anim);
+    if (mapping.NodesMapping.IsInvalid())
+        return;
+
+    // Evaluate nodes animations
+    const bool weighted = weight < 1.0f;
+    const bool retarget = mapping.SourceSkeleton && mapping.SourceSkeleton != mapping.TargetSkeleton;
+    const auto emptyNodes = GetEmptyNodes();
+    Retargeting retargeting;
+    SkinnedModel::SkeletonMapping sourceMapping;
+    if (retarget)
+    {
+        sourceMapping = _graph.BaseModel->GetSkeletonMapping(mapping.SourceSkeleton);
+        retargeting.Init(mapping.SourceSkeleton->Skeleton, mapping.TargetSkeleton->Skeleton, mapping);
+    }
+    for (int32 nodeIndex = 0; nodeIndex < nodes->Nodes.Count(); nodeIndex++)
+    {
+        const int32 nodeToChannel = mapping.NodesMapping[nodeIndex];
+        Transform& dstNode = nodes->Nodes[nodeIndex];
+        Transform srcNode = emptyNodes->Nodes[nodeIndex];
+        if (nodeToChannel != -1)
+        {
+            // Calculate the animated node transformation
+            anim->Data.Channels[nodeToChannel].Evaluate(animPos, &srcNode, false);
+
+            // Optionally retarget animation into the skeleton used by the Anim Graph
+            if (retarget)
+            {
+                const int32 sourceIndex = sourceMapping.NodesMapping[nodeIndex];
+                retargeting.RetargetNode(srcNode, srcNode, sourceIndex, nodeIndex);
+            }
+
+            // Mark node as used
+            if (usedNodes)
+                usedNodes->Set(nodeIndex, true);
+        }
+        else if (usedNodes && (usedNodes != &usedNodesThis || usedNodes->Get(nodeIndex)))
+        {
+            // Skip for nested animations so other one or top-level anim will update remaining nodes
+            continue;
+        }
+
+        // Blend node
+        if (mode == ProcessAnimationMode::BlendAdditive)
+        {
+            dstNode.Translation += srcNode.Translation * weight;
+            dstNode.Scale += srcNode.Scale * weight;
+            BlendAdditiveWeightedRotation(dstNode.Orientation, srcNode.Orientation, weight);
+        }
+        else if (mode == ProcessAnimationMode::Add)
+        {
+            dstNode.Translation += srcNode.Translation * weight;
+            dstNode.Scale += srcNode.Scale * weight;
+            dstNode.Orientation += srcNode.Orientation * weight;
+        }
+        else if (weighted)
+        {
+            dstNode.Translation = srcNode.Translation * weight;
+            dstNode.Scale = srcNode.Scale * weight;
+            dstNode.Orientation = srcNode.Orientation * weight;
+        }
+        else
+        {
+            dstNode = srcNode;
+        }
+    }
+
+    // Handle root motion
+    if (_rootMotionMode != RootMotionExtraction::NoExtraction && anim->Data.RootMotionFlags != AnimationRootMotionFlags::None)
+    {
+        // Calculate the root motion node transformation
+        const bool motionPositionXZ = EnumHasAnyFlags(anim->Data.RootMotionFlags, AnimationRootMotionFlags::RootPositionXZ);
+        const bool motionPositionY = EnumHasAnyFlags(anim->Data.RootMotionFlags, AnimationRootMotionFlags::RootPositionY);
+        const bool motionRotation = EnumHasAnyFlags(anim->Data.RootMotionFlags, AnimationRootMotionFlags::RootRotation);
+        const bool motionPosition = motionPositionXZ | motionPositionY;
+        const Vector3 motionPositionMaskRef(motionPositionXZ ? 1.0f : 0.0f, motionPositionY ? 1.0f : 0.0f, motionPositionXZ ? 1.0f : 0.0f);
+        Vector3 motionPositionMask = motionPositionMaskRef;
+        const int32 rootNodeIndex = GetRootNodeIndex(anim);
+        auto& skeleton = _graph.BaseModel->Skeleton;
+        if (motionPosition && EnumHasAnyFlags(anim->Data.RootMotionFlags, AnimationRootMotionFlags::LocalPositionMask))
+        {
+            // Rotate position mask by the rotation of the root node to extract motion in the local space of the model (eg. when skeleton has different coordinate system)
+            Quaternion rootOrientation = Quaternion::Identity;
+            int32 parentIndex = skeleton.Nodes[rootNodeIndex].ParentIndex;
+            while (parentIndex != -1)
+            {
+                rootOrientation = rootOrientation * skeleton.Nodes[parentIndex].LocalTransform.Orientation;
+                parentIndex = skeleton.Nodes[parentIndex].ParentIndex;
+            }
+            Vector3::Transform(motionPositionMask, rootOrientation, motionPositionMask);
+        }
+        const Transform& refPose = emptyNodes->Nodes[rootNodeIndex];
+        Transform& rootNode = nodes->Nodes[rootNodeIndex];
+        Transform& dstNode = nodes->RootMotion;
+        Transform srcNode = Transform::Identity;
+        const int32 nodeToChannel = mapping.NodesMapping[rootNodeIndex];
+        if (_rootMotionMode == RootMotionExtraction::Enable && nodeToChannel != -1)
+        {
+            // Get the root bone transformation
+            Transform rootBefore = refPose, rootNow = refPose;
+            const NodeAnimationData& rootChannel = anim->Data.Channels[nodeToChannel];
+            rootChannel.Evaluate(animPrevPos, &rootBefore, false);
+            rootChannel.Evaluate(animPos, &rootNow, false);
+
+            // Check if animation looped
+            if (animPos < animPrevPos)
+            {
+                const float endPos = (float)(anim->GetLength() * anim->Data.FramesPerSecond);
+
+                Transform rootBegin = refPose;
+                rootChannel.Evaluate(0, &rootBegin, false);
+
+                Transform rootEnd = refPose;
+                rootChannel.Evaluate(endPos, &rootEnd, false);
+
+                // Complex motion calculation to preserve the looped movement
+                // (end - before + now - begin)
+                // It sums the motion since the last update to anim end and since the start to now
+                if (motionPosition)
+                    srcNode.Translation = (rootEnd.Translation - rootBefore.Translation + rootNow.Translation - rootBegin.Translation) * motionPositionMask;
+                if (motionRotation)
+                    srcNode.Orientation = (rootBefore.Orientation.Conjugated() * rootEnd.Orientation) * (rootBegin.Orientation.Conjugated() * rootNow.Orientation);
+            }
+            else
+            {
+                // Simple motion delta
+                // (now - before)
+                if (motionPosition)
+                    srcNode.Translation = (rootNow.Translation - rootBefore.Translation) * motionPositionMask;
+                if (motionRotation)
+                    srcNode.Orientation = rootBefore.Orientation.Conjugated() * rootNow.Orientation;
+            }
+
+            // Convert root motion from local-space to the actor-space (eg. if root node is not actually a root and its parents have rotation/scale)
+            int32 parentIndex = skeleton.Nodes[rootNodeIndex].ParentIndex;
+            while (parentIndex != -1)
+            {
+                srcNode.Translation = nodes->Nodes[parentIndex].LocalToWorld(srcNode.Translation);
+                parentIndex = skeleton.Nodes[parentIndex].ParentIndex;
+            }
+        }
+
+        // Remove root node motion after extraction (only extracted components)
+        if (motionPosition)
+            rootNode.Translation = refPose.Translation * motionPositionMask + rootNode.Translation * (Vector3::One - motionPositionMask);
+        if (motionRotation)
+            rootNode.Orientation = refPose.Orientation;
+
+        // Blend root motion
+        if (mode == ProcessAnimationMode::BlendAdditive)
+        {
+            if (motionPosition)
+                dstNode.Translation += srcNode.Translation * weight * motionPositionMaskRef;
+            if (motionRotation)
+                BlendAdditiveWeightedRotation(dstNode.Orientation, srcNode.Orientation, weight);
+        }
+        else if (mode == ProcessAnimationMode::Add)
+        {
+            if (motionPosition)
+                dstNode.Translation += srcNode.Translation * weight * motionPositionMaskRef;
+            if (motionRotation)
+                dstNode.Orientation += srcNode.Orientation * weight;
+        }
+        else if (weighted)
+        {
+            if (motionPosition)
+                dstNode.Translation = srcNode.Translation * weight * motionPositionMaskRef;
+            if (motionRotation)
+                dstNode.Orientation = srcNode.Orientation * weight;
+        }
+        else
+        {
+            if (motionPosition)
+                dstNode.Translation = srcNode.Translation * motionPositionMaskRef;
+            if (motionRotation)
+                dstNode.Orientation = srcNode.Orientation;
+        }
+    }
+
+    // Collect events
+    if (weight > 0.5f)
+    {
+        ProcessAnimEvents(node, loop, length, animPos, animPrevPos, anim, speed);
+    }
 }
 
 Variant AnimGraphExecutor::SampleAnimation(AnimGraphNode* node, bool loop, float length, float startTimePos, float prevTimePos, float& newTimePos, Animation* anim, float speed)
 {
-    // Skip if animation is not ready to use
     if (anim == nullptr || !anim->IsLoaded())
         return Value::Null;
-    PROFILE_CPU_ASSET(anim);
 
-    // Calculate actual time position within the animation node (defined by length and loop mode)
-    const float pos = GetAnimPos(newTimePos, startTimePos, loop, length);
-    const float prevPos = GetAnimPos(prevTimePos, startTimePos, loop, length);
+    float pos, prevPos;
+    GetAnimPos(loop, length, speed, startTimePos, prevTimePos, newTimePos, pos, prevPos);
 
-    // Get animation position (animation track position for channels sampling)
-    const float animPos = GetAnimSamplePos(length, anim, pos, speed);
-    const float animPrevPos = GetAnimSamplePos(length, anim, prevPos, speed);
-
-    // Sample the animation
     const auto nodes = node->GetNodes(this);
-    nodes->RootMotion = RootMotionData::Identity;
+    InitNodes(nodes);
     nodes->Position = pos;
     nodes->Length = length;
-    const auto mapping = anim->GetMapping(_graph.BaseModel);
-    const auto emptyNodes = GetEmptyNodes();
-    for (int32 i = 0; i < nodes->Nodes.Count(); i++)
-    {
-        const int32 nodeToChannel = mapping->At(i);
-        nodes->Nodes[i] = emptyNodes->Nodes[i];
-        if (nodeToChannel != -1)
-        {
-            // Calculate the animated node transformation
-            anim->Data.Channels[nodeToChannel].Evaluate(animPos, &nodes->Nodes[i], false);
-        }
-    }
-
-    // Handle root motion
-    if (anim->Data.EnableRootMotion && _rootMotionMode != RootMotionMode::NoExtraction)
-    {
-        const int32 rootNodeIndex = GetRootNodeIndex(anim);
-        UpdateRootMotion(mapping, anim, animPos, animPrevPos, nodes->Nodes[rootNodeIndex], nodes->RootMotion);
-    }
+    ProcessAnimation(nodes, node, loop, length, pos, prevPos, anim, speed);
+    NormalizeRotations(nodes, _rootMotionMode);
 
     return nodes;
 }
 
-Variant AnimGraphExecutor::SampleAnimationsWithBlend(AnimGraphNode* node, bool loop, float length, float startTimePos, float prevTimePos, float& newTimePos, Animation* animA, Animation* animB, float speedA, float speedB, float alpha)
+Variant AnimGraphExecutor::SampleAnimation(AnimGraphNode* node, bool loop, float startTimePos, AnimSampleData& sample)
+{
+    return SampleAnimation(node, loop, sample.Length, startTimePos, sample.PrevTimePos, sample.TimePos, sample.Anim, sample.Speed);
+}
+
+Variant AnimGraphExecutor::SampleAnimationsWithBlend(AnimGraphNode* node, bool loop, float startTimePos, AnimSampleData& a, AnimSampleData& b, float alpha)
 {
     // Skip if any animation is not ready to use
-    if (animA == nullptr || !animA->IsLoaded() ||
-        animB == nullptr || !animB->IsLoaded())
+    if (a.Anim == nullptr || !a.Anim->IsLoaded() ||
+        b.Anim == nullptr || !b.Anim->IsLoaded())
         return Value::Null;
 
-    // Calculate actual time position within the animation node (defined by length and loop mode)
-    const float pos = GetAnimPos(newTimePos, startTimePos, loop, length);
-    const float prevPos = GetAnimPos(prevTimePos, startTimePos, loop, length);
-
-    // Get animation position (animation track position for channels sampling)
-    const float animPosA = GetAnimSamplePos(length, animA, pos, speedA);
-    const float animPrevPosA = GetAnimSamplePos(length, animA, prevPos, speedA);
-    const float animPosB = GetAnimSamplePos(length, animB, pos, speedB);
-    const float animPrevPosB = GetAnimSamplePos(length, animB, prevPos, speedB);
+    // Get actual animation position (includes looping and start offset)
+    float posA, prevPosA, posB, prevPosB;
+    GetAnimPos(loop, a.Length, a.Speed, startTimePos, a.PrevTimePos, a.TimePos, posA, prevPosA);
+    GetAnimPos(loop, b.Length, b.Speed, startTimePos, b.PrevTimePos, b.TimePos, posB, prevPosB);
 
     // Sample the animations with blending
     const auto nodes = node->GetNodes(this);
-    nodes->RootMotion = RootMotionData::Identity;
-    nodes->Position = pos;
-    nodes->Length = length;
-    const auto mappingA = animA->GetMapping(_graph.BaseModel);
-    const auto mappingB = animB->GetMapping(_graph.BaseModel);
-    for (int32 i = 0; i < nodes->Nodes.Count(); i++)
-    {
-        const int32 nodeToChannelA = mappingA->At(i);
-        const int32 nodeToChannelB = mappingB->At(i);
-        Transform nodeA = GetEmptyNodes()->Nodes[i];
-        Transform nodeB = nodeA;
-
-        // Calculate the animated node transformations
-        if (nodeToChannelA != -1)
-        {
-            animA->Data.Channels[nodeToChannelA].Evaluate(animPosA, &nodeA, false);
-        }
-        if (nodeToChannelB != -1)
-        {
-            animB->Data.Channels[nodeToChannelB].Evaluate(animPosB, &nodeB, false);
-        }
-
-        // Blend
-        Transform::Lerp(nodeA, nodeB, alpha, nodes->Nodes[i]);
-    }
-
-    // Handle root motion
-    if (_rootMotionMode != RootMotionMode::NoExtraction)
-    {
-        // Extract root motion from animation A
-        if (animA->Data.EnableRootMotion)
-        {
-            RootMotionData rootMotion = RootMotionData::Identity;
-            const int32 rootNodeIndex = GetRootNodeIndex(animA);
-            const int32 nodeToChannel = mappingA->At(rootNodeIndex);
-            Transform rootNode = Transform::Identity;
-            if (nodeToChannel != -1)
-            {
-                animA->Data.Channels[nodeToChannel].Evaluate(animPosA, &rootNode, false);
-            }
-            UpdateRootMotion(mappingA, animA, animPosA, animPrevPosA, rootNode, rootMotion);
-            RootMotionData::Lerp(nodes->RootMotion, rootMotion, 1.0f - alpha, nodes->RootMotion);
-            Transform::Lerp(nodes->Nodes[rootNodeIndex], rootNode, 1.0f - alpha, nodes->Nodes[rootNodeIndex]);
-        }
-
-        // Extract root motion from animation B
-        if (animB->Data.EnableRootMotion)
-        {
-            RootMotionData rootMotion = RootMotionData::Identity;
-            const int32 rootNodeIndex = GetRootNodeIndex(animA);
-            const int32 nodeToChannel = mappingB->At(rootNodeIndex);
-            Transform rootNode = Transform::Identity;
-            if (nodeToChannel != -1)
-            {
-                animB->Data.Channels[nodeToChannel].Evaluate(animPosB, &rootNode, false);
-            }
-            UpdateRootMotion(mappingB, animB, animPosB, animPrevPosB, rootNode, rootMotion);
-            RootMotionData::Lerp(nodes->RootMotion, rootMotion, alpha, nodes->RootMotion);
-            Transform::Lerp(nodes->Nodes[rootNodeIndex], rootNode, alpha, nodes->Nodes[rootNodeIndex]);
-        }
-    }
+    InitNodes(nodes);
+    nodes->Position = (a.TimePos + b.TimePos) / 2.0f;
+    nodes->Length = Math::Max(a.Length, b.Length);
+    ProcessAnimation(nodes, node, loop, a.Length, posA, prevPosA, a.Anim, a.Speed, 1.0f - alpha, ProcessAnimationMode::Override);
+    ProcessAnimation(nodes, node, loop, b.Length, posB, prevPosB, b.Anim, b.Speed, alpha, ProcessAnimationMode::BlendAdditive);
+    NormalizeRotations(nodes, _rootMotionMode);
 
     return nodes;
 }
 
-Variant AnimGraphExecutor::SampleAnimationsWithBlend(AnimGraphNode* node, bool loop, float length, float startTimePos, float prevTimePos, float& newTimePos, Animation* animA, Animation* animB, Animation* animC, float speedA, float speedB, float speedC, float alphaA, float alphaB, float alphaC)
+Variant AnimGraphExecutor::SampleAnimationsWithBlend(AnimGraphNode* node, bool loop, float startTimePos, AnimSampleData& a, AnimSampleData& b, AnimSampleData& c, float alphaA, float alphaB, float alphaC)
 {
     // Skip if any animation is not ready to use
-    if (animA == nullptr || !animA->IsLoaded() ||
-        animB == nullptr || !animB->IsLoaded() ||
-        animC == nullptr || !animC->IsLoaded())
+    if (a.Anim == nullptr || !a.Anim->IsLoaded() ||
+        b.Anim == nullptr || !b.Anim->IsLoaded() ||
+        c.Anim == nullptr || !c.Anim->IsLoaded())
+    {
+        // Blending a pair of anims to avoid T-Posing
+        if (a.Anim && a.Anim->IsLoaded())
+        {
+            if (b.Anim && b.Anim->IsLoaded())
+                return SampleAnimationsWithBlend(node, loop, startTimePos, a, b, alphaB);
+            if (c.Anim && c.Anim->IsLoaded())
+                return SampleAnimationsWithBlend(node, loop, startTimePos, a, b, alphaB);
+        }
+        if (b.Anim && b.Anim->IsLoaded())
+        {
+            if (c.Anim && c.Anim->IsLoaded())
+                return SampleAnimationsWithBlend(node, loop, startTimePos, a, c, alphaC);
+        }
+
         return Value::Null;
+    }
 
-    // Calculate actual time position within the animation node (defined by length and loop mode)
-    const float pos = GetAnimPos(newTimePos, startTimePos, loop, length);
-    const float prevPos = GetAnimPos(prevTimePos, startTimePos, loop, length);
-
-    // Get animation position (animation track position for channels sampling)
-    const float animPosA = GetAnimSamplePos(length, animA, pos, speedA);
-    const float animPrevPosA = GetAnimSamplePos(length, animA, prevPos, speedA);
-    const float animPosB = GetAnimSamplePos(length, animB, pos, speedB);
-    const float animPrevPosB = GetAnimSamplePos(length, animB, prevPos, speedB);
-    const float animPosC = GetAnimSamplePos(length, animC, pos, speedC);
-    const float animPrevPosC = GetAnimSamplePos(length, animC, prevPos, speedC);
+    // Get actual animation position (includes looping and start offset)
+    float posA, prevPosA, posB, prevPosB, posC, prevPosC;
+    GetAnimPos(loop, a.Length, a.Speed, startTimePos, a.PrevTimePos, a.TimePos, posA, prevPosA);
+    GetAnimPos(loop, b.Length, b.Speed, startTimePos, b.PrevTimePos, b.TimePos, posB, prevPosB);
+    GetAnimPos(loop, c.Length, c.Speed, startTimePos, c.PrevTimePos, c.TimePos, posC, prevPosC);
 
     // Sample the animations with blending
     const auto nodes = node->GetNodes(this);
-    nodes->RootMotion = RootMotionData::Identity;
-    nodes->Position = pos;
-    nodes->Length = length;
-    const auto mappingA = animA->GetMapping(_graph.BaseModel);
-    const auto mappingB = animB->GetMapping(_graph.BaseModel);
-    const auto mappingC = animC->GetMapping(_graph.BaseModel);
-    Transform tmp, t;
-    const auto emptyNodes = GetEmptyNodes();
+    InitNodes(nodes);
+    nodes->Position = (a.TimePos + b.TimePos + c.TimePos) / 3.0f;
+    nodes->Length = Math::Max(a.Length, b.Length, c.Length);
     ASSERT(Math::Abs(alphaA + alphaB + alphaC - 1.0f) <= ANIM_GRAPH_BLEND_THRESHOLD); // Assumes weights are normalized
-    for (int32 i = 0; i < nodes->Nodes.Count(); i++)
-    {
-        const int32 nodeToChannelA = mappingA->At(i);
-        t = emptyNodes->Nodes[i];
-        if (nodeToChannelA != -1)
-        {
-            // Override
-            tmp = t;
-            animA->Data.Channels[nodeToChannelA].Evaluate(animPosA, &tmp, false);
-            t.Translation = tmp.Translation * alphaA;
-            t.Orientation = tmp.Orientation * alphaA;
-            t.Scale = tmp.Scale * alphaA;
-        }
-        nodes->Nodes[i] = t;
-    }
-    for (int32 i = 0; i < nodes->Nodes.Count(); i++)
-    {
-        const int32 nodeToChannelB = mappingB->At(i);
-        const int32 nodeToChannelC = mappingC->At(i);
-        t = nodes->Nodes[i];
-        if (nodeToChannelB != -1)
-        {
-            // Additive
-            tmp = emptyNodes->Nodes[i];
-            animB->Data.Channels[nodeToChannelB].Evaluate(animPosB, &tmp, false);
-            t.Translation += tmp.Translation * alphaB;
-            t.Scale += tmp.Scale * alphaB;
-            BlendAdditiveWeightedRotation(t.Orientation, tmp.Orientation, alphaB);
-        }
-        if (nodeToChannelC != -1)
-        {
-            // Additive
-            tmp = emptyNodes->Nodes[i];
-            animC->Data.Channels[nodeToChannelC].Evaluate(animPosC, &tmp, false);
-            t.Translation += tmp.Translation * alphaC;
-            t.Scale += tmp.Scale * alphaC;
-            BlendAdditiveWeightedRotation(t.Orientation, tmp.Orientation, alphaC);
-        }
-        t.Orientation.Normalize();
-        nodes->Nodes[i] = t;
-    }
-
-    // Handle root motion
-    if (_rootMotionMode != RootMotionMode::NoExtraction)
-    {
-        // Extract root motion from animation A
-        if (animA->Data.EnableRootMotion)
-        {
-            RootMotionData rootMotion = RootMotionData::Identity;
-            const int32 rootNodeIndex = GetRootNodeIndex(animA);
-            const int32 nodeToChannel = mappingA->At(rootNodeIndex);
-            Transform rootNode = Transform::Identity;
-            if (nodeToChannel != -1)
-            {
-                animA->Data.Channels[nodeToChannel].Evaluate(animPosA, &rootNode, false);
-            }
-            UpdateRootMotion(mappingA, animA, animPosA, animPrevPosA, rootNode, rootMotion);
-            RootMotionData::Lerp(nodes->RootMotion, rootMotion, alphaA, nodes->RootMotion);
-            Transform::Lerp(nodes->Nodes[rootNodeIndex], rootNode, alphaA, nodes->Nodes[rootNodeIndex]);
-        }
-
-        // Extract root motion from animation B
-        if (animB->Data.EnableRootMotion)
-        {
-            RootMotionData rootMotion = RootMotionData::Identity;
-            const int32 rootNodeIndex = GetRootNodeIndex(animA);
-            const int32 nodeToChannel = mappingB->At(rootNodeIndex);
-            Transform rootNode = Transform::Identity;
-            if (nodeToChannel != -1)
-            {
-                animB->Data.Channels[nodeToChannel].Evaluate(animPosB, &rootNode, false);
-            }
-            UpdateRootMotion(mappingB, animB, animPosB, animPrevPosB, rootNode, rootMotion);
-            RootMotionData::Lerp(nodes->RootMotion, rootMotion, alphaB, nodes->RootMotion);
-            Transform::Lerp(nodes->Nodes[rootNodeIndex], rootNode, alphaB, nodes->Nodes[rootNodeIndex]);
-        }
-
-        // Extract root motion from animation C
-        if (animC->Data.EnableRootMotion)
-        {
-            RootMotionData rootMotion = RootMotionData::Identity;
-            const int32 rootNodeIndex = GetRootNodeIndex(animA);
-            const int32 nodeToChannel = mappingC->At(rootNodeIndex);
-            Transform rootNode = Transform::Identity;
-            if (nodeToChannel != -1)
-            {
-                animC->Data.Channels[nodeToChannel].Evaluate(animPosC, &rootNode, false);
-            }
-            UpdateRootMotion(mappingC, animC, animPosC, animPrevPosC, rootNode, rootMotion);
-            RootMotionData::Lerp(nodes->RootMotion, rootMotion, alphaC, nodes->RootMotion);
-            Transform::Lerp(nodes->Nodes[rootNodeIndex], rootNode, alphaC, nodes->Nodes[rootNodeIndex]);
-        }
-    }
+    ProcessAnimation(nodes, node, loop, a.Length, posA, prevPosA, a.Anim, a.Speed, alphaA, ProcessAnimationMode::Override);
+    ProcessAnimation(nodes, node, loop, b.Length, posB, prevPosB, b.Anim, b.Speed, alphaB, ProcessAnimationMode::BlendAdditive);
+    ProcessAnimation(nodes, node, loop, c.Length, posC, prevPosC, c.Anim, c.Speed, alphaC, ProcessAnimationMode::BlendAdditive);
+    NormalizeRotations(nodes, _rootMotionMode);
 
     return nodes;
 }
@@ -403,10 +799,12 @@ Variant AnimGraphExecutor::Blend(AnimGraphNode* node, const Value& poseA, const 
 {
     ANIM_GRAPH_PROFILE_EVENT("Blend Pose");
 
+    if (isnan(alpha) || isinf(alpha))
+        alpha = 0;
+    alpha = Math::Saturate(alpha);
     alpha = AlphaBlend::Process(alpha, alphaMode);
 
     const auto nodes = node->GetNodes(this);
-
     auto nodesA = static_cast<AnimGraphImpulse*>(poseA.AsPointer);
     auto nodesB = static_cast<AnimGraphImpulse*>(poseB.AsPointer);
     if (!ANIM_GRAPH_IS_VALID_PTR(poseA))
@@ -414,69 +812,152 @@ Variant AnimGraphExecutor::Blend(AnimGraphNode* node, const Value& poseA, const 
     if (!ANIM_GRAPH_IS_VALID_PTR(poseB))
         nodesB = GetEmptyNodes();
 
+    const Transform* srcA = nodesA->Nodes.Get();
+    const Transform* srcB = nodesB->Nodes.Get();
+    Transform* dst = nodes->Nodes.Get();
     for (int32 i = 0; i < nodes->Nodes.Count(); i++)
     {
-        Transform::Lerp(nodesA->Nodes[i], nodesB->Nodes[i], alpha, nodes->Nodes[i]);
+        Transform::Lerp(srcA[i], srcB[i], alpha, dst[i]);
     }
-    RootMotionData::Lerp(nodesA->RootMotion, nodesB->RootMotion, alpha, nodes->RootMotion);
+    Transform::Lerp(nodesA->RootMotion, nodesB->RootMotion, alpha, nodes->RootMotion);
     nodes->Position = Math::Lerp(nodesA->Position, nodesB->Position, alpha);
     nodes->Length = Math::Lerp(nodesA->Length, nodesB->Length, alpha);
 
     return nodes;
 }
 
-Variant AnimGraphExecutor::SampleState(AnimGraphNode* state)
+Variant AnimGraphExecutor::SampleState(AnimGraphContext& context, const AnimGraphNode* state)
 {
-    // Prepare
     auto& data = state->Data.State;
     if (data.Graph == nullptr || data.Graph->GetRootNode() == nullptr)
-    {
-        // Invalid state graph
         return Value::Null;
+
+    // Add to trace
+    if (context.Data->EnableTracing)
+    {
+        auto& trace = context.AddTraceEvent(state);
     }
 
     ANIM_GRAPH_PROFILE_EVENT("Evaluate State");
-
-    // Evaluate state
+    context.NodePath.Add(state->ID);
     auto rootNode = data.Graph->GetRootNode();
     auto result = eatBox((Node*)rootNode, &rootNode->Boxes[0]);
+    context.NodePath.Pop();
 
     return result;
 }
 
-void ComputeMultiBlendLength(float& length, AnimGraphNode* node)
+void AnimGraphExecutor::InitStateTransition(AnimGraphContext& context, AnimGraphInstanceData::StateMachineBucket& stateMachineBucket, AnimGraphStateTransition* transition)
 {
-    ANIM_GRAPH_PROFILE_EVENT("Setup Mutli Blend Length");
+    // Reset transition
+    stateMachineBucket.ActiveTransition = transition;
+    stateMachineBucket.TransitionPosition = 0.0f;
 
-    // TODO: lock graph or graph asset here? make it thread safe
-
-    length = 0.0f;
-    for (int32 i = 0; i < ARRAY_COUNT(node->Assets); i++)
+    // End base transition
+    if (stateMachineBucket.BaseTransition)
     {
-        if (node->Assets[i])
+        ResetBuckets(context, stateMachineBucket.BaseTransitionState->Data.State.Graph);
+        stateMachineBucket.BaseTransition = nullptr;
+        stateMachineBucket.BaseTransitionState = nullptr;
+        stateMachineBucket.BaseTransitionPosition = 0.0f;
+    }
+}
+
+AnimGraphStateTransition* AnimGraphExecutor::UpdateStateTransitions(AnimGraphContext& context, const AnimGraphNode::StateMachineData& stateMachineData, AnimGraphNode* state, AnimGraphNode* ignoreState)
+{
+    return UpdateStateTransitions(context, stateMachineData, state->Data.State, state, ignoreState);
+}
+
+AnimGraphStateTransition* AnimGraphExecutor::UpdateStateTransitions(AnimGraphContext& context, const AnimGraphNode::StateMachineData& stateMachineData, const AnimGraphNode::StateBaseData& stateData, AnimGraphNode* state, AnimGraphNode* ignoreState)
+{
+    int32 transitionIndex = 0;
+    while (stateData.Transitions && stateData.Transitions[transitionIndex] != AnimGraphNode::StateData::InvalidTransitionIndex)
+    {
+        const uint16 idx = stateData.Transitions[transitionIndex];
+        ASSERT(idx < stateMachineData.Graph->StateTransitions.Count());
+        auto& transition = stateMachineData.Graph->StateTransitions[idx];
+        if (transition.Destination == state || transition.Destination == ignoreState)
         {
-            // TODO: maybe don't update if not all anims are loaded? just skip the node with the bind pose?
-            if (node->Assets[i]->WaitForLoaded())
+            // Ignore transition to the current state
+            transitionIndex++;
+            continue;
+        }
+
+        // Evaluate source state transition data (position, length, etc.)
+        const Value sourceStatePtr = SampleState(context, state);
+        auto& transitionData = context.TransitionData; // Note: this could support nested transitions but who uses state machine inside transition rule?
+        if (ANIM_GRAPH_IS_VALID_PTR(sourceStatePtr))
+        {
+            // Use source state as data provider
+            const auto sourceState = (AnimGraphImpulse*)sourceStatePtr.AsPointer;
+            auto sourceLength = Math::Max(sourceState->Length, 0.0f);
+            transitionData.Position = Math::Clamp(sourceState->Position, 0.0f, sourceLength);
+            transitionData.Length = sourceLength;
+        }
+        else
+        {
+            // Reset
+            transitionData.Position = 0;
+            transitionData.Length = ZeroTolerance;
+        }
+
+        const bool useDefaultRule = EnumHasAnyFlags(transition.Flags, AnimGraphStateTransition::FlagTypes::UseDefaultRule);
+        if (transition.RuleGraph && !useDefaultRule)
+        {
+            // Execute transition rule
+            ANIM_GRAPH_PROFILE_EVENT("Rule");
+            auto rootNode = transition.RuleGraph->GetRootNode();
+            ASSERT(rootNode);
+            if (!(bool)eatBox((Node*)rootNode, &rootNode->Boxes[0]))
             {
-                node->Assets[i] = nullptr;
-                LOG(Warning, "Failed to load one of the animations.");
-            }
-            else
-            {
-                const auto anim = node->Assets[i].As<Animation>();
-                const auto aData = node->Values[4 + i * 2].AsVector4();
-                length = Math::Max(length, anim->GetLength() * Math::Abs(aData.W));
+                transitionIndex++;
+                continue;
             }
         }
+
+        // Check if can trigger the transition
+        bool canEnter = false;
+        if (useDefaultRule)
+        {
+            // Start transition when the current state animation is about to end (split blend duration evenly into two states)
+            const auto transitionDurationHalf = transition.BlendDuration * 0.5f + ZeroTolerance;
+            const auto endPos = transitionData.Length - transitionDurationHalf;
+            canEnter = transitionData.Position >= endPos;
+        }
+        else if (transition.RuleGraph)
+            canEnter = true;
+        if (canEnter)
+        {
+            return &transition;
+        }
+
+        // Skip after Solo transition
+        // TODO: don't load transitions after first enabled Solo transition and remove this check here
+        if (EnumHasAnyFlags(transition.Flags, AnimGraphStateTransition::FlagTypes::Solo))
+            break;
+
+        transitionIndex++;
+    }
+
+    // No transition
+    return nullptr;
+}
+
+void AnimGraphExecutor::UpdateStateTransitions(AnimGraphContext& context, const AnimGraphNode::StateMachineData& stateMachineData, AnimGraphInstanceData::StateMachineBucket& stateMachineBucket, const AnimGraphNode::StateBaseData& stateData)
+{
+    AnimGraphStateTransition* transition = UpdateStateTransitions(context, stateMachineData, stateData, stateMachineBucket.CurrentState);
+    if (transition)
+    {
+        InitStateTransition(context, stateMachineBucket, transition);
     }
 }
 
 void AnimGraphExecutor::ProcessGroupParameters(Box* box, Node* node, Value& value)
 {
-    auto& context = Context.Get();
+    auto& context = *Context.Get();
     switch (node->TypeID)
     {
-        // Get
+    // Get
     case 1:
     {
         // Get parameter
@@ -487,36 +968,42 @@ void AnimGraphExecutor::ProcessGroupParameters(Box* box, Node* node, Value& valu
             value = context.Data->Parameters[paramIndex].Value;
             switch (param->Type.Type)
             {
-            case VariantType::Vector2:
-                switch (box->ID)
-                {
-                case 1:
-                case 2:
-                    value = value.AsVector2().Raw[box->ID - 1];
-                    break;
-                }
+            case VariantType::Float2:
+                if (box->ID >= 1 && box->ID <= 2)
+                    value = value.AsFloat2().Raw[box->ID - 1];
                 break;
-            case VariantType::Vector3:
-                switch (box->ID)
-                {
-                case 1:
-                case 2:
-                case 3:
-                    value = value.AsVector3().Raw[box->ID - 1];
-                    break;
-                }
+            case VariantType::Float3:
+                if (box->ID >= 1 && box->ID <= 3)
+                    value = value.AsFloat3().Raw[box->ID - 1];
                 break;
-            case VariantType::Vector4:
+            case VariantType::Float4:
             case VariantType::Color:
-                switch (box->ID)
-                {
-                case 1:
-                case 2:
-                case 3:
-                case 4:
-                    value = value.AsVector4().Raw[box->ID - 1];
-                    break;
-                }
+                if (box->ID >= 1 && box->ID <= 4)
+                    value = value.AsFloat4().Raw[box->ID - 1];
+                break;
+            case VariantType::Double2:
+                if (box->ID >= 1 && box->ID <= 2)
+                    value = value.AsDouble2().Raw[box->ID - 1];
+                break;
+            case VariantType::Double3:
+                if (box->ID >= 1 && box->ID <= 3)
+                    value = value.AsDouble3().Raw[box->ID - 1];
+                break;
+            case VariantType::Double4:
+                if (box->ID >= 1 && box->ID <= 4)
+                    value = value.AsDouble4().Raw[box->ID - 1];
+                break;
+            case VariantType::Int2:
+                if (box->ID >= 1 && box->ID <= 2)
+                    value = value.AsInt2().Raw[box->ID - 1];
+                break;
+            case VariantType::Int3:
+                if (box->ID >= 1 && box->ID <= 3)
+                    value = value.AsInt3().Raw[box->ID - 1];
+                break;
+            case VariantType::Int4:
+                if (box->ID >= 1 && box->ID <= 4)
+                    value = value.AsInt4().Raw[box->ID - 1];
                 break;
             case VariantType::Matrix:
             {
@@ -547,6 +1034,21 @@ void AnimGraphExecutor::ProcessGroupParameters(Box* box, Node* node, Value& valu
         }
         break;
     }
+    // Set Parameter
+    case 5:
+    {
+        // Set parameter value
+        int32 paramIndex;
+        const auto param = _graph.GetParameter((Guid)node->Values[0], paramIndex);
+        if (param)
+        {
+            context.Data->Parameters[paramIndex].Value = tryGetValue(node->GetBox(1), 1, Value::Null);
+        }
+
+        // Pass over the pose
+        value = tryGetValue(node->GetBox(2), Value::Null);
+        break;
+    }
     default:
         break;
     }
@@ -554,11 +1056,11 @@ void AnimGraphExecutor::ProcessGroupParameters(Box* box, Node* node, Value& valu
 
 void AnimGraphExecutor::ProcessGroupTools(Box* box, Node* nodeBase, Value& value)
 {
-    auto& context = Context.Get();
+    auto& context = *Context.Get();
     auto node = (AnimGraphNode*)nodeBase;
     switch (node->TypeID)
     {
-        // Time
+    // Time
     case 5:
     {
         auto& bucket = context.Data->State[node->BucketIndex].Animation;
@@ -578,40 +1080,43 @@ void AnimGraphExecutor::ProcessGroupTools(Box* box, Node* nodeBase, Value& value
 
 void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Value& value)
 {
-    auto& context = Context.Get();
+    auto& context = *Context.Get();
     if (context.ValueCache.TryGet(boxBase, value))
         return;
     auto box = (AnimGraphBox*)boxBase;
     auto node = (AnimGraphNode*)nodeBase;
     switch (node->TypeID)
     {
-        // Animation Output
+    // Animation Output
     case 1:
-    {
-        if (box->HasConnection())
-            value = eatBox(nodeBase, box->FirstConnection());
-        else
-            value = Value::Null;
+        value = tryGetValue(box, Value::Null);
         break;
-    }
-        // Animation
+    // Animation
     case 2:
     {
-        const auto anim = node->Assets[0].As<Animation>();
+        auto anim = node->Assets[0].As<Animation>();
         auto& bucket = context.Data->State[node->BucketIndex].Animation;
-        const float speed = (float)tryGetValue(node->GetBox(5), node->Values[1]);
-        const bool loop = (bool)tryGetValue(node->GetBox(6), node->Values[2]);
-        const float startTimePos = (float)tryGetValue(node->GetBox(7), node->Values[3]);
+
+        // Override animation when animation reference box is connected
+        auto animationAssetBox = node->TryGetBox(8);
+        if (animationAssetBox && animationAssetBox->HasConnection())
+        {
+            anim = TVariantValueCast<Animation*>::Cast(tryGetValue(animationAssetBox, Value::Null));
+        }
 
         switch (box->ID)
         {
-            // Animation
+        // Animation
         case 0:
         {
+            ANIM_GRAPH_PROFILE_EVENT("Animation");
+            const float speed = (float)tryGetValue(node->GetBox(5), node->Values[1]);
+            const bool loop = (bool)tryGetValue(node->GetBox(6), node->Values[2]);
+            const float startTimePos = (float)tryGetValue(node->GetBox(7), node->Values[3]);
             const float length = anim ? anim->GetLength() : 0.0f;
 
             // Calculate new time position
-            if (speed < 0.0f && bucket.LastUpdateFrame < context.CurrentFrameIndex - 1)
+            if (speed * context.DeltaTime < 0.0f && bucket.LastUpdateFrame < context.CurrentFrameIndex - 1)
             {
                 // If speed is negative and it's the first node update then start playing from end
                 bucket.TimePosition = length;
@@ -625,29 +1130,39 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
 
             break;
         }
-            // Normalized Time
+        // Normalized Time
         case 1:
+        {
+            const float startTimePos = (float)tryGetValue(node->GetBox(7), node->Values[3]);
             value = startTimePos + bucket.TimePosition;
             if (anim && anim->IsLoaded())
                 value.AsFloat /= anim->GetLength();
             break;
-            // Time
+        }
+        // Time
         case 2:
+        {
+            const float startTimePos = (float)tryGetValue(node->GetBox(7), node->Values[3]);
             value = startTimePos + bucket.TimePosition;
             break;
-            // Length
+        }
+        // Length
         case 3:
             value = anim ? anim->GetLength() : 0.0f;
             break;
-            // Is Playing
+        // Is Playing
         case 4:
             // If anim was updated during this or a previous frame
             value = bucket.LastUpdateFrame >= context.CurrentFrameIndex - 1;
             break;
+        // Animation
+        case 9:
+            value = anim;
+            break;
         }
         break;
     }
-        // Transform Bone (local/model space)
+    // Transform Bone (local/model space)
     case 3:
     case 4:
     {
@@ -660,7 +1175,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         Transform transform;
         transform.Translation = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         transform.Orientation = (Quaternion)tryGetValue(node->GetBox(3), Quaternion::Identity);
-        transform.Scale = (Vector3)tryGetValue(node->GetBox(4), Vector3::One);
+        transform.Scale = (Float3)tryGetValue(node->GetBox(4), Float3::One);
 
         // Skip if no change will be performed
         auto& skeleton = _graph.BaseModel->Skeleton;
@@ -697,7 +1212,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
-        // Local To Model
+    // Local To Model
     case 5:
     {
         // [Deprecated on 15.05.2020, expires on 15.05.2021]
@@ -729,7 +1244,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = dst;*/
         break;
     }
-        // Model To Local
+    // Model To Local
     case 6:
     {
         // [Deprecated on 15.05.2020, expires on 15.05.2021]
@@ -768,24 +1283,13 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = dst;*/
         break;
     }
-        // Copy Bone
+    // Copy Bone
     case 7:
     {
         // [Deprecated on 13.05.2020, expires on 13.05.2021]
         // Get input
         auto input = tryGetValue(node->GetBox(1), Value::Null);
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
 
         // Fetch the settings
         const auto srcBoneIndex = (int32)node->Values[0];
@@ -820,7 +1324,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
-        // Get Bone Transform
+    // Get Bone Transform
     case 8:
     {
         // [Deprecated on 13.05.2020, expires on 13.05.2021]
@@ -834,7 +1338,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
             value = Variant(Transform::Identity);
         break;
     }
-        // Blend
+    // Blend
     case 9:
     {
         const float alpha = Math::Saturate((float)tryGetValue(node->GetBox(3), node->Values[0]));
@@ -844,36 +1348,22 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         {
             value = tryGetValue(node->GetBox(1), Value::Null);
         }
-            // Only B
+        // Only B
         else if (Math::NearEqual(alpha, 1.0f, ANIM_GRAPH_BLEND_THRESHOLD))
         {
             value = tryGetValue(node->GetBox(2), Value::Null);
         }
-            // Blend A and B
+        // Blend A and B
         else
         {
             const auto valueA = tryGetValue(node->GetBox(1), Value::Null);
             const auto valueB = tryGetValue(node->GetBox(2), Value::Null);
-            const auto nodes = node->GetNodes(this);
-
-            auto nodesA = static_cast<AnimGraphImpulse*>(valueA.AsPointer);
-            auto nodesB = static_cast<AnimGraphImpulse*>(valueB.AsPointer);
-            if (!ANIM_GRAPH_IS_VALID_PTR(valueA))
-                nodesA = GetEmptyNodes();
-            if (!ANIM_GRAPH_IS_VALID_PTR(valueB))
-                nodesB = GetEmptyNodes();
-
-            for (int32 i = 0; i < nodes->Nodes.Count(); i++)
-            {
-                Transform::Lerp(nodesA->Nodes[i], nodesB->Nodes[i], alpha, nodes->Nodes[i]);
-            }
-            RootMotionData::Lerp(nodesA->RootMotion, nodesB->RootMotion, alpha, nodes->RootMotion);
-            value = nodes;
+            value = Blend(node, valueA, valueB, alpha, AlphaBlendMode::Linear);
         }
 
         break;
     }
-        // Blend Additive
+    // Blend Additive
     case 10:
     {
         const float alpha = Math::Saturate((float)tryGetValue(node->GetBox(3), node->Values[0]));
@@ -883,7 +1373,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         {
             value = tryGetValue(node->GetBox(1), Value::Null);
         }
-            // Blend A and B
+        // Blend A and B
         else
         {
             const auto valueA = tryGetValue(node->GetBox(1), Value::Null);
@@ -900,38 +1390,53 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
             else
             {
                 const auto nodes = node->GetNodes(this);
-                const auto nodesA = static_cast<AnimGraphImpulse*>(valueA.AsPointer);
-                const auto nodesB = static_cast<AnimGraphImpulse*>(valueB.AsPointer);
-                Transform t, tA, tB;
+                const auto basePoseNodes = static_cast<AnimGraphImpulse*>(valueA.AsPointer);
+                const auto blendPoseNodes = static_cast<AnimGraphImpulse*>(valueB.AsPointer);
+                const auto& refNodes = _graph.BaseModel.Get()->GetNodes();
+                Transform t, basePoseTransform, blendPoseTransform, refTransform;
                 for (int32 i = 0; i < nodes->Nodes.Count(); i++)
                 {
-                    tA = nodesA->Nodes[i];
-                    tB = nodesB->Nodes[i];
-                    t.Translation = tA.Translation + tB.Translation;
-                    t.Orientation = tA.Orientation * tB.Orientation;
-                    t.Scale = tA.Scale * tB.Scale;
-                    t.Orientation.Normalize();
-                    Transform::Lerp(tA, t, alpha, nodes->Nodes[i]);
+                    basePoseTransform = basePoseNodes->Nodes[i];
+                    blendPoseTransform = blendPoseNodes->Nodes[i];
+                    refTransform = refNodes[i].LocalTransform;
+
+                    // base + (blend - reference)
+                    t.Translation = basePoseTransform.Translation + (blendPoseTransform.Translation - refTransform.Translation);
+                    auto diff = Quaternion::Invert(refTransform.Orientation) * blendPoseTransform.Orientation;
+                    t.Orientation = basePoseTransform.Orientation * diff;
+                    t.Scale = basePoseTransform.Scale + (blendPoseTransform.Scale - refTransform.Scale);
+
+                    // Lerp base and transform
+                    Transform::Lerp(basePoseTransform, t, alpha, nodes->Nodes[i]);
                 }
-                RootMotionData::Lerp(nodesA->RootMotion, nodesA->RootMotion + nodesB->RootMotion, alpha, nodes->RootMotion);
+                Transform::Lerp(basePoseNodes->RootMotion, basePoseNodes->RootMotion + blendPoseNodes->RootMotion, alpha, nodes->RootMotion);
                 value = nodes;
             }
         }
 
         break;
     }
-        // Blend with Mask
+    // Blend with Mask
     case 11:
     {
         const float alpha = Math::Saturate((float)tryGetValue(node->GetBox(3), node->Values[0]));
         auto mask = node->Assets[0].As<SkeletonMask>();
+
+        // Use the mask connected with this node instead of default mask asset
+        auto maskAssetBox = node->TryGetBox(4);
+        if (maskAssetBox && maskAssetBox->HasConnection())
+        {
+            const Value assetBoxValue = tryGetValue(maskAssetBox, Value::Null);
+            if (assetBoxValue != Value::Null)
+                mask = (SkeletonMask*)assetBoxValue.AsAsset;
+        }
 
         // Only A or missing/invalid mask
         if (Math::NearEqual(alpha, 0.0f, ANIM_GRAPH_BLEND_THRESHOLD) || mask == nullptr || mask->WaitForLoaded())
         {
             value = tryGetValue(node->GetBox(1), Value::Null);
         }
-            // Blend A and B with mask
+        // Blend A and B with mask
         else
         {
             auto valueA = tryGetValue(node->GetBox(1), Value::Null);
@@ -961,238 +1466,260 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
                     nodes->Nodes[nodeIndex] = tA;
                 }
             }
-            RootMotionData::Lerp(nodesA->RootMotion, nodesB->RootMotion, alpha, nodes->RootMotion);
+            Transform::Lerp(nodesA->RootMotion, nodesB->RootMotion, alpha, nodes->RootMotion);
 
             value = nodes;
         }
 
         break;
     }
-        // Multi Blend 1D
+    // Multi Blend 1D
     case 12:
     {
+        ANIM_GRAPH_PROFILE_EVENT("Multi Blend 1D");
         ASSERT(box->ID == 0);
-
-        // Note data layout:
-        // [0]: Vector4 Range (minX, maxX, 0, 0)
-        // [1]: float Speed
-        // [2]: bool Loop
-        // [3]: float StartPosition
-        // Per Blend Sample data layout:
-        // [0]: Vector4 Info (x=posX, y=0, z=0, w=Speed)
-        // [1]: Guid Animation
-
-        // Prepare
+        value = Value::Null;
         auto& bucket = context.Data->State[node->BucketIndex].MultiBlend;
-        const auto range = node->Values[0].AsVector4();
-        const auto speed = (float)tryGetValue(node->GetBox(1), node->Values[1]);
-        const auto loop = (bool)tryGetValue(node->GetBox(2), node->Values[2]);
-        const auto startTimePos = (float)tryGetValue(node->GetBox(3), node->Values[3]);
+        MultiBlendInputs inputs(this, node);
         auto& data = node->Data.MultiBlend1D;
-
-        // Check if not valid animation binded
-        if (data.IndicesSorted[0] == ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS)
-        {
-            // Nothing to sample
-            value = Value::Null;
-            break;
-        }
+        if (data.Count == 0)
+            break; // Skip if no valid animations added
 
         // Get axis X
         float x = (float)tryGetValue(node->GetBox(4), Value::Zero);
-        x = Math::Clamp(x, range.X, range.Y);
+        x = Math::Clamp(x, inputs.Range.X, inputs.Range.Y);
+
+        // Add to trace
+        if (context.Data->EnableTracing)
+        {
+            auto& trace = context.AddTraceEvent(node);
+            trace.Value = x;
+        }
 
         // Check if need to evaluate multi blend length
         if (data.Length < 0)
-        {
-            ComputeMultiBlendLength(data.Length, node);
-        }
+            data.Length = inputs.ComputeMultiBlendLength(this, node);
         if (data.Length <= ZeroTolerance)
-        {
-            // Nothing to sample
-            value = Value::Null;
             break;
-        }
 
-        // Calculate new time position
-        if (speed < 0.0f && bucket.LastUpdateFrame < context.CurrentFrameIndex - 1)
-        {
-            // If speed is negative and it's the first node update then start playing from end
-            bucket.TimePosition = data.Length;
-        }
-        float newTimePos = bucket.TimePosition + context.DeltaTime * speed;
-
-        ANIM_GRAPH_PROFILE_EVENT("Multi Blend 1D");
+        MultiBlendAnimData::List prevList, newList;
+        MultiBlendAnimData::GetList(bucket, prevList);
 
         // Find 2 animations to blend (line)
-        for (int32 i = 0; i < ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS - 1; i++)
+        for (int32 i = 0; i < data.Count - 1; i++)
         {
-            const auto a = data.IndicesSorted[i];
-            const auto b = data.IndicesSorted[i + 1];
+            const auto aIndex = data.IndicesSorted[i];
+            const auto bIndex = data.IndicesSorted[i + 1];
+            ASSERT_LOW_LAYER(aIndex != ANIM_GRAPH_MULTI_BLEND_INVALID);
+            AnimSampleData a(this, inputs, node, aIndex);
 
-            // Get A animation data
-            const auto aAnim = node->Assets[a].As<Animation>();
-            auto aData = node->Values[4 + a * 2].AsVector4();
-
-            // Check single A case or the last valid animation
-            if (x <= aData.X + ANIM_GRAPH_BLEND_THRESHOLD || b == ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS)
+            // Check single A case
+            if (x <= a.Data.X + ANIM_GRAPH_BLEND_THRESHOLD || bIndex == ANIM_GRAPH_MULTI_BLEND_INVALID)
             {
-                value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, aData.W);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+                value = SampleAnimation(node, inputs.Loop, inputs.StartTime, a);
+                MultiBlendAnimData::AfterSample(newList, a);
                 break;
             }
 
             // Get B animation data
-            ASSERT(b != ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS);
-            const auto bAnim = node->Assets[b].As<Animation>();
-            auto bData = node->Values[4 + b * 2].AsVector4();
+            AnimSampleData b(this, inputs, node, bIndex);
+            if (inputs.SyncLength)
+                a.Length = b.Length = data.Length;
 
             // Check single B edge case
-            if (Math::NearEqual(bData.X, x, ANIM_GRAPH_BLEND_THRESHOLD))
+            if (Math::NearEqual(b.Data.X, x, ANIM_GRAPH_BLEND_THRESHOLD))
             {
-                value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, bAnim, bData.W);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, b, inputs.Speed);
+                value = SampleAnimation(node, inputs.Loop, inputs.StartTime, b);
+                MultiBlendAnimData::AfterSample(newList, b);
                 break;
             }
 
             // Blend A and B
-            const float alpha = (x - aData.X) / (bData.X - aData.X);
+            const float alpha = (x - a.Data.X) / (b.Data.X - a.Data.X);
             if (alpha > 1.0f)
                 continue;
-            value = SampleAnimationsWithBlend(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, bAnim, aData.W, bData.W, alpha);
+            MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+            MultiBlendAnimData::BeforeSample(context, bucket, prevList, b, inputs.Speed);
+            value = SampleAnimationsWithBlend(node, inputs.Loop, inputs.StartTime, a, b, alpha);
+            MultiBlendAnimData::AfterSample(newList, a);
+            MultiBlendAnimData::AfterSample(newList, b);
             break;
         }
+        if (newList.IsEmpty())
+        {
+            // Sample the last animation if had no result
+            const auto aIndex = data.IndicesSorted[data.Count - 1];
+            AnimSampleData a(this, inputs, node, aIndex);
+            MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+            value = SampleAnimation(node, inputs.Loop, inputs.StartTime, a);
+            MultiBlendAnimData::AfterSample(newList, a);
+        }
 
-        bucket.TimePosition = newTimePos;
+        MultiBlendAnimData::SetList(bucket, newList);
         bucket.LastUpdateFrame = context.CurrentFrameIndex;
 
         break;
     }
-        // Multi Blend 2D
+    // Multi Blend 2D
     case 13:
     {
+        ANIM_GRAPH_PROFILE_EVENT("Multi Blend 2D");
         ASSERT(box->ID == 0);
-
-        // Note data layout:
-        // [0]: Vector4 Range (minX, maxX, minY, maxY)
-        // [1]: float Speed
-        // [2]: bool Loop
-        // [3]: float StartPosition
-        // Per Blend Sample data layout:
-        // [0]: Vector4 Info (x=posX, y=posY, z=0, w=Speed)
-        // [1]: Guid Animation
-
-        // Prepare
+        value = Value::Null;
         auto& bucket = context.Data->State[node->BucketIndex].MultiBlend;
-        const auto range = node->Values[0].AsVector4();
-        const auto speed = (float)tryGetValue(node->GetBox(1), node->Values[1]);
-        const auto loop = (bool)tryGetValue(node->GetBox(2), node->Values[2]);
-        const auto startTimePos = (float)tryGetValue(node->GetBox(3), node->Values[3]);
+        MultiBlendInputs inputs(this, node);
         auto& data = node->Data.MultiBlend2D;
-
-        // Check if not valid animation binded
-        if (data.TrianglesP0[0] == ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS)
-        {
-            // Nothing to sample
-            value = Value::Null;
-            break;
-        }
+        if (data.TrianglesCount == 0)
+            break; // Skip if no valid animations added
 
         // Get axis X
         float x = (float)tryGetValue(node->GetBox(4), Value::Zero);
-        x = Math::Clamp(x, range.X, range.Y);
+        x = Math::Clamp(x, inputs.Range.X, inputs.Range.Y);
 
         // Get axis Y
         float y = (float)tryGetValue(node->GetBox(5), Value::Zero);
-        y = Math::Clamp(y, range.Z, range.W);
+        y = Math::Clamp(y, inputs.Range.Z, inputs.Range.W);
+
+        // Add to trace
+        if (context.Data->EnableTracing)
+        {
+            auto& trace = context.AddTraceEvent(node);
+            const Half2 packed(x, y); // Pack xy into 32-bits
+            *(uint32*)&trace.Value = *(uint32*)&packed;
+        }
 
         // Check if need to evaluate multi blend length
         if (data.Length < 0)
-        {
-            ComputeMultiBlendLength(data.Length, node);
-        }
+            data.Length = inputs.ComputeMultiBlendLength(this, node);
         if (data.Length <= ZeroTolerance)
-        {
-            // Nothing to sample
-            value = Value::Null;
             break;
-        }
 
-        // Calculate new time position
-        if (speed < 0.0f && bucket.LastUpdateFrame < context.CurrentFrameIndex - 1)
-        {
-            // If speed is negative and it's the first node update then start playing from end
-            bucket.TimePosition = data.Length;
-        }
-        float newTimePos = bucket.TimePosition + context.DeltaTime * speed;
-
-        ANIM_GRAPH_PROFILE_EVENT("Multi Blend 2D");
+        MultiBlendAnimData::List prevList, newList;
+        MultiBlendAnimData::GetList(bucket, prevList);
 
         // Find 3 animations to blend (triangle)
-        value = Value::Null;
-        Vector2 p(x, y);
+        Float2 p(x, y);
         bool hasBest = false;
-        Vector2 bestPoint;
+        Float2 bestPoint;
         float bestWeight = 0.0f;
         byte bestAnims[2];
-        for (int32 i = 0; i < ANIM_GRAPH_MULTI_BLEND_2D_MAX_TRIS && data.TrianglesP0[i] != ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS; i++)
+        for (int32 i = 0, t = 0; i < data.TrianglesCount; i++)
         {
-            // Get A animation data
-            const auto a = data.TrianglesP0[i];
-            const auto aAnim = node->Assets[a].As<Animation>();
-            const auto aData = node->Values[4 + a * 2].AsVector4();
-
-            // Get B animation data
-            const auto b = data.TrianglesP1[i];
-            const auto bAnim = node->Assets[b].As<Animation>();
-            const auto bData = node->Values[4 + b * 2].AsVector4();
-
-            // Get C animation data
-            const auto c = data.TrianglesP2[i];
-            const auto cAnim = node->Assets[c].As<Animation>();
-            const auto cData = node->Values[4 + c * 2].AsVector4();
+            // Get animations data at vertices
+            const auto aIndex = data.Triangles[t++];
+            const auto bIndex = data.Triangles[t++];
+            const auto cIndex = data.Triangles[t++];
+            AnimSampleData a(this, inputs, node, aIndex);
+            AnimSampleData b(this, inputs, node, bIndex);
+            AnimSampleData c(this, inputs, node, cIndex);
+            if (inputs.SyncLength)
+                a.Length = b.Length = c.Length = data.Length;
 
             // Get triangle coords
-            Vector2 points[3] = {
-                Vector2(aData.X, aData.Y),
-                Vector2(bData.X, bData.Y),
-                Vector2(cData.X, cData.Y)
+            byte anims[3] = { aIndex, bIndex, cIndex };
+            Float2 points[3] = {
+                Float2(a.Data.X, a.Data.Y),
+                Float2(b.Data.X, b.Data.Y),
+                Float2(c.Data.X, c.Data.Y)
             };
 
             // Check if blend using this triangle
             if (CollisionsHelper::IsPointInTriangle(p, points[0], points[1], points[2]))
             {
-                if (Vector2::DistanceSquared(p, points[0]) < ANIM_GRAPH_BLEND_THRESHOLD2)
+                if (Float2::DistanceSquared(p, points[0]) < ANIM_GRAPH_BLEND_THRESHOLD2)
                 {
                     // Use only vertex A
-                    value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, aData.W);
+                    MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+                    value = SampleAnimation(node, inputs.Loop, inputs.StartTime, a);
+                    MultiBlendAnimData::AfterSample(newList, a);
                     break;
                 }
-                if (Vector2::DistanceSquared(p, points[1]) < ANIM_GRAPH_BLEND_THRESHOLD2)
+                if (Float2::DistanceSquared(p, points[1]) < ANIM_GRAPH_BLEND_THRESHOLD2)
                 {
                     // Use only vertex B
-                    value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, bAnim, bData.W);
+                    MultiBlendAnimData::BeforeSample(context, bucket, prevList, b, inputs.Speed);
+                    value = SampleAnimation(node, inputs.Loop, inputs.StartTime, b);
+                    MultiBlendAnimData::AfterSample(newList, b);
                     break;
                 }
-                if (Vector2::DistanceSquared(p, points[2]) < ANIM_GRAPH_BLEND_THRESHOLD2)
+                if (Float2::DistanceSquared(p, points[2]) < ANIM_GRAPH_BLEND_THRESHOLD2)
                 {
                     // Use only vertex C
-                    value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, cAnim, cData.W);
+                    MultiBlendAnimData::BeforeSample(context, bucket, prevList, c, inputs.Speed);
+                    value = SampleAnimation(node, inputs.Loop, inputs.StartTime, c);
+                    MultiBlendAnimData::AfterSample(newList, c);
                     break;
                 }
 
-                const Vector2 v0 = points[1] - points[0];
-                const Vector2 v1 = points[2] - points[0];
-                const Vector2 v2 = p - points[0];
+                auto v0 = points[1] - points[0];
+                auto v1 = points[2] - points[0];
+                auto v2 = p - points[0];
 
-                const float d00 = Vector2::Dot(v0, v0);
-                const float d01 = Vector2::Dot(v0, v1);
-                const float d11 = Vector2::Dot(v1, v1);
-                const float d20 = Vector2::Dot(v2, v0);
-                const float d21 = Vector2::Dot(v2, v1);
+                const float d00 = Float2::Dot(v0, v0);
+                const float d01 = Float2::Dot(v0, v1);
+                const float d11 = Float2::Dot(v1, v1);
+                const float d20 = Float2::Dot(v2, v0);
+                const float d21 = Float2::Dot(v2, v1);
                 const float coeff = (d00 * d11 - d01 * d01);
                 if (Math::IsZero(coeff))
                 {
-                    // Use only vertex A for invalid triangle
-                    value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, aData.W);
+                    const bool xAxis = Math::IsZero(v0.X) && Math::IsZero(v1.X);
+                    const bool yAxis = Math::IsZero(v0.Y) && Math::IsZero(v1.Y);
+                    if (xAxis && yAxis)
+                    {
+                        // Single animation
+                        MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+                        value = SampleAnimation(node, inputs.Loop, inputs.StartTime, a);
+                        MultiBlendAnimData::AfterSample(newList, a);
+                    }
+                    else if (xAxis || yAxis)
+                    {
+                        if (yAxis)
+                        {
+                            // Use code for X-axis case so swap coordinates
+                            Swap(v0.X, v0.Y);
+                            Swap(v1.X, v1.Y);
+                            Swap(v2.X, v2.Y);
+                            Swap(p.X, p.Y);
+                        }
+
+                        // Use 1D blend if points are on the same line (degenerated triangle)
+                        struct BlendData
+                        {
+                            float AlphaX, AlphaY;
+                            AnimSampleData *SampleA, *SampleB;
+                        };
+                        BlendData blendData;
+                        if (v1.Y >= v0.Y)
+                        {
+                            if (p.Y < v0.Y && v1.Y >= v0.Y)
+                                blendData = { p.Y, v0.Y, &a, &b };
+                            else
+                                blendData = { p.Y - v0.Y, v1.Y - v0.Y, &b, &c };
+                        }
+                        else
+                        {
+                            if (p.Y < v1.Y)
+                                blendData = { p.Y, v1.Y, &a, &c };
+                            else
+                                blendData = { p.Y - v1.Y, v0.Y - v1.Y, &c, &b };
+                        }
+                        const float alpha = Math::IsZero(blendData.AlphaY) ? 0.0f : blendData.AlphaX / blendData.AlphaY;
+                        MultiBlendAnimData::BeforeSample(context, bucket, prevList, *blendData.SampleA, inputs.Speed);
+                        MultiBlendAnimData::BeforeSample(context, bucket, prevList, *blendData.SampleB, inputs.Speed);
+                        value = SampleAnimationsWithBlend(node, inputs.Loop, inputs.StartTime, *blendData.SampleA, *blendData.SampleB, alpha);
+                        MultiBlendAnimData::AfterSample(newList, *blendData.SampleA);
+                        MultiBlendAnimData::AfterSample(newList, *blendData.SampleB);
+                    }
+                    else
+                    {
+                        // Use only vertex A for invalid triangle
+                        MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+                        value = SampleAnimation(node, inputs.Loop, inputs.StartTime, a);
+                        MultiBlendAnimData::AfterSample(newList, a);
+                    }
                     break;
                 }
                 const float v = (d11 * d20 - d01 * d21) / coeff;
@@ -1200,65 +1727,71 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
                 const float u = 1.0f - v - w;
 
                 // Blend A and B and C
-                value = SampleAnimationsWithBlend(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, bAnim, cAnim, aData.W, bData.W, cData.W, u, v, w);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, a, inputs.Speed);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, b, inputs.Speed);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, c, inputs.Speed);
+                value = SampleAnimationsWithBlend(node, inputs.Loop, inputs.StartTime, a, b, c, u, v, w);
+                MultiBlendAnimData::AfterSample(newList, a);
+                MultiBlendAnimData::AfterSample(newList, b);
+                MultiBlendAnimData::AfterSample(newList, c);
                 break;
             }
 
             // Try to find the best blend weights for blend position being outside the all triangles (edge case)
-            for (int j = 0; j < 3; j++)
+            for (int32 j = 0; j < 3; j++)
             {
-                Vector2 s[2] = {
+                int32 jNext = (j + 1) % 3;
+                Float2 s[2] = {
                     points[j],
-                    points[(j + 1) % 3]
+                    points[jNext]
                 };
-                Vector2 closest;
+                Float2 closest;
                 CollisionsHelper::ClosestPointPointLine(p, s[0], s[1], closest);
-                if (!hasBest || Vector2::DistanceSquared(closest, p) < Vector2::DistanceSquared(bestPoint, p))
+                if (!hasBest || Float2::DistanceSquared(closest, p) < Float2::DistanceSquared(bestPoint, p))
                 {
                     bestPoint = closest;
                     hasBest = true;
 
-                    float d = Vector2::Distance(s[0], s[1]);
-                    if (Math::IsZero(d))
-                    {
-                        bestWeight = 0;
-                    }
-                    else
-                    {
-                        bestWeight = Vector2::Distance(s[0], closest) / d;
-                    }
+                    const float d = Float2::Distance(s[0], s[1]);
+                    bestWeight = d < ANIM_GRAPH_BLEND_THRESHOLD ? 0 : Float2::Distance(s[0], closest) / d;
 
-                    bestAnims[0] = j;
-                    bestAnims[1] = (j + 1) % 3;
+                    bestAnims[0] = anims[j];
+                    bestAnims[1] = anims[jNext];
                 }
             }
         }
 
-        // Check if use the closes sample
-        if (value.AsPointer == nullptr && hasBest)
+        // Check if use the closest sample
+        if ((void*)value == nullptr && hasBest)
         {
-            const auto aAnim = node->Assets[bestAnims[0]].As<Animation>();
-            const auto aData = node->Values[4 + bestAnims[0] * 2].AsVector4();
+            const auto best0Index = bestAnims[0];
+            const auto best1Index = bestAnims[1];
+            AnimSampleData best0(this, inputs, node, best0Index);
+            AnimSampleData best1(this, inputs, node, best1Index);
+            if (inputs.SyncLength)
+                best0.Length = best1.Length = data.Length;
 
             // Check if use only one sample
+            MultiBlendAnimData::BeforeSample(context, bucket, prevList, best0, inputs.Speed);
             if (bestWeight < ANIM_GRAPH_BLEND_THRESHOLD)
             {
-                value = SampleAnimation(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, aData.W);
+                value = SampleAnimation(node, inputs.Loop, inputs.StartTime, best0);
             }
             else
             {
-                const auto bAnim = node->Assets[bestAnims[1]].As<Animation>();
-                const auto bData = node->Values[4 + bestAnims[1] * 2].AsVector4();
-                value = SampleAnimationsWithBlend(node, loop, data.Length, startTimePos, bucket.TimePosition, newTimePos, aAnim, bAnim, aData.W, bData.W, bestWeight);
+                MultiBlendAnimData::BeforeSample(context, bucket, prevList, best1, inputs.Speed);
+                value = SampleAnimationsWithBlend(node, inputs.Loop, inputs.StartTime, best0, best1, bestWeight);
+                MultiBlendAnimData::AfterSample(newList, best1);
             }
+            MultiBlendAnimData::AfterSample(newList, best0);
         }
 
-        bucket.TimePosition = newTimePos;
+        MultiBlendAnimData::SetList(bucket, newList);
         bucket.LastUpdateFrame = context.CurrentFrameIndex;
 
         break;
     }
-        // Blend Pose
+    // Blend Poses
     case 14:
     {
         ASSERT(box->ID == 0);
@@ -1272,41 +1805,44 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         // [2]: int Pose Count
         // [3]: AlphaBlendMode Mode
 
-        // Prepare
         auto& bucket = context.Data->State[node->BucketIndex].BlendPose;
-        const int32 poseIndex = (int32)tryGetValue(node->GetBox(1), node->Values[0]);
+        const int16 poseIndex = (int32)tryGetValue(node->GetBox(1), node->Values[0]);
         const float blendDuration = (float)tryGetValue(node->GetBox(2), node->Values[1]);
         const int32 poseCount = Math::Clamp(node->Values[2].AsInt, 0, MaxBlendPoses);
         const AlphaBlendMode mode = (AlphaBlendMode)node->Values[3].AsInt;
-
-        // Skip if nothing to blend
         if (poseCount == 0 || poseIndex < 0 || poseIndex >= poseCount)
-        {
             break;
+
+        // Check if swap transition end points
+        if (bucket.PreviousBlendPoseIndex == poseIndex && bucket.BlendPoseIndex != poseIndex && bucket.TransitionPosition >= ANIM_GRAPH_BLEND_THRESHOLD)
+        {
+            bucket.TransitionPosition = blendDuration - bucket.TransitionPosition;
+            Swap(bucket.BlendPoseIndex, bucket.PreviousBlendPoseIndex);
         }
 
         // Check if transition is not active (first update, pose not changing or transition ended)
         bucket.TransitionPosition += context.DeltaTime;
+        bucket.BlendPoseIndex = poseIndex;
         if (bucket.PreviousBlendPoseIndex == -1 || bucket.PreviousBlendPoseIndex == poseIndex || bucket.TransitionPosition >= blendDuration || blendDuration <= ANIM_GRAPH_BLEND_THRESHOLD)
         {
             bucket.TransitionPosition = 0.0f;
+            bucket.BlendPoseIndex = poseIndex;
             bucket.PreviousBlendPoseIndex = poseIndex;
-            value = tryGetValue(node->GetBox(FirstBlendPoseBoxIndex + poseIndex), Value::Null);
+            value = tryGetValue(node->GetBox(FirstBlendPoseBoxIndex + bucket.BlendPoseIndex), Value::Null);
             break;
         }
 
         // Blend two animations
         {
-            const float alpha = Math::Saturate(bucket.TransitionPosition / blendDuration);
+            const float alpha = bucket.TransitionPosition / blendDuration;
             const auto valueA = tryGetValue(node->GetBox(FirstBlendPoseBoxIndex + bucket.PreviousBlendPoseIndex), Value::Null);
-            const auto valueB = tryGetValue(node->GetBox(FirstBlendPoseBoxIndex + poseIndex), Value::Null);
-
+            const auto valueB = tryGetValue(node->GetBox(FirstBlendPoseBoxIndex + bucket.BlendPoseIndex), Value::Null);
             value = Blend(node, valueA, valueB, alpha, mode);
         }
 
         break;
     }
-        // Get Root Motion
+    // Get Root Motion
     case 15:
     {
         auto pose = tryGetValue(node->GetBox(2), Value::Null);
@@ -1319,7 +1855,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
                 value = poseData->RootMotion.Translation;
                 break;
             case 1:
-                value = poseData->RootMotion.Rotation;
+                value = poseData->RootMotion.Orientation;
                 break;
             }
         }
@@ -1337,7 +1873,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         }
         break;
     }
-        // Set Root Motion
+    // Set Root Motion
     case 16:
     {
         auto pose = tryGetValue(node->GetBox(1), Value::Null);
@@ -1349,13 +1885,13 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         const AnimGraphImpulse* poseData = (AnimGraphImpulse*)pose.AsPointer;
 
         auto nodes = node->GetNodes(this);
-        nodes->Nodes = poseData->Nodes;
+        *nodes = *poseData;
         nodes->RootMotion.Translation = (Vector3)tryGetValue(node->GetBox(2), Value::Zero);
-        nodes->RootMotion.Rotation = (Quaternion)tryGetValue(node->GetBox(3), Value::Zero);
+        nodes->RootMotion.Orientation = (Quaternion)tryGetValue(node->GetBox(3), Value::Zero);
         value = nodes;
         break;
     }
-        // Add Root Motion
+    // Add Root Motion
     case 17:
     {
         auto pose = tryGetValue(node->GetBox(1), Value::Null);
@@ -1367,20 +1903,19 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         const AnimGraphImpulse* poseData = (AnimGraphImpulse*)pose.AsPointer;
 
         auto nodes = node->GetNodes(this);
-        nodes->Nodes = poseData->Nodes;
+        *nodes = *poseData;
         nodes->RootMotion.Translation = poseData->RootMotion.Translation + (Vector3)tryGetValue(node->GetBox(2), Value::Zero);
-        nodes->RootMotion.Rotation = poseData->RootMotion.Rotation * (Quaternion)tryGetValue(node->GetBox(3), Value::Zero);
+        nodes->RootMotion.Orientation = poseData->RootMotion.Orientation * (Quaternion)tryGetValue(node->GetBox(3), Value::Zero);
         value = nodes;
         break;
     }
-        // State Machine
+    // State Machine
     case 18:
     {
+        ANIM_GRAPH_PROFILE_EVENT("State Machine");
         const int32 maxTransitionsPerUpdate = node->Values[2].AsInt;
         const bool reinitializeOnBecomingRelevant = node->Values[3].AsBool;
         const bool skipFirstUpdateTransition = node->Values[4].AsBool;
-
-        ANIM_GRAPH_PROFILE_EVENT("State Machine");
 
         // Prepare
         auto& bucket = context.Data->State[node->BucketIndex].StateMachine;
@@ -1407,183 +1942,196 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
 
             // Enter to the first state pointed by the Entry node (without transitions)
             bucket.CurrentState = data.Graph->GetRootNode();
-            bucket.ActiveTransition = nullptr;
-            bucket.TransitionPosition = 0.0f;
+            InitStateTransition(context, bucket);
 
-            // Reset all state buckets pof the graphs and nodes included inside the state machine
+            // Reset all state buckets of the graphs and nodes included inside the state machine
             ResetBuckets(context, data.Graph);
         }
+#define END_TRANSITION() \
+    ResetBuckets(context, bucket.CurrentState->Data.State.Graph); \
+    bucket.CurrentState = bucket.ActiveTransition->Destination; \
+    InitStateTransition(context, bucket)
+
+        context.NodePath.Push(node->ID);
 
         // Update the active transition
         if (bucket.ActiveTransition)
         {
             bucket.TransitionPosition += context.DeltaTime;
+            ASSERT(bucket.CurrentState);
 
             // Check for transition end
             if (bucket.TransitionPosition >= bucket.ActiveTransition->BlendDuration)
             {
-                // End transition
-                ResetBuckets(context, bucket.CurrentState->Data.State.Graph);
-                bucket.CurrentState = bucket.ActiveTransition->Destination;
-                bucket.ActiveTransition = nullptr;
-                bucket.TransitionPosition = 0.0f;
+                END_TRANSITION();
+            }
+            // Check for transition interruption
+            else if (EnumHasAnyFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionRuleRechecking) &&
+                EnumHasNoneFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::UseDefaultRule) &&
+                bucket.ActiveTransition->RuleGraph)
+            {
+                // Execute transition rule
+                auto rootNode = bucket.ActiveTransition->RuleGraph->GetRootNode();
+                if (!(bool)eatBox((Node*)rootNode, &rootNode->Boxes[0]))
+                {
+                    bool cancelTransition = false;
+                    if (EnumHasAnyFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionInstant))
+                    {
+                        cancelTransition = true;
+                    }
+                    else
+                    {
+                        // Blend back to the source state (remove currently applied delta and rewind transition)
+                        bucket.TransitionPosition -= context.DeltaTime;
+                        bucket.TransitionPosition -= context.DeltaTime;
+                        if (bucket.TransitionPosition <= ZeroTolerance)
+                        {
+                            cancelTransition = true;
+                        }
+                    }
+                    if (cancelTransition)
+                    {
+                        // Go back to the source state
+                        ResetBuckets(context, bucket.CurrentState->Data.State.Graph);
+                        InitStateTransition(context, bucket);
+                    }
+                }
+            }
+            if (bucket.ActiveTransition && !bucket.BaseTransition && EnumHasAnyFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionSourceState))
+            {
+                // Try to interrupt with any other transition in the source state (except the current transition)
+                if (AnimGraphStateTransition* transition = UpdateStateTransitions(context, data, bucket.CurrentState, bucket.ActiveTransition->Destination))
+                {
+                    // Change active transition to the interrupted one
+                    if (EnumHasNoneFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionInstant))
+                    {
+                        // Cache the current blending state to be used as a base when blending towards new destination state (seamless blending after interruption)
+                        bucket.BaseTransition = bucket.ActiveTransition;
+                        bucket.BaseTransitionState = bucket.CurrentState;
+                        bucket.BaseTransitionPosition = bucket.TransitionPosition;
+                    }
+                    bucket.ActiveTransition = transition;
+                    bucket.TransitionPosition = 0.0f;
+                }
+            }
+            if (bucket.ActiveTransition && !bucket.BaseTransition && EnumHasAnyFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionDestinationState))
+            {
+                // Try to interrupt with any other transition in the destination state (except the transition back to the current state if exists)
+                if (AnimGraphStateTransition* transition = UpdateStateTransitions(context, data, bucket.ActiveTransition->Destination, bucket.CurrentState))
+                {
+                    // Change active transition to the interrupted one
+                    if (EnumHasNoneFlags(bucket.ActiveTransition->Flags, AnimGraphStateTransition::FlagTypes::InterruptionInstant))
+                    {
+                        // Cache the current blending state to be used as a base when blending towards new destination state (seamless blending after interruption)
+                        bucket.BaseTransition = bucket.ActiveTransition;
+                        bucket.BaseTransitionState = bucket.CurrentState;
+                        bucket.BaseTransitionPosition = bucket.TransitionPosition;
+                    }
+                    bucket.CurrentState = bucket.ActiveTransition->Destination;
+                    bucket.ActiveTransition = transition;
+                    bucket.TransitionPosition = 0.0f;
+                }
             }
         }
 
-        ASSERT(bucket.CurrentState && bucket.CurrentState->GroupID == 9 && bucket.CurrentState->TypeID == 20);
+        ASSERT(bucket.CurrentState && bucket.CurrentState->Type == GRAPH_NODE_MAKE_TYPE(9, 20));
 
         // Update transitions
-        // Note: this logic assumes that all transitions are sorted by Order property and Enabled
+        // Note: this logic assumes that all transitions are sorted by Order property and Enabled (by Editor when saving Anim Graph asset)
         while (!bucket.ActiveTransition && transitionsLeft-- > 0)
         {
-            // Check if can change the current state
-            const auto& stateData = bucket.CurrentState->Data.State;
-            int32 transitionIndex = 0;
-            while (stateData.Transitions[transitionIndex] != AnimGraphNode::StateData::InvalidTransitionIndex
-                && transitionIndex < ANIM_GRAPH_MAX_STATE_TRANSITIONS)
+            // State transitions
+            UpdateStateTransitions(context, data, bucket, bucket.CurrentState->Data.State);
+
+            // Any state transitions
+            // TODO: cache Any state nodes inside State Machine to optimize the loop below
+            for (const AnimGraphNode& anyStateNode : data.Graph->Nodes)
             {
-                const auto idx = stateData.Transitions[transitionIndex];
-                ASSERT(idx >= 0 && idx < data.Graph->StateTransitions.Count());
-                auto& transition = data.Graph->StateTransitions[idx];
-                const bool useDefaultRule = static_cast<int32>(transition.Flags & AnimGraphStateTransition::FlagTypes::UseDefaultRule) != 0;
-
-                // Evaluate source state transition data (position, length, etc.)
-                const Value sourceStatePtr = SampleState(bucket.CurrentState);
-                auto& transitionData = context.TransitionData; // Note: this could support nested transitions but who uses state machine inside transition rule?
-                if (ANIM_GRAPH_IS_VALID_PTR(sourceStatePtr))
-                {
-                    // Use source state as data provider
-                    const auto sourceState = (AnimGraphImpulse*)sourceStatePtr.AsPointer;
-                    auto sourceLength = Math::Max(sourceState->Length, 0.0f);
-                    transitionData.Position = Math::Clamp(sourceState->Position, 0.0f, sourceLength);
-                    transitionData.Length = sourceLength;
-                }
-                else
-                {
-                    // Reset
-                    transitionData.Position = 0;
-                    transitionData.Length = ZeroTolerance;
-                }
-
-                // Check if can trigger the transition
-                bool canEnter = false;
-                if (useDefaultRule)
-                {
-                    // Start transition when the current state animation is about to end (split blend duration evenly into two states)
-                    const auto transitionDurationHalf = transition.BlendDuration * 0.5f + ZeroTolerance;
-                    const auto endPos = transitionData.Length - transitionDurationHalf;
-                    canEnter = transitionData.Position >= endPos;
-                }
-                else if (transition.RuleGraph)
-                {
-                    ASSERT(transition.RuleGraph->GetRootNode());
-
-                    // Execute transition rule
-                    auto rootNode = transition.RuleGraph->GetRootNode();
-                    canEnter = (bool)eatBox((Node*)rootNode, &rootNode->Boxes[0]);
-                }
-                if (canEnter)
-                {
-                    // Start transition
-                    bucket.ActiveTransition = &transition;
-                    bucket.TransitionPosition = 0.0f;
-                    break;
-                }
-
-                // Skip after Solo transition
-                // TODO: don't load transitions after first enabled Solo transition and remove this check here
-                if (static_cast<int32>(transition.Flags & AnimGraphStateTransition::FlagTypes::Solo) != 0)
-                    break;
-
-                transitionIndex++;
+                if (anyStateNode.Type == GRAPH_NODE_MAKE_TYPE(9, 34))
+                    UpdateStateTransitions(context, data, bucket, anyStateNode.Data.AnyState);
             }
 
             // Check for instant transitions
             if (bucket.ActiveTransition && bucket.ActiveTransition->BlendDuration <= ZeroTolerance)
             {
-                // End transition
-                ResetBuckets(context, bucket.CurrentState->Data.State.Graph);
-                bucket.CurrentState = bucket.ActiveTransition->Destination;
-                bucket.ActiveTransition = nullptr;
-                bucket.TransitionPosition = 0.0f;
+                END_TRANSITION();
             }
         }
 
-        // Sample the current state
-        const auto currentState = SampleState(bucket.CurrentState);
-        value = currentState;
+        if (bucket.BaseTransitionState)
+        {
+            // Sample the other state (eg. when blending from interrupted state to the another state from the old destination)
+            value = SampleState(context, bucket.BaseTransitionState);
+            if (bucket.BaseTransition)
+            {
+                // Evaluate the base pose from the time when transition was interrupted
+                const auto destinationState = SampleState(context, bucket.BaseTransition->Destination);
+                const float alpha = bucket.BaseTransitionPosition / bucket.BaseTransition->BlendDuration;
+                value = Blend(node, value, destinationState, alpha, bucket.BaseTransition->BlendMode);
+            }
+        }
+        else
+        {
+            // Sample the current state
+            value = SampleState(context, bucket.CurrentState);
+        }
 
         // Handle active transition blending
         if (bucket.ActiveTransition)
         {
             // Sample the active transition destination state
-            const auto destinationState = SampleState(bucket.ActiveTransition->Destination);
+            const auto destinationState = SampleState(context, bucket.ActiveTransition->Destination);
 
             // Perform blending
-            const float alpha = Math::Saturate(bucket.TransitionPosition / bucket.ActiveTransition->BlendDuration);
-            value = Blend(node, currentState, destinationState, alpha, bucket.ActiveTransition->BlendMode);
+            const float alpha = bucket.TransitionPosition / bucket.ActiveTransition->BlendDuration;
+            value = Blend(node, value, destinationState, alpha, bucket.ActiveTransition->BlendMode);
         }
 
-        // Update bucket
         bucket.LastUpdateFrame = context.CurrentFrameIndex;
-
+        context.NodePath.Pop();
+#undef END_TRANSITION
         break;
     }
-        // Entry
+    // Entry
     case 19:
-    {
-        // Not used
-        CRASH;
-        break;
-    }
-        // State
+    // State
     case 20:
+    // Any State
+    case 34:
     {
         // Not used
         CRASH;
         break;
     }
-        // State Output
+    // State Output
     case 21:
-    {
-        if (box->HasConnection())
-            value = eatBox(nodeBase, box->FirstConnection());
-        else
-            value = Value::Null;
-        break;
-    }
-        // Rule Output
+    // Rule Output
     case 22:
-    {
-        if (box->HasConnection())
-            value = eatBox(nodeBase, box->FirstConnection());
-        else
-            value = Value::False;
+        value = box->HasConnection() ? eatBox(nodeBase, box->FirstConnection()) : Value::Null;
         break;
-    }
-        // Transition Source State Anim
+    // Transition Source State Anim
     case 23:
     {
         const AnimGraphTransitionData& transitionsData = context.TransitionData;
         switch (box->ID)
         {
-            // Length
+        // Length
         case 0:
             value = transitionsData.Length;
             break;
-            // Time
+        // Time
         case 1:
             value = transitionsData.Position;
             break;
-            // Normalized Time
+        // Normalized Time
         case 2:
             value = transitionsData.Position / transitionsData.Length;
             break;
-            // Remaining Time
+        // Remaining Time
         case 3:
             value = transitionsData.Length - transitionsData.Position;
             break;
-            // Remaining Normalized Time
+        // Remaining Normalized Time
         case 4:
             value = 1.0f - (transitionsData.Position / transitionsData.Length);
             break;
@@ -1592,7 +2140,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         }
         break;
     }
-        // Animation Graph Function
+    // Animation Graph Function
     case 24:
     {
         // Load function graph
@@ -1641,7 +2189,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         context.GraphStack.Pop();
         break;
     }
-        // Transform Bone (local/model space)
+    // Transform Bone (local/model space)
     case 25:
     case 26:
     {
@@ -1653,7 +2201,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         Transform transform;
         transform.Translation = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         transform.Orientation = (Quaternion)tryGetValue(node->GetBox(3), Quaternion::Identity);
-        transform.Scale = (Vector3)tryGetValue(node->GetBox(4), Vector3::One);
+        transform.Scale = (Float3)tryGetValue(node->GetBox(4), Float3::One);
 
         // Skip if no change will be performed
         if (nodeIndex < 0 || nodeIndex >= _skeletonNodesCount || transformMode == BoneTransformMode::None || (transformMode == BoneTransformMode::Add && transform.IsIdentity()))
@@ -1699,23 +2247,12 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
-        // Copy Node
+    // Copy Node
     case 27:
     {
         // Get input
         auto input = tryGetValue(node->GetBox(1), Value::Null);
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
 
         // Fetch the settings
         const auto srcNodeIndex = node->Data.CopyNode.SrcNodeIndex;
@@ -1748,7 +2285,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
-        // Get Node Transform (model space)
+    // Get Node Transform (model space)
     case 28:
     {
         // Get input
@@ -1760,7 +2297,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
             value = Variant(Transform::Identity);
         break;
     }
-        // Aim IK
+    // Aim IK
     case 29:
     {
         // Get input
@@ -1769,22 +2306,10 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         float weight = (float)tryGetValue(node->GetBox(3), node->Values[1]);
         if (nodeIndex < 0 || nodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
         {
-            // Pass through the input
             value = input;
             break;
         }
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
         const Vector3 target = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         weight = Math::Saturate(weight);
 
@@ -1805,7 +2330,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
-        // Get Node Transform (local space)
+    // Get Node Transform (local space)
     case 30:
     {
         // Get input
@@ -1817,7 +2342,7 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
             value = Variant(Transform::Identity);
         break;
     }
-        // Two Bone IK
+    // Two Bone IK
     case 31:
     {
         // Get input
@@ -1826,22 +2351,10 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         float weight = (float)tryGetValue(node->GetBox(4), node->Values[1]);
         if (nodeIndex < 0 || nodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
         {
-            // Pass through the input
             value = input;
             break;
         }
-        const auto nodes = node->GetNodes(this);
-        if (ANIM_GRAPH_IS_VALID_PTR(input))
-        {
-            // Use input nodes
-            CopyNodes(nodes, input);
-        }
-        else
-        {
-            // Use default nodes
-            InitNodes(nodes);
-            input = nodes;
-        }
+        const auto nodes = node->GetNodes(this, input);
         const Vector3 target = (Vector3)tryGetValue(node->GetBox(2), Vector3::Zero);
         const Vector3 jointTarget = (Vector3)tryGetValue(node->GetBox(3), Vector3::Zero);
         const bool allowStretching = (bool)tryGetValue(node->GetBox(5), node->Values[2]);
@@ -1883,25 +2396,371 @@ void AnimGraphExecutor::ProcessGroupAnimation(Box* boxBase, Node* nodeBase, Valu
         value = nodes;
         break;
     }
+    // Animation Slot
+    case 32:
+    {
+        auto& slots = context.Data->Slots;
+        if (slots.Count() == 0)
+        {
+            value = tryGetValue(node->GetBox(1), Value::Null);
+            return;
+        }
+        const StringView slotName(node->Values[0]);
+        auto& bucket = context.Data->State[node->BucketIndex].Slot;
+        if (bucket.Index != -1 && (slots.Count() <= bucket.Index || slots[bucket.Index].Animation == nullptr))
+        {
+            // Current slot animation ended
+            bucket.Index = -1;
+        }
+        if (bucket.Index == -1)
+        {
+            // Pick the animation to play
+            for (int32 i = 0; i < slots.Count(); i++)
+            {
+                auto& slot = slots[i];
+                if (slot.Animation && slot.Name == slotName)
+                {
+                    // Start playing animation
+                    bucket.Index = i;
+
+                    // Keep bucket time position and blend in time for if blending between two anims in the same slot
+                    bucket.TimePosition = bucket.TimePosition;
+                    bucket.BlendInPosition = bucket.BlendInPosition;
+                    bucket.BlendOutPosition = 0.0f;
+                    bucket.LoopsDone = 0;
+                    bucket.LoopsLeft = slot.LoopCount;
+                    break;
+                }
+            }
+            if (bucket.Index == -1 || !slots[bucket.Index].Animation->IsLoaded())
+            {
+                value = tryGetValue(node->GetBox(1), Value::Null);
+
+                // Reset times if time is left over from playing between different anims in the same slot
+                if (bucket.BlendInPosition > 0)
+                {
+                    bucket.TimePosition = 0;
+                    bucket.BlendInPosition = 0;
+                }
+                return;
+            }
+        }
+
+        // Play the animation
+        auto& slot = slots[bucket.Index];
+        Animation* anim = slot.Animation;
+        ASSERT(slot.Animation && slot.Animation->IsLoaded());
+        const float deltaTime = slot.Pause ? 0.0f : context.DeltaTime * slot.Speed;
+        const float length = anim->GetLength();
+        const bool loop = bucket.LoopsLeft != 0;
+        float newTimePos = bucket.TimePosition + deltaTime;
+        if (newTimePos >= length)
+        {
+            if (bucket.LoopsLeft == 0)
+            {
+                // End playing animation and reset bucket params
+                value = tryGetValue(node->GetBox(1), Value::Null);
+                bucket.Index = -1;
+                slot.Animation = nullptr;
+                bucket.TimePosition = 0.0f;
+                bucket.BlendInPosition = 0.0f;
+                bucket.BlendOutPosition = 0.0f;
+                bucket.LoopsDone = 0;
+                return;
+            }
+
+            // Loop animation
+            if (bucket.LoopsLeft > 0)
+                bucket.LoopsLeft--;
+            bucket.LoopsDone++;
+        }
+        // Speed is accounted for in the new time pos, so keep sample speed at 1
+        value = SampleAnimation(node, loop, length, 0.0f, bucket.TimePosition, newTimePos, anim, 1);
+        bucket.TimePosition = newTimePos;
+
+        // On animation slot stop
+        if (slot.Stop)
+        {
+            // Blend between last anim and new anim if found, otherwise blend back to input
+            Animation* otherAnim = nullptr;
+            for (int32 i = 0; i < slots.Count(); i++)
+            {
+                if (bucket.Index == i)
+                    continue;
+                auto& other = slots[i];
+                if (other.Animation && other.Name == slotName)
+                {
+                    otherAnim = other.Animation;
+                    other.ActiveBlend = true;
+                    if (other.Rewind)
+                    {
+                        other.Rewind = false;
+                        bucket.BlendOutPosition = 0;
+                    }
+                }
+                else if (other.Name == slotName)
+                {
+                    other.ActiveBlend = false;
+                }
+            }
+            float oldTimePos = bucket.BlendOutPosition;
+            bucket.BlendOutPosition += deltaTime;
+            bucket.BlendInPosition = bucket.BlendOutPosition;
+            const float alpha = slot.BlendOutTime > ANIM_GRAPH_BLEND_THRESHOLD ? bucket.BlendOutPosition / slot.BlendOutTime : 1.0f;
+            if (otherAnim != nullptr)
+            {
+                auto otherValue = SampleAnimation(node, false, otherAnim->GetLength(), 0.0f, oldTimePos, bucket.BlendInPosition, otherAnim, 1);
+                //value = SampleAnimationsWithBlend(node, false, length, 0.0f, bucket.TimePosition, newTimePos, anim, sAnim, 1, 1, alpha);
+                value = Blend(node, value, otherValue, alpha, AlphaBlendMode::HermiteCubic);
+            }
+            else
+            {
+                auto input = tryGetValue(node->GetBox(1), Value::Null);
+                value = Blend(node, value, input, alpha, AlphaBlendMode::HermiteCubic);
+            }
+
+            if (bucket.BlendOutPosition >= slot.BlendOutTime)
+            {
+                // Start from the beginning or the blend in position if next anim found
+                slot.Animation = nullptr;
+                slot.Stop = false;
+                slot.ActiveBlend = false;
+                if (!otherAnim)
+                {
+                    bucket.TimePosition = 0;
+                    bucket.BlendInPosition = 0;
+                }
+                else
+                {
+                    bucket.TimePosition = bucket.BlendInPosition;
+                }
+            }
+            break;
+        }
+
+        if (bucket.LoopsLeft == 0 && slot.BlendOutTime > ANIM_GRAPH_BLEND_THRESHOLD && length - slot.BlendOutTime < bucket.TimePosition)
+        {
+            // Blend out
+            auto input = tryGetValue(node->GetBox(1), Value::Null);
+            bucket.BlendOutPosition += deltaTime;
+            const float alpha = bucket.BlendOutPosition / slot.BlendOutTime;
+            value = Blend(node, value, input, alpha, AlphaBlendMode::HermiteCubic);
+        }
+        else if (bucket.LoopsDone == 0 && slot.BlendInTime > ANIM_GRAPH_BLEND_THRESHOLD && bucket.BlendInPosition < slot.BlendInTime)
+        {
+            // Blend in
+            auto input = tryGetValue(node->GetBox(1), Value::Null);
+            bucket.BlendInPosition += deltaTime;
+            const float alpha = bucket.BlendInPosition / slot.BlendInTime;
+            value = Blend(node, input, value, alpha, AlphaBlendMode::HermiteCubic);
+        }
+        break;
+    }
+    // Animation Instance Data
+    case 33:
+    {
+        auto& bucket = context.Data->State[node->BucketIndex].InstanceData;
+        if (bucket.Init)
+        {
+            bucket.Init = false;
+            *(Float4*)bucket.Data = (Float4)tryGetValue(node->GetBox(1), Value::Zero);
+        }
+        value = *(Float4*)bucket.Data;
+        break;
+    }
+    // Spring Bone Physics
+    case 35:
+    {
+        // Get bucket
+        auto& bucket = context.Data->State[node->BucketIndex].SpringBonePhysics;
+        Transform objectTransform = context.Data->GetObjectTransform();
+
+        // Get input
+        auto input = tryGetValue(node->GetBox(1), Value::Null);
+        const auto endNodeIndex = node->Data.TransformNode.NodeIndex;
+        float weight = (float)tryGetValue(node->GetBox(2), node->Values[2]);
+        if (endNodeIndex < 0 || endNodeIndex >= _skeletonNodesCount || weight < ANIM_GRAPH_BLEND_THRESHOLD)
+        {
+            value = input;
+            break;
+        }
+        const auto nodes = node->GetNodes(this, input);
+
+        // Get parameters
+        weight = Math::Min(weight, 1.0f);
+        float deltaTime = context.DeltaTime;
+        int32 nodesCount = Math::Clamp((int32)node->Values[1] + 1, 1, _skeletonNodesCount);
+        float stiffness = (float)tryGetValue(node->GetBox(3), node->Values[3]);
+        float drag = (float)tryGetValue(node->GetBox(4), node->Values[4]);
+        float stretchLimit = (float)tryGetValue(node->GetBox(5), node->Values[5]) + 1.0f;
+        float gravityScale = (float)tryGetValue(node->GetBox(6), node->Values[6]);
+        Vector3 force = (Vector3)tryGetValue(node->GetBox(7), node->Values[7]) + Physics::GetGravity() * gravityScale;
+
+        // Get world-space transforms of the nodes (from root to end)
+        Array<int32, InlinedAllocation<8>> nodesIndices;
+        Array<Transform, InlinedAllocation<8>> nodesRef;
+        nodesIndices.Resize(nodesCount);
+        nodesRef.Resize(nodesCount);
+        auto& skeleton = _graph.BaseModel->Skeleton;
+        for (int32 i = nodesCount - 1, nodeIndex = endNodeIndex; i >= 0; i--)
+        {
+            nodesIndices[i] = nodeIndex;
+            nodeIndex = skeleton.Nodes[nodeIndex].ParentIndex;
+        }
+        nodesRef[0] = nodes->GetNodeWorldTransformation(context, skeleton, nodesIndices[0]); // Root comes from animation (incl. animated model movement)
+        for (int32 i = 1; i < nodesCount; i++)
+            nodesRef[i] = nodesRef[i - 1].LocalToWorld(nodes->Nodes[nodesIndices[i]]);
+
+        // Check if we reset the simulation (start from the reference pose)
+        bool reset = bucket.LastUpdateFrame < context.CurrentFrameIndex - 1 || context.CurrentFrameIndex == 1;
+        if (bucket.StateDataStart == -1)
+        {
+            // Allocate a dynamic state
+            bucket.StateDataStart = context.Data->DynamicState.Count();
+            context.Data->DynamicState.AddUninitialized(sizeof(AnimGraphInstanceData::SpringBonePhysicsDynamic) * nodesCount);
+            reset = true;
+        }
+        auto* dynamic = (AnimGraphInstanceData::SpringBonePhysicsDynamic*)&context.Data->DynamicState[bucket.StateDataStart];
+        if (reset)
+        {
+            // Initialize the simulation from the reference pose
+            for (int32 i = 0; i < nodesCount; i++)
+                dynamic[i].CurrentPosition = dynamic[i].PreviousPosition = nodesRef[i].Translation;
+        }
+        bucket.LastUpdateFrame = context.CurrentFrameIndex;
+
+        // Move each node by velocity and forces
+        dynamic[0].PreviousPosition = dynamic[0].CurrentPosition;
+        dynamic[0].CurrentPosition = nodesRef[0].Translation;
+        for (int32 i = 1; i < nodesCount; i++)
+        {
+            Vector3 position = dynamic[i].CurrentPosition;
+            Vector3 prevPosition = dynamic[i].PreviousPosition;
+            Vector3 refPosition = nodesRef[i].Translation;
+
+            // Stiffness force
+            Vector3 delta = (refPosition - position) * stiffness;
+
+            // Gravity and wind forces
+            delta += force * (deltaTime * deltaTime);
+
+            // Verlet integration
+            delta += (position - prevPosition) * (1 - drag);
+
+            dynamic[i].PreviousPosition = position;
+            dynamic[i].CurrentPosition = position + delta;
+        }
+
+        // Length constraints
+        for (int32 i = 1; i < nodesCount; i++)
+        {
+            Vector3 offset = dynamic[i].CurrentPosition - dynamic[i - 1].CurrentPosition;
+            Real dist = offset.Length();
+            Real boneLength = Vector3::Distance(nodesRef[i].Translation, nodesRef[i - 1].Translation);
+            Real maxBoneLength = boneLength * stretchLimit;
+            if (dist > maxBoneLength && dist > ANIM_GRAPH_BLEND_THRESHOLD)
+            {
+                Real scale = ((dist - maxBoneLength) / dist);
+                dynamic[i].CurrentPosition -= offset * scale;
+            }
+        }
+
+        // Update the nodes with the new transforms (move back from world-space to node-space)
+        Quaternion prevRotation = Quaternion::Identity;
+        for (int32 i = 0; i < nodesCount; i++)
+        {
+            Transform nodeTransform = nodesRef[i];
+            nodeTransform.Translation = dynamic[i].CurrentPosition;
+
+            // Move back from world-space to model-space
+            nodeTransform = objectTransform.WorldToLocal(nodeTransform);
+
+            if (i + 1 < nodesCount)
+            {
+                // Orient node to point to the next node in the chain
+                Vector3 childNewPos = objectTransform.WorldToLocal(dynamic[i + 1].CurrentPosition);
+                int32 childIndex = nodesIndices[i + 1];
+                Vector3 childRefPos = nodes->Nodes[childIndex].Translation;
+                Vector3 childOldPos = nodeTransform.LocalToWorld(childRefPos);
+                Vector3 oldDir = (childOldPos - nodeTransform.Translation).GetNormalized();
+                Vector3 newDir = (childNewPos - nodeTransform.Translation).GetNormalized();
+                nodeTransform.Orientation = Quaternion::FindBetween(oldDir, newDir) * nodeTransform.Orientation;
+                prevRotation = nodeTransform.Orientation;
+            }
+            else
+            {
+                // Tip (last) node copies the orientation of the parent
+                nodeTransform.Orientation = prevRotation;
+            }
+
+            nodes->SetNodeModelTransformation(skeleton, nodesIndices[i], nodeTransform, weight);
+        }
+
+        // When we blend between animated and simulated poses then fetch the final pose from the nodes instead of using the simulated pose directly
+        if (weight < 1.0f)
+        {
+            // TODO: optimize it by getting root node, then using LocalToWorld for following children
+            for (int32 i = 1; i < nodesCount; i++)
+                dynamic[i].CurrentPosition = nodes->GetNodeWorldTransformation(context, skeleton, nodesIndices[i]).Translation;
+        }
+
+        value = nodes;
+        break;
+    }
+    // Per Instance Random
+    case 36:
+    {
+        auto* actor = ScriptingObject::Cast<Actor>(context.Data->Object);
+        value = actor ? actor->GetPerInstanceRandom() : 0.0f;
+        break;
+    }
+    // Instance Transform
+    case 37:
+    {
+        auto* actor = ScriptingObject::Cast<Actor>(context.Data->Object);
+        const auto& transform = actor ? actor->GetTransform() : Transform::Identity;
+        switch (box->ID)
+        {
+        case 0:
+            value = Value(transform);
+            break;
+        case 1:
+            value = transform.Translation;
+            break;
+        case 2:
+            value = transform.Orientation;
+            break;
+        case 3:
+            value = transform.Scale;
+            break;
+        }
+        break;
+    }
     default:
         break;
     }
-    context.ValueCache.Add(boxBase, value);
+    context.ValueCache[boxBase] = value;
 }
 
 void AnimGraphExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value& value)
 {
-    auto& context = Context.Get();
+    auto& context = *Context.Get();
     if (context.ValueCache.TryGet(boxBase, value))
         return;
     switch (node->TypeID)
     {
-        // Function Input
+    // Function Input
     case 1:
     {
+        // Skip when graph is too small (eg. preview) and fallback with default value from the function graph
+        if (context.GraphStack.Count() < 2)
+        {
+            value = tryGetValue(node->TryGetBox(1), Value::Zero);
+            break;
+        }
+
         // Find the function call
         AnimGraphNode* functionCallNode = nullptr;
-        ASSERT(context.GraphStack.Count() >= 2);
         Graph* graph;
         for (int32 i = context.CallStack.Count() - 1; i >= 0; i--)
         {
@@ -1926,17 +2785,13 @@ void AnimGraphExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value& va
 
         // Peek the input box to use
         int32 inputIndex = -1;
+        const auto name = (StringView)node->Values[1];
         for (int32 i = 0; i < function->Inputs.Count(); i++)
         {
             auto& input = function->Inputs[i];
-
-            // Pick the any nested graph that uses this input
-            AnimSubGraph* subGraph = data.Graph;
-            for (auto& graphIndex : input.GraphIndices)
-                subGraph = subGraph->SubGraphs[graphIndex];
-            if (node->ID == subGraph->Nodes[input.NodeIndex].ID)
+            if (input.Name == name)
             {
-                inputIndex = i;
+                inputIndex = input.InputIndex;
                 break;
             }
         }

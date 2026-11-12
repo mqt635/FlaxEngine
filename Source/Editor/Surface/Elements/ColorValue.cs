@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.Input;
 using FlaxEngine;
@@ -28,9 +28,10 @@ namespace FlaxEditor.Surface.Elements
         public ColorValue(SurfaceNode parentNode, NodeElementArchetype archetype)
         : base(Get(parentNode, archetype), archetype.Position.X, archetype.Position.Y)
         {
+            Height = Constants.BoxRowHeight;
             ParentNode = parentNode;
             Archetype = archetype;
-
+            UseDynamicEditing = false;
             ParentNode.ValuesChanged += OnNodeValuesChanged;
         }
 

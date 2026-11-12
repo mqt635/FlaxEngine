@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -15,7 +15,7 @@ namespace FlaxEditor.Surface
         /// <summary>
         /// The mouse position in local control space. Updates by auto.
         /// </summary>
-        protected Vector2 _mousePosition = Vector2.Minimum;
+        protected Float2 _mousePosition = Float2.Minimum;
 
         /// <summary>
         /// The is selected flag for element.
@@ -48,7 +48,7 @@ namespace FlaxEditor.Surface
         /// <summary>
         /// Gets the mouse position (in local control space).
         /// </summary>
-        public Vector2 MousePosition => _mousePosition;
+        public Float2 MousePosition => _mousePosition;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SurfaceControl"/> class.
@@ -59,6 +59,7 @@ namespace FlaxEditor.Surface
         protected SurfaceControl(VisjectSurfaceContext context, float width, float height)
         : base(0, 0, width, height)
         {
+            AutoFocus = true;
             ClipChildren = false;
 
             Surface = context.Surface;
@@ -83,7 +84,7 @@ namespace FlaxEditor.Surface
         /// </summary>
         /// <param name="location">The mouse location (in surface space).</param>
         /// <returns><c>true</c> if this instance can be selected by mouse at the specified location; otherwise, <c>false</c>.</returns>
-        public abstract bool CanSelect(ref Vector2 location);
+        public abstract bool CanSelect(ref Float2 location);
 
         /// <summary>
         /// Determines whether selection rectangle is intersecting with the surface control area that can be selected.
@@ -108,7 +109,7 @@ namespace FlaxEditor.Surface
         /// </summary>
         /// <param name="menu">The menu.</param>
         /// <param name="location">The show location (in control space).</param>
-        public virtual void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Vector2 location)
+        public virtual void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
         {
         }
 
@@ -120,31 +121,47 @@ namespace FlaxEditor.Surface
         }
 
         /// <summary>
+        /// Called when control is loading - has data loaded but not UI created yet.
+        /// </summary>
+        public virtual void OnLoading(SurfaceNodeActions action)
+        {
+        }
+
+        /// <summary>
         /// Called when control gets loaded and added to surface.
         /// </summary>
-        public virtual void OnLoaded()
+        public virtual void OnLoaded(SurfaceNodeActions action)
         {
         }
 
         /// <summary>
         /// Called when surface gets loaded and nodes boxes are connected.
         /// </summary>
-        public virtual void OnSurfaceLoaded()
+        public virtual void OnSurfaceLoaded(SurfaceNodeActions action)
         {
+            // Snap bounds (with ceil) when using grid snapping
+            if (Surface != null && Surface.GridSnappingEnabled)
+            {
+                var bounds = Bounds;
+                bounds.Location = Surface.SnapToGrid(bounds.Location, false);
+                bounds.Size = Surface.SnapToGrid(bounds.Size, true);
+                Bounds = bounds;
+            }
+
             UpdateRectangles();
         }
 
         /// <summary>
         /// Called after adding the control to the surface after user spawn (eg. add comment, add new node, etc.).
         /// </summary>
-        public virtual void OnSpawned()
+        public virtual void OnSpawned(SurfaceNodeActions action)
         {
         }
 
         /// <summary>
         /// Called on removing the control from the surface after user delete/cut operation (eg. delete comment, cut node, etc.).
         /// </summary>
-        public virtual void OnDeleted()
+        public virtual void OnDeleted(SurfaceNodeActions action)
         {
             Dispose();
         }
@@ -155,7 +172,7 @@ namespace FlaxEditor.Surface
         protected abstract void UpdateRectangles();
 
         /// <inheritdoc />
-        public override void OnMouseEnter(Vector2 location)
+        public override void OnMouseEnter(Float2 location)
         {
             _mousePosition = location;
 
@@ -163,7 +180,7 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             _mousePosition = location;
 
@@ -173,13 +190,13 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         public override void OnMouseLeave()
         {
-            _mousePosition = Vector2.Minimum;
+            _mousePosition = Float2.Minimum;
 
             base.OnMouseLeave();
         }
 
         /// <inheritdoc />
-        protected override void SetScaleInternal(ref Vector2 scale)
+        protected override void SetScaleInternal(ref Float2 scale)
         {
             base.SetScaleInternal(ref scale);
 

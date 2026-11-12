@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEditor.Viewport.Modes
 {
@@ -13,7 +13,7 @@ namespace FlaxEditor.Viewport.Modes
         {
             base.OnActivated();
 
-            Viewport.Gizmos.Active = Viewport.TransformGizmo;
+            Owner.Gizmos.Active = ((MainEditorGizmoViewport)Owner).TransformGizmo;
         }
     }
 }

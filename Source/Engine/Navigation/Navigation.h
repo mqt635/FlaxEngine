@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,16 +11,15 @@ class Scene;
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Navigation
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Navigation);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Navigation);
 public:
-
     /// <summary>
     /// Finds the distance from the specified start position to the nearest polygon wall.
     /// </summary>
     /// <param name="startPosition">The start position.</param>
     /// <param name="hitInfo">The result hit information. Valid only when query succeed.</param>
     /// <param name="maxDistance">The maximum distance to search for wall (search radius).</param>
-    /// <returns>True if ray hits an matching object, otherwise false.</returns>
+    /// <returns>True if ray hits a matching object, otherwise false.</returns>
     API_FUNCTION() static bool FindDistanceToWall(const Vector3& startPosition, API_PARAM(Out) NavMeshHit& hitInfo, float maxDistance = MAX_float);
 
     /// <summary>
@@ -41,12 +40,24 @@ public:
     API_FUNCTION() static bool TestPath(const Vector3& startPosition, const Vector3& endPosition);
 
     /// <summary>
-    /// Projects the point to nav mesh surface (finds the nearest polygon).
+    /// Finds the nearest point on a nav mesh surface.
     /// </summary>
     /// <param name="point">The source point.</param>
     /// <param name="result">The result position on the navmesh (valid only if method returns true).</param>
     /// <returns>True if found valid location on the navmesh, otherwise false.</returns>
-    API_FUNCTION() static bool ProjectPoint(const Vector3& point, API_PARAM(Out) Vector3& result);
+    API_FUNCTION() static bool FindClosestPoint(const Vector3& point, API_PARAM(Out) Vector3& result);
+
+    /// <summary>
+    /// Projects the point to nav mesh surface (finds the nearest polygon).
+    /// [Deprecated in v1.8]
+    /// </summary>
+    /// <param name="point">The source point.</param>
+    /// <param name="result">The result position on the navmesh (valid only if method returns true).</param>
+    /// <returns>True if found valid location on the navmesh, otherwise false.</returns>
+    API_FUNCTION() DEPRECATED("Use FindClosestPoint instead") static bool ProjectPoint(const Vector3& point, API_PARAM(Out) Vector3& result)
+    {
+        return FindClosestPoint(point, result);
+    }
 
     /// <summary>
     /// Finds random location on nav mesh.
@@ -70,13 +81,10 @@ public:
     /// <param name="startPosition">The start position.</param>
     /// <param name="endPosition">The end position.</param>
     /// <param name="hitInfo">The result hit information. Valid only when query succeed.</param>
-    /// <returns>True if ray hits an matching object, otherwise false.</returns>
+    /// <returns>True if ray hits a matching object, otherwise false.</returns>
     API_FUNCTION() static bool RayCast(const Vector3& startPosition, const Vector3& endPosition, API_PARAM(Out) NavMeshHit& hitInfo);
 
-public:
-
 #if COMPILE_WITH_NAV_MESH_BUILDER
-
     /// <summary>
     /// Returns true if navigation system is during navmesh building (any request is valid or async task active).
     /// </summary>
@@ -90,32 +98,49 @@ public:
     /// <summary>
     /// Builds the Nav Mesh for the given scene (discards all its tiles).
     /// </summary>
-    /// <remarks>
-    /// Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.
-    /// </remarks>
-    /// <param name="scene">The scene.</param>
+    /// <remarks>Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.</remarks>
+    /// <param name="scene">The scene. Pass null to build navmesh for all loaded scenes.</param>
     /// <param name="timeoutMs">The timeout to wait before building Nav Mesh (in milliseconds).</param>
-    API_FUNCTION() static void BuildNavMesh(Scene* scene, float timeoutMs = 50);
+    API_FUNCTION() static void BuildNavMesh(Scene* scene = nullptr, float timeoutMs = 50);
 
     /// <summary>
     /// Builds the Nav Mesh for the given scene (builds only the tiles overlapping the given bounding box).
     /// </summary>
-    /// <remarks>
-    /// Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.
-    /// </remarks>
+    /// <remarks>Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.</remarks>
+    /// <param name="dirtyBounds">The bounds in world-space to build overlapping tiles.</param>
+    /// <param name="scene">The scene. Pass null to build navmesh for all loaded scenes that intersect with a given bounds.</param>
+    /// <param name="timeoutMs">The timeout to wait before building Nav Mesh (in milliseconds).</param>
+    API_FUNCTION() static void BuildNavMesh(const BoundingBox& dirtyBounds, Scene* scene = nullptr, float timeoutMs = 50);
+
+    /// <summary>
+    /// Builds the Nav Mesh for all the loaded scenes (builds only the tiles overlapping the given bounding box).
+    /// </summary>
+    /// <remarks>Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.</remarks>
+    /// <param name="dirtyBounds">The bounds in world-space to build overlapping tiles.</param>
+    /// <param name="timeoutMs">The timeout to wait before building Nav Mesh (in milliseconds).</param>
+    API_FUNCTION() static void BuildNavMesh(const BoundingBox& dirtyBounds, float timeoutMs = 50)
+    {
+        BuildNavMesh(dirtyBounds, nullptr, timeoutMs);
+    }
+
+    /// <summary>
+    /// Builds the Nav Mesh for the given scene (builds only the tiles overlapping the given bounding box).
+    /// [Deprecated in v1.12]
+    /// </summary>
+    /// <remarks>Requests are enqueued till the next game scripts update. Actual navmesh building in done via Thread Pool tasks in a background to prevent game thread stalls.</remarks>
     /// <param name="scene">The scene.</param>
     /// <param name="dirtyBounds">The bounds in world-space to build overlapping tiles.</param>
     /// <param name="timeoutMs">The timeout to wait before building Nav Mesh (in milliseconds).</param>
-    API_FUNCTION() static void BuildNavMesh(Scene* scene, const BoundingBox& dirtyBounds, float timeoutMs = 50);
-
+    API_FUNCTION() DEPRECATED("Use BuildNavMesh with reordered arguments instead") static void BuildNavMesh(Scene* scene, const BoundingBox& dirtyBounds, float timeoutMs = 50)
+    {
+        BuildNavMesh(dirtyBounds, scene, timeoutMs);
+    }
 #endif
 
 #if COMPILE_WITH_DEBUG_DRAW
-
     /// <summary>
     /// Draws the navigation for all the scenes (uses DebugDraw interface).
     /// </summary>
     static void DrawNavMesh();
-
 #endif
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_ANDROID
 
@@ -8,6 +8,7 @@
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Types/Guid.h"
 #include "Engine/Core/Types/String.h"
+#include "Engine/Core/Types/Version.h"
 #include "Engine/Core/Collections/HashFunctions.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Math/Math.h"
@@ -24,6 +25,7 @@
 #include "Engine/Input/Gamepad.h"
 #include "Engine/Input/Keyboard.h"
 #include "Engine/Input/Mouse.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/syscall.h>
@@ -33,6 +35,7 @@
 #include <sys/ioctl.h>
 #include <linux/unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <sched.h>
@@ -50,6 +53,84 @@
 #include "Engine/Main/Android/android_native_app_glue.h"
 #include <android/window.h>
 #include <android/versioning.h>
+
+#if CRASH_LOG_ENABLE
+
+#include <unwind.h>
+#include <cxxabi.h>
+
+struct AndroidBacktraceState
+{
+    void** Current;
+    void** End;
+};
+
+_Unwind_Reason_Code AndroidUnwindCallback(struct _Unwind_Context* context, void* arg)
+{
+    AndroidBacktraceState* state = (AndroidBacktraceState*)arg;
+    uintptr_t pc = _Unwind_GetIP(context);
+    if (pc)
+    {
+        if (state->Current == state->End)
+            return _URC_END_OF_STACK;
+        else
+            *state->Current++ = reinterpret_cast<void*>(pc);
+    }
+    return _URC_NO_REASON;
+}
+
+#endif
+
+static void CrashHandler(int32 signal, siginfo_t* info, void* context)
+{
+    // Skip if engine already crashed
+    if (Engine::FatalError != FatalErrorType::None)
+        return;
+
+    // Get exception info
+    String errorMsg(TEXT("Unhandled exception: "));
+    switch (signal)
+    {
+#define CASE(x) case x: errorMsg += TEXT(#x); break
+        CASE(SIGABRT);
+        CASE(SIGILL);
+        CASE(SIGSEGV);
+        CASE(SIGQUIT);
+        CASE(SIGFPE);
+        CASE(SIGBUS);
+        CASE(SIGSYS);
+#undef CASE
+    default:
+        errorMsg += StringUtils::ToString(signal);
+    }
+
+    // Log exception and return to the crash location when using debugger
+    if (Platform::IsDebuggerPresent())
+    {
+        LOG_STR(Error, errorMsg);
+        const String stackTrace = Platform::GetStackTrace(3, 60, nullptr);
+        LOG_STR(Error, stackTrace);
+        return;
+    }
+
+    // Crash engine
+    Platform::Fatal(errorMsg.Get(), nullptr, FatalErrorType::Exception);
+}
+
+void AndroidRegisterCrashHandling()
+{
+    struct sigaction action;
+    Platform::MemoryClear(&action, sizeof(action));
+    action.sa_sigaction = CrashHandler;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGABRT, &action, nullptr);
+    sigaction(SIGILL, &action, nullptr);
+    sigaction(SIGSEGV, &action, nullptr);
+    sigaction(SIGQUIT, &action, nullptr);
+    sigaction(SIGFPE, &action, nullptr);
+    sigaction(SIGBUS, &action, nullptr);
+    sigaction(SIGSYS, &action, nullptr);
+}
 
 struct AndroidKeyEventType
 {
@@ -249,13 +330,13 @@ namespace
 {
     android_app* App = nullptr;
     ANativeWindow* AppWindow = nullptr;
-    CPUInfo AndroidCpu;
     int ClockSource;
     bool HasFocus = false;
     bool IsStarted = false;
     bool IsPaused = true;
     bool IsVibrating = false;
     int32 ScreenWidth = 0, ScreenHeight = 0;
+    uint64 ProgramSizeMemory = 0;
     Guid DeviceId;
     String AppPackageName, DeviceManufacturer, DeviceModel, DeviceBuildNumber;
     String SystemVersion, SystemLanguage, CacheDir, ExecutablePath;
@@ -308,11 +389,11 @@ namespace
         return orientation;
     }
 
-    Vector2 GetWindowSize()
+    Float2 GetWindowSize()
     {
         const float width = (float)ANativeWindow_getWidth(AppWindow);
         const float height = (float)ANativeWindow_getHeight(AppWindow);
-        return Vector2(width, height);
+        return Float2(width, height);
     }
 
     void UpdateOrientation()
@@ -653,11 +734,6 @@ String AndroidPlatform::GetDeviceBuildNumber()
     return DeviceBuildNumber;
 }
 
-String AndroidPlatform::GetSystemVersion()
-{
-    return SystemVersion;
-}
-
 void AndroidPlatform::PreInit(android_app* app)
 {
     App = app;
@@ -665,6 +741,7 @@ void AndroidPlatform::PreInit(android_app* app)
     app->onInputEvent = OnAppInput;
     ANativeActivity_setWindowFlags(app->activity, AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_TURN_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN | AWINDOW_FLAG_DISMISS_KEYGUARD, 0);
     ANativeActivity_setWindowFormat(app->activity, WINDOW_FORMAT_RGBA_8888);
+    pthread_setname_np(pthread_self(), "Main");
 }
 
 bool AndroidPlatform::Is64BitPlatform()
@@ -674,16 +751,6 @@ bool AndroidPlatform::Is64BitPlatform()
 #else
 #error "Implement AndroidPlatform::Is64BitPlatform for 32-bit builds."
 #endif
-}
-
-CPUInfo AndroidPlatform::GetCPUInfo()
-{
-    return AndroidCpu;
-}
-
-int32 AndroidPlatform::GetCacheLineSize()
-{
-    return AndroidCpu.CacheLineSize;
 }
 
 MemoryStats AndroidPlatform::GetMemoryStats()
@@ -696,6 +763,7 @@ MemoryStats AndroidPlatform::GetMemoryStats()
     result.UsedPhysicalMemory = (totalPages - availablePages) * pageSize;
     result.TotalVirtualMemory = result.TotalPhysicalMemory;
     result.UsedVirtualMemory = result.UsedPhysicalMemory;
+    result.ProgramSizeMemory = ProgramSizeMemory;
     return result;
 }
 
@@ -707,11 +775,6 @@ ProcessMemoryStats AndroidPlatform::GetProcessMemoryStats()
     result.UsedPhysicalMemory = usage.ru_maxrss;
     result.UsedVirtualMemory = result.UsedPhysicalMemory;
     return result;
-}
-
-uint64 AndroidPlatform::GetCurrentThreadID()
-{
-    return static_cast<uint64>(pthread_self());
 }
 
 void AndroidPlatform::SetThreadPriority(ThreadPriority priority)
@@ -729,6 +792,11 @@ void AndroidPlatform::SetThreadAffinityMask(uint64 affinityMask)
 void AndroidPlatform::Sleep(int32 milliseconds)
 {
     usleep(milliseconds * 1000);
+}
+
+void AndroidPlatform::Yield()
+{
+    sched_yield();
 }
 
 double AndroidPlatform::GetTimeSeconds()
@@ -803,28 +871,30 @@ bool AndroidPlatform::Init()
         ClockSource = CLOCK_MONOTONIC;
     }
 
+	// Estimate program size by checking physical memory usage on start
+	ProgramSizeMemory = Platform::GetProcessMemoryStats().UsedPhysicalMemory;
+
     // Set info about the CPU
+    extern CPUInfo CpuInfo;
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     if (sched_getaffinity(0, sizeof(cpus), &cpus) == 0)
     {
-        AndroidCpu.ProcessorCoreCount = AndroidCpu.LogicalProcessorCount = CPU_COUNT(&cpus);
+        CpuInfo.ProcessorCoreCount = CpuInfo.LogicalProcessorCount = CPU_COUNT(&cpus);
     }
     else
     {
-        AndroidCpu.ProcessorCoreCount = AndroidCpu.LogicalProcessorCount = 1;
+        CpuInfo.ProcessorCoreCount = CpuInfo.LogicalProcessorCount = 1;
     }
-    AndroidCpu.ProcessorPackageCount = 1;
-    AndroidCpu.L1CacheSize = 0;
-    AndroidCpu.L2CacheSize = 0;
-    AndroidCpu.L3CacheSize = 0;
-    AndroidCpu.PageSize = sysconf(_SC_PAGESIZE);
-    AndroidCpu.ClockSpeed = GetClockFrequency();
-    AndroidCpu.CacheLineSize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
-    if (!AndroidCpu.CacheLineSize)
-    {
-        AndroidCpu.CacheLineSize = PLATFORM_CACHE_LINE_SIZE;
-    }
+    CpuInfo.ProcessorPackageCount = 1;
+    CpuInfo.L1CacheSize = 0;
+    CpuInfo.L2CacheSize = 0;
+    CpuInfo.L3CacheSize = 0;
+    CpuInfo.PageSize = sysconf(_SC_PAGESIZE);
+    CpuInfo.ClockSpeed = GetClockFrequency();
+    CpuInfo.CacheLineSize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (!CpuInfo.CacheLineSize)
+        CpuInfo.CacheLineSize = PLATFORM_CACHE_LINE_SIZE;
 
     UnixGetMacAddress(MacAddress);
 
@@ -847,8 +917,10 @@ bool AndroidPlatform::Init()
         DeviceId.C = (uint32)Platform::GetMemoryStats().TotalPhysicalMemory;
 
         // D - cpuid
-        DeviceId.D = (uint32)AndroidCpu.ClockSpeed * AndroidCpu.LogicalProcessorCount * AndroidCpu.ProcessorCoreCount * AndroidCpu.CacheLineSize;
+        DeviceId.D = (uint32)CpuInfo.ClockSpeed * CpuInfo.LogicalProcessorCount * CpuInfo.ProcessorCoreCount * CpuInfo.CacheLineSize;
     }
+
+    AndroidRegisterCrashHandling();
 
     // Setup native platform input devices
     Input::Keyboard = KeyboardImpl = New<AndroidKeyboard>();
@@ -866,8 +938,8 @@ void AndroidPlatform::LogInfo()
 {
     UnixPlatform::LogInfo();
 
-    LOG(Info, "App Package Name: {0}", AppPackageName);
-    LOG(Info, "System Version: {0}", SystemVersion);
+    LOG(Info, "App Package: {0}", AppPackageName);
+    LOG(Info, "Android {0}", SystemVersion);
     LOG(Info, "Device: {0} {1}, {2}", DeviceManufacturer, DeviceModel, DeviceBuildNumber);
 }
 
@@ -884,7 +956,7 @@ void AndroidPlatform::Tick()
     // Pool app events
     int events;
     android_poll_source* source;
-    while (ALooper_pollAll(0, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0)
+    while (ALooper_pollOnce(0, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0)
     {
         // Process event
         if (source != nullptr)
@@ -913,14 +985,31 @@ void AndroidPlatform::Exit()
 
 #if !BUILD_RELEASE
 
-void AndroidPlatform::Log(const StringView& msg)
+void AndroidPlatform::Log(const StringView& msg, int32 logType)
 {
     const StringAsANSI<512> msgAnsi(*msg, msg.Length());
     const char* str = msgAnsi.Get();
-    __android_log_write(ANDROID_LOG_INFO, "Flax", str);
+    int prio = ANDROID_LOG_INFO;
+    if (logType == (int32)LogType::Warning)
+        prio = ANDROID_LOG_WARN;
+    if (logType == (int32)LogType::Error)
+        prio = ANDROID_LOG_ERROR;
+    __android_log_write(prio, "Flax", str);
 }
 
 #endif
+
+String AndroidPlatform::GetSystemName()
+{
+    return String::Format(TEXT("Android {}"), SystemVersion);
+}
+
+Version AndroidPlatform::GetSystemVersion()
+{
+    Version version(0, 0);
+    Version::Parse(SystemVersion, &version);
+    return version;
+}
 
 int32 AndroidPlatform::GetDpi()
 {
@@ -956,12 +1045,6 @@ String AndroidPlatform::GetComputerName()
     return DeviceModel;
 }
 
-String AndroidPlatform::GetUserName()
-{
-    // TODO: add support for username on Android
-    return String::Empty;
-}
-
 bool AndroidPlatform::GetHasFocus()
 {
     return HasFocus;
@@ -993,28 +1076,18 @@ void AndroidPlatform::OpenUrl(const StringView& url)
     App->activity->vm->DetachCurrentThread();
 }
 
-Vector2 AndroidPlatform::GetMousePosition()
+Float2 AndroidPlatform::GetMousePosition()
 {
-    return Vector2::Zero;
+    return Float2::Zero;
 }
 
-void AndroidPlatform::SetMousePosition(const Vector2& pos)
+void AndroidPlatform::SetMousePosition(const Float2& pos)
 {
 }
 
-Vector2 AndroidPlatform::GetDesktopSize()
+Float2 AndroidPlatform::GetDesktopSize()
 {
-    return Vector2((float)ScreenWidth, (float)ScreenHeight);
-}
-
-Rectangle AndroidPlatform::GetMonitorBounds(const Vector2& screenPos)
-{
-    return Rectangle(Vector2::Zero, GetDesktopSize());
-}
-
-Rectangle AndroidPlatform::GetVirtualDesktopBounds()
-{
-    return Rectangle(Vector2::Zero, GetDesktopSize());
+    return Float2((float)ScreenWidth, (float)ScreenHeight);
 }
 
 String AndroidPlatform::GetMainDirectory()
@@ -1067,6 +1140,8 @@ bool AndroidPlatform::SetEnvironmentVariable(const String& name, const String& v
 
 void* AndroidPlatform::LoadLibrary(const Char* filename)
 {
+    PROFILE_CPU();
+    ZoneText(filename, StringUtils::Length(filename));
     const StringAsANSI<> filenameANSI(filename);
     void* result = dlopen(filenameANSI.Get(), RTLD_LAZY);
     if (!result)
@@ -1084,6 +1159,47 @@ void AndroidPlatform::FreeLibrary(void* handle)
 void* AndroidPlatform::GetProcAddress(void* handle, const char* symbol)
 {
     return dlsym(handle, symbol);
+}
+
+Array<AndroidPlatform::StackFrame> AndroidPlatform::GetStackFrames(int32 skipCount, int32 maxDepth, void* context)
+{
+    Array<StackFrame> result;
+#if CRASH_LOG_ENABLE
+    // Reference: https://stackoverflow.com/questions/8115192/android-ndk-getting-the-backtrace
+    void* callstack[120];
+    skipCount = Math::Min<int32>(skipCount, ARRAY_COUNT(callstack));
+    int32 maxCount = Math::Min<int32>(ARRAY_COUNT(callstack), skipCount + maxDepth);
+    AndroidBacktraceState state;
+    state.Current = callstack;
+    state.End = callstack + maxCount;
+    _Unwind_Backtrace(AndroidUnwindCallback, &state);
+    int32 count = (int32)(state.Current - callstack);
+    int32 useCount = count - skipCount;
+    if (useCount > 0)
+    {
+        result.Resize(useCount);
+        for (int32 i = 0; i < useCount; i++)
+        {
+            StackFrame& frame = result[i];
+            frame.ProgramCounter = callstack[skipCount + i];
+            frame.ModuleName[0] = 0;
+            frame.FileName[0] = 0;
+            frame.LineNumber = 0;
+            Dl_info info;
+            const char* symbol = "";
+            if (dladdr(frame.ProgramCounter, &info) && info.dli_sname) 
+                symbol = info.dli_sname;
+            int status = 0; 
+            char* demangled = __cxxabiv1::__cxa_demangle(symbol, 0, 0, &status); 
+            int32 nameLen = Math::Min<int32>(StringUtils::Length(demangled), ARRAY_COUNT(frame.FunctionName) - 1);
+            Platform::MemoryCopy(frame.FunctionName, demangled, nameLen);
+            frame.FunctionName[nameLen] = 0;
+            if (demangled)
+                free(demangled);
+        }
+    }
+#endif
+    return result;
 }
 
 #endif

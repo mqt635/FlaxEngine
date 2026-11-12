@@ -1,15 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Builder.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Core/Types/TimeSpan.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Threading/ThreadSpawner.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUBuffer.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUPipelineState.h"
 #include "Engine/Graphics/RenderTargetPool.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
@@ -145,7 +148,6 @@ void ShadowsOfMordor::Builder::Dispose()
 #include "Engine/Serialization/FileWriteStream.h"
 #include "Engine/Engine/CommandLine.h"
 #include "Engine/Scripting/Scripting.h"
-#include "FlaxEngine.Gen.h"
 
 namespace ShadowsOfMordor
 {
@@ -201,7 +203,7 @@ bool ShadowsOfMordor::Builder::RestoreState()
     for (int32 i = 0; i < scenesCount; i++)
     {
         Guid id;
-        stream->Read(&id);
+        stream->Read(id);
         Level::LoadScene(id);
     }
 
@@ -235,7 +237,7 @@ void ShadowsOfMordor::Builder::saveState()
     // Scenes ids
     stream->WriteInt32(_scenes.Count());
     for (int32 i = 0; i < _scenes.Count(); i++)
-        stream->Write(&_scenes[i]->Scene->GetID());
+        stream->Write(_scenes[i]->Scene->GetID());
 
     // State
     stream->WriteInt32(_giBounceRunningIndex);
@@ -273,6 +275,7 @@ void ShadowsOfMordor::Builder::saveState()
             context->Flush();
             Platform::Sleep(10);
             void* mapped = lightmapDataStaging->Map(GPUResourceMapMode::Read);
+            ASSERT(mapped);
             stream->WriteInt32(lightmapDataSize);
             stream->WriteBytes(mapped, lightmapDataSize);
             lightmapDataStaging->Unmap();
@@ -325,7 +328,7 @@ bool ShadowsOfMordor::Builder::loadState()
     for (int32 i = 0; i < scenesCount; i++)
     {
         Guid id;
-        stream->Read(&id);
+        stream->Read(id);
         if (Level::Scenes[i]->GetID() != id || _scenes[i]->SceneIndex != i)
         {
             LOG(Error, "Invalid scenes.");
@@ -445,6 +448,7 @@ bool ShadowsOfMordor::Builder::initResources()
             ViewFlags::DirectionalLights |
             ViewFlags::PointLights |
             ViewFlags::SpotLights |
+            ViewFlags::Sky |
             ViewFlags::Shadows |
             ViewFlags::Decals |
             ViewFlags::SkyLights |
@@ -452,12 +456,12 @@ bool ShadowsOfMordor::Builder::initResources()
     view.IsOfflinePass = true;
     view.Near = HEMISPHERES_NEAR_PLANE;
     view.Far = HEMISPHERES_FAR_PLANE;
-    view.StaticFlagsMask = StaticFlags::Lightmap;
+    view.StaticFlagsMask = view.StaticFlagsCompare = StaticFlags::Lightmap;
     view.MaxShadowsQuality = Quality::Low;
     _task->Resize(HEMISPHERES_RESOLUTION, HEMISPHERES_RESOLUTION);
 
     // Load shader
-    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/BakeLightmap"));
+    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Editor/BakeLightmap"));
     if (_shader == nullptr)
         return true;
     if (_shader->WaitForLoaded())
@@ -466,19 +470,19 @@ bool ShadowsOfMordor::Builder::initResources()
     _psRenderCacheModel = GPUDevice::Instance->CreatePipelineState();
     GPUPipelineState::Description desc = GPUPipelineState::Description::DefaultNoDepth;
     desc.CullMode = CullMode::TwoSided;
-    desc.VS = _shader->GetShader()->GetVS("VS_RenderCacheModel");
-    desc.PS = _shader->GetShader()->GetPS("PS_RenderCache");
+    desc.VS = _shader->GPU->GetVS("VS_RenderCacheModel");
+    desc.PS = _shader->GPU->GetPS("PS_RenderCache");
     if (_psRenderCacheModel->Init(desc))
         return true;
 
     _psRenderCacheTerrain = GPUDevice::Instance->CreatePipelineState();
-    desc.VS = _shader->GetShader()->GetVS("VS_RenderCacheTerrain");
+    desc.VS = _shader->GPU->GetVS("VS_RenderCacheTerrain");
     if (_psRenderCacheTerrain->Init(desc))
         return true;
 
     _psBlurCache = GPUDevice::Instance->CreatePipelineState();
     desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
-    desc.PS = _shader->GetShader()->GetPS("PS_BlurCache");
+    desc.PS = _shader->GPU->GetPS("PS_BlurCache");
     if (_psBlurCache->Init(desc))
         return true;
 

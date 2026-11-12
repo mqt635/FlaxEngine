@@ -1,37 +1,30 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Collider.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Level/Scene/Scene.h"
 #if USE_EDITOR
 #include "Engine/Level/Scene/SceneRendering.h"
 #endif
-#include "Engine/Serialization/Serialization.h"
-#include "Engine/Physics/Utilities.h"
 #include "Engine/Physics/PhysicsSettings.h"
 #include "Engine/Physics/Physics.h"
-#include "Engine/Physics/PhysicalMaterial.h"
+#include "Engine/Physics/PhysicsBackend.h"
+#include "Engine/Physics/PhysicsScene.h"
 #include "Engine/Physics/Actors/RigidBody.h"
-#include <ThirdParty/PhysX/geometry/PxGeometryQuery.h>
-#include <ThirdParty/PhysX/PxShape.h>
-#include <ThirdParty/PhysX/PxPhysics.h>
-#include <ThirdParty/PhysX/PxFiltering.h>
-#include <ThirdParty/PhysX/PxRigidDynamic.h>
-#include <ThirdParty/PhysX/PxRigidStatic.h>
-#include <ThirdParty/PhysX/PxScene.h>
 
 Collider::Collider(const SpawnParams& params)
     : PhysicsColliderActor(params)
-    , _center(Vector3::Zero)
+    , _center(Float3::Zero)
     , _isTrigger(false)
     , _shape(nullptr)
     , _staticActor(nullptr)
     , _cachedScale(1.0f)
-    , _contactOffset(10.0f)
+    , _contactOffset(2.0f)
+    , Material(this)
 {
-    Material.Changed.Bind<Collider, &Collider::OnMaterialChanged>(this);
 }
 
-PxShape* Collider::GetPxShape() const
+void* Collider::GetPhysicsShape() const
 {
     return _shape;
 }
@@ -40,122 +33,77 @@ void Collider::SetIsTrigger(bool value)
 {
     if (value == _isTrigger || !CanBeTrigger())
         return;
-
     _isTrigger = value;
-
     if (_shape)
+        PhysicsBackend::SetShapeState(_shape, IsActiveInHierarchy(), _isTrigger && CanBeTrigger());
+    if (EnumHasAnyFlags(_staticFlags, StaticFlags::Navigation) && _isEnabled)
     {
-        const bool isTrigger = _isTrigger && CanBeTrigger();
-        const PxShapeFlags shapeFlags = GetShapeFlags(isTrigger, IsActiveInHierarchy());
-        _shape->setFlags(shapeFlags);
+        if (_isTrigger)
+            GetScene()->Navigation.Actors.Remove(this);
+        else
+            GetScene()->Navigation.Actors.Add(this);
     }
 }
 
 void Collider::SetCenter(const Vector3& value)
 {
-    if (Vector3::NearEqual(value, _center))
+    if (value == _center)
         return;
-
     _center = value;
-
     if (_staticActor)
-    {
-        _shape->setLocalPose(PxTransform(C2P(_center)));
-    }
+        PhysicsBackend::SetShapeLocalPose(_shape, _center * GetScale(), Quaternion::Identity);
     else if (const RigidBody* rigidBody = GetAttachedRigidBody())
-    {
-        _shape->setLocalPose(PxTransform(C2P((_localTransform.Translation + _localTransform.Orientation * _center) * rigidBody->GetScale()), C2P(_localTransform.Orientation)));
-    }
-
+        PhysicsBackend::SetShapeLocalPose(_shape, (_localTransform.Translation + _localTransform.Orientation * _center) * rigidBody->GetScale(), _localTransform.Orientation);
     UpdateBounds();
 }
 
 void Collider::SetContactOffset(float value)
 {
     value = Math::Clamp(value, 0.0f, 100.0f);
-    if (Math::NearEqual(value, _contactOffset))
+    if (value == _contactOffset)
         return;
-
     _contactOffset = value;
-
     if (_shape)
-    {
-        _shape->setContactOffset(Math::Max(_shape->getRestOffset() + ZeroTolerance, _contactOffset));
-    }
+        PhysicsBackend::SetShapeContactOffset(_shape, _contactOffset);
 }
 
 bool Collider::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, float maxDistance) const
 {
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     resultHitDistance = MAX_float;
     if (_shape == nullptr)
         return false;
-
-    // Prepare data
-    const PxTransform trans(C2P(_transform.Translation), C2P(_transform.Orientation));
-    const PxHitFlags hitFlags = PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eFACE_INDEX | PxHitFlag::eUV;
-
-    // Perform raycast test
-    PxRaycastHit hit;
-    if (PxGeometryQuery::raycast(C2P(origin), C2P(direction), _shape->getGeometry().any(), trans, maxDistance, hitFlags, 1, &hit) != 0)
-    {
-        resultHitDistance = hit.distance;
-        return true;
-    }
-
-    return false;
+    return PhysicsBackend::RayCastShape(_shape, _transform.Translation, _transform.Orientation, origin, direction, resultHitDistance, maxDistance);
 }
 
 bool Collider::RayCast(const Vector3& origin, const Vector3& direction, RayCastHit& hitInfo, float maxDistance) const
 {
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     if (_shape == nullptr)
         return false;
-
-    // Prepare data
-    const PxTransform trans(C2P(_transform.Translation), C2P(_transform.Orientation));
-    const PxHitFlags hitFlags = PxHitFlag::ePOSITION | PxHitFlag::eNORMAL | PxHitFlag::eUV;
-    PxRaycastHit hit;
-
-    // Perform raycast test
-    if (PxGeometryQuery::raycast(C2P(origin), C2P(direction), _shape->getGeometry().any(), trans, maxDistance, hitFlags, 1, &hit) == 0)
-        return false;
-
-    // Gather results
-    hitInfo.Gather(hit);
-    return true;
+    return PhysicsBackend::RayCastShape(_shape, _transform.Translation, _transform.Orientation, origin, direction, hitInfo, maxDistance);
 }
 
-void Collider::ClosestPoint(const Vector3& position, Vector3& result) const
+void Collider::ClosestPoint(const Vector3& point, Vector3& result) const
 {
     if (_shape == nullptr)
     {
         result = Vector3::Maximum;
         return;
     }
-
-    // Prepare data
-    const PxTransform trans(C2P(_transform.Translation), C2P(_transform.Orientation));
-    PxVec3 closestPoint;
-
-    // Compute distance between a point and a geometry object
-    const float distanceSqr = PxGeometryQuery::pointDistance(C2P(position), _shape->getGeometry().any(), trans, &closestPoint);
+    Vector3 closestPoint;
+    const float distanceSqr = PhysicsBackend::ComputeShapeSqrDistanceToPoint(_shape, _transform.Translation, _transform.Orientation, point, &closestPoint);
     if (distanceSqr > 0.0f)
-    {
-        // Use calculated point
-        result = P2C(closestPoint);
-    }
+        result = closestPoint;
     else
-    {
-        // Fallback to the input location
-        result = position;
-    }
+        result = point;
 }
 
 bool Collider::ContainsPoint(const Vector3& point) const
 {
     if (_shape)
     {
-        const PxTransform trans(C2P(_transform.Translation), C2P(_transform.Orientation));
-        const float distanceSqr = PxGeometryQuery::pointDistance(C2P(point), _shape->getGeometry().any(), trans);
+        const float distanceSqr = PhysicsBackend::ComputeShapeSqrDistanceToPoint(_shape, _transform.Translation, _transform.Orientation, point);
         return distanceSqr <= 0.0f;
     }
     return false;
@@ -165,17 +113,12 @@ bool Collider::ComputePenetration(const Collider* colliderA, const Collider* col
 {
     direction = Vector3::Zero;
     distance = 0.0f;
-
     CHECK_RETURN(colliderA && colliderB, false);
-    const PxShape* shapeA = colliderA->GetPxShape();
-    const PxShape* shapeB = colliderB->GetPxShape();
+    void* shapeA = colliderA->GetPhysicsShape();
+    void* shapeB = colliderB->GetPhysicsShape();
     if (!shapeA || !shapeB)
         return false;
-
-    const PxTransform poseA(C2P(colliderA->GetPosition()), C2P(colliderA->GetOrientation()));
-    const PxTransform poseB(C2P(colliderB->GetPosition()), C2P(colliderB->GetOrientation()));
-
-    return PxGeometryQuery::computePenetration(C2P(direction), distance, shapeA->getGeometry().any(), poseA, shapeB->getGeometry().any(), poseB);
+    return PhysicsBackend::ComputeShapesPenetration(shapeA, shapeB, colliderA->GetPosition(), colliderA->GetOrientation(), colliderB->GetPosition(), colliderB->GetOrientation(), direction, distance);
 }
 
 bool Collider::CanAttach(RigidBody* rigidBody) const
@@ -192,32 +135,32 @@ RigidBody* Collider::GetAttachedRigidBody() const
 {
     if (_shape && _staticActor == nullptr)
     {
-        auto actor = _shape->getActor();
-        if (actor && actor->is<PxRigidDynamic>())
-            return static_cast<RigidBody*>(actor->userData);
+        return dynamic_cast<RigidBody*>(GetParent());
     }
     return nullptr;
 }
 
-#if USE_EDITOR
-
 void Collider::OnEnable()
 {
-    GetSceneRendering()->AddPhysicsDebug<Collider, &Collider::DrawPhysicsDebug>(this);
+    if (EnumHasAnyFlags(_staticFlags, StaticFlags::Navigation) && !_isTrigger)
+        GetScene()->Navigation.Actors.Add(this);
+#if USE_EDITOR
+    GetSceneRendering()->AddPhysicsDebug(this);
+#endif
 
-    // Base
-    Actor::OnEnable();
+    PhysicsColliderActor::OnEnable();
 }
 
 void Collider::OnDisable()
 {
-    // Base
-    Actor::OnDisable();
+    PhysicsColliderActor::OnDisable();
 
-    GetSceneRendering()->RemovePhysicsDebug<Collider, &Collider::DrawPhysicsDebug>(this);
-}
-
+    if (EnumHasAnyFlags(_staticFlags, StaticFlags::Navigation) && !_isTrigger)
+        GetScene()->Navigation.Actors.Remove(this);
+#if USE_EDITOR
+    GetSceneRendering()->RemovePhysicsDebug(this);
 #endif
+}
 
 void Collider::Attach(RigidBody* rigidBody)
 {
@@ -232,50 +175,48 @@ void Collider::Attach(RigidBody* rigidBody)
         CreateShape();
 
     // Attach
-    rigidBody->GetPhysXRigidActor()->attachShape(*_shape);
+    PhysicsBackend::AttachShape(_shape, rigidBody->GetPhysicsActor());
     _cachedLocalPosePos = (_localTransform.Translation + _localTransform.Orientation * _center) * rigidBody->GetScale();
     _cachedLocalPoseRot = _localTransform.Orientation;
-    _shape->setLocalPose(PxTransform(C2P(_cachedLocalPosePos), C2P(_cachedLocalPoseRot)));
+    PhysicsBackend::SetShapeLocalPose(_shape, _cachedLocalPosePos, _cachedLocalPoseRot);
     if (rigidBody->IsDuringPlay())
+    {
         rigidBody->UpdateBounds();
+        rigidBody->UpdateMass();
+    }
 }
 
 void Collider::UpdateLayerBits()
 {
-    ASSERT(_shape);
-
-    PxFilterData filterData;
-
     // Own layer ID
-    filterData.word0 = GetLayerMask();
+    const uint32 mask0 = GetLayerMask();
 
     // Own layer mask
-    filterData.word1 = Physics::LayerMasks[GetLayer()];
+    const uint32 mask1 = Physics::LayerMasks[GetLayer()];
 
-    _shape->setSimulationFilterData(filterData);
-    _shape->setQueryFilterData(filterData);
+    PhysicsBackend::SetShapeFilterMask(_shape, mask0, mask1);
 }
 
 void Collider::CreateShape()
 {
+    ASSERT(_shape == nullptr);
+
     // Setup shape geometry
-    _cachedScale = GetScale();
-    PxGeometryHolder geometry;
-    GetGeometry(geometry);
+    _cachedScale = GetScale().GetAbsolute().MaxValue();
+    CollisionShape shape;
+    GetGeometry(shape);
 
     // Create shape
     const bool isTrigger = _isTrigger && CanBeTrigger();
-    const PxShapeFlags shapeFlags = GetShapeFlags(isTrigger, IsActiveInHierarchy());
-    PxMaterial* material = Physics::GetDefaultMaterial();
-    if (Material && !Material->WaitForLoaded() && Material->Instance)
+    _shape = PhysicsBackend::CreateShape(this, shape, Material, IsActiveInHierarchy(), isTrigger);
+    if (!_shape)
     {
-        material = ((PhysicalMaterial*)Material->Instance)->GetPhysXMaterial();
+        LOG(Error, "Failed to create physics shape for actor '{}'", GetNamePath());
+        if (shape.Type == CollisionShape::Types::ConvexMesh && Float3(shape.ConvexMesh.Scale).MinValue() <= 0)
+            LOG(Warning, "Convex Mesh colliders cannot have negative scale");
+        return;
     }
-    ASSERT(_shape == nullptr);
-    _shape = CPhysX->createShape(geometry.any(), *material, true, shapeFlags);
-    ASSERT(_shape);
-    _shape->userData = this;
-    _shape->setContactOffset(Math::Max(_shape->getRestOffset() + ZeroTolerance, _contactOffset));
+    PhysicsBackend::SetShapeContactOffset(_shape, _contactOffset);
     UpdateLayerBits();
 }
 
@@ -285,21 +226,21 @@ void Collider::UpdateGeometry()
         return;
 
     // Setup shape geometry
-    _cachedScale = GetScale();
-    PxGeometryHolder geometry;
-    GetGeometry(geometry);
+    _cachedScale = GetScale().GetAbsolute().MaxValue();
+    CollisionShape shape;
+    GetGeometry(shape);
 
     // Recreate shape if geometry has different type
-    if (_shape->getGeometryType() != geometry.getType())
+    if (PhysicsBackend::GetShapeType(_shape) != shape.Type)
     {
         // Detach from the actor
-        auto actor = _shape->getActor();
+        void* actor = PhysicsBackend::GetShapeActor(_shape);
         if (actor)
-            actor->detachShape(*_shape);
+            PhysicsBackend::DetachShape(_shape, actor);
 
         // Release shape
-        Physics::RemoveCollider(this);
-        _shape->release();
+        PhysicsBackend::RemoveCollider(this);
+        PhysicsBackend::DestroyShape(_shape);
         _shape = nullptr;
 
         // Recreate shape
@@ -309,9 +250,13 @@ void Collider::UpdateGeometry()
         if (actor)
         {
             const auto rigidBody = dynamic_cast<RigidBody*>(GetParent());
-            if (_staticActor != nullptr || (rigidBody && CanAttach(rigidBody)))
+            if (rigidBody && CanAttach(rigidBody))
             {
-                actor->attachShape(*_shape);
+                Attach(rigidBody);
+            }
+            else if (_staticActor != nullptr)
+            {
+                PhysicsBackend::AttachShape(_shape, actor);
             }
             else
             {
@@ -324,80 +269,29 @@ void Collider::UpdateGeometry()
     }
 
     // Update shape
-    _shape->setGeometry(geometry.any());
+    PhysicsBackend::SetShapeGeometry(_shape, shape);
 }
 
 void Collider::CreateStaticActor()
 {
     ASSERT(_staticActor == nullptr);
-
-    const PxTransform trans(C2P(_transform.Translation), C2P(_transform.Orientation));
-    _staticActor = CPhysX->createRigidStatic(trans);
-    ASSERT(_staticActor);
-    _staticActor->userData = this;
-#if WITH_PVD
-    _staticActor->setActorFlag(PxActorFlag::eVISUALIZATION, true);
-#endif
+    void* scene = GetPhysicsScene()->GetPhysicsScene();
+    _staticActor = PhysicsBackend::CreateRigidStaticActor(nullptr, _transform.Translation, _transform.Orientation, scene);
 
     // Reset local pos of the shape and link it to the actor
-    _shape->setLocalPose(PxTransform(C2P(_center)));
-    _staticActor->attachShape(*_shape);
+    PhysicsBackend::SetShapeLocalPose(_shape, _center * GetScale(), Quaternion::Identity);
+    PhysicsBackend::AttachShape(_shape, _staticActor);
 
-    Physics::AddActor(_staticActor);
+    PhysicsBackend::AddSceneActor(scene, _staticActor);
 }
 
 void Collider::RemoveStaticActor()
 {
     ASSERT(_staticActor != nullptr);
-
-    Physics::RemoveActor(_staticActor);
+    void* scene = GetPhysicsScene()->GetPhysicsScene();
+    PhysicsBackend::RemoveSceneActor(scene, _staticActor);
+    PhysicsBackend::DestroyActor(_staticActor);
     _staticActor = nullptr;
-}
-
-#if USE_EDITOR
-
-void Collider::DrawPhysicsDebug(RenderView& view)
-{
-}
-
-#endif
-
-void Collider::OnMaterialChanged()
-{
-    // Update the shape material
-    if (_shape)
-    {
-        PxMaterial* material = Physics::GetDefaultMaterial();
-        if (Material && !Material->WaitForLoaded() && Material->Instance)
-        {
-            material = ((PhysicalMaterial*)Material->Instance)->GetPhysXMaterial();
-        }
-        _shape->setMaterials(&material, 1);
-    }
-}
-
-void Collider::Serialize(SerializeStream& stream, const void* otherObj)
-{
-    // Base
-    PhysicsColliderActor::Serialize(stream, otherObj);
-
-    SERIALIZE_GET_OTHER_OBJ(Collider);
-
-    SERIALIZE_MEMBER(IsTrigger, _isTrigger);
-    SERIALIZE_MEMBER(Center, _center);
-    SERIALIZE_MEMBER(ContactOffset, _contactOffset);
-    SERIALIZE(Material);
-}
-
-void Collider::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
-{
-    // Base
-    PhysicsColliderActor::Deserialize(stream, modifier);
-
-    DESERIALIZE_MEMBER(IsTrigger, _isTrigger);
-    DESERIALIZE_MEMBER(Center, _center);
-    DESERIALIZE_MEMBER(ContactOffset, _contactOffset);
-    DESERIALIZE(Material);
 }
 
 void Collider::BeginPlay(SceneBeginData* data)
@@ -406,18 +300,20 @@ void Collider::BeginPlay(SceneBeginData* data)
     if (_shape == nullptr)
     {
         CreateShape();
-
-        // Check if parent is a rigidbody
-        const auto rigidBody = dynamic_cast<RigidBody*>(GetParent());
-        if (rigidBody && CanAttach(rigidBody))
+        if (_shape)
         {
-            // Attach to the rigidbody
-            Attach(rigidBody);
-        }
-        else
-        {
-            // Be a static collider
-            CreateStaticActor();
+            // Check if parent is a rigidbody
+            const auto rigidBody = dynamic_cast<RigidBody*>(GetParent());
+            if (rigidBody && CanAttach(rigidBody))
+            {
+                // Attach to the rigidbody
+                Attach(rigidBody);
+            }
+            else
+            {
+                // Be a static collider
+                CreateStaticActor();
+            }
         }
     }
 
@@ -433,19 +329,22 @@ void Collider::EndPlay()
     if (_shape)
     {
         // Detach from the actor
-        auto actor = _shape->getActor();
+        void* actor = PhysicsBackend::GetShapeActor(_shape);
+        RigidBody* rigidBody = GetAttachedRigidBody();
         if (actor)
-            actor->detachShape(*_shape);
-        if (actor && actor->is<PxRigidDynamic>())
-            static_cast<RigidBody*>(actor->userData)->OnColliderChanged(this);
+            PhysicsBackend::DetachShape(_shape, actor);
+        if (rigidBody)
+        {
+            rigidBody->OnColliderChanged(this);
+        }
         else if (_staticActor)
         {
             RemoveStaticActor();
         }
 
         // Release shape
-        Physics::RemoveCollider(this);
-        _shape->release();
+        PhysicsBackend::RemoveCollider(this);
+        PhysicsBackend::DestroyShape(_shape);
         _shape = nullptr;
     }
 }
@@ -457,9 +356,7 @@ void Collider::OnActiveInTreeChanged()
 
     if (_shape)
     {
-        const bool isTrigger = _isTrigger && CanBeTrigger();
-        const PxShapeFlags shapeFlags = GetShapeFlags(isTrigger, IsActiveInHierarchy());
-        _shape->setFlags(shapeFlags);
+        PhysicsBackend::SetShapeState(_shape, IsActiveInHierarchy(), _isTrigger && CanBeTrigger());
 
         auto rigidBody = GetAttachedRigidBody();
         if (rigidBody)
@@ -478,17 +375,20 @@ void Collider::OnParentChanged()
     if (_shape)
     {
         // Detach from the actor
-        auto actor = _shape->getActor();
+        void* actor = PhysicsBackend::GetShapeActor(_shape);
+        RigidBody* rigidBody = GetAttachedRigidBody();
         if (actor)
-            actor->detachShape(*_shape);
-        if (actor && actor->is<PxRigidDynamic>())
-            static_cast<RigidBody*>(actor->userData)->OnColliderChanged(this);
+            PhysicsBackend::DetachShape(_shape, actor);
+        if (rigidBody)
+        {
+            rigidBody->OnColliderChanged(this);
+        }
 
         // Check if the new parent is a rigidbody
-        const auto rigidBody = dynamic_cast<RigidBody*>(GetParent());
+        rigidBody = dynamic_cast<RigidBody*>(GetParent());
         if (rigidBody && CanAttach(rigidBody))
         {
-            // Attach to the rigidbody (will remove static actor if it's n use)
+            // Attach to the rigidbody
             Attach(rigidBody);
         }
         else
@@ -496,6 +396,8 @@ void Collider::OnParentChanged()
             // Use static actor (if not created yet)
             if (_staticActor == nullptr)
                 CreateStaticActor();
+            else
+                PhysicsBackend::AttachShape(_shape, _staticActor);
         }
     }
 }
@@ -507,7 +409,7 @@ void Collider::OnTransformChanged()
 
     if (_staticActor)
     {
-        _staticActor->setGlobalPose(PxTransform(C2P(_transform.Translation), C2P(_transform.Orientation)));
+        PhysicsBackend::SetRigidActorPose(_staticActor, _transform.Translation, _transform.Orientation);
     }
     else if (const RigidBody* rigidBody = GetAttachedRigidBody())
     {
@@ -516,12 +418,12 @@ void Collider::OnTransformChanged()
         {
             _cachedLocalPosePos = localPosePos;
             _cachedLocalPoseRot = _localTransform.Orientation;
-            _shape->setLocalPose(PxTransform(C2P(localPosePos), C2P(_cachedLocalPoseRot)));
+            PhysicsBackend::SetShapeLocalPose(_shape, localPosePos, _cachedLocalPoseRot);
         }
     }
 
-    const Vector3 scale = GetScale();
-    if (!Vector3::NearEqual(_cachedScale, scale))
+    const float scale = GetScale().GetAbsolute().MaxValue();
+    if (_cachedScale != scale)
         UpdateGeometry();
     UpdateBounds();
 }
@@ -533,4 +435,46 @@ void Collider::OnLayerChanged()
 
     if (_shape)
         UpdateLayerBits();
+}
+
+void Collider::OnStaticFlagsChanged()
+{
+    PhysicsColliderActor::OnStaticFlagsChanged();
+
+    if (!_isTrigger && _isEnabled)
+    {
+        if (EnumHasAnyFlags(_staticFlags, StaticFlags::Navigation))
+            GetScene()->Navigation.Actors.AddUnique(this);
+        else
+            GetScene()->Navigation.Actors.Remove(this);
+    }
+}
+
+void Collider::OnPhysicsSceneChanged(PhysicsScene* previous)
+{
+    PhysicsColliderActor::OnPhysicsSceneChanged(previous);
+
+    if (_staticActor != nullptr)
+    {
+        PhysicsBackend::RemoveSceneActor(previous->GetPhysicsScene(), _staticActor, true);
+        void* scene = GetPhysicsScene()->GetPhysicsScene();
+        PhysicsBackend::AddSceneActor(scene, _staticActor);
+    }
+}
+
+void Collider::OnAssetChanged(Asset* asset, void* caller)
+{
+    // Update the shape material
+    if (_shape && caller == &Material)
+        PhysicsBackend::SetShapeMaterial(_shape, Material);
+}
+
+void Collider::OnAssetLoaded(Asset* asset, void* caller)
+{
+    Collider::OnAssetChanged(asset, caller);
+}
+
+void Collider::OnAssetUnloaded(Asset* asset, void* caller)
+{
+    Collider::OnAssetChanged(asset, caller);
 }

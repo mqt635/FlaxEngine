@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content.Thumbnails;
+using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Viewport.Previews;
 using FlaxEditor.Windows;
 using FlaxEditor.Windows.Assets;
@@ -40,37 +41,72 @@ namespace FlaxEditor.Content
         public override Type AssetType => typeof(SkinnedModel);
 
         /// <inheritdoc />
+        public override void OnContentWindowContextMenu(ContextMenu menu, ContentItem item)
+        {
+            base.OnContentWindowContextMenu(menu, item);
+
+            if (item is BinaryAssetItem binaryAssetItem)
+            {
+                var button = menu.AddButton("Create Animation Graph", CreateAnimationGraphClicked);
+                button.Tag = binaryAssetItem;
+            }
+        }
+
+        private void CreateAnimationGraphClicked(ContextMenuButton obj)
+        {
+            var binaryAssetItem = (BinaryAssetItem)obj.Tag;
+            CreateAnimationGraph(binaryAssetItem);
+        }
+
+        /// <summary>
+        /// Creates the animation graph from the given particle emitter.
+        /// </summary>
+        /// <param name="skinnedModelItem">The skinned model item to use as the base model for the animation graph.</param>
+        public static void CreateAnimationGraph(BinaryAssetItem skinnedModelItem)
+        {
+            var animationGraphName = skinnedModelItem.ShortName + " Graph";
+            var animationGraphProxy = Editor.Instance.ContentDatabase.GetProxy<AnimationGraph>();
+            Editor.Instance.Windows.ContentWin.NewItem(animationGraphProxy, null, item => OnAnimationGraphCreated(item, skinnedModelItem), animationGraphName);
+        }
+
+        private static void OnAnimationGraphCreated(ContentItem item, BinaryAssetItem skinnedModelItem)
+        {
+            var skinnedModel = FlaxEngine.Content.Load<SkinnedModel>(skinnedModelItem.ID);
+            if (skinnedModel == null)
+            {
+                Editor.LogError("Failed to load base skinned model.");
+                return;
+            }
+
+            // Hack the animation graph window to modify the base model of the animation graph.
+            // TODO: implement it without window logic (load AnimGraphSurface and set AnimationGraphWindow.BaseModelId to model)
+            AnimationGraphWindow win = new AnimationGraphWindow(Editor.Instance, item as AssetItem);
+            win.Show();
+
+            // Ensure the window knows the asset is loaded so we can save it later.
+            win.Asset.WaitForLoaded();
+            win.Update(0); // Call Update() to refresh the loaded flag.
+
+            win.SetBaseModel(skinnedModel);
+            win.Surface.MarkAsEdited();
+            win.Save();
+            win.Close();
+        }
+
+        /// <inheritdoc />
         public override void OnThumbnailDrawPrepare(ThumbnailRequest request)
         {
             if (_preview == null)
             {
-                _preview = new AnimatedModelPreview(false)
-                {
-                    RenderOnlyWithWindow = false,
-                    UseAutomaticTaskManagement = false,
-                    AnchorPreset = AnchorPresets.StretchAll,
-                    Offsets = Margin.Zero,
-                };
-                _preview.Task.Enabled = false;
-
-                var eyeAdaptation = _preview.PostFxVolume.EyeAdaptation;
-                eyeAdaptation.Mode = EyeAdaptationMode.None;
-                eyeAdaptation.OverrideFlags |= EyeAdaptationSettingsOverride.Mode;
-                _preview.PostFxVolume.EyeAdaptation = eyeAdaptation;
+                _preview = new AnimatedModelPreview(false);
+                InitAssetPreview(_preview);
             }
-
-            // TODO: disable streaming for asset during thumbnail rendering (and restore it after)
         }
 
         /// <inheritdoc />
         public override bool CanDrawThumbnail(ThumbnailRequest request)
         {
-            if (!_preview.HasLoadedAssets)
-                return false;
-
-            // Check if asset is streamed enough
-            var asset = (SkinnedModel)request.Asset;
-            return asset.LoadedLODs >= Mathf.Max(1, (int)(asset.LODs.Length * ThumbnailsModule.MinimumRequiredResourcesQuality));
+            return _preview.HasContentLoaded && ThumbnailsModule.HasMinimumQuality((SkinnedModel)request.Asset);
         }
 
         /// <inheritdoc />

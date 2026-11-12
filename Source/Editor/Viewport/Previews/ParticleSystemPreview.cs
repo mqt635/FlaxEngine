@@ -1,9 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Viewport.Cameras;
+using FlaxEditor.Viewport.Widgets;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using System;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Viewport.Previews
@@ -14,10 +16,12 @@ namespace FlaxEditor.Viewport.Previews
     /// <seealso cref="AssetPreview" />
     public class ParticleSystemPreview : AssetPreview
     {
+        private bool _playSimulation = false;
         private ParticleEffect _previewEffect;
         private ContextMenuButton _showBoundsButton;
         private ContextMenuButton _showOriginButton;
         private ContextMenuButton _showParticleCounterButton;
+        private ViewportWidgetButton _playPauseButton;
         private StaticModel _boundsModel;
         private StaticModel _originModel;
         private bool _showParticlesCounter;
@@ -39,14 +43,32 @@ namespace FlaxEditor.Viewport.Previews
         /// <summary>
         /// Gets or sets a value indicating whether to play the particles simulation in editor.
         /// </summary>
-        public bool PlaySimulation { get; set; } = false;
+        public bool PlaySimulation
+        {
+            get => _playSimulation;
+            set
+            {
+                if (_playSimulation == value)
+                    return;
+                _playSimulation = value;
+                PlaySimulationChanged?.Invoke();
+
+                if (_playPauseButton != null)
+                    _playPauseButton.Icon = value ? Editor.Instance.Icons.Pause64 : Editor.Instance.Icons.Play64;
+            }
+        }
+
+        /// <summary>
+        /// Occurs when particles simulation playback state gets changed.
+        /// </summary>
+        public event Action PlaySimulationChanged;
 
         /// <summary>
         /// Gets or sets a value indicating whether to show particle effect bounding box.
         /// </summary>
         public bool ShowBounds
         {
-            get => _boundsModel?.IsActive ?? false;
+            get => _boundsModel != null ? _boundsModel.IsActive : false;
             set
             {
                 if (value == ShowBounds)
@@ -88,7 +110,7 @@ namespace FlaxEditor.Viewport.Previews
         /// </summary>
         public bool ShowOrigin
         {
-            get => _originModel?.IsActive ?? false;
+            get => _originModel != null ? _originModel.IsActive : false;
             set
             {
                 if (value == ShowOrigin)
@@ -161,17 +183,31 @@ namespace FlaxEditor.Viewport.Previews
             // Link actors for rendering
             Task.AddCustomActor(_previewEffect);
 
-            if (useWidgets)
+            if (!useWidgets)
+                return;
+            _showBoundsButton = ViewWidgetShowMenu.AddButton("Bounds", () => ShowBounds = !ShowBounds);
+            _showBoundsButton.CloseMenuOnClick = false;
+            _showOriginButton = ViewWidgetShowMenu.AddButton("Origin", () => ShowOrigin = !ShowOrigin);
+            _showOriginButton.CloseMenuOnClick = false;
+            _showParticleCounterButton = ViewWidgetShowMenu.AddButton("Particles Counter", () => ShowParticlesCounter = !ShowParticlesCounter);
+            _showParticleCounterButton.CloseMenuOnClick = false;
+
+            // Play/Pause widget
             {
-                _showBoundsButton = ViewWidgetShowMenu.AddButton("Bounds", () => ShowBounds = !ShowBounds);
-                _showOriginButton = ViewWidgetShowMenu.AddButton("Origin", () => ShowOrigin = !ShowOrigin);
-                _showParticleCounterButton = ViewWidgetShowMenu.AddButton("Particles Counter", () => ShowParticlesCounter = !ShowParticlesCounter);
+                var playPauseWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
+                _playPauseButton = new ViewportWidgetButton(null, Editor.Instance.Icons.Pause64)
+                {
+                    TooltipText = "Simulation playback play (F5) or pause (F6)",
+                    Parent = playPauseWidget,
+                };
+                _playPauseButton.Clicked += button => PlaySimulation = !PlaySimulation;
+                playPauseWidget.Parent = this;
             }
         }
 
         private void UpdateBoundsModel()
         {
-            var bounds = _previewEffect.Box;
+            var bounds = _previewEffect.BoundingBox;
             Transform t = Transform.Identity;
             t.Translation = bounds.Center;
             t.Scale = bounds.Size;
@@ -184,13 +220,13 @@ namespace FlaxEditor.Viewport.Previews
         /// <param name="targetSize">The target size of the effect.</param>
         public void FitIntoView(float targetSize = 300.0f)
         {
-            _previewEffect.Scale = Vector3.One;
-            float maxSize = Mathf.Max(0.001f, _previewEffect.Box.Size.MaxValue);
-            _previewEffect.Scale = new Vector3(targetSize / maxSize);
+            _previewEffect.Scale = Float3.One;
+            float maxSize = Mathf.Max(0.001f, (float)_previewEffect.BoundingBox.Size.MaxValue);
+            _previewEffect.Scale = new Float3(targetSize / maxSize);
         }
 
         /// <inheritdoc />
-        public override bool HasLoadedAssets => _previewEffect.HasContentLoaded && base.HasLoadedAssets;
+        public override bool HasContentLoaded => _previewEffect.HasContentLoaded && base.HasContentLoaded;
 
         /// <inheritdoc />
         public override void Update(float deltaTime)
@@ -200,7 +236,7 @@ namespace FlaxEditor.Viewport.Previews
             // Manually update simulation
             if (PlaySimulation)
             {
-                _previewEffect.UpdateSimulation();
+                _previewEffect.UpdateSimulation(true);
             }
 
             // Keep bounds matching the model
@@ -208,6 +244,14 @@ namespace FlaxEditor.Viewport.Previews
             {
                 UpdateBoundsModel();
             }
+        }
+
+        /// <inheritdoc />
+        protected override void OnDebugDraw(GPUContext context, ref RenderContext renderContext)
+        {
+            base.OnDebugDraw(context, ref renderContext);
+
+            _previewEffect.OnDebugDraw();
         }
 
         /// <inheritdoc />
@@ -221,7 +265,7 @@ namespace FlaxEditor.Viewport.Previews
                 Render2D.DrawText(
                                   Style.Current.FontSmall,
                                   "Particles: " + count,
-                                  new Rectangle(Vector2.Zero, Size),
+                                  new Rectangle(Float2.Zero, Size),
                                   Color.Wheat,
                                   TextAlignment.Near,
                                   TextAlignment.Far);
@@ -229,9 +273,38 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            switch (key)
+            {
+            case KeyboardKeys.F:
+                ViewportCamera.SetArcBallView(_previewEffect.BoundingBox);
+                return true;
+            case KeyboardKeys.Spacebar:
+                PlaySimulation = !PlaySimulation;
+                return true;
+            }
+
+            var inputOptions = Editor.Instance.Options.Options.Input;
+            if (inputOptions.Play.Process(this, key))
+            {
+                PlaySimulation = true;
+                return true;
+            }
+            if (inputOptions.Pause.Process(this, key))
+            {
+                PlaySimulation = false;
+                return true;
+            }
+
+            return base.OnKeyDown(key);
+        }
+
+        /// <inheritdoc />
         public override void OnDestroy()
         {
-            // Cleanup objects
+            if (IsDisposing)
+                return;
             _previewEffect.ParticleSystem = null;
             Object.Destroy(ref _previewEffect);
             Object.Destroy(ref _boundsModel);
@@ -239,6 +312,7 @@ namespace FlaxEditor.Viewport.Previews
             _showBoundsButton = null;
             _showOriginButton = null;
             _showParticleCounterButton = null;
+            _playPauseButton = null;
 
             base.OnDestroy();
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,7 @@ using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -25,8 +26,10 @@ namespace FlaxEditor.CustomEditors.Editors
         /// Describes object property/field information for custom editors pipeline.
         /// </summary>
         /// <seealso cref="System.IComparable" />
-        protected class ItemInfo : IComparable
+        public class ItemInfo : IComparable
         {
+            private Options.GeneralOptions.MembersOrder _membersOrder;
+
             /// <summary>
             /// The member information from reflection.
             /// </summary>
@@ -41,11 +44,6 @@ namespace FlaxEditor.CustomEditors.Editors
             /// The display attribute.
             /// </summary>
             public EditorDisplayAttribute Display;
-
-            /// <summary>
-            /// The tooltip attribute.
-            /// </summary>
-            public TooltipAttribute Tooltip;
 
             /// <summary>
             /// The custom editor attribute.
@@ -68,9 +66,9 @@ namespace FlaxEditor.CustomEditors.Editors
             public HeaderAttribute Header;
 
             /// <summary>
-            /// The visible if attribute.
+            /// The visible if attributes.
             /// </summary>
-            public VisibleIfAttribute VisibleIf;
+            public VisibleIfAttribute[] VisibleIfs;
 
             /// <summary>
             /// The read-only attribute usage flag.
@@ -86,11 +84,6 @@ namespace FlaxEditor.CustomEditors.Editors
             /// Gets the display name.
             /// </summary>
             public string DisplayName { get; }
-
-            /// <summary>
-            /// Gets a value indicating whether use dedicated group.
-            /// </summary>
-            public bool UseGroup => Display?.Group != null;
 
             /// <summary>
             /// Gets the overridden custom editor for item editing.
@@ -110,7 +103,7 @@ namespace FlaxEditor.CustomEditors.Editors
             /// <summary>
             /// Gets the tooltip text (may be null if not provided).
             /// </summary>
-            public string TooltipText => Tooltip?.Text;
+            public string TooltipText;
 
             /// <summary>
             /// Initializes a new instance of the <see cref="ItemInfo"/> class.
@@ -131,17 +124,19 @@ namespace FlaxEditor.CustomEditors.Editors
                 Info = info;
                 Order = (EditorOrderAttribute)attributes.FirstOrDefault(x => x is EditorOrderAttribute);
                 Display = (EditorDisplayAttribute)attributes.FirstOrDefault(x => x is EditorDisplayAttribute);
-                Tooltip = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
                 CustomEditor = (CustomEditorAttribute)attributes.FirstOrDefault(x => x is CustomEditorAttribute);
                 CustomEditorAlias = (CustomEditorAliasAttribute)attributes.FirstOrDefault(x => x is CustomEditorAliasAttribute);
                 Space = (SpaceAttribute)attributes.FirstOrDefault(x => x is SpaceAttribute);
                 Header = (HeaderAttribute)attributes.FirstOrDefault(x => x is HeaderAttribute);
-                VisibleIf = (VisibleIfAttribute)attributes.FirstOrDefault(x => x is VisibleIfAttribute);
+                VisibleIfs = attributes.OfType<VisibleIfAttribute>().ToArray();
                 IsReadOnly = attributes.FirstOrDefault(x => x is ReadOnlyAttribute) != null;
                 ExpandGroups = attributes.FirstOrDefault(x => x is ExpandGroupsAttribute) != null;
 
                 IsReadOnly |= !info.HasSet;
-                DisplayName = Display?.Name ?? CustomEditorsUtil.GetPropertyNameUI(info.Name);
+                DisplayName = Display?.Name ?? Utilities.Utils.GetPropertyNameUI(info.Name);
+                var editor = Editor.Instance;
+                TooltipText = editor.CodeDocs.GetTooltip(info, attributes);
+                _membersOrder = editor.Options.Options.General.ScriptMembersOrder;
             }
 
             /// <summary>
@@ -176,13 +171,15 @@ namespace FlaxEditor.CustomEditors.Editors
                             return string.Compare(Display.Group, other.Display.Group, StringComparison.InvariantCulture);
                     }
 
-                    if (Editor.Instance.Options.Options.General.ScriptMembersOrder == Options.GeneralOptions.MembersOrder.Declaration)
+                    if (_membersOrder == Options.GeneralOptions.MembersOrder.Declaration)
                     {
                         // By declaration order
                         if (Info.MetadataToken > other.Info.MetadataToken)
                             return 1;
                         if (Info.MetadataToken < other.Info.MetadataToken)
                             return -1;
+                        // Keep declaration order if same metadata token.
+                        return 0;
                     }
 
                     // By name
@@ -215,21 +212,31 @@ namespace FlaxEditor.CustomEditors.Editors
         private struct VisibleIfCache
         {
             public ScriptMemberInfo Target;
-            public ScriptMemberInfo Source;
+            public ScriptMemberInfo[] Sources;
             public PropertiesListElement PropertiesList;
             public GroupElement Group;
-            public bool Invert;
+            public bool[] InversionList;
             public int LabelIndex;
 
             public bool GetValue(object instance)
             {
-                var value = (bool)Source.GetValue(instance);
-                if (Invert)
-                    value = !value;
+                bool value = true;
+
+                for (int i = 0; i < Sources.Length; i++)
+                {
+                    bool currentValue = (bool)Sources[i].GetValue(instance);
+                    if (InversionList[i])
+                        currentValue = !currentValue;
+
+                    value = value && currentValue;
+                }
                 return value;
             }
         }
 
+        private static HashSet<PropertiesList> _visibleIfPropertiesListsCache;
+        private static Stack<Dictionary<string, GroupElement>> _groups;
+        private static List<Dictionary<string, GroupElement>> _groupsPool;
         private VisibleIfCache[] _visibleIfCaches;
         private bool _isNull;
 
@@ -249,10 +256,12 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <param name="type">The type.</param>
         /// <param name="useProperties">True if use type properties.</param>
         /// <param name="useFields">True if use type fields.</param>
+        /// <param name="usePropertiesWithoutSetter">True if use type properties that have only getter method without setter method (aka read-only).</param>
         /// <returns>The items.</returns>
-        protected List<ItemInfo> GetItemsForType(ScriptType type, bool useProperties, bool useFields)
+        public static List<ItemInfo> GetItemsForType(ScriptType type, bool useProperties, bool useFields, bool usePropertiesWithoutSetter = false)
         {
             var items = new List<ItemInfo>();
+            var isPlayMode = Editor.IsPlayMode;
 
             if (useProperties)
             {
@@ -262,15 +271,20 @@ namespace FlaxEditor.CustomEditors.Editors
                 for (int i = 0; i < properties.Length; i++)
                 {
                     var p = properties[i];
+
+                    // Indexed properties require arguments and cannot be represented by a normal property row (eg. IList.Item[index])
+                    if (p.Type is PropertyInfo managedProperty && managedProperty.GetIndexParameters().Length != 0)
+                        continue;
+
                     var attributes = p.GetAttributes(true);
                     var showInEditor = attributes.Any(x => x is ShowInEditorAttribute);
 
                     // Skip properties without getter or setter
-                    if (!p.HasGet || (!p.HasSet && !showInEditor))
+                    if (!p.HasGet || (!p.HasSet && !showInEditor && !usePropertiesWithoutSetter))
                         continue;
 
                     // Skip hidden fields, handle special attributes
-                    if ((!p.IsPublic && !showInEditor) || attributes.Any(x => x is HideInEditorAttribute))
+                    if ((!p.IsPublic && !showInEditor) || attributes.Any(x => x is HideInEditorAttribute hide && (!isPlayMode || !hide.ShowInPlayMode)))
                         continue;
 
                     items.Add(new ItemInfo(p, attributes));
@@ -285,11 +299,10 @@ namespace FlaxEditor.CustomEditors.Editors
                 for (int i = 0; i < fields.Length; i++)
                 {
                     var f = fields[i];
-
                     var attributes = f.GetAttributes(true);
 
                     // Skip hidden fields, handle special attributes
-                    if ((!f.IsPublic && !attributes.Any(x => x is ShowInEditorAttribute)) || attributes.Any(x => x is HideInEditorAttribute))
+                    if ((!f.IsPublic && !attributes.Any(x => x is ShowInEditorAttribute)) || attributes.Any(x => x is HideInEditorAttribute hide && (!isPlayMode || !hide.ShowInPlayMode)))
                         continue;
 
                     items.Add(new ItemInfo(f, attributes));
@@ -299,43 +312,51 @@ namespace FlaxEditor.CustomEditors.Editors
             return items;
         }
 
-        private static ScriptMemberInfo GetVisibleIfSource(ScriptType type, VisibleIfAttribute visibleIf)
+        private static ScriptMemberInfo[] GetVisibleIfSources(ScriptType type, VisibleIfAttribute[] visibleIfs)
         {
-            var property = type.GetProperty(visibleIf.MemberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-            if (property != ScriptMemberInfo.Null)
+            ScriptMemberInfo[] members = Array.Empty<ScriptMemberInfo>();
+
+            for (int i = 0; i < visibleIfs.Length; i++)
             {
-                if (!property.HasGet)
+                var property = type.GetProperty(visibleIfs[i].MemberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                if (property != ScriptMemberInfo.Null)
                 {
-                    Debug.LogError("Invalid VisibleIf rule. Property has missing getter " + visibleIf.MemberName);
-                    return ScriptMemberInfo.Null;
+                    if (!property.HasGet)
+                    {
+                        Debug.LogError("Invalid VisibleIf rule. Property has missing getter " + visibleIfs[i].MemberName);
+                        continue;
+                    }
+
+                    if (property.ValueType.Type != typeof(bool))
+                    {
+                        Debug.LogError("Invalid VisibleIf rule. Property has to return bool type " + visibleIfs[i].MemberName);
+                        continue;
+                    }
+
+                    members = members.Append(property).ToArray();
+                    continue;
                 }
 
-                if (property.ValueType.Type != typeof(bool))
+                var field = type.GetField(visibleIfs[i].MemberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
+                if (field != ScriptMemberInfo.Null)
                 {
-                    Debug.LogError("Invalid VisibleIf rule. Property has to return bool type " + visibleIf.MemberName);
-                    return ScriptMemberInfo.Null;
+                    if (field.ValueType.Type != typeof(bool))
+                    {
+                        Debug.LogError("Invalid VisibleIf rule. Field has to be bool type " + visibleIfs[i].MemberName);
+                        continue;
+                    }
+
+                    members = members.Append(field).ToArray();
+                    continue;
                 }
 
-                return property;
+                Debug.LogError("Invalid VisibleIf rule. Cannot find member " + visibleIfs[i].MemberName);
             }
 
-            var field = type.GetField(visibleIf.MemberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static);
-            if (field != ScriptMemberInfo.Null)
-            {
-                if (field.ValueType.Type != typeof(bool))
-                {
-                    Debug.LogError("Invalid VisibleIf rule. Field has to be bool type " + visibleIf.MemberName);
-                    return ScriptMemberInfo.Null;
-                }
-
-                return field;
-            }
-
-            Debug.LogError("Invalid VisibleIf rule. Cannot find member " + visibleIf.MemberName);
-            return ScriptMemberInfo.Null;
+            return members;
         }
 
-        private void GroupPanelCheckIfCanRevert(LayoutElementsContainer layout, ref bool canRevertReference, ref bool canRevertDefault)
+        private static void GroupPanelCheckIfCanRevert(LayoutElementsContainer layout, ref bool canRevertReference, ref bool canRevertDefault)
         {
             if (layout == null || canRevertReference && canRevertDefault)
                 return;
@@ -350,7 +371,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 GroupPanelCheckIfCanRevert(child as LayoutElementsContainer, ref canRevertReference, ref canRevertDefault);
         }
 
-        private void OnGroupPanelRevert(LayoutElementsContainer layout, bool toDefault)
+        private static void OnGroupPanelRevert(LayoutElementsContainer layout, bool toDefault)
         {
             if (layout == null)
                 return;
@@ -367,7 +388,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 OnGroupPanelRevert(child as LayoutElementsContainer, toDefault);
         }
 
-        private void OnGroupPanelCopy(LayoutElementsContainer layout)
+        private static void OnGroupPanelCopy(LayoutElementsContainer layout)
         {
             if (layout.Editors.Count == 1)
             {
@@ -403,12 +424,12 @@ namespace FlaxEditor.CustomEditors.Editors
             }
         }
 
-        private bool OnGroupPanelCanCopy(LayoutElementsContainer layout)
+        private static bool OnGroupPanelCanCopy(LayoutElementsContainer layout)
         {
             return layout.Editors.Count != 0 || layout.Children.Any(x => x is LayoutElementsContainer);
         }
 
-        private void OnGroupPanelPaste(LayoutElementsContainer layout)
+        private static void OnGroupPanelPaste(LayoutElementsContainer layout)
         {
             if (layout.Editors.Count == 1)
             {
@@ -452,7 +473,7 @@ namespace FlaxEditor.CustomEditors.Editors
             }
         }
 
-        private bool OnGroupPanelCanPaste(LayoutElementsContainer layout)
+        private static bool OnGroupPanelCanPaste(LayoutElementsContainer layout)
         {
             if (layout.Editors.Count == 1)
             {
@@ -460,32 +481,7 @@ namespace FlaxEditor.CustomEditors.Editors
             }
             if (layout.Editors.Count != 0)
             {
-                var sb = Clipboard.Text;
-                if (!string.IsNullOrEmpty(sb))
-                {
-                    try
-                    {
-                        var data = JsonSerializer.Deserialize<string[]>(sb);
-                        if (data == null || data.Length != layout.Editors.Count)
-                            return false;
-                        for (var i = 0; i < layout.Editors.Count; i++)
-                        {
-                            Clipboard.Text = data[i];
-                            if (!layout.Editors[i].CanPaste)
-                                return false;
-                        }
-                        return true;
-                    }
-                    catch
-                    {
-                        return false;
-                    }
-                    finally
-                    {
-                        Clipboard.Text = sb;
-                    }
-                }
-                return false;
+                return !string.IsNullOrEmpty(Clipboard.Text);
             }
             if (layout.Children.Any(x => x is LayoutElementsContainer))
             {
@@ -498,7 +494,7 @@ namespace FlaxEditor.CustomEditors.Editors
             return false;
         }
 
-        private void OnGroupPanelMouseButtonRightClicked(DropPanel groupPanel, Vector2 location)
+        private static void OnGroupPanelMouseButtonRightClicked(DropPanel groupPanel, Float2 location)
         {
             var group = (GroupElement)groupPanel.Tag;
             bool canRevertReference = false, canRevertDefault = false;
@@ -518,56 +514,110 @@ namespace FlaxEditor.CustomEditors.Editors
             menu.Show(groupPanel, location);
         }
 
+        internal static void OnGroupsBegin()
+        {
+            if (_groups == null)
+                _groups = new Stack<Dictionary<string, GroupElement>>();
+            if (_groupsPool == null)
+                _groupsPool = new List<Dictionary<string, GroupElement>>();
+            Dictionary<string, GroupElement> group;
+            if (_groupsPool.Count != 0)
+            {
+                group = _groupsPool[0];
+                _groupsPool.RemoveAt(0);
+            }
+            else
+            {
+                group = new Dictionary<string, GroupElement>();
+            }
+            _groups.Push(group);
+        }
+
+        internal static void OnGroupsEnd()
+        {
+            var groups = _groups.Pop();
+            groups.Clear();
+            _groupsPool.Add(groups);
+        }
+
+        internal static GroupElement OnGroup(LayoutElementsContainer layout, string name)
+        {
+            // Add new group
+            var group = layout.Group(name);
+            group.Panel.Tag = group;
+            group.Panel.MouseButtonRightClicked += OnGroupPanelMouseButtonRightClicked;
+            return group;
+        }
+
+        internal static LayoutElementsContainer OnGroup(LayoutElementsContainer layout, EditorDisplayAttribute display)
+        {
+            if (display?.Group != null)
+            {
+                var groups = _groups.Peek();
+                if (groups.TryGetValue(display.Group, out var group))
+                {
+                    // Reuse group
+                    layout = group;
+                }
+                else
+                {
+                    // Add new group
+                    group = layout.Group(display.Group);
+                    group.Panel.Tag = group;
+                    group.Panel.MouseButtonRightClicked += OnGroupPanelMouseButtonRightClicked;
+                    groups.Add(display.Group, group);
+                    layout = group;
+                }
+            }
+            return layout;
+        }
+
+        internal static void OnReadOnlyProperty(LayoutElementsContainer itemLayout, int labelIndex = -1)
+        {
+            PropertiesList list = null;
+            int firstChildControlIndex = 0;
+            bool disableSingle = true;
+            var control = itemLayout.Children[itemLayout.Children.Count - 1];
+            if (control is GroupElement group && group.Children.Count > 0)
+            {
+                list = (group.Children[0] as PropertiesListElement)?.Properties;
+                disableSingle = false; // Disable all nested editors
+            }
+            else if (control is PropertiesListElement list1 && labelIndex != -1)
+            {
+                list = list1.Labels[labelIndex].FirstChildControlContainer ?? list1.Properties;
+                firstChildControlIndex = list1.Labels[labelIndex].FirstChildControlIndex;
+            }
+            else if (control?.Control != null)
+            {
+                control.Control.Enabled = false;
+            }
+
+            if (list != null)
+            {
+                // Disable controls added to the editor
+                var count = list.Children.Count;
+                for (int j = firstChildControlIndex; j < count; j++)
+                {
+                    var child = list.Children[j];
+                    if (disableSingle && child is PropertyNameLabel)
+                        break;
+
+                    if (child != null)
+                        child.Enabled = false;
+                }
+            }
+        }
+
         /// <summary>
-        /// Spawns the property for the given item.
+        /// Evaluate the <see cref="VisibleIfAttribute"/> cache for a given property item.
         /// </summary>
         /// <param name="itemLayout">The item layout.</param>
-        /// <param name="itemValues">The item values.</param>
         /// <param name="item">The item.</param>
-        protected virtual void SpawnProperty(LayoutElementsContainer itemLayout, ValueContainer itemValues, ItemInfo item)
+        /// <param name="labelIndex">The label index.</param>
+        protected virtual void EvaluateVisibleIf(LayoutElementsContainer itemLayout, ItemInfo item, int labelIndex)
         {
-            int labelIndex = 0;
-            if ((item.IsReadOnly || item.VisibleIf != null) &&
-                itemLayout.Children.Count > 0 &&
-                itemLayout.Children[itemLayout.Children.Count - 1] is PropertiesListElement propertiesListElement)
-            {
-                labelIndex = propertiesListElement.Labels.Count;
-            }
-
-            itemLayout.Property(item.DisplayName, itemValues, item.OverrideEditor, item.TooltipText);
-
-            if (item.IsReadOnly && itemLayout.Children.Count > 0)
-            {
-                PropertiesListElement list = null;
-                int firstChildControlIndex = 0;
-                bool disableSingle = true;
-                var control = itemLayout.Children[itemLayout.Children.Count - 1];
-                if (control is GroupElement group && group.Children.Count > 0)
-                {
-                    list = group.Children[0] as PropertiesListElement;
-                    disableSingle = false; // Disable all nested editors
-                }
-                else if (control is PropertiesListElement list1)
-                {
-                    list = list1;
-                    firstChildControlIndex = list.Labels[labelIndex].FirstChildControlIndex;
-                }
-
-                if (list != null)
-                {
-                    // Disable controls added to the editor
-                    var count = list.Properties.Children.Count;
-                    for (int j = firstChildControlIndex; j < count; j++)
-                    {
-                        var child = list.Properties.Children[j];
-                        if (disableSingle && child is PropertyNameLabel)
-                            break;
-
-                        child.Enabled = false;
-                    }
-                }
-            }
-            if (item.VisibleIf != null && itemLayout.Children.Count > 0)
+            if (item.VisibleIfs.Length > 0 && itemLayout.Children.Count > 0)
             {
                 PropertiesListElement list = null;
                 GroupElement group = null;
@@ -579,8 +629,8 @@ namespace FlaxEditor.CustomEditors.Editors
                     return;
 
                 // Get source member used to check rule
-                var sourceMember = GetVisibleIfSource(item.Info.DeclaringType, item.VisibleIf);
-                if (sourceMember == ScriptType.Null)
+                var sourceMembers = GetVisibleIfSources(item.Info.DeclaringType, item.VisibleIfs);
+                if (sourceMembers.Length == 0)
                     return;
 
                 // Resize cache
@@ -596,13 +646,52 @@ namespace FlaxEditor.CustomEditors.Editors
                 _visibleIfCaches[count] = new VisibleIfCache
                 {
                     Target = item.Info,
-                    Source = sourceMember,
+                    Sources = sourceMembers,
                     PropertiesList = list,
                     Group = group,
                     LabelIndex = labelIndex,
-                    Invert = item.VisibleIf.Invert,
+                    InversionList = item.VisibleIfs.Select((x, i) => x.Invert).ToArray(),
                 };
             }
+        }
+
+        /// <summary>
+        /// Get the label index.
+        /// </summary>
+        /// <param name="itemLayout">The item layout.</param>
+        /// <param name="item">The item.</param>
+        /// <returns>The label index.</returns>
+        protected virtual int GetLabelIndex(LayoutElementsContainer itemLayout, ItemInfo item)
+        {
+            int labelIndex = 0;
+            if ((item.IsReadOnly || item.VisibleIfs.Length > 0) &&
+                itemLayout.Children.Count > 0 &&
+                itemLayout.Children[itemLayout.Children.Count - 1] is PropertiesListElement propertiesListElement)
+            {
+                labelIndex = propertiesListElement.Labels.Count;
+            }
+
+            return labelIndex;
+        }
+
+        /// <summary>
+        /// Spawns the property for the given item.
+        /// </summary>
+        /// <param name="itemLayout">The item layout.</param>
+        /// <param name="itemValues">The item values.</param>
+        /// <param name="item">The item.</param>
+        protected virtual void SpawnProperty(LayoutElementsContainer itemLayout, ValueContainer itemValues, ItemInfo item)
+        {
+            int labelIndex = GetLabelIndex(itemLayout, item);
+
+            itemLayout.Property(item.DisplayName, itemValues, item.OverrideEditor, item.TooltipText);
+
+            if (item.IsReadOnly && itemLayout.Children.Count > 0)
+            {
+                OnReadOnlyProperty(itemLayout, labelIndex);
+            }
+
+            EvaluateVisibleIf(itemLayout, item, labelIndex);
         }
 
         /// <inheritdoc />
@@ -623,29 +712,57 @@ namespace FlaxEditor.CustomEditors.Editors
             if (!HasDifferentTypes)
             {
                 var value = Values[0];
+                var type = Values.Type;
                 if (value == null)
                 {
                     // Check if it's an object type that can be created in editor
-                    var type = Values.Type;
-                    if (type != ScriptMemberInfo.Null && type.CanCreateInstance)
+                    if (type != ScriptMemberInfo.Null && CanEditValue)
                     {
-                        layout = layout.Space(20);
-
-                        const float ButtonSize = 14.0f;
-                        var button = new Button
+                        ScriptType[] types = null;
+                        if (type.IsAbstract || type.IsInterface)
                         {
-                            Text = "+",
-                            TooltipText = "Create a new instance of the object",
-                            Size = new Vector2(ButtonSize, ButtonSize),
-                            AnchorPreset = AnchorPresets.MiddleRight,
-                            Parent = layout.ContainerControl,
-                            Location = new Vector2(layout.ContainerControl.Width - ButtonSize - 4, (layout.ContainerControl.Height - ButtonSize) * 0.5f),
-                        };
-                        button.Clicked += () => SetValue(Values.Type.CreateInstance());
+                            // Show picker with all types that implement specific class/interface but are not abstract
+                            types = Editor.Instance.CodeEditing.All.Get().Where(x => !x.IsAbstract && !x.IsScriptingObject && x.CanCreateInstance && type.IsAssignableFrom(x)).ToArray();
+                        }
+                        else if (type.CanCreateInstance)
+                        {
+                            types = [type];
+                        }
+                        if (types != null && types.Length != 0)
+                        {
+                            layout = layout.Space(20);
+
+                            const float ButtonSize = 14.0f;
+                            var button = new Button
+                            {
+                                Text = "+",
+                                TooltipText = "Create a new instance of the object",
+                                Size = new Float2(ButtonSize, ButtonSize),
+                                AnchorPreset = AnchorPresets.MiddleRight,
+                                Parent = layout.ContainerControl,
+                                Location = new Float2(layout.ContainerControl.Width - ButtonSize - 4, (layout.ContainerControl.Height - ButtonSize) * 0.5f),
+                            };
+                            if (types.Length == 1)
+                            {
+                                // Single type
+                                button.Clicked += () => SetValue(types[0].CreateInstance());
+                            }
+                            else
+                            {
+                                // Picker
+                                button.Clicked += () => FlaxEditor.GUI.TypeSearchPopup.Show(button, new Float2(0, button.Height), types, scriptType => { SetValue(scriptType.CreateInstance()); });
+                            }
+                        }
                     }
 
                     layout.Label("<null>");
                     return;
+                }
+                if (!type.IsArray && !type.IsStructure && !type.IsScriptingObject && (type.IsAbstract || type.IsInterface) && value.GetType() != type.Type && layout is GroupElement group && CanEditValue)
+                {
+                    // Add button to unset the value to null (eg. to edit it to different type)
+                    var button = group.AddHeaderButton("Reset value to null", 0, FlaxEngine.GUI.Style.Current.Cross);
+                    button.Clicked += (_, _) => SetValue(null);
                 }
 
                 items = GetItemsForType(TypeUtils.GetObjectType(value));
@@ -686,28 +803,13 @@ namespace FlaxEditor.CustomEditors.Editors
             items.Sort();
 
             // Add items
-            GroupElement lastGroup = null;
+            OnGroupsBegin();
             for (int i = 0; i < items.Count; i++)
             {
                 var item = items[i];
 
-                // Check if use group
-                LayoutElementsContainer itemLayout;
-                if (item.UseGroup)
-                {
-                    if (lastGroup == null || lastGroup.Panel.HeaderText != item.Display.Group)
-                    {
-                        lastGroup = layout.Group(item.Display.Group);
-                        lastGroup.Panel.Tag = lastGroup;
-                        lastGroup.Panel.MouseButtonRightClicked += OnGroupPanelMouseButtonRightClicked;
-                    }
-                    itemLayout = lastGroup;
-                }
-                else
-                {
-                    lastGroup = null;
-                    itemLayout = layout;
-                }
+                // Group
+                var itemLayout = OnGroup(layout, item.Display);
 
                 // Space
                 if (item.Space != null)
@@ -715,7 +817,7 @@ namespace FlaxEditor.CustomEditors.Editors
 
                 // Header
                 if (item.Header != null)
-                    itemLayout.Header(item.Header.Text);
+                    itemLayout.Header(item.Header);
 
                 try
                 {
@@ -747,6 +849,16 @@ namespace FlaxEditor.CustomEditors.Editors
                     } while (c != null);
                 }
             }
+            OnGroupsEnd();
+        }
+
+        /// <inheritdoc />
+        protected override void Deinitialize()
+        {
+            _visibleIfCaches = null;
+            _visibleIfPropertiesListsCache = null;
+
+            base.Deinitialize();
         }
 
         /// <inheritdoc />
@@ -761,8 +873,13 @@ namespace FlaxEditor.CustomEditors.Editors
 
             if (_visibleIfCaches != null)
             {
+                if (_visibleIfPropertiesListsCache == null)
+                    _visibleIfPropertiesListsCache = new HashSet<PropertiesList>();
+                else
+                    _visibleIfPropertiesListsCache.Clear();
                 try
                 {
+                    // Update VisibleIf rules
                     for (int i = 0; i < _visibleIfCaches.Length; i++)
                     {
                         ref var c = ref _visibleIfCaches[i];
@@ -784,6 +901,28 @@ namespace FlaxEditor.CustomEditors.Editors
                         if (c.LabelIndex != -1 && c.PropertiesList != null && c.PropertiesList.Labels.Count > c.LabelIndex)
                         {
                             var label = c.PropertiesList.Labels[c.LabelIndex];
+                            if (visible && Presenter != null && !string.IsNullOrEmpty(Presenter.SearchText))
+                            {
+                                bool match = label.Text.ToString().IndexOf(Presenter.SearchText, StringComparison.OrdinalIgnoreCase) >= 0;
+                                if (!match)
+                                {
+                                    var p = label.Parent;
+                                    while (p != null)
+                                    {
+                                        if (p is DropPanel dropPanel)
+                                        {
+                                            var headerText = dropPanel.HeaderText;
+                                            if (headerText != null && headerText.IndexOf(Presenter.SearchText, StringComparison.OrdinalIgnoreCase) >= 0)
+                                            {
+                                                match = true;
+                                                break;
+                                            }
+                                        }
+                                        p = p.Parent;
+                                    }
+                                }
+                                visible = match;
+                            }
                             label.Visible = visible;
                             for (int j = label.FirstChildControlIndex; j < c.PropertiesList.Properties.Children.Count; j++)
                             {
@@ -798,6 +937,21 @@ namespace FlaxEditor.CustomEditors.Editors
                         {
                             c.Group.Panel.Visible = visible;
                         }
+                        if (c.PropertiesList != null)
+                            _visibleIfPropertiesListsCache.Add(c.PropertiesList.Properties);
+                    }
+
+                    // Hide properties lists with all labels being hidden
+                    foreach (var propertiesList in _visibleIfPropertiesListsCache)
+                    {
+                        propertiesList.Visible = propertiesList.Children.Any(c => c.Visible);
+                    }
+
+                    // Hide group panels with all properties lists hidden
+                    foreach (var propertiesList in _visibleIfPropertiesListsCache)
+                    {
+                        if (propertiesList.Parent is DropPanel dropPanel)
+                            dropPanel.Visible = propertiesList.Visible || !dropPanel.Children.All(c => c is PropertiesList && !c.Visible);
                     }
                 }
                 catch (Exception ex)
@@ -808,6 +962,10 @@ namespace FlaxEditor.CustomEditors.Editors
                     // Remove rules to prevent error in loop
                     _visibleIfCaches = null;
                 }
+            }
+            if (Presenter != null && !string.IsNullOrEmpty(Presenter.SearchText))
+            {
+                Presenter.UpdateGroupsAndListsVisibility();
             }
 
             base.Refresh();

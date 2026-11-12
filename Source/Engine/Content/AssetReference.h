@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,32 +7,27 @@
 /// <summary>
 /// Asset reference utility. Keeps reference to the linked asset object and handles load/unload events.
 /// </summary>
-class FLAXENGINE_API AssetReferenceBase
+class FLAXENGINE_API AssetReferenceBase : public IAssetReference
 {
-public:
-
-    typedef Delegate<> EventType;
-
 protected:
-
     Asset* _asset = nullptr;
+    IAssetReference* _owner = nullptr;
 
 public:
-
     /// <summary>
     /// The asset loaded event (fired when asset gets loaded or is already loaded after change).
     /// </summary>
-    EventType Loaded;
+    Action Loaded;
 
     /// <summary>
     /// The asset unloading event (should cleanup refs to it).
     /// </summary>
-    EventType Unload;
+    Action Unload;
 
     /// <summary>
     /// Action fired when field gets changed (link a new asset or change to the another value).
     /// </summary>
-    EventType Changed;
+    Action Changed;
 
 public:
     NON_COPYABLE(AssetReferenceBase);
@@ -43,12 +38,17 @@ public:
     AssetReferenceBase() = default;
 
     /// <summary>
+    /// Initializes a new instance of the <see cref="AssetReferenceBase"/> class.
+    /// </summary>
+    /// <param name="owner">The reference owner to keep notified about asset changes.</param>
+    AssetReferenceBase(IAssetReference* owner);
+
+    /// <summary>
     /// Finalizes an instance of the <see cref="AssetReferenceBase"/> class.
     /// </summary>
     ~AssetReferenceBase();
 
 public:
-
     /// <summary>
     /// Gets the asset ID or Guid::Empty if not set.
     /// </summary>
@@ -60,7 +60,7 @@ public:
     /// <summary>
     /// Gets managed instance object (or null if no asset set).
     /// </summary>
-    FORCE_INLINE MonoObject* GetManagedInstance() const
+    FORCE_INLINE MObject* GetManagedInstance() const
     {
         return _asset ? _asset->GetOrCreateManagedInstance() : nullptr;
     }
@@ -70,11 +70,14 @@ public:
     /// </summary>
     String ToString() const;
 
-protected:
+public:
+    // [IAssetReference]
+    void OnAssetChanged(Asset* asset, void* caller) override;
+    void OnAssetLoaded(Asset* asset, void* caller) override;
+    void OnAssetUnloaded(Asset* asset, void* caller) override;
 
+protected:
     void OnSet(Asset* asset);
-    void OnLoaded(Asset* asset);
-    void OnUnloaded(Asset* asset);
 };
 
 /// <summary>
@@ -84,12 +87,10 @@ template<typename T>
 API_CLASS(InBuild) class AssetReference : public AssetReferenceBase
 {
 public:
-
     typedef T AssetType;
     typedef AssetReference<T> Type;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="AssetReference"/> class.
     /// </summary>
@@ -100,10 +101,26 @@ public:
     /// <summary>
     /// Initializes a new instance of the <see cref="AssetReference"/> class.
     /// </summary>
+    explicit AssetReference(decltype(__nullptr))
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AssetReference"/> class.
+    /// </summary>
     /// <param name="asset">The asset to set.</param>
     AssetReference(T* asset)
     {
-        OnSet(asset);
+        OnSet((Asset*)asset);
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AssetReference"/> class.
+    /// </summary>
+    /// <param name="owner">The reference owner to keep notified about asset changes.</param>
+    explicit AssetReference(IAssetReference* owner)
+        : AssetReferenceBase(owner)
+    {
     }
 
     /// <summary>
@@ -112,12 +129,12 @@ public:
     /// <param name="other">The other.</param>
     AssetReference(const AssetReference& other)
     {
-        OnSet(other.Get());
+        OnSet(other._asset);
     }
 
-    AssetReference(AssetReference&& other)
+    AssetReference(AssetReference&& other) noexcept
     {
-        OnSet(other.Get());
+        OnSet(other._asset);
         other.OnSet(nullptr);
     }
 
@@ -125,7 +142,7 @@ public:
     {
         if (&other != this)
         {
-            OnSet(other.Get());
+            OnSet(other._asset);
             other.OnSet(nullptr);
         }
         return *this;
@@ -139,41 +156,40 @@ public:
     }
 
 public:
-
     FORCE_INLINE AssetReference& operator=(const AssetReference& other)
     {
-        OnSet(other.Get());
+        OnSet(other._asset);
         return *this;
     }
 
     FORCE_INLINE AssetReference& operator=(T* other)
     {
-        OnSet(other);
+        OnSet((Asset*)other);
         return *this;
     }
 
     FORCE_INLINE AssetReference& operator=(const Guid& id)
     {
-        OnSet((T*)::LoadAsset(id, T::TypeInitializer));
+        OnSet(::LoadAsset(id, T::TypeInitializer));
         return *this;
     }
 
-    FORCE_INLINE bool operator==(T* other)
+    FORCE_INLINE bool operator==(T* other) const
     {
         return _asset == other;
     }
 
-    FORCE_INLINE bool operator==(const AssetReference& other)
+    FORCE_INLINE bool operator==(const AssetReference& other) const
     {
         return _asset == other._asset;
     }
 
-    FORCE_INLINE bool operator!=(T* other)
+    FORCE_INLINE bool operator!=(T* other) const
     {
         return _asset != other;
     }
 
-    FORCE_INLINE bool operator!=(const AssetReference& other)
+    FORCE_INLINE bool operator!=(const AssetReference& other) const
     {
         return _asset != other._asset;
     }
@@ -220,14 +236,13 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Sets the asset reference.
     /// </summary>
     /// <param name="asset">The asset.</param>
     void Set(T* asset)
     {
-        OnSet(asset);
+        OnSet((Asset*)asset);
     }
 };
 

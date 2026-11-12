@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Runtime.CompilerServices;
 
@@ -13,7 +13,7 @@ namespace FlaxEngine
         private FontAsset _font;
 
         [NoSerialize]
-        private int _size;
+        private float _size;
 
         [NoSerialize]
         private Font _cachedFont;
@@ -33,11 +33,22 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="font">The font.</param>
         /// <param name="size">The font size.</param>
-        public FontReference(FontAsset font, int size)
+        public FontReference(FontAsset font, float size)
         {
             _font = font;
             _size = size;
             _cachedFont = null;
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="FontReference"/> struct.
+        /// </summary>
+        /// <param name="other">The other font reference.</param>
+        public FontReference(FontReference other)
+        {
+            _font = other._font;
+            _size = other._size;
+            _cachedFont = other._cachedFont;
         }
 
         /// <summary>
@@ -79,8 +90,8 @@ namespace FlaxEngine
         /// <summary>
         /// The size of the font characters.
         /// </summary>
-        [EditorOrder(10), Limit(1, 500, 0.1f), Tooltip("The size of the font characters.")]
-        public int Size
+        [EditorOrder(10), Limit(1, 500, 0.5f), Tooltip("The size of the font characters.")]
+        public float Size
         {
             get => _size;
             set
@@ -96,7 +107,7 @@ namespace FlaxEngine
         /// <summary>
         /// Gets the font object described by the structure.
         /// </summary>
-        /// <returns>Th font or null if descriptor is invalid.</returns>
+        /// <returns>The font or null if descriptor is invalid.</returns>
         public Font GetFont()
         {
             if (_cachedFont)
@@ -104,6 +115,24 @@ namespace FlaxEngine
             if (_font)
                 _cachedFont = _font.CreateFont(_size);
             return _cachedFont;
+        }
+
+        /// <summary>
+        /// Gets the bold font object described by the structure.
+        /// </summary>
+        /// <returns>The bold font asset.</returns>
+        public FontReference GetBold()
+        {
+            return new FontReference(_font?.GetBold(), _size);
+        }
+
+        /// <summary>
+        /// Gets the italic font object described by the structure.
+        /// </summary>
+        /// <returns>The bold font asset.</returns>
+        public FontReference GetItalic()
+        {
+            return new FontReference(_font?.GetItalic(), _size);
         }
 
         /// <summary>
@@ -158,7 +187,7 @@ namespace FlaxEngine
             unchecked
             {
                 int hashCode = _font ? _font.GetHashCode() : 0;
-                hashCode = (hashCode * 397) ^ _size;
+                hashCode = (hashCode * 397) ^ _size.GetHashCode();
                 return hashCode;
             }
         }

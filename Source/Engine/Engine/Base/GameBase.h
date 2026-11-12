@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Core/Enums.h"
+#include "Engine/Core/Types/BaseTypes.h"
 
 /// <summary>
 /// Build game header flags.

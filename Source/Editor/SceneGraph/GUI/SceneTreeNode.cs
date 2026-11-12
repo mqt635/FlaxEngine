@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.SceneGraph.Actors;
 using FlaxEngine;
@@ -32,7 +32,7 @@ namespace FlaxEditor.SceneGraph.GUI
         }
 
         /// <inheritdoc />
-        protected override Color CacheTextColor()
+        protected override Color GetTextColor()
         {
             return Style.Current.Foreground;
         }

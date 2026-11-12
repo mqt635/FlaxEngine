@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using NUnit.Framework;
 
@@ -12,6 +12,7 @@ namespace Flax.Build.Tests
         [Test, Sequential]
         public void TestParseOptionOnly([Values(
                 "-something",
+                "something",
                 "  \t   \t-\t   \tsomething\t  ",
                 "-something=")]
             string commandLine)
@@ -25,6 +26,11 @@ namespace Flax.Build.Tests
         [Test, Sequential]
         public void TestParseOneValue([Values(
                 "-something=value",
+                "something=value",
+                "-something=\"value\"",
+                "-something=\\\"value\\\"",
+                "\"-something=\"value\"\"",
+                "\"-something=\\\"value\\\"\"",
                 "  \t   \t-\t   \tsomething\t =value  ",
                 "-something=value    ")]
             string commandLine)
@@ -143,6 +149,12 @@ namespace Flax.Build.Tests
             CommandLine.Configure(typeof(TestConfig1), "-option1 -option");
             Assert.AreEqual(true, TestConfig1.Option1);
 
+            CommandLine.Configure(typeof(TestConfig1), "-option1=0");
+            Assert.AreEqual(false, TestConfig1.Option1);
+
+            CommandLine.Configure(typeof(TestConfig1), "-option1=TRUE");
+            Assert.AreEqual(true, TestConfig1.Option1);
+
             CommandLine.Configure(typeof(TestConfig1), "-option2=11");
             Assert.AreEqual(11, TestConfig1.Option2);
 
@@ -177,6 +189,28 @@ namespace Flax.Build.Tests
             Assert.AreEqual(2, TestConfig3.Option1.Length);
             Assert.AreEqual("value1", TestConfig3.Option1[0]);
             Assert.AreEqual("value2", TestConfig3.Option1[1]);
+        }
+
+        [Test]
+        public void TestVisualStudioSolutionFileExtension()
+        {
+            var gen2026 = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio2026, TargetType.NativeCpp);
+            Assert.AreEqual("slnx", gen2026.SolutionFileExtension);
+
+            var genDefault = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio, TargetType.NativeCpp);
+            Assert.AreEqual("slnx", genDefault.SolutionFileExtension);
+
+            var gen2022 = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio2022, TargetType.NativeCpp);
+            Assert.AreEqual("sln", gen2022.SolutionFileExtension);
+
+            var gen2019 = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio2019, TargetType.NativeCpp);
+            Assert.AreEqual("sln", gen2019.SolutionFileExtension);
+
+            var gen2017 = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio2017, TargetType.NativeCpp);
+            Assert.AreEqual("sln", gen2017.SolutionFileExtension);
+
+            var gen2015 = (Flax.Build.Projects.VisualStudio.VisualStudioProjectGenerator)Flax.Build.Projects.ProjectGenerator.Create(Flax.Build.Projects.ProjectFormat.VisualStudio2015, TargetType.NativeCpp);
+            Assert.AreEqual("sln", gen2015.SolutionFileExtension);
         }
     }
 }

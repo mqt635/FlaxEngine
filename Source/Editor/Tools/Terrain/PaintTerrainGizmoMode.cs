@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using FlaxEditor.Gizmo;
 using FlaxEditor.SceneGraph.Actors;
 using FlaxEditor.Tools.Terrain.Brushes;
 using FlaxEditor.Tools.Terrain.Paint;
@@ -20,24 +21,35 @@ namespace FlaxEditor.Tools.Terrain
     [HideInEditor]
     public class PaintTerrainGizmoMode : EditorGizmoMode
     {
-        /// <summary>
-        /// The terrain layer names.
-        /// </summary>
-        public static readonly string[] TerrainLayerNames =
+        private struct SplatmapData
         {
-            "Layer 0",
-            "Layer 1",
-            "Layer 2",
-            "Layer 3",
-            "Layer 4",
-            "Layer 5",
-            "Layer 6",
-            "Layer 7",
-        };
+            public IntPtr DataPtr;
+            public int Size;
 
-        private IntPtr _cachedSplatmapData;
-        private int _cachedSplatmapDataSize;
+            public void EnsureCapacity(int size)
+            {
+                if (Size < size)
+                {
+                    if (DataPtr != IntPtr.Zero)
+                        Marshal.FreeHGlobal(DataPtr);
+                    DataPtr = Marshal.AllocHGlobal(size);
+                    Utils.MemoryClear(DataPtr, (ulong)size);
+                    Size = size;
+                }
+            }
+
+            public void Free()
+            {
+                if (DataPtr == IntPtr.Zero)
+                    return;
+                Marshal.FreeHGlobal(DataPtr);
+                DataPtr = IntPtr.Zero;
+                Size = 0;
+            }
+        }
+
         private EditTerrainMapAction _activeAction;
+        private SplatmapData[] _cachedSplatmapData = new SplatmapData[2];
 
         /// <summary>
         /// The terrain painting gizmo.
@@ -229,20 +241,13 @@ namespace FlaxEditor.Tools.Terrain
         /// Gets the splatmap temporary scratch memory buffer used to modify terrain samples. Allocated memory is unmanaged by GC.
         /// </summary>
         /// <param name="size">The minimum buffer size (in bytes).</param>
+        /// <param name="splatmapIndex">The splatmap index for which to return/create the temp buffer.</param>
         /// <returns>The allocated memory using <see cref="Marshal"/> interface.</returns>
-        public IntPtr GetSplatmapTempBuffer(int size)
+        public IntPtr GetSplatmapTempBuffer(int size, int splatmapIndex)
         {
-            if (_cachedSplatmapDataSize < size)
-            {
-                if (_cachedSplatmapData != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(_cachedSplatmapData);
-                }
-                _cachedSplatmapData = Marshal.AllocHGlobal(size);
-                _cachedSplatmapDataSize = size;
-            }
-
-            return _cachedSplatmapData;
+            ref var splatmapData = ref _cachedSplatmapData[splatmapIndex];
+            splatmapData.EnsureCapacity(size);
+            return splatmapData.DataPtr;
         }
 
         /// <summary>
@@ -251,11 +256,11 @@ namespace FlaxEditor.Tools.Terrain
         internal EditTerrainMapAction CurrentEditUndoAction => _activeAction;
 
         /// <inheritdoc />
-        public override void Init(MainEditorGizmoViewport viewport)
+        public override void Init(IGizmoOwner owner)
         {
-            base.Init(viewport);
+            base.Init(owner);
 
-            Gizmo = new PaintTerrainGizmo(viewport, this);
+            Gizmo = new PaintTerrainGizmo(owner, this);
             Gizmo.PaintStarted += OnPaintStarted;
             Gizmo.PaintEnded += OnPaintEnded;
         }
@@ -265,7 +270,7 @@ namespace FlaxEditor.Tools.Terrain
         {
             base.OnActivated();
 
-            Viewport.Gizmos.Active = Gizmo;
+            Owner.Gizmos.Active = Gizmo;
             ClearCursor();
         }
 
@@ -275,12 +280,8 @@ namespace FlaxEditor.Tools.Terrain
             base.OnDeactivated();
 
             // Free temporary memory buffer
-            if (_cachedSplatmapData != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(_cachedSplatmapData);
-                _cachedSplatmapData = IntPtr.Zero;
-                _cachedSplatmapDataSize = 0;
-            }
+            foreach (ref var splatmapData in _cachedSplatmapData.AsSpan())
+                splatmapData.Free();
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -21,6 +21,7 @@ namespace FlaxEditor.Content.Import
     {
         private TreeNode _rootNode;
         private CustomEditorPresenter _settingsEditor;
+        private Tree _tree;
 
         /// <summary>
         /// Gets the entries count.
@@ -83,7 +84,7 @@ namespace FlaxEditor.Content.Import
                 Offsets = new Margin(-ButtonsWidth - ButtonsMargin, ButtonsWidth, -ButtonsHeight - ButtonsMargin, ButtonsHeight),
                 Parent = this
             };
-            importButton.Clicked += OnImport;
+            importButton.Clicked += OnSubmit;
             var cancelButton = new Button
             {
                 Text = "Cancel",
@@ -106,11 +107,11 @@ namespace FlaxEditor.Content.Import
             _settingsEditor.Panel.Parent = splitPanel.Panel2;
 
             // Setup tree
-            var tree = new Tree(true)
+            _tree = new Tree(true)
             {
                 Parent = splitPanel.Panel1
             };
-            tree.RightClick += OnTreeRightClick;
+            _tree.RightClick += OnTreeRightClick;
             _rootNode = new TreeNode(false);
             for (int i = 0; i < entries.Count; i++)
             {
@@ -124,22 +125,22 @@ namespace FlaxEditor.Content.Import
             }
             _rootNode.Expand();
             _rootNode.ChildrenIndent = 0;
-            _rootNode.Parent = tree;
-            tree.Margin = new Margin(0.0f, 0.0f, -14.0f, 2.0f); // Hide root node
-            tree.SelectedChanged += OnSelectedChanged;
+            _rootNode.Parent = _tree;
+            _tree.Margin = new Margin(0.0f, 0.0f, -16.0f, 2.0f); // Hide root node
+            _tree.SelectedChanged += OnSelectedChanged;
 
             // Select the first item
-            tree.Select(_rootNode.Children[0] as TreeNode);
+            _tree.Select(_rootNode.Children[0] as TreeNode);
 
-            _dialogSize = new Vector2(TotalWidth, EditorHeight + splitPanel.Offsets.Height);
+            _dialogSize = new Float2(TotalWidth, EditorHeight + splitPanel.Offsets.Height);
         }
 
-        private void OnTreeRightClick(TreeNode node, Vector2 location)
+        private void OnTreeRightClick(TreeNode node, Float2 location)
         {
             var menu = new ContextMenu();
             menu.AddButton("Rename", OnRenameClicked);
             menu.AddButton("Don't import", OnDontImportClicked);
-            menu.AddButton("Show in Explorer", OnShowInExplorerClicked);
+            menu.AddButton(Utilities.Constants.ShowInExplorer, OnShowInExplorerClicked);
             menu.Tag = node;
             menu.Show(node, location);
         }
@@ -183,10 +184,28 @@ namespace FlaxEditor.Content.Import
             }
 
             /// <inheritdoc />
-            protected override bool OnMouseDoubleClickHeader(ref Vector2 location, MouseButton button)
+            protected override bool OnMouseDoubleClickHeader(ref Float2 location, MouseButton button)
             {
-                StartRenaming();
-                return true;
+                if (button == MouseButton.Left)
+                {
+                    StartRenaming();
+                    return true;
+                }
+
+                return false;
+            }
+
+            public override bool OnKeyDown(KeyboardKeys key)
+            {
+                if (base.OnKeyDown(key))
+                    return true;
+                switch (key)
+                {
+                case KeyboardKeys.F2:
+                    StartRenaming();
+                    return true;
+                }
+                return false;
             }
 
             /// <summary>
@@ -210,24 +229,6 @@ namespace FlaxEditor.Content.Import
             }
         }
 
-        private void OnImport()
-        {
-            var entries = new List<ImportFileEntry>(_rootNode.ChildrenCount);
-            for (int i = 0; i < _rootNode.ChildrenCount; i++)
-            {
-                if (_rootNode.Children[i].Tag is ImportFileEntry fileEntry)
-                    entries.Add(fileEntry);
-            }
-            Editor.Instance.ContentImporting.LetThemBeImportedxD(entries);
-
-            Close(DialogResult.OK);
-        }
-
-        private void OnCancel()
-        {
-            Close(DialogResult.Cancel);
-        }
-
         private void OnSelectedChanged(List<TreeNode> before, List<TreeNode> after)
         {
             var selection = new List<object>(after.Count);
@@ -241,31 +242,33 @@ namespace FlaxEditor.Content.Import
         }
 
         /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            var entries = new List<ImportFileEntry>(_rootNode.ChildrenCount);
+            for (int i = 0; i < _rootNode.ChildrenCount; i++)
+            {
+                if (_rootNode.Children[i].Tag is ImportFileEntry fileEntry)
+                    entries.Add(fileEntry);
+            }
+            Editor.Instance.ContentImporting.LetThemBeImportedxD(entries);
+
+            base.OnSubmit();
+        }
+
+        /// <inheritdoc />
         protected override void SetupWindowSettings(ref CreateWindowSettings settings)
         {
             base.SetupWindowSettings(ref settings);
 
-            settings.MinimumSize = new Vector2(300, 400);
+            settings.MinimumSize = new Float2(300, 400);
             settings.HasSizingFrame = true;
         }
 
         /// <inheritdoc />
-        public override bool OnKeyDown(KeyboardKeys key)
+        public override void Focus()
         {
-            if (base.OnKeyDown(key))
-                return true;
-
-            switch (key)
-            {
-            case KeyboardKeys.Escape:
-                OnCancel();
-                return true;
-            case KeyboardKeys.Return:
-                OnImport();
-                return true;
-            }
-
-            return false;
+            base.Focus();
+            _tree.SelectedNode?.Focus();
         }
     }
 }

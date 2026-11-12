@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 /// <summary>
 /// Unix platform file object implementation.
 /// </summary>
-class UnixFile : public FileBase
+class FLAXENGINE_API UnixFile : public FileBase
 {
 protected:
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -54,6 +54,12 @@ namespace ShaderProcessing
         /// </summary>
         /// <returns>The graphics feature level</returns>
         virtual FeatureLevel GetFeatureLevel() const = 0;
+
+        /// <summary>
+        /// Gets the parser feature flags for the Shader Profile of the target platform graphics backend.
+        /// </summary>
+        /// <returns>The shader profile features mask.</returns>
+        virtual ShaderProfileFeatures GetFeatures() const = 0;
 
         /// <summary>
         /// Gets the parser macros.

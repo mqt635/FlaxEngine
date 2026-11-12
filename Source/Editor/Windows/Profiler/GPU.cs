@@ -1,9 +1,27 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+#if USE_PROFILER
 using System.Collections.Generic;
 using FlaxEditor.GUI;
 using FlaxEngine;
 using FlaxEngine.GUI;
+
+namespace FlaxEngine
+{
+    partial class ProfilerGPU
+    {
+        /// <summary>
+        /// Delegate for profiler event click callback. Can be used by external profiling tools integration inside Editor.
+        /// </summary>
+        /// <param name="e">Event data.</param>
+        public delegate void EventDelegate(ref Event e);
+
+        /// <summary>
+        /// Called when the user double-clicks a GPU profiler event in Editor to open it. Can be used by external profiling tools integration inside Editor.
+        /// </summary>
+        public static EventDelegate OpenEventEditor;
+    }
+}
 
 namespace FlaxEditor.Windows.Profiler
 {
@@ -25,35 +43,48 @@ namespace FlaxEditor.Windows.Profiler
         : base("GPU")
         {
             // Layout
-            var panel = new Panel(ScrollBars.Vertical)
+            var mainPanel = new Panel(ScrollBars.None)
             {
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
                 Parent = this,
             };
-            var layout = new VerticalPanel
-            {
-                AnchorPreset = AnchorPresets.HorizontalStretchTop,
-                Offsets = Margin.Zero,
-                IsScrollable = true,
-                Parent = panel,
-            };
 
-            // Chart
+            // Charts
             _drawTimeCPU = new SingleChart
             {
                 Title = "Draw (CPU)",
+                AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Offsets = Margin.Zero,
+                Height = SingleChart.DefaultHeight,
                 FormatSample = v => (Mathf.RoundToInt(v * 10.0f) / 10.0f) + " ms",
-                Parent = layout,
+                Parent = mainPanel,
             };
             _drawTimeCPU.SelectedSampleChanged += OnSelectedSampleChanged;
             _drawTimeGPU = new SingleChart
             {
                 Title = "Draw (GPU)",
+                AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Offsets = new Margin(0, 0, _drawTimeCPU.Height + 2, SingleChart.DefaultHeight),
                 FormatSample = v => (Mathf.RoundToInt(v * 10.0f) / 10.0f) + " ms",
-                Parent = layout,
+                Parent = mainPanel,
             };
             _drawTimeGPU.SelectedSampleChanged += OnSelectedSampleChanged;
+
+            var panel = new Panel(ScrollBars.Vertical)
+            {
+                AnchorPreset = AnchorPresets.StretchAll,
+                Offsets = new Margin(0, 0, _drawTimeCPU.Height + _drawTimeGPU.Height + 4, 0),
+                Parent = mainPanel,
+            };
+            var layout = new VerticalPanel
+            {
+                AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Offsets = Margin.Zero,
+                Pivot = Float2.Zero,
+                IsScrollable = true,
+                Parent = panel,
+            };
 
             // Timeline
             _timeline = new Timeline
@@ -63,9 +94,13 @@ namespace FlaxEditor.Windows.Profiler
             };
 
             // Table
-            var headerColor = Style.Current.LightBackground;
+            var style = Style.Current;
+            var headerColor = style.LightBackground;
+            var textColor = style.Foreground;
             _table = new Table
             {
+                RowColorEven = Color.Transparent,
+                RowColorOdd = style.Background * 1.4f,
                 Columns = new[]
                 {
                     new ColumnDefinition
@@ -74,33 +109,42 @@ namespace FlaxEditor.Windows.Profiler
                         CellAlignment = TextAlignment.Near,
                         Title = "Event",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
                     },
                     new ColumnDefinition
                     {
                         Title = "Total",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
                         FormatValue = (x) => ((float)x).ToString("0.0") + '%',
                     },
                     new ColumnDefinition
                     {
                         Title = "GPU ms",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
                         FormatValue = (x) => ((float)x).ToString("0.000"),
                     },
                     new ColumnDefinition
                     {
                         Title = "Draw Calls",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
+                        FormatValue = FormatCountLong,
                     },
                     new ColumnDefinition
                     {
                         Title = "Triangles",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
+                        FormatValue = FormatCountLong,
                     },
                     new ColumnDefinition
                     {
                         Title = "Vertices",
                         TitleBackgroundColor = headerColor,
+                        TitleColor = textColor,
+                        FormatValue = FormatCountLong,
                     },
                 },
                 Parent = layout,
@@ -114,6 +158,11 @@ namespace FlaxEditor.Windows.Profiler
                 0.1f,
                 0.1f,
             };
+        }
+
+        private static string FormatCountLong(object x)
+        {
+            return ((long)x).ToString("###,###,###");
         }
 
         /// <inheritdoc />
@@ -158,7 +207,6 @@ namespace FlaxEditor.Windows.Profiler
         /// <inheritdoc />
         public override void OnDestroy()
         {
-            Clear();
             _timelineEventsCache?.Clear();
             _tableRowsCache?.Clear();
 
@@ -186,6 +234,8 @@ namespace FlaxEditor.Windows.Profiler
             }
             control.Bounds = new Rectangle(x, e.Depth * Timeline.Event.DefaultHeight, width, Timeline.Event.DefaultHeight - 1);
             control.Name = name;
+            control.Tag = e;
+            control.EventDoubleClick = OnEventDoubleClick;
             control.TooltipText = string.Format("{0}, {1} ms", name, ((int)(e.Time * 10000.0) / 10000.0f));
             control.Parent = parent;
 
@@ -291,21 +341,7 @@ namespace FlaxEditor.Windows.Profiler
         private void UpdateTable()
         {
             _table.IsLayoutLocked = true;
-            int idx = 0;
-            while (_table.Children.Count > idx)
-            {
-                var child = _table.Children[idx];
-                if (child is Row row)
-                {
-                    _tableRowsCache.Add(row);
-                    child.Parent = null;
-                }
-                else
-                {
-                    idx++;
-                }
-            }
-            _table.LockChildrenRecursive();
+            RecycleTableRows(_table, _tableRowsCache);
 
             UpdateTableInner();
 
@@ -320,11 +356,9 @@ namespace FlaxEditor.Windows.Profiler
             var data = _events.Get(_drawTimeCPU.SelectedSampleIndex);
             if (data == null || data.Length == 0)
                 return;
-
-            float totalTimeMs = _drawTimeCPU.SelectedSample;
+            float totalTimeMs = _drawTimeGPU.SelectedSample;
 
             // Add rows
-            var rowColor2 = Style.Current.Background * 1.4f;
             for (int i = 0; i < data.Length; i++)
             {
                 var e = data[i];
@@ -339,23 +373,29 @@ namespace FlaxEditor.Windows.Profiler
                 }
                 else
                 {
-                    row = new Row
+                    row = new ClickableRow
                     {
                         Values = new object[6],
+                        BackgroundColors = new Color[6],
+                        RowDoubleClick = OnRowDoubleClick,
                     };
+                    for (int k = 0; k < row.BackgroundColors.Length; k++)
+                        row.BackgroundColors[k] = Color.Transparent;
                 }
                 {
                     // Event
                     row.Values[0] = name;
 
                     // Total (%)
-                    row.Values[1] = (int)(e.Time / totalTimeMs * 1000.0f) / 10.0f;
+                    float rowTimePerc = (float)(e.Time / totalTimeMs);
+                    row.Values[1] = (int)(rowTimePerc * 1000.0f) / 10.0f;
+                    row.BackgroundColors[1] = Color.Red.AlphaMultiplied(Mathf.Min(1, rowTimePerc) * 0.5f);
 
                     // GPU ms
                     row.Values[2] = (e.Time * 10000.0f) / 10000.0f;
 
                     // Draw Calls
-                    row.Values[3] = e.Stats.DrawCalls;
+                    row.Values[3] = e.Stats.DrawCalls + e.Stats.DispatchCalls;
 
                     // Triangles
                     row.Values[4] = e.Stats.Triangles;
@@ -366,9 +406,28 @@ namespace FlaxEditor.Windows.Profiler
                 row.Depth = e.Depth;
                 row.Width = _table.Width;
                 row.Visible = e.Depth < 3;
-                row.BackgroundColor = i % 2 == 0 ? rowColor2 : Color.Transparent;
                 row.Parent = _table;
+                row.Tag = e;
+            }
+        }
+
+        private void OnEventDoubleClick(Timeline.Event control)
+        {
+            if (ProfilerGPU.OpenEventEditor != null)
+            {
+                var e = (ProfilerGPU.Event)control.Tag;
+                ProfilerGPU.OpenEventEditor(ref e);
+            }
+        }
+
+        private void OnRowDoubleClick(ClickableRow row)
+        {
+            if (ProfilerGPU.OpenEventEditor != null)
+            {
+                var e = (ProfilerGPU.Event)row.Tag;
+                ProfilerGPU.OpenEventEditor(ref e);
             }
         }
     }
 }
+#endif

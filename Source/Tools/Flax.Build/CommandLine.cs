@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 
 namespace Flax.Build
 {
@@ -14,6 +15,9 @@ namespace Flax.Build
     /// </summary>
     public class CommandLine
     {
+        private static string _commandLine;
+        internal static List<MethodInfo> ConsoleCommands;
+
         /// <summary>
         /// The command line option data.
         /// </summary>
@@ -44,15 +48,18 @@ namespace Flax.Build
         /// <returns>The command line.</returns>
         public static string Get()
         {
+            if (_commandLine != null)
+                return _commandLine;
+
+            _commandLine = string.Empty;
             string[] args = Environment.GetCommandLineArgs();
             if (args.Length > 1)
             {
                 string commandLine = Environment.CommandLine.Remove(0, args[0].Length + 2);
-                commandLine = commandLine.Trim(' ');
-                return commandLine;
+                _commandLine = commandLine.Trim(' ');
             }
 
-            return string.Empty;
+            return _commandLine;
         }
 
         /// <summary>
@@ -206,6 +213,26 @@ namespace Flax.Build
         }
 
         /// <summary>
+        /// Gets the options for the given configuration (key=value pairs).
+        /// </summary>
+        /// <param name="configuration">The configuration (key=value pairs).</param>
+        /// <returns>The options.</returns>
+        public static Option[] GetOptions(Dictionary<string, string> configuration)
+        {
+            var options = new Option[configuration.Count];
+            int i = 0;
+            foreach (var e in configuration)
+            {
+                options[i++] = new Option
+                {
+                    Name = e.Key,
+                    Value = e.Value,
+                };
+            }
+            return options;
+        }
+
+        /// <summary>
         /// Parses the specified command line.
         /// </summary>
         /// <param name="commandLine">The command line.</param>
@@ -224,12 +251,13 @@ namespace Flax.Build
                 // Read option prefix
                 if (i == length)
                     break;
-                var wholeQuote = commandLine[i] == '\"';
+                var wholeQuote = IsQuote(commandLine[i]);
                 if (wholeQuote)
                     i++;
-                if (commandLine[i] == '-')
-                    i++;
-                else if (commandLine[i] == '/')
+                if (i == length)
+                    break;
+                var hasArgPrefix = commandLine[i] == '-' || commandLine[i] == '/';
+                if (hasArgPrefix)
                     i++;
 
                 // Skip white space
@@ -240,6 +268,8 @@ namespace Flax.Build
                 int nameStart = i;
                 while (i < length && commandLine[i] != '-' && commandLine[i] != '=' && !char.IsWhiteSpace(commandLine[i]))
                     i++;
+                if (wholeQuote && IsQuote(commandLine[i]))
+                    i--;
                 int nameEnd = i;
                 string name = commandLine.Substring(nameStart, nameEnd - nameStart);
 
@@ -257,7 +287,7 @@ namespace Flax.Build
                     });
                     if (wholeQuote)
                         i++;
-                    if (i != length && commandLine[i] != '\"')
+                    if (i < length && !IsQuote(commandLine[i]))
                         i++;
                     continue;
                 }
@@ -265,28 +295,41 @@ namespace Flax.Build
                 // Read value
                 i++;
                 int valueStart, valueEnd;
-                if (commandLine[i] == '\"')
+                if (commandLine.Length > i + 1 && commandLine[i] == '\\' && IsQuote(commandLine[i + 1]))
                 {
-                    valueStart = i + 1;
+                    valueStart = i + 2;
                     i++;
-                    while (i < length && commandLine[i] != '\"')
+                    while (i + 1 < length && commandLine[i] != '\\' && !IsQuote(commandLine[i + 1]))
                         i++;
                     valueEnd = i;
-                    i++;
+                    i += 2;
+                    if (wholeQuote)
+                    {
+                        while (i < length && !IsQuote(commandLine[i]))
+                            i++;
+                        i++;
+                    }
                 }
-                else if (commandLine[i] == '\'')
+                else if (IsQuote(commandLine[i]))
                 {
+                    var quoteChar = commandLine[i];
                     valueStart = i + 1;
                     i++;
-                    while (i < length && commandLine[i] != '\'')
+                    while (i < length && commandLine[i] != quoteChar)
                         i++;
                     valueEnd = i;
                     i++;
+                    if (wholeQuote)
+                    {
+                        while (i < length && !IsQuote(commandLine[i]))
+                            i++;
+                        i++;
+                    }
                 }
                 else if (wholeQuote)
                 {
                     valueStart = i;
-                    while (i < length && commandLine[i] != '\"')
+                    while (i < length && !IsQuote(commandLine[i]))
                         i++;
                     valueEnd = i;
                     i++;
@@ -299,10 +342,13 @@ namespace Flax.Build
                     valueEnd = i;
                 }
                 string value = commandLine.Substring(valueStart, valueEnd - valueStart);
+                value = value.Trim();
+                if (value.StartsWith("\\\"") && value.EndsWith("\\\""))
+                    value = value.Substring(2, value.Length - 4);
                 options.Add(new Option
                 {
                     Name = name,
-                    Value = value.Trim()
+                    Value = value
                 });
             }
 
@@ -347,19 +393,67 @@ namespace Flax.Build
             Configure(GetMembers(obj), obj, commandLine);
         }
 
+        /// <summary>
+        /// Configures the members of the specified object using the command line options.
+        /// </summary>
+        /// <param name="type">The type.</param>
+        /// <param name="configuration">The configuration (key=value pairs).</param>
+        public static void Configure(Type type, Dictionary<string, string> configuration)
+        {
+            if (configuration == null || configuration.Count == 0)
+                return;
+            Configure(GetMembers(type), null, configuration);
+        }
+
+        /// <summary>
+        /// Configures the members of the specified object using the command line options.
+        /// </summary>
+        /// <param name="obj">The object.</param>
+        /// <param name="configuration">The configuration (key=value pairs).</param>
+        public static void Configure(object obj, Dictionary<string, string> configuration)
+        {
+            if (configuration == null || configuration.Count == 0)
+                return;
+            Configure(GetMembers(obj), obj, configuration);
+        }
+
+        internal static void ConfigureChild(Type type, Dictionary<string, string> configuration, string name = null, bool withCommandLine = true)
+        {
+            if (configuration != null && configuration.TryGetValue(name ?? type.Name, out var subConfig) && subConfig?.Length != 0)
+            {
+                var child = JsonSerializer.Deserialize<Dictionary<string, string>>(subConfig.AsSpan(), ProjectInfo.JsonOptions);
+                Configure(type, child);
+            }
+            if (withCommandLine)
+            {
+                Configure(type);
+            }
+        }
+
         private static void Configure(Dictionary<CommandLineAttribute, MemberInfo> members, object instance, string commandLine)
         {
             if (commandLine == null)
                 throw new ArgumentNullException();
-
-            // Process command line
             var options = GetOptions(commandLine);
+            Configure(members, instance, options);
+        }
 
+
+        private static void Configure(Dictionary<CommandLineAttribute, MemberInfo> members, object instance, Dictionary<string, string> configuration)
+        {
+            if (configuration == null)
+                throw new ArgumentNullException();
+            var options = GetOptions(configuration);
+            Configure(members, instance, options);
+        }
+
+        private static void Configure(Dictionary<CommandLineAttribute, MemberInfo> members, object instance, Option[] options)
+        {
             foreach (var e in members)
             {
                 // Get option from command line
                 var member = e.Value;
-                var option = options.FirstOrDefault(x => string.Equals(x.Name, e.Key.Name, StringComparison.OrdinalIgnoreCase));
+                var option = options.FirstOrDefault(x => x != null && string.Equals(x.Name, e.Key.Name, StringComparison.OrdinalIgnoreCase));
                 if (option == null)
                     continue;
 
@@ -375,6 +469,14 @@ namespace Flax.Build
                     {
                         type = property.PropertyType;
                     }
+                    else if (member is MethodInfo method)
+                    {
+                        // Add console command to be invoked by build tool
+                        if (ConsoleCommands == null)
+                            ConsoleCommands = new List<MethodInfo>();
+                        ConsoleCommands.Add(method);
+                        continue;
+                    }
                     else
                     {
                         throw new Exception("Unknown member type.");
@@ -383,9 +485,13 @@ namespace Flax.Build
                 try
                 {
                     // Implicit casting to boolean value
-                    if (type == typeof(bool) && string.IsNullOrEmpty(option.Value))
+                    if (type == typeof(bool) && (string.IsNullOrEmpty(option.Value) || option.Value == "1"))
                     {
                         value = true;
+                    }
+                    else if (type == typeof(bool) && option.Value == "0")
+                    {
+                        value = false;
                     }
                     // Arrays handling
                     else if (type.IsArray)
@@ -428,6 +534,11 @@ namespace Flax.Build
                     throw new Exception(string.Format("Failed to set configuration property {0} with argument {1} to value \"{2}\"", member.Name, option.Name, option.Value), ex);
                 }
             }
+        }
+
+        private static bool IsQuote(char c)
+        {
+            return c == '\"' || c == '\'';
         }
     }
 }

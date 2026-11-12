@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.ComponentModel;
 using FlaxEditor.GUI.Docking;
 using FlaxEngine;
+using FlaxEngine.GUI;
 
 namespace FlaxEditor.Options
 {
@@ -37,7 +39,7 @@ namespace FlaxEditor.Options
             /// </summary>
             TimeSinceStartup,
         }
-    
+
         /// <summary>
         /// A proxy DockState for window open method.
         /// </summary>
@@ -47,31 +49,191 @@ namespace FlaxEditor.Options
             /// The floating window.
             /// </summary>
             Float = DockState.Float,
-            
+
             /// <summary>
             /// The dock fill as a tab.
             /// </summary>
             DockFill = DockState.DockFill,
-            
+
             /// <summary>
             /// The dock left.
             /// </summary>
             DockLeft = DockState.DockLeft,
-            
+
             /// <summary>
             /// The dock right.
             /// </summary>
             DockRight = DockState.DockRight,
-            
+
             /// <summary>
             /// The dock top.
             /// </summary>
             DockTop = DockState.DockTop,
-            
+
             /// <summary>
             /// The dock bottom.
             /// </summary>
             DockBottom = DockState.DockBottom
+        }
+
+        /// <summary>
+        /// Options for the visibility status of the tab close button.
+        /// </summary>
+        public enum TabCloseButtonVisibility
+        {
+            /// <summary>
+            /// Never show the close button.
+            /// </summary>
+            Never,
+
+            /// <summary>
+            /// Show the close button on tabs that are currently selected.
+            /// </summary>
+            SelectedTab,
+
+            /// <summary>
+            /// Show the close button on all tabs that can be closed.
+            /// </summary>
+            Always
+        }
+
+        /// <summary>
+        /// Options for the action taken by the play button.
+        /// </summary>
+        public enum PlayAction
+        {
+            /// <summary>
+            /// Launches the game from the First Scene defined in the project settings.
+            /// </summary>
+            PlayGame,
+
+            /// <summary>
+            /// Launches the game using the scenes currently loaded in the editor.
+            /// </summary>
+            PlayScenes,
+        }
+
+        /// <summary>
+        /// Available window modes for the game window.
+        /// </summary>
+        public enum GameWindowMode
+        {
+            /// <summary>
+            /// Shows the game window docked, inside the editor.
+            /// </summary>
+            Docked,
+
+            /// <summary>
+            /// Shows the game window as a popup.
+            /// </summary>
+            PopupWindow,
+
+            /// <summary>
+            /// Shows the game window maximized. (Same as pressing F11)
+            /// </summary>
+            MaximizedWindow,
+
+            /// <summary>
+            /// Shows the game window borderless.
+            /// </summary>
+            BorderlessWindow,
+        }
+
+        /// <summary>
+        /// Options for formatting numerical values.
+        /// </summary>
+        public enum ValueFormattingType
+        {
+            /// <summary>
+            /// No formatting.
+            /// </summary>
+            None,
+
+            /// <summary>
+            /// Format using the base SI unit.
+            /// </summary>
+            BaseUnit,
+
+            /// <summary>
+            /// Format using a unit that matches the value best.
+            /// </summary>
+            AutoUnit,
+        }
+
+        /// <summary>
+        /// Options for focus Game Window behaviour when play mode is entered.
+        /// </summary>
+        public enum PlayModeFocus
+        {
+            /// <summary>
+            /// Don't change focus.
+            /// </summary>
+            None,
+
+            /// <summary>
+            /// Focus the Game Window.
+            /// </summary>
+            GameWindow,
+
+            /// <summary>
+            /// Focus the Game Window. On play mode end restore focus to the previous window.
+            /// </summary>
+            GameWindowThenRestore,
+
+            /// <summary>
+            /// Focus the Game Window. On play mode end restore focus to the editor window.
+            /// </summary>
+            GameWindowThenRestoreEditor
+        }
+
+        /// <summary>
+        /// Options for type of window decorations to use.
+        /// </summary>
+        public enum WindowDecorationsType
+        {
+            /// <summary>
+            /// Determined automatically based on the system and any known compatibility issues with native decorations.
+            /// </summary>
+#if PLATFORM_MAC && !PLATFORM_SDL
+            [HideInEditor]
+#endif
+            Auto,
+
+            /// <summary>
+            /// Automatically choose most compatible window decorations for child windows, prefer custom decorations on main window.
+            /// </summary>
+            [EditorDisplay(Name = "Auto (Child Only)")]
+#if PLATFORM_MAC && !PLATFORM_SDL
+            [HideInEditor]
+#endif
+            AutoChildOnly,
+
+            /// <summary>
+            /// Use native system window decorations on all windows.
+            /// </summary>
+            Native,
+
+            /// <summary>
+            /// Use custom client-side window decorations on all windows.
+            /// </summary>
+            [EditorDisplay(Name = "Client-side")]
+            ClientSide,
+        }
+
+        /// <summary>
+        /// Generic options for a disabled or hidden state. Used for example in create content button.
+        /// </summary>
+        public enum DisabledHidden
+        {
+            /// <summary>
+            /// Disabled state.
+            /// </summary>
+            Disabled,
+
+            /// <summary>
+            /// Hidden state.
+            /// </summary>
+            Hidden,
         }
 
         /// <summary>
@@ -81,17 +243,6 @@ namespace FlaxEditor.Options
         [EditorDisplay("Interface"), EditorOrder(10), Tooltip("Editor User Interface scale. Applied to all UI elements, windows and text. Can be used to scale the interface up on a bigger display. Editor restart required.")]
         public float InterfaceScale { get; set; } = 1.0f;
 
-#if PLATFORM_WINDOWS
-
-        /// <summary>
-        /// Gets or sets a value indicating whether use native window title bar. Editor restart required.
-        /// </summary>
-        [DefaultValue(false)]
-        [EditorDisplay("Interface"), EditorOrder(70), Tooltip("Determines whether use native window title bar. Editor restart required.")]
-        public bool UseNativeWindowSystem { get; set; } = false;
-
-#endif
-
         /// <summary>
         /// Gets or sets a value indicating whether show selected camera preview in the editor window.
         /// </summary>
@@ -99,27 +250,6 @@ namespace FlaxEditor.Options
         [EditorDisplay("Interface"), EditorOrder(80), Tooltip("Determines whether show selected camera preview in the edit window.")]
         public bool ShowSelectedCameraPreview { get; set; } = true;
 
-        /// <summary>
-        /// Gets or sets a value indicating whether center mouse position on window focus in play mode. Helps when working with games that lock mouse cursor.
-        /// </summary>
-        [DefaultValue(false)]
-        [EditorDisplay("Interface", "Center Mouse On Game Window Focus"), EditorOrder(100), Tooltip("Determines whether center mouse position on window focus in play mode. Helps when working with games that lock mouse cursor.")]
-        public bool CenterMouseOnGameWinFocus { get; set; } = false;
-
-        /// <summary>
-        /// Gets or sets the method window opening.
-        /// </summary>
-        [DefaultValue(DockStateProxy.Float)]
-        [EditorDisplay("Interface", "New Window Location"), EditorOrder(150), Tooltip("Define the opening method for new windows, open in a new tab by default.")]
-        public DockStateProxy NewWindowLocation { get; set; } = DockStateProxy.Float;
-        
-        /// <summary>
-        /// Gets or sets the timestamps prefix mode for debug log messages.
-        /// </summary>
-        [DefaultValue(TimestampsFormats.None)]
-        [EditorDisplay("Interface"), EditorOrder(210), Tooltip("The timestamps prefix mode for debug log messages.")]
-        public TimestampsFormats DebugLogTimestampsFormat { get; set; } = TimestampsFormats.None;
-        
         /// <summary>
         /// Gets or sets the editor icons scale. Editor restart required.
         /// </summary>
@@ -135,91 +265,424 @@ namespace FlaxEditor.Options
         public FlaxEngine.GUI.Orientation ContentWindowOrientation { get; set; } = FlaxEngine.GUI.Orientation.Horizontal;
 
         /// <summary>
-        /// Gets or sets the timestamps prefix mode for output log messages.
+        /// Gets or sets the formatting option for numeric values in the editor.
         /// </summary>
-        [DefaultValue(TimestampsFormats.TimeSinceStartup)]
-        [EditorDisplay("Output Log", "Timestamps Format"), EditorOrder(300), Tooltip("The timestamps prefix mode for output log messages.")]
-        public TimestampsFormats OutputLogTimestampsFormat { get; set; } = TimestampsFormats.TimeSinceStartup;
+        [DefaultValue(ValueFormattingType.None)]
+        [EditorDisplay("Interface"), EditorOrder(300)]
+        public ValueFormattingType ValueFormatting { get; set; }
+
+        /// <summary>
+        /// Gets or sets the option to put a space between numbers and units for unit formatting.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Interface"), EditorOrder(310)]
+        public bool SeparateValueAndUnit { get; set; }
+
+        /// <summary>
+        /// Gets or sets the option to auto size the Properties panel splitter based on the longest property name. Editor restart recommended.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Interface"), EditorOrder(311)]
+        public bool AutoSizePropertiesPanelSplitter { get; set; }
+
+        /// <summary>
+        /// Gets or sets tree line visibility.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Interface"), EditorOrder(320), Tooltip("Toggles tree line visibility in places like the Scene or Content Panel.")]
+        public bool ShowTreeLines { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets tooltip text alignment.
+        /// </summary>
+        [DefaultValue(TextAlignment.Center)]
+        [EditorDisplay("Interface"), EditorOrder(321)]
+        public TextAlignment TooltipTextAlignment
+        {
+            get => _tooltipTextAlignment;
+            set
+            {
+                _tooltipTextAlignment = value;
+                var tooltip = Style.Current?.SharedTooltip;
+                if (tooltip != null)
+                    tooltip.HorizontalTextAlignment = value;
+            }
+        }
+
+        private TextAlignment _tooltipTextAlignment = TextAlignment.Center;
+
+        /// <summary>
+        /// Whether to scroll to the script when a script is added to an actor.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Interface"), EditorOrder(322)]
+        public bool ScrollToScriptOnAdd { get; set; } = true;
+
+#if PLATFORM_SDL || PLATFORM_MAC
+        /// <summary>
+        /// Gets or sets a value indicating whether use native window title bar decorations in child windows. Editor restart required.
+        /// </summary>
+#if PLATFORM_WINDOWS || PLATFORM_MAC
+        [DefaultValue(WindowDecorationsType.ClientSide)]
+#else
+        [DefaultValue(WindowDecorationsType.AutoChildOnly)]
+#endif
+        [EditorDisplay("Tabs & Windows"), EditorOrder(70), Tooltip("Determines whether use native window title bar decorations. Editor restart required.")]
+        public WindowDecorationsType WindowDecorations { get; set; } =
+#if PLATFORM_WINDOWS || PLATFORM_MAC
+            WindowDecorationsType.ClientSide;
+#else
+            WindowDecorationsType.AutoChildOnly;
+#endif
+#elif PLATFORM_WINDOWS
+        /// <summary>
+        /// Gets or sets a value indicating whether use native window title bar. Editor restart required.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Tabs & Windows"), EditorOrder(70), Tooltip("Determines whether use native window title bar. Editor restart required.")]
+        public bool UseNativeWindowSystem { get; set; } = false;
+#endif
+
+#if PLATFORM_SDL || PLATFORM_WINDOWS
+        /// <summary>
+        /// Gets or sets a value indicating whether a window containing a single tabs hides the tab bar. Editor restart recommended.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Tabs & Windows", "Hide Single-Tab Window Tab Bars"), EditorOrder(71)]
+        public bool HideSingleTabWindowTabBars { get; set; } = true;
+#endif
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the minimum tab width should be used. Editor restart required.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Tabs & Windows"), EditorOrder(99)]
+        public bool UseMinimumTabWidth { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets a value indicating the minimum tab width. If a tab is smaller than this width, its width will be set to this. Editor restart required.
+        /// </summary>
+        [DefaultValue(80.0f), Limit(50.0f, 150.0f)]
+        [EditorDisplay("Tabs & Windows"), EditorOrder(99), VisibleIf(nameof(UseMinimumTabWidth))]
+        public float MinimumTabWidth { get; set; } = 80.0f;
+
+        /// <summary>
+        /// Gets or sets a value indicating the height of window tabs. Editor restart required.
+        /// </summary>
+        [DefaultValue(20.0f), Limit(15.0f, 40.0f)]
+        [EditorDisplay("Tabs & Windows"), EditorOrder(100)]
+        public float TabHeight { get; set; } = 20.0f;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether center mouse position on window focus in play mode. Helps when working with games that lock mouse cursor.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Tabs & Windows", "Center Mouse On Game Window Focus"), EditorOrder(101), Tooltip("Determines whether center mouse position on window focus in play mode. Helps when working with games that lock mouse cursor.")]
+        public bool CenterMouseOnGameWinFocus { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets the method window opening.
+        /// </summary>
+        [DefaultValue(DockStateProxy.Float)]
+        [EditorDisplay("Tabs & Windows", "New Window Location"), EditorOrder(150), Tooltip("Define the opening method for new windows, open in a new tab by default.")]
+        public DockStateProxy NewWindowLocation { get; set; } = DockStateProxy.Float;
+
+        /// <summary>
+        /// Gets or sets a value indicating when the tab close button should be visible.
+        /// </summary>
+        [DefaultValue(TabCloseButtonVisibility.SelectedTab)]
+        [EditorDisplay("Tabs & Windows"), EditorOrder(151)]
+        public TabCloseButtonVisibility ShowTabCloseButton { get; set; } = TabCloseButtonVisibility.SelectedTab;
 
         /// <summary>
         /// Gets or sets the timestamps prefix mode for output log messages.
         /// </summary>
+        [DefaultValue(TimestampsFormats.None)]
+        [EditorDisplay("Debug Log"), EditorOrder(350), Tooltip("The timestamps prefix mode for debug log messages.")]
+        public TimestampsFormats DebugLogTimestampsFormat { get; set; } = TimestampsFormats.None;
+
+        /// <summary>
+        /// Gets or sets the clear on play for debug log messages.
+        /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Output Log", "Show Log Type"), EditorOrder(310), Tooltip("Determines whether show log type prefix in output log messages.")]
+        [EditorDisplay("Debug Log", "Clear on Play"), EditorOrder(360), Tooltip("Clears all log entries on enter playmode.")]
+        public bool DebugLogClearOnPlay { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the collapse mode for debug log messages.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Debug Log"), EditorOrder(361), Tooltip("Collapses similar or repeating log entries.")]
+        public bool DebugLogCollapse { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the automatic pause on error for debug log messages.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Debug Log", "Pause on Error"), EditorOrder(362), Tooltip("Performs auto pause on error.")]
+        public bool DebugLogPauseOnError { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets the automatic pause on error for debug log messages.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Debug Log", "Show Error Messages"), EditorOrder(370), Tooltip("Shows/hides error messages.")]
+        public bool DebugLogShowErrorMessages { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the automatic pause on error for debug log messages.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Debug Log", "Show Warning Messages"), EditorOrder(371), Tooltip("Shows/hides warning messages.")]
+        public bool DebugLogShowWarningMessages { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the automatic pause on error for debug log messages.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Debug Log", "Show Info messages"), EditorOrder(372), Tooltip("Shows/hides info messages.")]
+        public bool DebugLogShowInfoMessages { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the timestamps prefix mode for output log messages.
+        /// </summary>
+        [DefaultValue(TimestampsFormats.TimeSinceStartup)]
+        [EditorDisplay("Output Log", "Timestamps Format"), EditorOrder(400), Tooltip("The timestamps prefix mode for output log messages.")]
+        public TimestampsFormats OutputLogTimestampsFormat { get; set; } = TimestampsFormats.TimeSinceStartup;
+
+        /// <summary>
+        /// Gets or sets the log type prefix mode for output log messages.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Output Log", "Show Log Type"), EditorOrder(410), Tooltip("Determines whether show log type prefix in output log messages.")]
         public bool OutputLogShowLogType { get; set; } = true;
 
         /// <summary>
         /// Gets or sets the output log text font.
         /// </summary>
-        [EditorDisplay("Output Log", "Text Font"), EditorOrder(320), Tooltip("The output log text font.")]
-        public FontReference OutputLogTextFont { get; set; } = new FontReference(FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.InconsolataRegularFont), 10);
-
-        /// <summary>
-        /// Gets or sets the output log text color.
-        /// </summary>
-        [DefaultValue(typeof(Color), "1,1,1,1")]
-        [EditorDisplay("Output Log", "Text Color"), EditorOrder(330), Tooltip("The output log text color.")]
-        public Color OutputLogTextColor { get; set; } = Color.White;
+        [EditorDisplay("Output Log", "Text Font"), EditorOrder(420), Tooltip("The output log text font.")]
+        public FontReference OutputLogTextFont
+        {
+            get => _outputLogFont;
+            set
+            {
+                if (value == null)
+                    _outputLogFont = new FontReference(ConsoleFont, 10);
+                else if (!value.Font)
+                    _outputLogFont.Font = ConsoleFont;
+                else
+                    _outputLogFont = value;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the output log text shadow color.
         /// </summary>
         [DefaultValue(typeof(Color), "0,0,0,0.5")]
-        [EditorDisplay("Output Log", "Text Shadow Color"), EditorOrder(340), Tooltip("The output log text shadow color.")]
+        [EditorDisplay("Output Log", "Text Shadow Color"), EditorOrder(440), Tooltip("The output log text shadow color.")]
         public Color OutputLogTextShadowColor { get; set; } = new Color(0, 0, 0, 0.5f);
 
         /// <summary>
         /// Gets or sets the output log text shadow offset. Set to 0 to disable this feature.
         /// </summary>
-        [DefaultValue(typeof(Vector2), "1,1")]
-        [EditorDisplay("Output Log", "Text Shadow Offset"), EditorOrder(340), Tooltip("The output log text shadow offset. Set to 0 to disable this feature.")]
-        public Vector2 OutputLogTextShadowOffset { get; set; } = new Vector2(1);
+        [DefaultValue(typeof(Float2), "1,1")]
+        [EditorDisplay("Output Log", "Text Shadow Offset"), EditorOrder(445), Tooltip("The output log text shadow offset. Set to 0 to disable this feature.")]
+        public Float2 OutputLogTextShadowOffset { get; set; } = new Float2(1);
+
+        // [Deprecated in v1.10]
+        [Serialize, Obsolete, NoUndo]
+        private bool FocusGameWinOnPlay
+        {
+            get => throw new Exception();
+            set
+            {
+                // Upgrade value
+                FocusOnPlayMode = value ? PlayModeFocus.GameWindow : PlayModeFocus.None;
+            }
+        }
 
         /// <summary>
         /// Gets or sets a value indicating whether auto-focus output log window on code compilation error.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Output Log", "Focus Output Log On Compilation Error"), EditorOrder(350), Tooltip("Determines whether auto-focus output log window on code compilation error.")]
+        [EditorDisplay("Output Log", "Focus Output Log On Compilation Error"), EditorOrder(450), Tooltip("Determines whether auto-focus output log window on code compilation error.")]
         public bool FocusOutputLogOnCompilationError { get; set; } = true;
 
         /// <summary>
         /// Gets or sets a value indicating whether auto-focus output log window on game build error.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Output Log", "Focus Output Log On Game Build Error"), EditorOrder(360), Tooltip("Determines whether auto-focus output log window on game build error.")]
+        [EditorDisplay("Output Log", "Focus Output Log On Game Build Error"), EditorOrder(460), Tooltip("Determines whether auto-focus output log window on game build error.")]
         public bool FocusOutputLogOnGameBuildError { get; set; } = true;
 
         /// <summary>
-        /// Gets or sets a value indicating whether auto-focus game window on play mode start.
+        /// Gets or sets the value for automatic scroll to bottom in output log.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Play In-Editor", "Focus Game Window On Play"), EditorOrder(400), Tooltip("Determines whether auto-focus game window on play mode start.")]
-        public bool FocusGameWinOnPlay { get; set; } = true;
+        [EditorDisplay("Output Log", "Scroll To Bottom"), EditorOrder(470), Tooltip("Scroll the output log view to bottom automatically after new lines are added.")]
+        public bool OutputLogScrollToBottom { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating what panel should be focused when play mode start.
+        /// </summary>
+        [DefaultValue(PlayModeFocus.GameWindowThenRestoreEditor)]
+        [EditorDisplay("Play In-Editor", "Focus On Play"), EditorOrder(500), Tooltip("Set what panel to focus on play mode start.")]
+        public PlayModeFocus FocusOnPlayMode { get; set; } = PlayModeFocus.GameWindowThenRestoreEditor;
+
+        /// <summary>
+        /// Gets or sets a value indicating what action should be taken upon pressing the play button.
+        /// </summary>
+        [DefaultValue(PlayAction.PlayScenes)]
+        [EditorDisplay("Play In-Editor", "Play Button Action"), EditorOrder(510)]
+        public PlayAction PlayButtonAction { get; set; } = PlayAction.PlayScenes;
+
+        /// <summary>
+        /// Gets or sets a value indicating how the game window should be displayed when the game is launched.
+        /// </summary>
+        [DefaultValue(GameWindowMode.Docked)]
+        [EditorDisplay("Play In-Editor", "Game Window Mode"), EditorOrder(520), Tooltip("Determines how the game window is displayed when the game is launched.")]
+        public GameWindowMode DefaultGameWindowMode { get; set; } = GameWindowMode.Docked;
+
+        /// <summary>
+        /// Gets or sets a value indicating the number of game clients to launch when building and/or running cooked game.
+        /// </summary>
+        [DefaultValue(1), Range(1, 4)]
+        [EditorDisplay("Cook & Run"), EditorOrder(600)]
+        public int NumberOfGameClientsToLaunch = 1;
+
+        /// <summary>
+        /// Gets or sets the build configuration to use when using Cook and Run option in the editor.
+        /// </summary>
+        [EditorDisplay("Cook & Run"), EditorOrder(601), ExpandGroups, Tooltip("The build configuration to use when using Cook and Run option in the editor.")]
+        public BuildConfiguration CookAndRunBuildConfiguration { get; set; } = BuildConfiguration.Development;
+
+        /// <summary>
+        /// Gets or sets the curvature of the line connecting to connected visject nodes.
+        /// </summary>
+        [DefaultValue(0.25f), Range(0.0f, 2.0f)]
+        [EditorDisplay("Visject"), EditorOrder(550)]
+        public float ConnectionCurvature { get; set; } = 0.25f;
+
+        /// <summary>
+        /// Gets or sets a value that indicates whether the context menu description panel is shown or not.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Visject"), EditorOrder(550), Tooltip("Shows/hides the description panel in visual scripting context menu.")]
+        public bool NodeDescriptionPanel { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the surface grid snapping option.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Visject", "Grid Snapping"), EditorOrder(551), Tooltip("Toggles grid snapping when moving nodes.")]
+        public bool SurfaceGridSnapping { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets the surface grid snapping option.
+        /// </summary>
+        [DefaultValue(20.0f)]
+        [EditorDisplay("Visject", "Grid Snapping Size"), EditorOrder(551), Tooltip("Defines the size of the grid for nodes snapping."), VisibleIf(nameof(SurfaceGridSnapping))]
+        public float SurfaceGridSnappingSize { get; set; } = 20.0f;
+
+        /// <summary>
+        /// Gets or sets a value that indicates if a warning should be displayed when deleting a Visject parameter that is used in a graph.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Visject", "Warn When Deleting Used Parameter"), EditorOrder(552)]
+        public bool WarnOnDeletingUsedVisjectParameter { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating what should happen to unavailable options in the content create menu.
+        /// </summary>
+        [DefaultValue(DisabledHidden.Hidden)]
+        [EditorDisplay("Content"), EditorOrder(600)]
+        public DisabledHidden UnavailableContentCreateOptions { get; set; } = DisabledHidden.Hidden;
 
         private static FontAsset DefaultFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.PrimaryFont);
+        private static FontAsset ConsoleFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.InconsolataRegularFont);
+
+        private FontReference _titleFont = new FontReference(DefaultFont, 18);
+        private FontReference _largeFont = new FontReference(DefaultFont, 14);
+        private FontReference _mediumFont = new FontReference(DefaultFont, 9);
+        private FontReference _smallFont = new FontReference(DefaultFont, 9);
+        private FontReference _outputLogFont = new FontReference(ConsoleFont, 10);
+
+        /// <summary>
+        /// The list of fallback fonts to use when main text font is missing certain characters. Empty to use fonts from GraphicsSettings.
+        /// </summary>
+        [EditorDisplay("Fonts"), EditorOrder(750)]
+        public FontAsset[] FallbackFonts = new FontAsset[1] { FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.FallbackFont) };
 
         /// <summary>
         /// Gets or sets the title font for editor UI.
         /// </summary>
-        [EditorDisplay("Fonts"), EditorOrder(500), Tooltip("The title font for editor UI.")]
-        public FontReference TitleFont { get; set; } = new FontReference(DefaultFont, 18);
+        [EditorDisplay("Fonts"), EditorOrder(700), Tooltip("The title font for editor UI.")]
+        public FontReference TitleFont
+        {
+            get => _titleFont;
+            set
+            {
+                if (value == null)
+                    _titleFont = new FontReference(DefaultFont, 18);
+                else if (!value.Font)
+                    _titleFont.Font = DefaultFont;
+                else
+                    _titleFont = value;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the large font for editor UI.
         /// </summary>
-        [EditorDisplay("Fonts"), EditorOrder(510), Tooltip("The large font for editor UI.")]
-        public FontReference LargeFont { get; set; } = new FontReference(DefaultFont, 14);
+        [EditorDisplay("Fonts"), EditorOrder(710), Tooltip("The large font for editor UI.")]
+        public FontReference LargeFont
+        {
+            get => _largeFont;
+            set
+            {
+                if (value == null)
+                    _largeFont = new FontReference(DefaultFont, 14);
+                else if (!value.Font)
+                    _largeFont.Font = DefaultFont;
+                else
+                    _largeFont = value;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the medium font for editor UI.
         /// </summary>
-        [EditorDisplay("Fonts"), EditorOrder(520), Tooltip("The medium font for editor UI.")]
-        public FontReference MediumFont { get; set; } = new FontReference(DefaultFont, 9);
+        [EditorDisplay("Fonts"), EditorOrder(720), Tooltip("The medium font for editor UI.")]
+        public FontReference MediumFont
+        {
+            get => _mediumFont;
+            set
+            {
+                if (value == null)
+                    _mediumFont = new FontReference(DefaultFont, 9);
+                else if (!value.Font)
+                    _mediumFont.Font = DefaultFont;
+                else
+                    _mediumFont = value;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the small font for editor UI.
         /// </summary>
-        [EditorDisplay("Fonts"), EditorOrder(530), Tooltip("The small font for editor UI.")]
-        public FontReference SmallFont { get; set; } = new FontReference(DefaultFont, 9);
+        [EditorDisplay("Fonts"), EditorOrder(730), Tooltip("The small font for editor UI.")]
+        public FontReference SmallFont
+        {
+            get => _smallFont;
+            set
+            {
+                if (value == null)
+                    _smallFont = new FontReference(DefaultFont, 9);
+                else if (!value.Font)
+                    _smallFont.Font = DefaultFont;
+                else
+                    _smallFont = value;
+            }
+        }
     }
 }

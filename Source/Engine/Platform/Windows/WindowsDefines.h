@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,5 +9,6 @@
 // Platform description
 #define PLATFORM_TYPE PlatformType::Windows
 #define PLATFORM_HAS_HEADLESS_MODE 1
+#define PLATFORM_DESKTOP 1
 
 #endif

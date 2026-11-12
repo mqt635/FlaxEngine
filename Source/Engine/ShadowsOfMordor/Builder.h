@@ -1,9 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Assets/Shader.h"
+#include "Engine/Core/Types/DateTime.h"
+#include "Engine/Core/Math/Rectangle.h"
 #include "Engine/CSG/CSGMesh.h"
 #include "Builder.Config.h"
 
@@ -103,8 +105,8 @@ namespace ShadowsOfMordor
         /// </summary>
         struct HemisphereData
         {
-            Vector3 Position;
-            Vector3 Normal;
+            Float3 Position;
+            Float3 Normal;
 
             int16 TexelX;
             int16 TexelY;

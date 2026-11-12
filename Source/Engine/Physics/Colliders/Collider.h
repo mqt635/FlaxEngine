@@ -1,11 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Physics/Types.h"
 #include "Engine/Content/JsonAsset.h"
-#include "Engine/Content/AssetReference.h"
+#include "Engine/Content/JsonAssetReference.h"
 #include "Engine/Physics/Actors/PhysicsColliderActor.h"
+#include "Engine/Physics/Actors/IPhysicsDebug.h"
 
 struct RayCastHit;
 class RigidBody;
@@ -15,33 +16,32 @@ class RigidBody;
 /// </summary>
 /// <seealso cref="Actor" />
 /// <seealso cref="PhysicsColliderActor" />
-API_CLASS(Abstract) class FLAXENGINE_API Collider : public PhysicsColliderActor
+API_CLASS(Abstract) class FLAXENGINE_API Collider : public PhysicsColliderActor, protected IAssetReference
+#if USE_EDITOR
+    , public IPhysicsDebug
+#endif
 {
-DECLARE_SCENE_OBJECT_ABSTRACT(Collider);
+    API_AUTO_SERIALIZATION();
+    DECLARE_SCENE_OBJECT_ABSTRACT(Collider);
 protected:
-
     Vector3 _center;
     bool _isTrigger;
-    PxShape* _shape;
-    PxRigidStatic* _staticActor;
-    Vector3 _cachedScale;
+    void* _shape;
+    void* _staticActor;
+    float _cachedScale;
     float _contactOffset;
     Vector3 _cachedLocalPosePos;
     Quaternion _cachedLocalPoseRot;
 
 public:
+    /// <summary>
+    /// Gets the native physics backend object.
+    /// </summary>
+    void* GetPhysicsShape() const;
 
     /// <summary>
-    /// Gets the collider shape PhysX object.
+    /// Gets the 'IsTrigger' flag. A trigger doesn't register a collision with an incoming Rigidbody. Instead, it sends OnTriggerEnter and OnTriggerExit message when a rigidbody enters or exits the trigger volume.
     /// </summary>
-    PxShape* GetPxShape() const;
-
-    /// <summary>
-    /// Gets the 'IsTrigger' flag.
-    /// </summary>
-    /// <remarks>
-    /// A trigger doesn't register a collision with an incoming Rigidbody. Instead, it sends OnTriggerEnter, OnTriggerExit and OnTriggerStay message when a rigidbody enters or exits the trigger volume.
-    /// </remarks>
     API_PROPERTY(Attributes="EditorOrder(0), DefaultValue(false), EditorDisplay(\"Collider\")")
     FORCE_INLINE bool GetIsTrigger() const
     {
@@ -49,17 +49,14 @@ public:
     }
 
     /// <summary>
-    /// Sets the `IsTrigger` flag. A trigger doesn't register a collision with an incoming Rigidbody. Instead, it sends OnTriggerEnter, OnTriggerExit and OnTriggerStay message when a rigidbody enters or exits the trigger volume.
+    /// Sets the `IsTrigger` flag. A trigger doesn't register a collision with an incoming Rigidbody. Instead, it sends OnTriggerEnter and OnTriggerExit message when a rigidbody enters or exits the trigger volume.
     /// </summary>
-    /// <remarks>
-    /// A trigger doesn't register a collision with an incoming Rigidbody. Instead, it sends OnTriggerEnter, OnTriggerExit and OnTriggerStay message when a rigidbody enters or exits the trigger volume.
-    /// </remarks>
     API_PROPERTY() void SetIsTrigger(bool value);
 
     /// <summary>
     /// Gets the center of the collider, measured in the object's local space.
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(10), DefaultValue(typeof(Vector3), \"0,0,0\"), EditorDisplay(\"Collider\")")
+    API_PROPERTY(Attributes="EditorOrder(10), DefaultValue(typeof(Vector3), \"0,0,0\"), EditorDisplay(\"Collider\"), ValueCategory(Utils.ValueCategory.Distance)")
     FORCE_INLINE Vector3 GetCenter() const
     {
         return _center;
@@ -68,70 +65,29 @@ public:
     /// <summary>
     /// Sets the center of the collider, measured in the object's local space.
     /// </summary>
-    API_PROPERTY() void SetCenter(const Vector3& value);
+    API_PROPERTY() virtual void SetCenter(const Vector3& value);
 
     /// <summary>
-    /// Gets the contact offset.
+    /// Gets the contact offset. Colliders whose distance is less than the sum of their ContactOffset values will generate contacts. The contact offset must be positive. Contact offset allows the collision detection system to predictively enforce the contact constraint even when the objects are slightly separated.
     /// </summary>
-    /// <remarks>
-    /// Colliders whose distance is less than the sum of their ContactOffset values will generate contacts. The contact offset must be positive. Contact offset allows the collision detection system to predictively enforce the contact constraint even when the objects are slightly separated.
-    /// </remarks>
-    API_PROPERTY(Attributes="EditorOrder(1), DefaultValue(10.0f), Limit(0, 100), EditorDisplay(\"Collider\")")
+    API_PROPERTY(Attributes="EditorOrder(1), DefaultValue(2.0f), Limit(0, 100), EditorDisplay(\"Collider\"), ValueCategory(Utils.ValueCategory.Distance)")
     FORCE_INLINE float GetContactOffset() const
     {
         return _contactOffset;
     }
 
     /// <summary>
-    /// Sets the contact offset.
+    /// Sets the contact offset. Colliders whose distance is less than the sum of their ContactOffset values will generate contacts. The contact offset must be positive. Contact offset allows the collision detection system to predictively enforce the contact constraint even when the objects are slightly separated.
     /// </summary>
-    /// <remarks>
-    /// Colliders whose distance is less than the sum of their ContactOffset values will generate contacts. The contact offset must be positive. Contact offset allows the collision detection system to predictively enforce the contact constraint even when the objects are slightly separated.
-    /// </remarks>
     API_PROPERTY() void SetContactOffset(float value);
 
     /// <summary>
     /// The physical material used to define the collider physical properties.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(2), DefaultValue(null), AssetReference(typeof(PhysicalMaterial), true), EditorDisplay(\"Collider\")")
-    AssetReference<JsonAsset> Material;
+    API_FIELD(Attributes="EditorOrder(2), DefaultValue(null), EditorDisplay(\"Collider\")")
+    JsonAssetReference<PhysicalMaterial> Material;
 
 public:
-
-    /// <summary>
-    /// Performs a raycast against this collider shape.
-    /// </summary>
-    /// <param name="origin">The origin of the ray.</param>
-    /// <param name="direction">The normalized direction of the ray.</param>
-    /// <param name="resultHitDistance">The raycast result hit position distance from the ray origin. Valid only if raycast hits anything.</param>
-    /// <param name="maxDistance">The maximum distance the ray should check for collisions.</param>
-    /// <returns>True if ray hits an object, otherwise false.</returns>
-    API_FUNCTION() bool RayCast(const Vector3& origin, const Vector3& direction, API_PARAM(Out) float& resultHitDistance, float maxDistance = MAX_float) const;
-
-    /// <summary>
-    /// Performs a raycast against this collider, returns results in a RaycastHit structure.
-    /// </summary>
-    /// <param name="origin">The origin of the ray.</param>
-    /// <param name="direction">The normalized direction of the ray.</param>
-    /// <param name="hitInfo">The result hit information. Valid only when method returns true.</param>
-    /// <param name="maxDistance">The maximum distance the ray should check for collisions.</param>
-    /// <returns>True if ray hits an object, otherwise false.</returns>
-    API_FUNCTION() bool RayCast(const Vector3& origin, const Vector3& direction, API_PARAM(Out) RayCastHit& hitInfo, float maxDistance = MAX_float) const;
-
-    /// <summary>
-    /// Gets a point on the collider that is closest to a given location. Can be used to find a hit location or position to apply explosion force or any other special effects.
-    /// </summary>
-    /// <param name="position">The position to find the closest point to it.</param>
-    /// <param name="result">The result point on the collider that is closest to the specified location.</param>
-    API_FUNCTION() void ClosestPoint(const Vector3& position, API_PARAM(Out) Vector3& result) const;
-
-    /// <summary>
-    /// Checks if a point is inside the collider.
-    /// </summary>
-    /// <param name="point">The point to check if is contained by the collider shape (in world-space).</param>
-    /// <returns>True if collider shape contains a given point, otherwise false.</returns>
-    API_FUNCTION() bool ContainsPoint(const Vector3& point) const;
-
     /// <summary>
     /// Computes minimum translational distance between two geometry objects.
     /// Translating the first collider by direction * distance will separate the colliders apart if the function returned true. Otherwise, direction and distance are not defined.
@@ -146,7 +102,6 @@ public:
     API_FUNCTION() static bool ComputePenetration(const Collider* colliderA, const Collider* colliderB, API_PARAM(Out) Vector3& direction, API_PARAM(Out) float& distance);
 
 public:
-
     /// <summary>
     /// Determines whether this collider can be attached the specified rigid body.
     /// </summary>
@@ -167,11 +122,10 @@ public:
     void Attach(RigidBody* rigidBody);
 
 protected:
-
     /// <summary>
     /// Updates the shape actor collisions/queries layer mask bits.
     /// </summary>
-    virtual void UpdateLayerBits();
+    void UpdateLayerBits();
 
     /// <summary>
     /// Updates the bounding box of the shape.
@@ -181,8 +135,8 @@ protected:
     /// <summary>
     /// Gets the collider shape geometry.
     /// </summary>
-    /// <param name="geometry">The output geometry.</param>
-    virtual void GetGeometry(PxGeometryHolder& geometry) = 0;
+    /// <param name="collision">The output collision shape.</param>
+    virtual void GetGeometry(CollisionShape& collision) = 0;
 
     /// <summary>
     /// Creates the collider shape.
@@ -204,32 +158,35 @@ protected:
     /// </summary>
     void RemoveStaticActor();
 
-#if USE_EDITOR
-    virtual void DrawPhysicsDebug(RenderView& view);
-#endif
-
 private:
-
-    void OnMaterialChanged();
+    friend RigidBody;
+#if USE_EDITOR
+    virtual void OnDebugDrawSelf() {}
+#endif
 
 public:
-
     // [PhysicsColliderActor]
-    void Serialize(SerializeStream& stream, const void* otherObj) override;
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     RigidBody* GetAttachedRigidBody() const override;
+    bool RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, float maxDistance = MAX_float) const final;
+    bool RayCast(const Vector3& origin, const Vector3& direction, RayCastHit& hitInfo, float maxDistance = MAX_float) const final;
+    void ClosestPoint(const Vector3& point, Vector3& result) const final;
+    bool ContainsPoint(const Vector3& point) const final;
 
 protected:
-
     // [PhysicsColliderActor]
-#if USE_EDITOR
     void OnEnable() override;
     void OnDisable() override;
-#endif
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void OnActiveInTreeChanged() override;
     void OnParentChanged() override;
     void OnTransformChanged() override;
     void OnLayerChanged() override;
+    void OnStaticFlagsChanged() override;
+    void OnPhysicsSceneChanged(PhysicsScene* previous) override;
+
+    // [IAssetReference]
+    void OnAssetChanged(Asset* asset, void* caller) override;
+    void OnAssetLoaded(Asset* asset, void* caller) override;
+    void OnAssetUnloaded(Asset* asset, void* caller) override;
 };

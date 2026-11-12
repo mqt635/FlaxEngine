@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BinaryAssetFactory.h"
 #include "../BinaryAsset.h"
@@ -28,7 +28,7 @@ bool BinaryAssetFactoryBase::Init(BinaryAsset* asset)
 #if USE_EDITOR
     // Check if need to perform data conversion to the newer version (only in Editor)
     const auto upgrader = GetUpgrader();
-    if (storage->AllowDataModifications() && upgrader && upgrader->ShouldUpgrade(initData.SerializedVersion))
+    if (!storage->IsReadOnly() && upgrader && upgrader->ShouldUpgrade(initData.SerializedVersion))
     {
         const auto startTime = DateTime::NowUTC();
         const AssetInfo info(asset->GetID(), asset->GetTypeName(), storage->GetPath());
@@ -145,6 +145,10 @@ bool BinaryAssetFactoryBase::UpgradeAsset(const AssetInfo& info, FlaxStorage* st
             context.Input.Header.DeleteChunks();
         context.Input = context.Output;
     } while (upgrader->ShouldUpgrade(context.Input.SerializedVersion));
+
+    // Prevent other threads from loading the storage when it is upgrading
+    // It works because CriticalSection allows recursion
+    ScopeLock upgradeLock(storage->_loadLocker);
 
     // Release storage internal data (should also close file handles)
     {

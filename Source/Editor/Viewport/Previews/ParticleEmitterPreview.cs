@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.Input;
 using FlaxEngine;
@@ -67,6 +67,7 @@ namespace FlaxEditor.Viewport.Previews
             if (useWidgets)
             {
                 var playbackDuration = ViewWidgetButtonMenu.AddButton("Duration");
+                playbackDuration.CloseMenuOnClick = false;
                 var playbackDurationValue = new FloatValueBox(_playbackDuration, 90, 2, 70.0f, 0.1f, 1000000.0f, 0.1f)
                 {
                     Parent = playbackDuration
@@ -77,7 +78,7 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <inheritdoc />
-        public override bool HasLoadedAssets => (_emitter == null || _emitter.IsLoaded) && base.HasLoadedAssets;
+        public override bool HasContentLoaded => (_emitter == null || _emitter.IsLoaded) && base.HasContentLoaded;
 
         /// <inheritdoc />
         public override void OnDestroy()

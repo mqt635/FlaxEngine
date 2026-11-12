@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MATERIAL_GRAPH
 
@@ -8,19 +8,21 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Sample Layer
+    // Sample Layer
     case 1:
     {
         Guid id = (Guid)node->Values[0];
         if (!id.IsValid())
         {
             OnError(node, box, TEXT("Missing material."));
+            value = MaterialValue::InitForZero(VariantType::Void);
             break;
         }
         ASSERT(GetRootLayer() != nullptr && GetRootLayer()->ID.IsValid());
         if (id == GetRootLayer()->ID)
         {
             OnError(node, box, TEXT("Cannot use current material as layer."));
+            value = MaterialValue::InitForZero(VariantType::Void);
             break;
         }
 
@@ -29,6 +31,7 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
         if (layer == nullptr)
         {
             OnError(node, box, TEXT("Cannot load material."));
+            value = MaterialValue::InitForZero(VariantType::Void);
             break;
         }
         ASSERT(_layers.Contains(layer));
@@ -56,7 +59,7 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
                 // TODO: better idea would to be to use variable for current UVs, by default=input.TexCoord.xy could be modified when sampling layers
 
                 // Cache original pixel UVs
-                orginalUVs = writeLocal(VariantType::Vector2, TEXT("input.TexCoord.xy"), node).Value;
+                orginalUVs = writeLocal(VariantType::Float2, TEXT("input.TexCoord.xy"), node).Value;
 
                 // Modify current pixel UVs
                 _writer.Write(*String::Format(TEXT("\tinput.TexCoord.xy = {0};\n"), customUVs));
@@ -141,13 +144,13 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
         value = MaterialValue(VariantType::Void, varName);
         break;
     }
-        // Blend Linear
+    // Blend Linear
     case 2:
     case 5:
     case 8:
     {
         const Value defaultValue = MaterialValue::InitForZero(VariantType::Void);
-        const Value alpha = tryGetValue(node->GetBox(2), 0, Value::Zero);
+        Value alpha = tryGetValue(node->GetBox(2), 0, Value::Zero).AsFloat();
         if (alpha.IsZero())
         {
             // Bottom-only
@@ -178,6 +181,7 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
             auto topHeightScaled = writeLocal(VariantType::Float, String::Format(TEXT("{0} * {1}"), topHeight.Value, alpha.Value), node);
             auto heightStart = writeLocal(VariantType::Float, String::Format(TEXT("max({0}, {1}) - 0.05"), bottomHeightScaled.Value, topHeightScaled.Value), node);
             auto bottomLevel = writeLocal(VariantType::Float, String::Format(TEXT("max({0} - {1}, 0.0001)"), topHeightScaled.Value, heightStart.Value), node);
+            alpha = writeLocal(VariantType::Float, alpha.Value, node);
             _writer.Write(TEXT("\t{0} = {1} / (max({2} - {3}, 0) + {4});\n"), alpha.Value, bottomLevel.Value, bottomHeightScaled.Value, heightStart.Value, bottomLevel.Value);
         }
 #define EAT_BOX(type) writeBlending(MaterialGraphBoxes::type, value, bottom, top, alpha)
@@ -215,8 +219,8 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
 #undef EAT_BOX
         break;
     }
-        // Pack Material Layer (old: without TessellationMultiplier, SubsurfaceColor and WorldDisplacement support)
-        // [Deprecated on 2018.10.01, expires on 2019.10.01]
+    // Pack Material Layer (old: without TessellationMultiplier, SubsurfaceColor and WorldDisplacement support)
+    // [Deprecated on 2018.10.01, expires on 2019.10.01]
     case 3:
     {
         // Create new layer
@@ -252,6 +256,7 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
             CHECK_MATERIAL_FEATURE(Emissive, UseEmissive);
             CHECK_MATERIAL_FEATURE(Normal, UseNormal);
             CHECK_MATERIAL_FEATURE(Mask, UseMask);
+            CHECK_MATERIAL_FEATURE(Refraction, UseRefraction);
 
             break;
         }
@@ -263,8 +268,8 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
 
         break;
     }
-        // Unpack Material Layer
-        // Node type 4 -> [Deprecated on 2018.10.01, expires on 2019.10.01]
+    // Unpack Material Layer
+    // Node type 4 -> [Deprecated on 2018.10.01, expires on 2019.10.01]
     case 4:
     case 7:
     {
@@ -284,7 +289,7 @@ void MaterialGenerator::ProcessGroupLayers(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Pack Material Layer
+    // Pack Material Layer
     case 6:
     {
         // Create new layer

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,8 +6,6 @@
 
 #include "Engine/Platform/Types.h"
 #include "../Win32/WindowsMinimal.h"
-
-struct Vector2;
 
 /// <summary>
 /// Windows platform specific implementation of the input system parts. Handles XInput devices.

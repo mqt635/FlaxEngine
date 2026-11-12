@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -42,14 +42,12 @@ namespace FlaxEditor.GUI
             Text = text;
 
             var style = Style.Current;
-#if PLATFORM_WINDOWS
-            if (Editor.Instance.Options.Options.Interface.UseNativeWindowSystem)
+            if (!Utilities.Utils.UseCustomWindowDecorations())
             {
                 BackgroundColorMouseOver = style.BackgroundHighlighted;
                 BackgroundColorMouseOverOpened = style.Background;
             }
             else
-#endif
             {
                 BackgroundColorMouseOver = BackgroundColorMouseOverOpened = style.LightBackground * 1.3f;
             }
@@ -76,7 +74,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             Focus();
 
@@ -87,7 +85,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseEnter(Vector2 location)
+        public override void OnMouseEnter(Float2 location)
         {
             base.OnMouseEnter(location);
 

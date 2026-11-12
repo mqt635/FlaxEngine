@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -62,7 +62,7 @@ namespace Flax.Build.NativeCpp
         public bool UseFastPDBLinking = false;
 
         /// <summary>
-        /// Enables the link time code generation (LTCG).
+        /// Enables the link time code generation (LTCG) or Link Time Optimization (LTO).
         /// </summary>
         public bool LinkTimeCodeGeneration = false;
 
@@ -106,6 +106,11 @@ namespace Flax.Build.NativeCpp
         /// </summary>
         public readonly List<string> LibraryPaths = new List<string>();
 
+        /// <summary>
+        /// The collection of custom arguments to pass to the linker.
+        /// </summary>
+        public readonly HashSet<string> CustomArgs = new HashSet<string>();
+
         /// <inheritdoc />
         public object Clone()
         {
@@ -122,11 +127,11 @@ namespace Flax.Build.NativeCpp
                 LinkAsConsoleProgram = LinkAsConsoleProgram,
                 GenerateDocumentation = GenerateDocumentation
             };
-            foreach (var e in InputFiles)
-                clone.InputFiles.Add(e);
+            clone.InputFiles.AddRange(InputFiles);
             clone.DocumentationFiles.AddRange(DocumentationFiles);
             clone.InputLibraries.AddRange(InputLibraries);
             clone.LibraryPaths.AddRange(LibraryPaths);
+            clone.CustomArgs.AddRange(CustomArgs);
             return clone;
         }
     }

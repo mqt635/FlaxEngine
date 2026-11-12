@@ -1,21 +1,23 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "VisjectGraph.h"
 #include "GraphUtilities.h"
 #include "Engine/Core/Random.h"
+#include "Engine/Core/Collections/Sorting.h"
 #include "Engine/Core/Math/Vector4.h"
 #include "Engine/Core/Math/Transform.h"
 #include "Engine/Engine/GameplayGlobals.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Level/Actor.h"
-#include "Engine/Scripting/ManagedCLR/MType.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MField.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Utilities/StringConverter.h"
+#include "Engine/Utilities/Noise.h"
 
 #define RAND Random::Rand()
+#define ENSURE(condition, errorMsg)  if (!(condition)) { OnError(node, box, errorMsg); return; }
 
 VisjectExecutor::VisjectExecutor()
 {
@@ -32,6 +34,7 @@ VisjectExecutor::VisjectExecutor()
     _perGroupProcessCall[11] = &VisjectExecutor::ProcessGroupBitwise;
     _perGroupProcessCall[12] = &VisjectExecutor::ProcessGroupComparisons;
     _perGroupProcessCall[14] = &VisjectExecutor::ProcessGroupParticles;
+    _perGroupProcessCall[18] = &VisjectExecutor::ProcessGroupCollections;
 }
 
 VisjectExecutor::~VisjectExecutor()
@@ -48,53 +51,35 @@ void VisjectExecutor::ProcessGroupConstants(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Constant value
+    // Constant value
     case 1:
     case 2:
     case 3:
     case 12:
+    case 15:
         value = node->Values[0];
         break;
+    // Float2/3/4, Color
     case 4:
-    {
-        const Value& cv = node->Values[0];
-        if (box->ID == 0)
-            value = cv;
-        else if (box->ID == 1)
-            value = cv.AsVector2().X;
-        else if (box->ID == 2)
-            value = cv.AsVector2().Y;
-        break;
-    }
     case 5:
-    {
-        const Value& cv = node->Values[0];
-        if (box->ID == 0)
-            value = cv;
-        else if (box->ID == 1)
-            value = cv.AsVector3().X;
-        else if (box->ID == 2)
-            value = cv.AsVector3().Y;
-        else if (box->ID == 3)
-            value = cv.AsVector3().Z;
-        break;
-    }
     case 6:
     case 7:
     {
-        const Value& cv = node->Values[0];
+        const Variant& v = node->Values[0];
+        const Float4 cv = (Float4)v;
         if (box->ID == 0)
-            value = cv;
+            value = v;
         else if (box->ID == 1)
-            value = cv.AsVector4().X;
+            value = cv.X;
         else if (box->ID == 2)
-            value = cv.AsVector4().Y;
+            value = cv.Y;
         else if (box->ID == 3)
-            value = cv.AsVector4().Z;
+            value = cv.Z;
         else if (box->ID == 4)
-            value = cv.AsVector4().W;
+            value = cv.W;
         break;
     }
+    // Rotation
     case 8:
     {
         const float pitch = (float)node->Values[0];
@@ -106,14 +91,61 @@ void VisjectExecutor::ProcessGroupConstants(Box* box, Node* node, Value& value)
     case 9:
         value = node->Values[0];
         break;
-        // PI
+    // PI
     case 10:
         value = PI;
         break;
-        // Enum
+    // Enum
     case 11:
         value = node->Values[0];
         break;
+    // Array
+    case 13:
+        value = node->Values[0];
+        if (value.Type.Type == VariantType::Array)
+        {
+            auto& array = value.AsArray();
+            const int32 count = Math::Min(array.Count(), node->Boxes.Count() - 1);
+            const VariantType elementType = value.Type.GetElementType();
+            for (int32 i = 0; i < count; i++)
+            {
+                auto b = &node->Boxes[i + 1];
+                if (b && b->HasConnection())
+                    array[i] = eatBox(node, b->FirstConnection()).Cast(elementType);
+            }
+        }
+        break;
+    // Dictionary
+    case 14:
+    {
+        value = Variant(Dictionary<Variant, Variant>());
+        String typeName = TEXT("System.Collections.Generic.Dictionary`2[");
+        typeName += (StringView)node->Values[0];
+        typeName += ',';
+        typeName += (StringView)node->Values[1];
+        typeName += ']';
+        value.Type.SetTypeName(typeName);
+        break;
+    }
+    // Vector2/3/4
+    case 16:
+    case 17:
+    case 18:
+    {
+        const Variant& v = node->Values[0];
+        const Vector4 cv = (Vector4)v;
+        if (box->ID == 0)
+            value = v;
+        else if (box->ID == 1)
+            value = cv.X;
+        else if (box->ID == 2)
+            value = cv.Y;
+        else if (box->ID == 3)
+            value = cv.Z;
+        else if (box->ID == 4)
+            value = cv.W;
+        break;
+    }
     default:
         break;
     }
@@ -123,7 +155,7 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Add, Subtract, Multiply, Divide, Modulo, Max, Min, Pow, Fmod, Atan2
+    // Add, Subtract, Multiply, Divide, Modulo, Max, Min, Pow, Fmod, Atan2
     case 1:
     case 2:
     case 3:
@@ -135,12 +167,17 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
     case 40:
     case 41:
     {
-        Value v1 = tryGetValue(node->GetBox(0), 0, Value::Zero);
-        Value v2 = tryGetValue(node->GetBox(1), 1, Value::Zero).Cast(v1.Type);
+        auto b1 = node->GetBox(0);
+        Value v1 = tryGetValue(b1, 0, Value::Zero);
+        Value v2 = tryGetValue(node->GetBox(1), 1, Value::Zero);
+        if (b1->HasConnection())
+            v2 = v2.Cast(v1.Type);
+        else
+            v1 = v1.Cast(v2.Type);
         GraphUtilities::ApplySomeMathHere(node->TypeID, value, v1, v2);
         break;
     }
-        // Absolute Value, Ceil, Cosine, Floor, Round, Saturate, Sine, Sqrt, Tangent, Negate, 1 - Value, Asine, Acosine, Atan, Trunc, Frac, Degrees, Radians
+    // Absolute Value, Ceil, Cosine, Floor, Round, Saturate, Sine, Sqrt, Tangent, Negate, 1 - Value, Asine, Acosine, Atan, Trunc, Frac, Degrees, Radians
     case 7:
     case 8:
     case 9:
@@ -164,7 +201,7 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         GraphUtilities::ApplySomeMathHere(node->TypeID, value, v1);
         break;
     }
-        // Length, Normalize
+    // Length, Normalize
     case 11:
     case 12:
     {
@@ -175,16 +212,26 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         {
             switch (v1.Type.Type)
             {
-            case VariantType::Vector2:
-                value = v1.AsVector2().Length();
+            case VariantType::Float2:
+                value = v1.AsFloat2().Length();
                 break;
-            case VariantType::Vector3:
-                value = v1.AsVector3().Length();
+            case VariantType::Float3:
+                value = v1.AsFloat3().Length();
                 break;
-            case VariantType::Vector4:
-                value = Vector3(v1.AsVector4()).Length();
+            case VariantType::Float4:
+                value = Float3(v1.AsFloat4()).Length();
                 break;
-            default: CRASH;
+            case VariantType::Double2:
+                value = v1.AsDouble2().Length();
+                break;
+            case VariantType::Double3:
+                value = v1.AsDouble3().Length();
+                break;
+            case VariantType::Double4:
+                value = Double3(v1.AsDouble4()).Length();
+                break;
+            default:
+                value = 0.0f;
                 break;
             }
             break;
@@ -201,79 +248,124 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
             case VariantType::Float:
                 value = Math::Saturate(v1.AsFloat);
                 break;
-            case VariantType::Vector2:
-                value = Vector2::Normalize(v1.AsVector2());
+            case VariantType::Float2:
+                value = Float2::Normalize(v1.AsFloat2());
                 break;
-            case VariantType::Vector3:
-                value = Vector3::Normalize(v1.AsVector3());
+            case VariantType::Float3:
+                value = Float3::Normalize(v1.AsFloat3());
                 break;
-            case VariantType::Vector4:
-                value = Vector4(Vector3::Normalize(Vector3(v1.AsVector4())), 0.0f);
+            case VariantType::Float4:
+                value = Float4(Float3::Normalize(Float3(v1.AsFloat4())), 0.0f);
                 break;
-            default: CRASH;
+            case VariantType::Double2:
+                value = Double2::Normalize(v1.AsDouble2());
+                break;
+            case VariantType::Double3:
+                value = Double3::Normalize(v1.AsDouble3());
+                break;
+            case VariantType::Double4:
+                value = Double4(Double3::Normalize(Double3(v1.AsDouble3())), 0.0f);
+                break;
+            default:
+                value = 0.0f;
                 break;
             }
             break;
         }
         break;
     }
-        // Cross, Distance, Dot
+    // Cross, Distance, Dot
     case 18:
     case 19:
     case 20:
     {
-        Value v1 = tryGetValue(node->GetBox(0), Value::Zero);
-        Value v2 = tryGetValue(node->GetBox(1), Value::Zero).Cast(v1.Type);
+        Value v1 = tryGetValue(node->GetBox(0), 0, Value::Zero);
+        Value v2 = tryGetValue(node->GetBox(1), 1, Value::Zero).Cast(v1.Type);
         switch (node->TypeID)
         {
         case 18:
             switch (v1.Type.Type)
             {
-            case VariantType::Vector3:
-                value = Vector3::Cross(v1.AsVector3(), v2.AsVector3());
+            case VariantType::Float3:
+                value = Float3::Cross(v1.AsFloat3(), v2.AsFloat3());
                 break;
-            default: CRASH;
+            case VariantType::Double3:
+                value = Double3::Cross(v1.AsDouble3(), v2.AsDouble3());
+                break;
+            default:
+                value = 0.0f;
                 break;
             }
             break;
         case 19:
             switch (v1.Type.Type)
             {
-            case VariantType::Vector2:
-                value = Vector2::Distance(v1.AsVector2(), v2.AsVector2());
+            case VariantType::Bool:
+            case VariantType::Int16:
+            case VariantType::Uint16:
+            case VariantType::Int:
+            case VariantType::Uint:
+            case VariantType::Int64:
+            case VariantType::Uint64:
+            case VariantType::Float:
+            case VariantType::Double:
+                value = Math::Abs((float)v1 - (float)v2);
                 break;
-            case VariantType::Vector3:
-                value = Vector3::Distance(v1.AsVector3(), v2.AsVector3());
+            case VariantType::Float2:
+                value = Float2::Distance(v1.AsFloat2(), v2.AsFloat2());
                 break;
-            case VariantType::Vector4:
+            case VariantType::Float3:
+                value = Float3::Distance(v1.AsFloat3(), v2.AsFloat3());
+                break;
+            case VariantType::Float4:
             case VariantType::Color:
-                value = Vector3::Distance((Vector3)v1, (Vector3)v2);
+                value = Float3::Distance((Float3)v1, (Float3)v2);
                 break;
-            default: CRASH;
+            case VariantType::Double2:
+                value = Double2::Distance(v1.AsDouble2(), v2.AsDouble2());
+                break;
+            case VariantType::Double3:
+                value = Double3::Distance(v1.AsDouble3(), v2.AsDouble3());
+                break;
+            case VariantType::Double4:
+                value = Double3::Distance((Double3)v1, (Double3)v2);
+                break;
+            default:
+                value = 0.0f;
                 break;
             }
             break;
         case 20:
             switch (v1.Type.Type)
             {
-            case VariantType::Vector2:
-                value = Vector2::Dot(v1.AsVector2(), v2.AsVector2());
+            case VariantType::Float2:
+                value = Float2::Dot(v1.AsFloat2(), v2.AsFloat2());
                 break;
-            case VariantType::Vector3:
-                value = Vector3::Dot(v1.AsVector3(), v2.AsVector3());
+            case VariantType::Float3:
+                value = Float3::Dot(v1.AsFloat3(), v2.AsFloat3());
                 break;
-            case VariantType::Vector4:
+            case VariantType::Float4:
             case VariantType::Color:
-                value = Vector3::Dot((Vector3)v1, (Vector3)v2);
+                value = Float3::Dot((Float3)v1, (Float3)v2);
                 break;
-            default: CRASH;
+            case VariantType::Double2:
+                value = Double2::Dot(v1.AsDouble2(), v2.AsDouble2());
+                break;
+            case VariantType::Double3:
+                value = Double3::Dot(v1.AsDouble3(), v2.AsDouble3());
+                break;
+            case VariantType::Double4:
+                value = Double3::Dot((Double3)v1, (Double3)v2);
+                break;
+            default:
+                value = 0.0f;
                 break;
             }
             break;
         }
         break;
     }
-        // Clamp
+    // Clamp
     case 24:
     {
         Value v1 = tryGetValue(node->GetBox(0), Value::Zero);
@@ -285,7 +377,7 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         });
         break;
     }
-        // Lerp
+    // Lerp
     case 25:
     {
         Value a = tryGetValue(node->GetBox(0), 0, Value::Zero);
@@ -294,28 +386,29 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         value = Value::Lerp(a, b, alpha.AsFloat);
         break;
     }
-        // Reflect
+    // Reflect
     case 26:
     {
         Value v1 = tryGetValue(node->GetBox(0), Value::Zero);
         Value v2 = tryGetValue(node->GetBox(1), Value::Zero).Cast(v1.Type);
         switch (v1.Type.Type)
         {
-        case VariantType::Vector2:
-            value = v1.AsVector2() - 2 * v2.AsVector2() * Vector2::Dot(v1.AsVector2(), v2.AsVector2());
+        case VariantType::Float2:
+            value = v1.AsFloat2() - 2.0f * v2.AsFloat2() * Float2::Dot(v1.AsFloat2(), v2.AsFloat2());
             break;
-        case VariantType::Vector3:
-            value = v1.AsVector3() - 2 * v2.AsVector3() * Vector3::Dot(v1.AsVector3(), v2.AsVector3());
+        case VariantType::Float3:
+            value = v1.AsFloat3() - 2.0f * v2.AsFloat3() * Float3::Dot(v1.AsFloat3(), v2.AsFloat3());
             break;
-        case VariantType::Vector4:
-            value = Vector4(v1.AsVector4() - 2 * v2.AsVector4() * Vector3::Dot((Vector3)v1, (Vector3)v2));
+        case VariantType::Float4:
+            value = Float4(v1.AsFloat4() - 2.0f * v2.AsFloat4() * Float3::Dot((Float3)v1, (Float3)v2));
             break;
-        default: CRASH;
+        default:
+            value = 0.0f;
             break;
         }
         break;
     }
-        // Mad
+    // Mad
     case 31:
     {
         Value v1 = tryGetValue(node->GetBox(0), Value::Zero);
@@ -327,34 +420,34 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         });
         break;
     }
-        // Extract Largest Component
+    // Extract Largest Component
     case 32:
     {
-        const auto v1 = (Vector3)tryGetValue(node->GetBox(0), Value::Zero);
+        const auto v1 = (Float3)tryGetValue(node->GetBox(0), Value::Zero);
         value = Math::ExtractLargestComponent(v1);
         break;
     }
-        // Bias and Scale
+    // Bias and Scale
     case 36:
     {
         ASSERT(node->Values.Count() == 2 && node->Values[0].Type == VariantType::Float && node->Values[1].Type == VariantType::Float);
         const auto bias = node->Values[0].AsFloat;
         const auto scale = node->Values[1].AsFloat;
-        const auto input = (Vector3)tryGetValue(node->GetBox(0), Value::Zero);
+        const auto input = (Float3)tryGetValue(node->GetBox(0), Value::Zero);
         value = (input + bias) * scale;
         break;
     }
-        // Rotate About Axis
+    // Rotate About Axis
     case 37:
     {
-        const auto normalizedRotationAxis = (Vector3)tryGetValue(node->GetBox(0), Value::Zero);
+        const auto normalizedRotationAxis = (Float3)tryGetValue(node->GetBox(0), Value::Zero);
         const auto rotationAngle = (float)tryGetValue(node->GetBox(1), Value::Zero);
-        const auto pivotPoint = (Vector3)tryGetValue(node->GetBox(2), Value::Zero);
-        const auto position = (Vector3)tryGetValue(node->GetBox(3), Value::Zero);
+        const auto pivotPoint = (Float3)tryGetValue(node->GetBox(2), Value::Zero);
+        const auto position = (Float3)tryGetValue(node->GetBox(3), Value::Zero);
         value = Math::RotateAboutAxis(normalizedRotationAxis, rotationAngle, pivotPoint, position);
         break;
     }
-        // Near Equal
+    // Near Equal
     case 42:
     {
         const Value a = tryGetValue(node->GetBox(0), node->Values[0]);
@@ -363,33 +456,39 @@ void VisjectExecutor::ProcessGroupMath(Box* box, Node* node, Value& value)
         value = Value::NearEqual(a, b, epsilon);
         break;
     }
-        // Enum Value
+    // Enum Value
     case 45:
         value = (uint64)tryGetValue(node->GetBox(0), Value::Zero);
         break;
-        // Enum AND
+    // Enum AND
     case 46:
         value = tryGetValue(node->GetBox(0), Value::Zero);
         if (value.Type.Type == VariantType::Enum)
             value.AsUint64 = value.AsUint64 & (uint64)tryGetValue(node->GetBox(1), Value::Zero);
         break;
-        // Enum OR
+    // Enum OR
     case 47:
         value = tryGetValue(node->GetBox(0), Value::Zero);
         if (value.Type.Type == VariantType::Enum)
             value.AsUint64 = value.AsUint64 | (uint64)tryGetValue(node->GetBox(1), Value::Zero);
         break;
-        // Remap
+    // Remap
     case 48:
     {
         const float inVal = tryGetValue(node->GetBox(0), node->Values[0]).AsFloat;
-        const Vector2 rangeA = tryGetValue(node->GetBox(1), node->Values[1]).AsVector2();
-        const Vector2 rangeB = tryGetValue(node->GetBox(2), node->Values[2]).AsVector2();
+        const Float2 rangeA = tryGetValue(node->GetBox(1), node->Values[1]).AsFloat2();
+        const Float2 rangeB = tryGetValue(node->GetBox(2), node->Values[2]).AsFloat2();
         const bool clamp = tryGetValue(node->GetBox(3), node->Values[3]).AsBool;
-
         auto mapFunc = Math::Remap(inVal, rangeA.X, rangeA.Y, rangeB.X, rangeB.Y);
-
         value = clamp ? Math::Clamp(mapFunc, rangeB.X, rangeB.Y) : mapFunc;
+        break;
+    }
+    // Rotate Vector
+    case 49:
+    {
+        const Quaternion quaternion = (Quaternion)tryGetValue(node->GetBox(0), Quaternion::Identity);
+        const Float3 vector = (Float3)tryGetValue(node->GetBox(1), Float3::Forward);
+        value = quaternion * vector;
         break;
     }
     default:
@@ -401,12 +500,12 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Pack
+    // Pack
     case 20:
     {
         float vX = (float)tryGetValue(node->GetBox(1), node->Values[0]);
         float vY = (float)tryGetValue(node->GetBox(2), node->Values[1]);
-        value = Vector2(vX, vY);
+        value = Float2(vX, vY);
         break;
     }
     case 21:
@@ -414,7 +513,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         float vX = (float)tryGetValue(node->GetBox(1), node->Values[0]);
         float vY = (float)tryGetValue(node->GetBox(2), node->Values[1]);
         float vZ = (float)tryGetValue(node->GetBox(3), node->Values[2]);
-        value = Vector3(vX, vY, vZ);
+        value = Float3(vX, vY, vZ);
         break;
     }
     case 22:
@@ -423,7 +522,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         float vY = (float)tryGetValue(node->GetBox(2), node->Values[1]);
         float vZ = (float)tryGetValue(node->GetBox(3), node->Values[2]);
         float vW = (float)tryGetValue(node->GetBox(4), node->Values[3]);
-        value = Vector4(vX, vY, vZ, vW);
+        value = Float4(vX, vY, vZ, vW);
         break;
     }
     case 23:
@@ -438,7 +537,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
     {
         const Vector3 vX = (Vector3)tryGetValue(node->GetBox(1), Vector3::Zero);
         const Quaternion vY = (Quaternion)tryGetValue(node->GetBox(2), Quaternion::Identity);
-        const Vector3 vZ = (Vector3)tryGetValue(node->GetBox(3), Vector3::One);
+        const Float3 vZ = (Float3)tryGetValue(node->GetBox(3), Float3::One);
         value = Variant(Transform(vX, vY, vZ));
         break;
     }
@@ -449,10 +548,10 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         value = Variant(BoundingBox(vX, vY));
         break;
     }
-        // Unpack
+    // Unpack
     case 30:
     {
-        Vector2 v = (Vector2)tryGetValue(node->GetBox(0), Vector2::Zero);
+        Float2 v = (Float2)tryGetValue(node->GetBox(0), Float2::Zero);
         int32 subIndex = box->ID - 1;
         ASSERT(subIndex >= 0 && subIndex < 2);
         value = v.Raw[subIndex];
@@ -460,7 +559,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
     }
     case 31:
     {
-        Vector3 v = (Vector3)tryGetValue(node->GetBox(0), Vector3::Zero);
+        Float3 v = (Float3)tryGetValue(node->GetBox(0), Float3::Zero);
         int32 subIndex = box->ID - 1;
         ASSERT(subIndex >= 0 && subIndex < 3);
         value = v.Raw[subIndex];
@@ -468,7 +567,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
     }
     case 32:
     {
-        Vector4 v = (Vector4)tryGetValue(node->GetBox(0), Vector4::Zero);
+        Float4 v = (Float4)tryGetValue(node->GetBox(0), Float4::Zero);
         int32 subIndex = box->ID - 1;
         ASSERT(subIndex >= 0 && subIndex < 4);
         value = v.Raw[subIndex];
@@ -476,7 +575,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
     }
     case 33:
     {
-        const Vector3 v = ((Quaternion)tryGetValue(node->GetBox(0), Quaternion::Identity)).GetEuler();
+        const Float3 v = ((Quaternion)tryGetValue(node->GetBox(0), Quaternion::Identity)).GetEuler();
         const int32 subIndex = box->ID - 1;
         ASSERT(subIndex >= 0 && subIndex < 3);
         value = v.Raw[subIndex];
@@ -513,7 +612,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Pack Structure
+    // Pack Structure
     case 26:
     {
         // Find type
@@ -523,6 +622,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(typeNameAnsiView);
         if (!typeHandle)
         {
+#if !COMPILE_WITHOUT_CSHARP
             const auto mclass = Scripting::FindClass(typeNameAnsiView);
             if (mclass)
             {
@@ -542,9 +642,9 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
                     {
                         box = &node->Boxes[boxId];
                         String fieldName;
-                        stream.ReadString(&fieldName, 11);
+                        stream.Read(fieldName, 11);
                         VariantType fieldType;
-                        stream.ReadVariantType(&fieldType);
+                        stream.Read(fieldType);
                         if (box && box->HasConnection())
                         {
                             StringAsANSI<40> fieldNameAnsi(*fieldName, fieldName.Length());
@@ -559,6 +659,7 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
                 }
             }
             else if (typeName.HasChars())
+#endif
             {
                 OnError(node, box, String::Format(TEXT("Missing type '{0}'"), typeName));
             }
@@ -582,9 +683,9 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
             {
                 box = &node->Boxes[boxId];
                 String fieldName;
-                stream.ReadString(&fieldName, 11);
+                stream.Read(fieldName, 11);
                 VariantType fieldType;
-                stream.ReadVariantType(&fieldType);
+                stream.Read(fieldType);
                 if (box && box->HasConnection())
                 {
                     const Variant fieldValue = eatBox(node, box->FirstConnection());
@@ -592,15 +693,19 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
                 }
             }
         }
+
+        // For in-built structures try to convert it into internal format for better comparability with the scripting
+        value.Inline();
+
         break;
     }
-        // Unpack Structure
+    // Unpack Structure
     case 36:
     {
         // Get value with structure data
-        const Variant structureValue = eatBox(node, node->GetBox(0)->FirstConnection());
         if (!node->GetBox(0)->HasConnection())
             return;
+        Variant structureValue = eatBox(node, node->GetBox(0)->FirstConnection());
 
         // Find type
         const StringView typeName(node->Values[0]);
@@ -609,13 +714,14 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(typeNameAnsiView);
         if (!typeHandle)
         {
+#if USE_CSHARP
             const auto mclass = Scripting::FindClass(typeNameAnsiView);
             if (mclass)
             {
                 // Fallback to C#-only types
-                auto instance = (MonoObject*)structureValue;
+                auto instance = (MObject*)structureValue;
                 CHECK(instance);
-                if (structureValue.Type.Type != VariantType::ManagedObject || mono_object_get_class(instance) != mclass->GetNative())
+                if (structureValue.Type.Type != VariantType::ManagedObject || MCore::Object::GetClass(instance) != mclass)
                 {
                     OnError(node, box, String::Format(TEXT("Cannot unpack value of type {0} to structure of type {1}"), String(MUtils::GetClassFullname(instance)), typeName));
                     return;
@@ -631,9 +737,9 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
                     for (int32 boxId = 1; boxId < node->Boxes.Count(); boxId++)
                     {
                         String fieldName;
-                        stream.ReadString(&fieldName, 11);
+                        stream.Read(fieldName, 11);
                         VariantType fieldType;
-                        stream.ReadVariantType(&fieldType);
+                        stream.Read(fieldType);
                         if (box->ID == boxId)
                         {
                             StringAsANSI<40> fieldNameAnsi(*fieldName, fieldName.Length());
@@ -646,13 +752,22 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
                 }
             }
             else if (typeName.HasChars())
+#endif
             {
                 OnError(node, box, String::Format(TEXT("Missing type '{0}'"), typeName));
             }
             return;
         }
         const ScriptingType& type = typeHandle.GetType();
-        if (structureValue.Type.Type != VariantType::Structure || StringUtils::Compare(typeNameAnsi.Get(), structureValue.Type.TypeName) != 0)
+        if (structureValue.Type.Type != VariantType::Structure) // If structureValue is eg. Float we can try to cast it to a required structure type
+        {
+            VariantType typeVariantType(typeNameAnsiView);
+            if (Variant::CanCast(structureValue, typeVariantType))
+                structureValue = Variant::Cast(structureValue, typeVariantType);
+        }
+        structureValue.InvertInline(); // Extract any Float3/Int32 into Structure type from inlined format
+        const ScriptingTypeHandle structureValueTypeHandle = structureValue.Type.GetScriptingType();
+        if (structureValue.Type.Type != VariantType::Structure || typeHandle != structureValueTypeHandle)
         {
             OnError(node, box, String::Format(TEXT("Cannot unpack value of type {0} to structure of type {1}"), structureValue.Type, typeName));
             return;
@@ -670,9 +785,9 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
             for (int32 boxId = 1; boxId < node->Boxes.Count(); boxId++)
             {
                 String fieldName;
-                stream.ReadString(&fieldName, 11);
+                stream.Read(fieldName, 11);
                 VariantType fieldType;
-                stream.ReadVariantType(&fieldType);
+                stream.Read(fieldType);
                 if (box->ID == boxId)
                 {
                     type.Struct.GetField(structureValue.AsBlob.Data, fieldName, value);
@@ -682,47 +797,47 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Mask X, Y, Z, W
+    // Mask X, Y, Z, W
     case 40:
     case 41:
     case 42:
     case 43:
     {
-        const Vector4 v = (Vector4)tryGetValue(node->GetBox(0), Vector4::Zero);
+        const Float4 v = (Float4)tryGetValue(node->GetBox(0), Float4::Zero);
         value = v.Raw[node->TypeID - 40];
         break;
     }
-        // Mask XY, YZ, XZ,...
+    // Mask XY, YZ, XZ,...
     case 44:
     {
-        value = (Vector2)tryGetValue(node->GetBox(0), Vector2::Zero);
+        value = (Float2)tryGetValue(node->GetBox(0), Float2::Zero);
         break;
     }
     case 45:
     {
-        const Vector4 v = (Vector4)tryGetValue(node->GetBox(0), Vector4::Zero);
-        value = Vector2(v.X, v.Z);
+        const Float4 v = (Float4)tryGetValue(node->GetBox(0), Float4::Zero);
+        value = Float2(v.X, v.Z);
         break;
     }
     case 46:
     {
-        const Vector4 v = (Vector4)tryGetValue(node->GetBox(0), Vector4::Zero);
-        value = Vector2(v.Y, v.Z);
+        const Float4 v = (Float4)tryGetValue(node->GetBox(0), Float4::Zero);
+        value = Float2(v.Y, v.Z);
         break;
     }
     case 47:
     {
-        const Vector4 v = (Vector4)tryGetValue(node->GetBox(0), Vector4::Zero);
-        value = Vector2(v.Z, v.W);
+        const Float4 v = (Float4)tryGetValue(node->GetBox(0), Float4::Zero);
+        value = Float2(v.Z, v.W);
         break;
     }
-        // Mask XYZ
+    // Mask XYZ
     case 70:
     {
-        value = (Vector3)tryGetValue(node->GetBox(0), Vector3::Zero);
+        value = (Float3)tryGetValue(node->GetBox(0), Float3::Zero);
         break;
     }
-        // Append
+    // Append
     case 100:
     {
         auto in0 = node->GetBox(0);
@@ -746,21 +861,21 @@ void VisjectExecutor::ProcessGroupPacking(Box* box, Node* node, Value& value)
             value = count0 ? value0 : value1;
             break;
         case 2:
-            value = Vector2((float)value0, (float)value1);
+            value = Float2((float)value0, (float)value1);
             break;
         case 3:
             if (count0 == 1)
-                value = Vector3((float)value0, value1.AsVector2().X, value1.AsVector2().Y);
+                value = Float3((float)value0, value1.AsFloat2().X, value1.AsFloat2().Y);
             else
-                value = Vector3((Vector2)value0, (float)value1);
+                value = Float3((Float2)value0, (float)value1);
             break;
         case 4:
             if (count0 == 1)
-                value = Vector4((float)value0, value1.AsVector3().X, value1.AsVector3().Y, value1.AsVector3().Z);
+                value = Float4((float)value0, value1.AsFloat3().X, value1.AsFloat3().Y, value1.AsFloat3().Z);
             else if (count0 == 2)
-                value = Vector4(value0.AsVector2().X, value0.AsVector2().Y, value1.AsVector2().X, value1.AsVector2().Y);
+                value = Float4(value0.AsFloat2().X, value0.AsFloat2().Y, value1.AsFloat2().X, value1.AsFloat2().Y);
             else
-                value = Vector4((Vector3)value0, (float)value1);
+                value = Float4((Float3)value0, (float)value1);
             break;
         default:
             value = Value::Zero;
@@ -777,7 +892,7 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Color Gradient
+    // Color Gradient
     case 10:
     {
         float time, prevTime, curTime;
@@ -833,22 +948,22 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Curve
+    // Curve
 #define SAMPLE_CURVE(id, curves, type, graphType) \
 		case id: \
 		{ \
-			const auto& curve = GetCurrentGraph()->curves[node->Data.Curve.CurveIndex]; \
+			const auto& curve = GetCurrentGraph()->curves[node->CurveIndex]; \
 			const float time = (float)tryGetValue(node->GetBox(0), Value::Zero); \
 			value.Type = VariantType(VariantType::graphType); \
 			curve.Evaluate(*(type*)value.AsData, time, false); \
 			break; \
 		}
     SAMPLE_CURVE(12, FloatCurves, float, Float)
-    SAMPLE_CURVE(13, Vector2Curves, Vector2, Vector2)
-    SAMPLE_CURVE(14, Vector3Curves, Vector3, Vector3)
-    SAMPLE_CURVE(15, Vector4Curves, Vector4, Vector4)
+    SAMPLE_CURVE(13, Float2Curves, Float2, Float2)
+    SAMPLE_CURVE(14, Float3Curves, Float3, Float3)
+    SAMPLE_CURVE(15, Float4Curves, Float4, Float4)
 #undef SETUP_CURVE
-        // Get Gameplay Global
+    // Get Gameplay Global
     case 16:
         if (const auto asset = node->Assets[0].As<GameplayGlobals>())
         {
@@ -861,7 +976,7 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
             value = Value::Zero;
         }
         break;
-        // Platform Switch
+    // Platform Switch
     case 17:
     {
         int32 boxId = 1;
@@ -891,24 +1006,36 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         case PlatformType::Switch:
             boxId = 9;
             break;
+        case PlatformType::PS5:
+            boxId = 10;
+            break;
+        case PlatformType::Mac:
+            boxId = 11;
+            break;
+        case PlatformType::iOS:
+            boxId = 12;
+            break;
+        case PlatformType::Web:
+            boxId = 13;
+            break;
         default: ;
         }
         value = tryGetValue(node->GetBox(node->GetBox(boxId)->HasConnection() ? boxId : 1), Value::Zero);
         break;
     }
-        // Asset Reference
+    // Asset Reference
     case 18:
         value = ::LoadAsset((Guid)node->Values[0], Asset::TypeInitializer);
         break;
-        // To String
+    // To String
     case 20:
         value.SetString(tryGetValue(node->GetBox(1), Value(StringView::Empty)).ToString());
         break;
-        // Actor Reference
+    // Actor Reference
     case 21:
         value = Scripting::FindObject<Actor>((Guid)node->Values[0]);
         break;
-        // As
+    // As
     case 22:
     {
         value = Value::Null;
@@ -924,7 +1051,7 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Type Reference node
+    // Type Reference node
     case 23:
     {
         const StringView typeName(node->Values[0]);
@@ -934,7 +1061,7 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
             value = typeName;
         break;
     }
-        // Is
+    // Is
     case 24:
     {
         value = Value::False;
@@ -949,17 +1076,33 @@ void VisjectExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Is Null
+    // Is Null
     case 27:
         value = (void*)tryGetValue(node->GetBox(1), Value::Null) == nullptr;
         break;
-        // Is Valid
+    // Is Valid
     case 28:
         value = (void*)tryGetValue(node->GetBox(1), Value::Null) != nullptr;
         break;
-        // Reroute
+    // Reroute
     case 29:
         value = tryGetValue(node->GetBox(0), Value::Zero);
+        break;
+    // Noises
+    case 30:
+        value = Noise::PerlinNoise((Float2)tryGetValue(node->GetBox(0)));
+        break;
+    case 31:
+        value = Noise::SimplexNoise((Float2)tryGetValue(node->GetBox(0)));
+        break;
+    case 32:
+        value = Noise::WorleyNoise((Float2)tryGetValue(node->GetBox(0)));
+        break;
+    case 33:
+        value = Noise::VoronoiNoise((Float2)tryGetValue(node->GetBox(0)));
+        break;
+    case 34:
+        value = Noise::CustomNoise((Float3)tryGetValue(node->GetBox(0)));
         break;
     default:
         break;
@@ -970,14 +1113,14 @@ void VisjectExecutor::ProcessGroupBoolean(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // NOT
+    // NOT
     case 1:
     {
         const bool a = (bool)tryGetValue(node->GetBox(0), Value::False);
         value = !a;
         break;
     }
-        // AND, OR, XOR, NOR, NAND
+    // AND, OR, XOR, NOR, NAND
     case 2:
     case 3:
     case 4:
@@ -989,23 +1132,23 @@ void VisjectExecutor::ProcessGroupBoolean(Box* box, Node* node, Value& value)
         bool result = false;
         switch (node->TypeID)
         {
-            // AND
+        // AND
         case 2:
             result = a && b;
             break;
-            // OR
+        // OR
         case 3:
             result = a || b;
             break;
-            // XOR
+        // XOR
         case 4:
             result = !a != !b;
             break;
-            // NOR
+        // NOR
         case 5:
             result = !(a || b);
             break;
-            // NAND
+        // NAND
         case 6:
             result = !(a && b);
             break;
@@ -1022,14 +1165,14 @@ void VisjectExecutor::ProcessGroupBitwise(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // NOT
+    // NOT
     case 1:
     {
         const int32 a = (int32)tryGetValue(node->GetBox(0), Value(0));
         value = !a;
         break;
     }
-        // AND, OR, XOR
+    // AND, OR, XOR
     case 2:
     case 3:
     case 4:
@@ -1039,15 +1182,15 @@ void VisjectExecutor::ProcessGroupBitwise(Box* box, Node* node, Value& value)
         int32 result = 0;
         switch (node->TypeID)
         {
-            // AND
+        // AND
         case 2:
             result = a & b;
             break;
-            // OR
+        // OR
         case 3:
             result = a | b;
             break;
-            // XOR
+        // XOR
         case 4:
             result = a ^ b;
             break;
@@ -1064,7 +1207,7 @@ void VisjectExecutor::ProcessGroupComparisons(Box* box, Node* node, Value& value
 {
     switch (node->TypeID)
     {
-        // ==, !=, >, <=, >=
+    // ==, !=, >, <=, >=
     case 1:
     case 2:
     case 3:
@@ -1099,7 +1242,7 @@ void VisjectExecutor::ProcessGroupComparisons(Box* box, Node* node, Value& value
         value = result;
         break;
     }
-        // Switch On Bool
+    // Switch On Bool
     case 7:
     {
         const Value condition = tryGetValue(node->GetBox(0), Value::False);
@@ -1109,7 +1252,7 @@ void VisjectExecutor::ProcessGroupComparisons(Box* box, Node* node, Value& value
             value = tryGetValue(node->GetBox(1), 0, Value::Zero);
         break;
     }
-        // Switch On Enum
+    // Switch On Enum
     case 8:
     {
         const Value v = tryGetValue(node->GetBox(0), Value::Null);
@@ -1138,67 +1281,67 @@ void VisjectExecutor::ProcessGroupParticles(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Random Float
+    // Random Float
     case 208:
     {
         value = RAND;
         break;
     }
-        // Random Vector2
+    // Random Vector2
     case 209:
     {
-        value = Vector2(RAND, RAND);
+        value = Float2(RAND, RAND);
         break;
     }
-        // Random Vector3
+    // Random Vector3
     case 210:
     {
-        value = Vector3(RAND, RAND, RAND);
+        value = Float3(RAND, RAND, RAND);
         break;
     }
-        // Random Vector4
+    // Random Vector4
     case 211:
     {
-        value = Vector4(RAND, RAND, RAND, RAND);
+        value = Float4(RAND, RAND, RAND, RAND);
         break;
     }
-        // Random Float Range
+    // Random Float Range
     case 213:
     {
-        auto& a = node->Values[0].AsFloat;
-        auto& b = node->Values[1].AsFloat;
+        auto a = (float)tryGetValue(node->TryGetBox(1), node->Values[0]);
+        auto b = (float)tryGetValue(node->TryGetBox(2), node->Values[1]);
         value = Math::Lerp(a, b, RAND);
         break;
     }
-        // Random Vector2 Range
+    // Random Vector2 Range
     case 214:
     {
-        auto a = (Vector2)node->Values[0];
-        auto b = (Vector2)node->Values[1];
-        value = Vector2(
+        auto a = (Float2)tryGetValue(node->TryGetBox(1),  node->Values[0]);
+        auto b = (Float2)tryGetValue(node->TryGetBox(2),  node->Values[1]);
+        value = Float2(
             Math::Lerp(a.X, b.X, RAND),
             Math::Lerp(a.Y, b.Y, RAND)
         );
         break;
     }
-        // Random Vector3 Range
+    // Random Vector3 Range
     case 215:
     {
-        auto a = (Vector3)node->Values[0];
-        auto b = (Vector3)node->Values[1];
-        value = Vector3(
+        auto a = (Float3)tryGetValue(node->TryGetBox(1), node->Values[0]);
+        auto b = (Float3)tryGetValue(node->TryGetBox(2), node->Values[1]);
+        value = Float3(
             Math::Lerp(a.X, b.X, RAND),
             Math::Lerp(a.Y, b.Y, RAND),
             Math::Lerp(a.Z, b.Z, RAND)
         );
         break;
     }
-        // Random Vector4 Range
+    // Random Vector4 Range
     case 216:
     {
-        auto a = (Vector4)node->Values[0];
-        auto b = (Vector4)node->Values[1];
-        value = Vector4(
+        auto a = (Float4)tryGetValue(node->TryGetBox(1), node->Values[0]);
+        auto b = (Float4)tryGetValue(node->TryGetBox(2), node->Values[1]);
+        value = Float4(
             Math::Lerp(a.X, b.X, RAND),
             Math::Lerp(a.Y, b.Y, RAND),
             Math::Lerp(a.Z, b.Z, RAND),
@@ -1211,17 +1354,175 @@ void VisjectExecutor::ProcessGroupParticles(Box* box, Node* node, Value& value)
     }
 }
 
-VisjectExecutor::Value VisjectExecutor::tryGetValue(Box* box, int32 defaultValueBoxIndex, const Value& defaultValue)
+void VisjectExecutor::ProcessGroupCollections(Box* box, Node* node, Value& value)
 {
-    const auto parentNode = box->GetParent<Node>();
-    if (box->HasConnection())
-        return eatBox(parentNode, box->FirstConnection());
-    if (parentNode->Values.Count() > defaultValueBoxIndex)
-        return Value(parentNode->Values[defaultValueBoxIndex]);
-    return defaultValue;
-}
-
-VisjectExecutor::Value VisjectExecutor::tryGetValue(Box* box, const Value& defaultValue)
-{
-    return box && box->HasConnection() ? eatBox(box->GetParent<Node>(), box->FirstConnection()) : defaultValue;
+    if (node->TypeID < 100)
+    {
+        // Array
+        Variant v = tryGetValue(node->GetBox(0), Value::Null);
+        if (v.Type.Type == VariantType::Null)
+            v = Variant(Array<Variant>());
+        ENSURE(v.Type.Type == VariantType::Array, String::Format(TEXT("Input value {0} is not an array."), v));
+        auto& array = v.AsArray();
+        Box* b;
+        switch (node->TypeID)
+        {
+        // Count
+        case 1:
+            value = array.Count();
+            break;
+        // Contains
+        case 2:
+            value = array.Contains(tryGetValue(node->GetBox(1), Value::Null));
+            break;
+        // Find
+        case 3:
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to find."));
+            value = array.Find(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            break;
+        // Find Last
+        case 4:
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to find."));
+            value = array.FindLast(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            break;
+        // Clear
+        case 5:
+            array.Clear();
+            value = MoveTemp(v);
+            break;
+        // Remove
+        case 6:
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to remove."));
+            array.Remove(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            value = MoveTemp(v);
+            break;
+        // Remove At
+        case 7:
+        {
+            const int32 index = (int32)tryGetValue(node->GetBox(1), 0, Value::Null);
+            ENSURE(index >= 0 && index < array.Count(), String::Format(TEXT("Array index {0} is out of range [0;{1}]."), index, array.Count() - 1));
+            array.RemoveAt(index);
+            value = MoveTemp(v);
+            break;
+        }
+        // Add
+        case 8:
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to add."));
+            array.Add(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            value = MoveTemp(v);
+            break;
+        // Insert
+        case 9:
+        {
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to add."));
+            const int32 index = (int32)tryGetValue(node->GetBox(2), 0, Value::Null);
+            ENSURE(index >= 0 && index <= array.Count(), String::Format(TEXT("Array index {0} is out of range [0;{1}]."), index, array.Count()));
+            array.Insert(index, eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            value = MoveTemp(v);
+            break;
+        }
+        // Get
+        case 10:
+        {
+            const int32 index = (int32)tryGetValue(node->GetBox(1), 0, Value::Null);
+            ENSURE(index >= 0 && index < array.Count(), String::Format(TEXT("Array index {0} is out of range [0;{1}]."), index, array.Count() - 1));
+            value = MoveTemp(array[index]);
+            break;
+        }
+        // Set
+        case 11:
+        {
+            b = node->GetBox(2);
+            ENSURE(b->HasConnection(), TEXT("Missing value to set."));
+            const int32 index = (int32)tryGetValue(node->GetBox(1), 0, Value::Null);
+            ENSURE(index >= 0 && index < array.Count(), String::Format(TEXT("Array index {0} is out of range [0;{1}]."), index, array.Count() - 1));
+            array[index] = MoveTemp(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            value = MoveTemp(v);
+            break;
+        }
+        // Sort
+        case 12:
+            Sorting::QuickSort(array);
+            value = MoveTemp(v);
+            break;
+        // Reverse
+        case 13:
+            array.Reverse();
+            value = MoveTemp(v);
+            break;
+        // Add Unique
+        case 14:
+            b = node->GetBox(1);
+            ENSURE(b->HasConnection(), TEXT("Missing value to add."));
+            array.AddUnique(eatBox(b->GetParent<Node>(), b->FirstConnection()));
+            value = MoveTemp(v);
+            break;
+        }
+    }
+    else if (node->TypeID < 200)
+    {
+        // Dictionary
+        Variant v = tryGetValue(node->GetBox(0), Value::Null);
+        if (v.Type.Type == VariantType::Null)
+            v = Variant(Dictionary<Variant, Variant>());
+        ENSURE(v.Type.Type == VariantType::Dictionary, String::Format(TEXT("Input value {0} is not a dictionary."), v));
+        auto& dictionary = *v.AsDictionary;
+        switch (node->TypeID)
+        {
+        // Count
+        case 101:
+            value = dictionary.Count();
+            break;
+        // Contains Key
+        case 102:
+        {
+            Variant inKey = tryGetValue(node->GetBox(1), 0, Value::Null);
+            value = dictionary.ContainsKey(inKey);
+            break;
+        }
+        // Contains Value
+        case 103:
+        {
+            Variant inValue = tryGetValue(node->GetBox(2), 0, Value::Null);
+            value = dictionary.ContainsValue(inValue);
+            break;
+        }
+        // Clear
+        case 104:
+            dictionary.Clear();
+            value = MoveTemp(v);
+            break;
+        // Remove
+        case 105:
+        {
+            Variant inKey = tryGetValue(node->GetBox(1), 0, Value::Null);
+            dictionary.Remove(inKey);
+            value = MoveTemp(v);
+            break;
+        }
+        // Set
+        case 106:
+        {
+            Variant inKey = tryGetValue(node->GetBox(1), 0, Value::Null);
+            Variant inValue = tryGetValue(node->GetBox(2), 1, Value::Null);
+            dictionary[MoveTemp(inKey)] = MoveTemp(inValue);
+            value = MoveTemp(v);
+            break;
+        }
+        // Get
+        case 107:
+        {
+            Variant key = tryGetValue(node->GetBox(1), 0, Value::Null);
+            Variant* valuePtr = dictionary.TryGet(key);
+            ENSURE(valuePtr, TEXT("Missing key to get."));
+            value = MoveTemp(*valuePtr);
+            break;
+        }
+        }
+    }
 }

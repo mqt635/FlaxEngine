@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Texture.h"
 #include "Engine/Content/Content.h"
@@ -7,7 +7,7 @@
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Graphics/RenderTools.h"
 #include "Engine/Graphics/Textures/TextureData.h"
-#include "Engine/Scripting/MainThreadManagedInvokeAction.h"
+#include "Engine/Scripting/Internal/MainThreadManagedInvokeAction.h"
 #include "Engine/Tools/TextureTool/TextureTool.h"
 
 REGISTER_BINARY_ASSET_WITH_UPGRADER(Texture, "FlaxEngine.Texture", TextureAssetUpgrader, true);
@@ -29,24 +29,19 @@ bool Texture::IsNormalMap() const
 
 #if USE_EDITOR
 
+bool Texture::Save(const StringView& path)
+{
+    return Save(path, nullptr);
+}
+
 bool Texture::Save(const StringView& path, const InitData* customData)
 {
-    // Validate state
-    if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave(path))
         return true;
-    }
-    if (IsVirtual() && path.IsEmpty())
-    {
-        LOG(Error, "To save virtual asset asset you need to specify the target asset path location.");
-        return true;
-    }
-
     ScopeLock lock(Locker);
 
     AssetInitData data;
-    const auto texture = StreamingTexture();
+    const class StreamingTexture* texture = StreamingTexture();
 
     // Use a temporary chunks for data storage for virtual assets
     FlaxChunk* tmpChunks[ASSET_FILE_DATA_CHUNKS];
@@ -176,33 +171,7 @@ bool Texture::LoadFile(const StringView& path, bool generateMips)
     }
 
     auto initData = New<InitData>();
-
-    initData->Format = textureData.Format;
-    initData->Width = textureData.Width;
-    initData->Height = textureData.Height;
-    initData->ArraySize = 1;
-    if (generateMips)
-        initData->Mips.Resize(MipLevelsCount(textureData.Width, textureData.Height));
-    else
-        initData->Mips.Resize(textureData.GetMipLevels());
-
-    for (int32 mipIndex = 0; mipIndex < textureData.GetMipLevels(); mipIndex++)
-    {
-        auto& mip = initData->Mips[mipIndex];
-        auto& data = *textureData.GetData(0, mipIndex);
-
-        mip.Data.Copy(data.Data);
-        mip.RowPitch = data.RowPitch;
-        mip.SlicePitch = data.DepthPitch;
-    }
-
-    if (generateMips)
-    {
-        for (int32 mipIndex = textureData.GetMipLevels(); mipIndex < initData->Mips.Count(); mipIndex++)
-        {
-            initData->GenerateMip(mipIndex, true);
-        }
-    }
+    initData->FromTextureData(textureData, generateMips);
 
     return Init(initData);
 }
@@ -211,6 +180,37 @@ Texture* Texture::FromFile(const StringView& path, bool generateMips)
 {
     auto texture = Content::CreateVirtualAsset<Texture>();
     if (texture->LoadFile(path, generateMips))
+    {
+        texture->DeleteObject();
+        texture = nullptr;
+    }
+    return texture;
+}
+
+bool Texture::LoadMemory(Span<byte> data, ImageFormat format, bool generateMips)
+{
+    if (!IsVirtual())
+    {
+        LOG(Error, "Loading image from file is supported only for virtual textures.");
+        return true;
+    }
+
+    TextureData textureData;
+    if (TextureTool::ImportTexture(data, format, textureData))
+    {
+        return true;
+    }
+
+    auto initData = New<InitData>();
+    initData->FromTextureData(textureData, generateMips);
+
+    return Init(initData);
+}
+
+Texture* Texture::FromMemory(Span<byte> data, ImageFormat format, bool generateMips)
+{
+    auto texture = Content::CreateVirtualAsset<Texture>();
+    if (texture->LoadMemory(data, format, generateMips))
     {
         texture->DeleteObject();
         texture = nullptr;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -24,6 +24,11 @@ namespace Flax.Build.Platforms
         /// The VC tools root path.
         /// </summary>
         protected readonly string _vcToolPath;
+
+        /// <summary>
+        /// The VC tools version.
+        /// </summary>
+        protected readonly string _vcToolVersion;
 
         /// <summary>
         /// The compiler path.
@@ -88,7 +93,22 @@ namespace Flax.Build.Platforms
             // Pick the newest installed Visual Studio version if using the default toolset
             if (toolsetVer == WindowsPlatformToolset.Default)
             {
-                if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2019))
+                if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2026))
+                {
+                    toolsetVer = WindowsPlatformToolset.v145;
+                }
+                else if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2022))
+                {
+                    if (toolsets.Keys.Contains(WindowsPlatformToolset.v144))
+                    {
+                        toolsetVer = WindowsPlatformToolset.v144;
+                    }
+                    else
+                    {
+                        toolsetVer = WindowsPlatformToolset.v143;
+                    }
+                }
+                else if (VisualStudioInstance.HasIDE(VisualStudioVersion.VisualStudio2019))
                 {
                     toolsetVer = WindowsPlatformToolset.v142;
                 }
@@ -122,16 +142,29 @@ namespace Flax.Build.Platforms
                 throw new Exception(string.Format("Missing SDK {0} for platform Windows", SDK));
 
             // Get the tools paths
-            string vcToolPath;
-            if (Architecture == TargetArchitecture.x64)
-                vcToolPath = WindowsPlatformBase.GetVCToolPath64(Toolset);
-            else
-                vcToolPath = WindowsPlatformBase.GetVCToolPath32(Toolset);
-            _vcToolPath = vcToolPath;
-            _compilerPath = Path.Combine(vcToolPath, "cl.exe");
-            _linkerPath = Path.Combine(vcToolPath, "link.exe");
-            _libToolPath = Path.Combine(vcToolPath, "lib.exe");
-            _xdcmakePath = Path.Combine(vcToolPath, "xdcmake.exe");
+            var hostArchitecture = Platform.BuildTargetArchitecture;
+            _vcToolPath = WindowsPlatformBase.GetVCToolPath(Toolset, hostArchitecture, Architecture);
+            if (string.IsNullOrEmpty(_vcToolPath))
+                throw new Exception(string.Format("No {0} host compiler tools found for target architecture {1}", hostArchitecture, Architecture));
+            _compilerPath = Path.Combine(_vcToolPath, "cl.exe");
+            _linkerPath = Path.Combine(_vcToolPath, "link.exe");
+            _libToolPath = Path.Combine(_vcToolPath, "lib.exe");
+            _xdcmakePath = Path.Combine(_vcToolPath, "xdcmake.exe");
+
+            // Find 'MSVC\XX.YY.ZZ\bin' to get version
+            _vcToolVersion = string.Empty;
+            var pathParts = _vcToolPath.Split('\\');
+            if (pathParts.Length >= 3)
+            {
+                for (int i = 3; i < pathParts.Length; i++)
+                {
+                    if (pathParts[i] == "bin" && pathParts[i - 2] == "MSVC")
+                    {
+                        _vcToolVersion = pathParts[i - 1];
+                        break;
+                    }
+                }
+            }
 
             // Add Visual C++ toolset include and library paths
             var vcToolChainDir = toolsets[Toolset];
@@ -155,7 +188,7 @@ namespace Flax.Build.Platforms
                 case TargetArchitecture.x64:
                     SystemLibraryPaths.Add(Path.Combine(vcToolChainDir, "lib", "amd64"));
                     break;
-                default: throw new InvalidArchitectureException(architecture);
+                default: throw new InvalidArchitectureException(Architecture);
                 }
 
                 // When using Visual Studio 2015 toolset and using pre-Windows 10 SDK, find a Windows 10 SDK and add the UCRT include paths
@@ -187,13 +220,16 @@ namespace Flax.Build.Platforms
                     case TargetArchitecture.x64:
                         SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "ucrt", "x64"));
                         break;
-                    default: throw new InvalidArchitectureException(architecture);
+                    default: throw new InvalidArchitectureException(Architecture);
                     }
                 }
                 break;
             }
             case WindowsPlatformToolset.v141:
             case WindowsPlatformToolset.v142:
+            case WindowsPlatformToolset.v143:
+            case WindowsPlatformToolset.v144:
+            case WindowsPlatformToolset.v145:
             {
                 switch (Architecture)
                 {
@@ -210,7 +246,7 @@ namespace Flax.Build.Platforms
                 case TargetArchitecture.x64:
                     SystemLibraryPaths.Add(Path.Combine(vcToolChainDir, "lib", "x64"));
                     break;
-                default: throw new InvalidArchitectureException(architecture);
+                default: throw new InvalidArchitectureException(Architecture);
                 }
                 break;
             }
@@ -261,7 +297,7 @@ namespace Flax.Build.Platforms
                     _makepriPath = Path.Combine(binRootDir, "makepri.exe");
                     break;
                 }
-                default: throw new InvalidArchitectureException(architecture);
+                default: throw new InvalidArchitectureException(Architecture);
                 }
                 break;
             }
@@ -274,6 +310,11 @@ namespace Flax.Build.Platforms
             case WindowsPlatformSDK.v10_0_17763_0:
             case WindowsPlatformSDK.v10_0_18362_0:
             case WindowsPlatformSDK.v10_0_19041_0:
+            case WindowsPlatformSDK.v10_0_20348_0:
+            case WindowsPlatformSDK.v10_0_22000_0:
+            case WindowsPlatformSDK.v10_0_22621_0:
+            case WindowsPlatformSDK.v10_0_26100_0:
+            case WindowsPlatformSDK.v10_0_28000_0:
             {
                 var sdkVersionName = WindowsPlatformBase.GetSDKVersion(SDK).ToString();
                 string includeRootDir = Path.Combine(windowsSdkDir, "include", sdkVersionName);
@@ -296,13 +337,16 @@ namespace Flax.Build.Platforms
                 {
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "ucrt", "arm64"));
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "um", "arm64"));
+                    var binRootDir = Path.Combine(windowsSdkDir, "bin", sdkVersionName, hostArchitecture.ToString().ToLower());
+                    _resourceCompilerPath = Path.Combine(binRootDir, "rc.exe");
+                    _makepriPath = Path.Combine(binRootDir, "makepri.exe");
                     break;
                 }
                 case TargetArchitecture.x86:
                 {
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "ucrt", "x86"));
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "um", "x86"));
-                    var binRootDir = Path.Combine(windowsSdkDir, "bin", sdkVersionName, "x86");
+                    var binRootDir = Path.Combine(windowsSdkDir, "bin", sdkVersionName, hostArchitecture.ToString().ToLower());
                     _resourceCompilerPath = Path.Combine(binRootDir, "rc.exe");
                     _makepriPath = Path.Combine(binRootDir, "makepri.exe");
                     break;
@@ -311,12 +355,12 @@ namespace Flax.Build.Platforms
                 {
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "ucrt", "x64"));
                     SystemLibraryPaths.Add(Path.Combine(libraryRootDir, "um", "x64"));
-                    var binRootDir = Path.Combine(windowsSdkDir, "bin", sdkVersionName, "x64");
+                    var binRootDir = Path.Combine(windowsSdkDir, "bin", sdkVersionName, hostArchitecture.ToString().ToLower());
                     _resourceCompilerPath = Path.Combine(binRootDir, "rc.exe");
                     _makepriPath = Path.Combine(binRootDir, "makepri.exe");
                     break;
                 }
-                default: throw new InvalidArchitectureException(architecture);
+                default: throw new InvalidArchitectureException(Architecture);
                 }
                 break;
             }
@@ -337,10 +381,16 @@ namespace Flax.Build.Platforms
         public override string DllImport => "__declspec(dllimport)";
 
         /// <inheritdoc />
+        public override TargetCompiler Compiler => TargetCompiler.MSVC;
+
+        /// <inheritdoc />
+        public override string NativeCompilerPath => _compilerPath;
+
+        /// <inheritdoc />
         public override void LogInfo()
         {
             var sdkPath = WindowsPlatformBase.GetSDKs()[SDK];
-            Log.Info(string.Format("Using Windows Toolset {0} ({1})", Toolset, sdkPath));
+            Log.Info(string.Format("Using Windows Toolset {0}, {2} ({1})", Toolset, sdkPath, _vcToolVersion));
             Log.Info(string.Format("Using Windows SDK {0} ({1})", WindowsPlatformBase.GetSDKVersion(SDK), _vcToolPath));
         }
 
@@ -367,11 +417,12 @@ namespace Flax.Build.Platforms
             var vcToolChainDir = toolsets[Toolset];
             switch (Toolset)
             {
+            case WindowsPlatformToolset.v145:
+            case WindowsPlatformToolset.v144:
+            case WindowsPlatformToolset.v143:
             case WindowsPlatformToolset.v142:
-            case WindowsPlatformToolset.v141:
-                return Path.Combine(vcToolChainDir, "lib", "x86", "store", "references");
-            case WindowsPlatformToolset.v140:
-                return Path.Combine(vcToolChainDir, "lib", "store", "references");
+            case WindowsPlatformToolset.v141: return Path.Combine(vcToolChainDir, "lib", "x86", "store", "references");
+            case WindowsPlatformToolset.v140: return Path.Combine(vcToolChainDir, "lib", "store", "references");
             default: return null;
             }
         }
@@ -386,8 +437,20 @@ namespace Flax.Build.Platforms
             options.CompileEnv.PreprocessorDefinitions.Add("_CRT_SECURE_NO_DEPRECATE");
             options.CompileEnv.PreprocessorDefinitions.Add("_CRT_SECURE_NO_WARNINGS");
             options.CompileEnv.PreprocessorDefinitions.Add("_WINDOWS");
-            if (Architecture == TargetArchitecture.x64)
+            if (Architecture == TargetArchitecture.x64 || Architecture == TargetArchitecture.ARM64)
                 options.CompileEnv.PreprocessorDefinitions.Add("WIN64");
+
+            // Linker may need access to rc.exe for embedding manifests,
+            // inject the location into PATH of current process so linker can inherit it from it.
+            if (!string.IsNullOrEmpty(_resourceCompilerPath))
+            {
+                string binRootDir = Directory.GetParent(_resourceCompilerPath).FullName;
+                var path = Environment.GetEnvironmentVariable("PATH");
+                if (path != null && !path.Contains(binRootDir))
+                    Environment.SetEnvironmentVariable("PATH", path + ";" + binRootDir);
+                else if (path == null)
+                    Environment.SetEnvironmentVariable("PATH", binRootDir);
+            }
         }
 
         /// <summary>
@@ -418,13 +481,33 @@ namespace Flax.Build.Platforms
 
             // Setup arguments shared by all source files
             var commonArgs = new List<string>();
+            commonArgs.AddRange(options.CompileEnv.CustomArgs);
             SetupCompileCppFilesArgs(graph, options, commonArgs);
+            var useSeparatePdb = true; //compileEnvironment.PrecompiledHeaderUsage == PrecompiledHeaderFileUsage.None;
             {
                 // Suppress Startup Banner
                 commonArgs.Add("/nologo");
 
                 // Compile Without Linking
                 commonArgs.Add("/c");
+
+                // C++ version
+                switch (compileEnvironment.CppVersion)
+                {
+                case CppVersion.Cpp14:
+                    commonArgs.Add("/std:c++14");
+                    break;
+                case CppVersion.Cpp17:
+                    commonArgs.Add("/std:c++17");
+                    break;
+                case CppVersion.Cpp20:
+                    commonArgs.Add("/std:c++20");
+                    break;
+                case CppVersion.Latest:
+                    commonArgs.Add("/std:c++latest");
+                    break;
+                }
+                commonArgs.Add("/Zc:__cplusplus");
 
                 // Generate Intrinsic Functions
                 if (compileEnvironment.IntrinsicFunctions)
@@ -445,19 +528,9 @@ namespace Flax.Build.Platforms
                 // Remove unreferenced COMDAT
                 commonArgs.Add("/Zc:inline");
 
-                // Favor Small Code, Favor Fast Code
-                if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.FastCode)
-                    commonArgs.Add("/Ot");
-                else if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.SmallCode)
-                    commonArgs.Add("/Os");
-
                 // Run-Time Error Checks
                 if (compileEnvironment.RuntimeChecks && !compileEnvironment.CompileAsWinRT)
                     commonArgs.Add("/RTC1");
-
-                // Enable Additional Security Checks
-                if (compileEnvironment.RuntimeChecks)
-                    commonArgs.Add("/sdl");
 
                 // Inline Function Expansion
                 if (compileEnvironment.Inlining)
@@ -466,27 +539,42 @@ namespace Flax.Build.Platforms
                 if (compileEnvironment.DebugInformation)
                 {
                     // Debug Information Format
-                    commonArgs.Add("/Zi");
+                    if (useSeparatePdb)
+                        commonArgs.Add("/Zi");
+                    else
+                        commonArgs.Add("/Z7");
 
                     // Enhance Optimized Debugging
                     commonArgs.Add("/Zo");
                 }
 
+                // Favor Small Code, Favor Fast Code
+                if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.FastCode)
+                    commonArgs.Add("/Ot");
+                else if (compileEnvironment.FavorSizeOrSpeed == FavorSizeOrSpeed.SmallCode)
+                    commonArgs.Add("/Os");
                 if (compileEnvironment.Optimization)
                 {
-                    // Enable Most Speed Optimizations
-                    commonArgs.Add("/Ox");
-
                     // Generate Intrinsic Functions
                     commonArgs.Add("/Oi");
 
                     // Frame-Pointer Omission
                     commonArgs.Add("/Oy");
 
+                    // Only use /Ox with /GL to prevent too long build times
                     if (compileEnvironment.WholeProgramOptimization)
                     {
+                        // Enable Most Speed Optimizations
+                        commonArgs.Add("/Ox");
+
                         // Whole Program Optimization
                         commonArgs.Add("/GL");
+                    }
+                    else
+                    {
+                        // Enable SEE2 and other code optimizations but without breaking incremental linking
+                        //commonArgs.Add("/Og"); // Results in D9035 warning
+                        commonArgs.Add("/O2");
                     }
                 }
                 else
@@ -548,7 +636,6 @@ namespace Flax.Build.Platforms
                     commonArgs.Add("/WX-");
 
                 // Show warnings
-                // TODO: compile with W4 and fix all warnings
                 commonArgs.Add("/W3");
 
                 // Silence macro redefinition warning
@@ -574,6 +661,9 @@ namespace Flax.Build.Platforms
                         commonArgs.Add(string.Format("/FU\"{0}\\platform.winmd\"", dir));
                     }
                 }
+
+                // Preprocessor conformance mode
+                commonArgs.Add("/Zc:preprocessor");
             }
 
             // Add preprocessor definitions
@@ -588,8 +678,67 @@ namespace Flax.Build.Platforms
                 AddIncludePath(commonArgs, includePath);
             }
 
-            // Compile all C++ files
             var args = new List<string>();
+
+            // Create precompiled header
+            string pchFile = null, pchSource = null;
+            if (compileEnvironment.PrecompiledHeaderUsage == PrecompiledHeaderFileUsage.UseManual)
+            {
+                pchFile = compileEnvironment.PrecompiledHeaderFile;
+                pchSource = compileEnvironment.PrecompiledHeaderSource;
+            }
+            else if (compileEnvironment.PrecompiledHeaderUsage == PrecompiledHeaderFileUsage.CreateManual)
+            {
+                // Use intermediate cpp file that includes the PCH path but also contains compiler info to properly recompile when it's modified
+                pchSource = compileEnvironment.PrecompiledHeaderSource;
+                var pchFilName = Path.GetFileName(pchSource);
+                var pchSourceFile = Path.Combine(options.IntermediateFolder, Path.ChangeExtension(pchFilName, "cpp"));
+                var contents = Bindings.BindingsGenerator.GetStringBuilder();
+                contents.AppendLine("// This code was auto-generated. Do not modify it.");
+                contents.Append("// Compiler: ").AppendLine(_compilerPath);
+                contents.Append("// Toolchain: ").AppendLine(_vcToolVersion);
+                contents.Append("// CppVersion: ").AppendLine(compileEnvironment.CppVersion.ToString());
+                contents.Append("#include \"").Append(pchSource).AppendLine("\"");
+                Utilities.WriteFileIfChanged(pchSourceFile, contents.ToString());
+                Bindings.BindingsGenerator.PutStringBuilder(contents);
+
+                // Compile intermediate cpp file into actual PCH (and obj+pdb files)
+                pchFile = Path.Combine(options.IntermediateFolder, Path.ChangeExtension(pchFilName, "pch"));
+                if (pchFile.EndsWith(".pch.pch"))
+                    pchFile = pchFile.Substring(0, pchFile.Length - 4);
+                var pchPdbFile = Path.Combine(options.IntermediateFolder, Path.ChangeExtension(pchFilName, "pdb"));
+                var pchObjFile = Path.Combine(options.IntermediateFolder, Path.ChangeExtension(pchFilName, "obj"));
+                var task = graph.Add<Task>();
+                task.PrerequisiteFiles.Add(pchSourceFile);
+                task.PrerequisiteFiles.Add(pchSource);
+                task.PrerequisiteFiles.AddRange(IncludesCache.FindAllIncludedFiles(pchSource));
+                task.ProducedFiles.Add(pchFile);
+                task.ProducedFiles.Add(pchObjFile);
+                args.AddRange(commonArgs);
+                args.Add(string.Format("/Yc\"{0}\"", pchSource));
+                args.Add(string.Format("/Fp\"{0}\"", pchFile));
+                args.Add(string.Format("/Fd\"{0}\"", pchPdbFile));
+                args.Add(string.Format("/Fo\"{0}\"", pchObjFile));
+                args.Add("/FS");
+                args.Add(string.Format("\"{0}\"", pchSourceFile));
+                task.WorkingDirectory = options.WorkingDirectory;
+                task.CommandPath = _compilerPath;
+                task.CommandArguments = string.Join(" ", args);
+                task.Cost = int.MaxValue; // Run it before any other tasks
+
+                // Setup outputs
+                output.PrecompiledHeaderFile = pchFile;
+                output.ObjectFiles.Add(pchObjFile);
+            }
+            if (pchFile != null)
+            {
+                // Include PCH file
+                commonArgs.Add(string.Format("/FI\"{0}\"", pchSource));
+                commonArgs.Add(string.Format("/Yu\"{0}\"", pchSource));
+                commonArgs.Add(string.Format("/Fp\"{0}\"", pchFile));
+            }
+
+            // Compile all C++ files
             foreach (var sourceFile in sourceFiles)
             {
                 var sourceFilename = Path.GetFileNameWithoutExtension(sourceFile);
@@ -602,9 +751,25 @@ namespace Flax.Build.Platforms
                 if (compileEnvironment.DebugInformation)
                 {
                     // Program Database File Name
-                    var pdbFile = Path.Combine(outputPath, sourceFilename + ".pdb");
-                    args.Add(string.Format("/Fd\"{0}\"", pdbFile));
-                    output.DebugDataFiles.Add(pdbFile);
+                    string pdbFile = null;
+                    if (pchFile != null)
+                    {
+                        // When using PCH we need to share the same PDB file that was used when building PCH
+                        pdbFile = pchFile + ".pdb";
+
+                        // Turn on sync for file access to prevent issues when compiling on multiple threads at once
+                        if (useSeparatePdb)
+                            args.Add("/FS");
+                    }
+                    else if (useSeparatePdb)
+                    {
+                        pdbFile = Path.Combine(outputPath, sourceFilename + ".pdb");
+                    }
+                    if (pdbFile != null)
+                    {
+                        args.Add(string.Format("/Fd\"{0}\"", pdbFile));
+                        output.DebugDataFiles.Add(pdbFile);
+                    }
                 }
 
                 if (compileEnvironment.GenerateDocumentation)
@@ -627,6 +792,10 @@ namespace Flax.Build.Platforms
                 // Request included files to exist
                 var includes = IncludesCache.FindAllIncludedFiles(sourceFile);
                 task.PrerequisiteFiles.AddRange(includes);
+                if (pchFile != null)
+                {
+                    task.PrerequisiteFiles.Add(pchFile);
+                }
 
                 // Compile
                 task.WorkingDirectory = options.WorkingDirectory;
@@ -642,11 +811,13 @@ namespace Flax.Build.Platforms
         /// <inheritdoc />
         public override void LinkFiles(TaskGraph graph, BuildOptions options, string outputFilePath)
         {
+            outputFilePath = Utilities.NormalizePath(outputFilePath);
             var linkEnvironment = options.LinkEnv;
             var task = graph.Add<LinkTask>();
 
             // Setup arguments
             var args = new List<string>();
+            args.AddRange(options.LinkEnv.CustomArgs);
             SetupLinkFilesArgs(graph, options, args);
             {
                 // Suppress startup banner
@@ -668,8 +839,10 @@ namespace Flax.Build.Platforms
                     args.Add("/MACHINE:x64");
                     break;
                 case TargetArchitecture.ARM:
-                case TargetArchitecture.ARM64:
                     args.Add("/MACHINE:ARM");
+                    break;
+                case TargetArchitecture.ARM64:
+                    args.Add("/MACHINE:ARM64");
                     break;
                 default: throw new InvalidArchitectureException(Architecture);
                 }
@@ -716,8 +889,27 @@ namespace Flax.Build.Platforms
                 }
                 else
                 {
-                    // Don't create Side-by-Side Assembly Manifest
-                    args.Add("/MANIFEST:NO");
+                    // Embed Side-by-Side Assembly Manifest
+                    args.Add("/MANIFEST:EMBED");
+
+                    // Required manifest information for modern visual styles in Windows Common Controls
+                    switch (Architecture)
+                    {
+                    case TargetArchitecture.ARM:
+                        args.Add("\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='arm' publicKeyToken='6595b64144ccf1df' language='*'\"");
+                        break;
+                    case TargetArchitecture.ARM64:
+                        args.Add("\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='arm64' publicKeyToken='6595b64144ccf1df' language='*'\"");
+                        break;
+                    case TargetArchitecture.x86:
+                        args.Add("\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='' publicKeyToken='6595b64144ccf1df' language='*'\"");
+                        break;
+                    case TargetArchitecture.x64:
+                        args.Add("\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"");
+                        break;
+                    default:
+                        break;
+                    }
 
                     // Fixed Base Address
                     args.Add("/FIXED:NO");
@@ -770,7 +962,7 @@ namespace Flax.Build.Platforms
                     }
 
                     // Link Incrementally
-                    if (linkEnvironment.UseIncrementalLinking)
+                    if (linkEnvironment.UseIncrementalLinking && !linkEnvironment.LinkTimeCodeGeneration)
                     {
                         args.Add("/INCREMENTAL");
                     }
@@ -792,7 +984,7 @@ namespace Flax.Build.Platforms
                         }
                         else
                         {
-                            args.Add("/DEBUG");
+                            args.Add("/DEBUG"); // Same as /DEBUG:FULL
                         }
 
                         // Use Program Database
@@ -829,6 +1021,13 @@ namespace Flax.Build.Platforms
             task.PrerequisiteFiles.AddRange(linkEnvironment.InputFiles);
             foreach (var file in linkEnvironment.InputFiles)
             {
+                if (file.EndsWith(".pch", StringComparison.OrdinalIgnoreCase))
+                {
+                    // PCH file
+                    args.Add(string.Format("/Yu:\"{0}\"", file));
+                    continue;
+                }
+
                 args.Add(string.Format("\"{0}\"", file));
             }
 
@@ -903,11 +1102,7 @@ namespace Flax.Build.Platforms
                 // Create AppxManifest file
                 {
                     using (var stringWriter = new StringWriterWithEncoding(Encoding.UTF8))
-                    using (var xmlTextWriter = XmlWriter.Create(stringWriter, new XmlWriterSettings
-                    {
-                        Encoding = Encoding.UTF8,
-                        Indent = true,
-                    }))
+                    using (var xmlTextWriter = XmlWriter.Create(stringWriter, new XmlWriterSettings { Encoding = Encoding.UTF8, Indent = true, }))
                     {
                         xmlTextWriter.WriteStartDocument();
 
@@ -1005,6 +1200,36 @@ namespace Flax.Build.Platforms
                 priNewFile.PrerequisiteFiles.Add(configFile);
                 priNewFile.ProducedFiles.Add(priFile);
             }
+        }
+
+        /// <inheritdoc />
+        public override bool CompileCSharp(ref CSharpOptions options)
+        {
+            switch (options.Action)
+            {
+            case CSharpOptions.ActionTypes.MonoCompile:
+            {
+                var aotCompilerPath = Path.Combine(options.PlatformToolsPath, "mono-aot-cross.exe");
+
+                // Setup options
+                var monoAotMode = "full";
+                var monoDebugMode = options.EnableDebugSymbols ? "soft-debug" : "nodebug";
+                var aotCompilerArgs = $"--aot={monoAotMode},verbose,stats,print-skipped,{monoDebugMode} -O=all";
+                if (options.EnableDebugSymbols || options.EnableToolDebug)
+                    aotCompilerArgs = "--debug " + aotCompilerArgs;
+                var envVars = new Dictionary<string, string>();
+                envVars["MONO_PATH"] = options.AssembliesPath + ";" + options.ClassLibraryPath;
+                if (options.EnableToolDebug)
+                {
+                    envVars["MONO_LOG_LEVEL"] = "debug";
+                }
+
+                // Run cross-compiler compiler
+                int result = Utilities.Run(aotCompilerPath, $"{aotCompilerArgs} \"{options.InputFiles[0]}\"", null, options.PlatformToolsPath, Utilities.RunOptions.AppMustExist | Utilities.RunOptions.ConsoleLogOutput, envVars);
+                return result != 0;
+            }
+            }
+            return base.CompileCSharp(ref options);
         }
     }
 }

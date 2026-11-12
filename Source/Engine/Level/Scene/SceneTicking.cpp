@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SceneTicking.h"
 #include "Scene.h"
@@ -32,7 +32,7 @@ void SceneTicking::TickData::RemoveTick(void* callee)
 {
     for (int32 i = 0; i < Ticks.Count(); i++)
     {
-        if (Ticks[i].Callee == callee)
+        if (Ticks.Get()[i].Callee == callee)
         {
             Ticks.RemoveAt(i);
             break;
@@ -44,8 +44,8 @@ void SceneTicking::TickData::Tick()
 {
     TickScripts(Scripts);
 
-    for (int32 i = 0; i < Ticks.Count(); i++)
-        Ticks[i].Call();
+    for (int32 i = 0; i < Ticks.Count() && _canTick; i++)
+        Ticks.Get()[i].Call();
 }
 
 #if USE_EDITOR
@@ -54,7 +54,7 @@ void SceneTicking::TickData::RemoveTickExecuteInEditor(void* callee)
 {
     for (int32 i = 0; i < TicksExecuteInEditor.Count(); i++)
     {
-        if (TicksExecuteInEditor[i].Callee == callee)
+        if (TicksExecuteInEditor.Get()[i].Callee == callee)
         {
             TicksExecuteInEditor.RemoveAt(i);
             break;
@@ -66,8 +66,8 @@ void SceneTicking::TickData::TickExecuteInEditor()
 {
     TickScripts(ScriptsExecuteInEditor);
 
-    for (int32 i = 0; i < TicksExecuteInEditor.Count(); i++)
-        TicksExecuteInEditor[i].Call();
+    for (int32 i = 0; i < TicksExecuteInEditor.Count() && _canTick; i++)
+        TicksExecuteInEditor.Get()[i].Call();
 }
 
 #endif
@@ -89,10 +89,8 @@ SceneTicking::FixedUpdateTickData::FixedUpdateTickData()
 
 void SceneTicking::FixedUpdateTickData::TickScripts(const Array<Script*>& scripts)
 {
-    for (auto* script : scripts)
-    {
-        script->OnFixedUpdate();
-    }
+    for (int32 i = 0; i < scripts.Count() && _canTick; i++)
+        scripts.Get()[i]->OnFixedUpdate();
 }
 
 SceneTicking::UpdateTickData::UpdateTickData()
@@ -102,23 +100,30 @@ SceneTicking::UpdateTickData::UpdateTickData()
 
 void SceneTicking::UpdateTickData::TickScripts(const Array<Script*>& scripts)
 {
-    for (auto* script : scripts)
-    {
-        script->OnUpdate();
-    }
+    for (int32 i = 0; i < scripts.Count() && _canTick; i++)
+        scripts.Get()[i]->OnUpdate();
 }
 
 SceneTicking::LateUpdateTickData::LateUpdateTickData()
-    : TickData(64)
+    : TickData(0)
 {
 }
 
 void SceneTicking::LateUpdateTickData::TickScripts(const Array<Script*>& scripts)
 {
-    for (auto* script : scripts)
-    {
-        script->OnLateUpdate();
-    }
+    for (int32 i = 0; i < scripts.Count() && _canTick; i++)
+        scripts.Get()[i]->OnLateUpdate();
+}
+
+SceneTicking::LateFixedUpdateTickData::LateFixedUpdateTickData()
+    : TickData(0)
+{
+}
+
+void SceneTicking::LateFixedUpdateTickData::TickScripts(const Array<Script*>& scripts)
+{
+    for (int32 i = 0; i < scripts.Count() && _canTick; i++)
+        scripts.Get()[i]->OnLateFixedUpdate();
 }
 
 void SceneTicking::AddScript(Script* obj)
@@ -130,6 +135,8 @@ void SceneTicking::AddScript(Script* obj)
         Update.AddScript(obj);
     if (obj->_tickLateUpdate)
         LateUpdate.AddScript(obj);
+    if (obj->_tickLateFixedUpdate)
+        LateFixedUpdate.AddScript(obj);
 }
 
 void SceneTicking::RemoveScript(Script* obj)
@@ -141,6 +148,8 @@ void SceneTicking::RemoveScript(Script* obj)
         Update.RemoveScript(obj);
     if (obj->_tickLateUpdate)
         LateUpdate.RemoveScript(obj);
+    if (obj->_tickLateFixedUpdate)
+        LateFixedUpdate.RemoveScript(obj);
 }
 
 void SceneTicking::Clear()
@@ -148,4 +157,13 @@ void SceneTicking::Clear()
     FixedUpdate.Clear();
     Update.Clear();
     LateUpdate.Clear();
+    LateFixedUpdate.Clear();
+}
+
+void SceneTicking::SetTicking(bool enable)
+{
+    FixedUpdate._canTick = enable;
+    Update._canTick = enable;
+    LateUpdate._canTick = enable;
+    LateFixedUpdate._canTick = enable;
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -9,6 +9,7 @@ using System.Text;
 using FlaxEditor.GUI.Timeline.Undo;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.GUI.Timeline.Tracks
 {
@@ -18,87 +19,6 @@ namespace FlaxEditor.GUI.Timeline.Tracks
     /// <seealso cref="MemberTrack" />
     public abstract class CurvePropertyTrackBase : MemberTrack, IKeyframesEditorContext
     {
-        private sealed class Splitter : Control
-        {
-            private bool _clicked;
-            internal CurvePropertyTrackBase _track;
-
-            public override void Draw()
-            {
-                var style = Style.Current;
-                if (IsMouseOver || _clicked)
-                    Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), _clicked ? style.BackgroundSelected : style.BackgroundHighlighted);
-            }
-
-            public override void OnEndMouseCapture()
-            {
-                base.OnEndMouseCapture();
-
-                _clicked = false;
-            }
-
-            public override void Defocus()
-            {
-                base.Defocus();
-
-                _clicked = false;
-            }
-
-            public override void OnMouseEnter(Vector2 location)
-            {
-                base.OnMouseEnter(location);
-
-                Cursor = CursorType.SizeNS;
-            }
-
-            public override void OnMouseLeave()
-            {
-                Cursor = CursorType.Default;
-
-                base.OnMouseLeave();
-            }
-
-            public override bool OnMouseDown(Vector2 location, MouseButton button)
-            {
-                if (button == MouseButton.Left)
-                {
-                    _clicked = true;
-                    Focus();
-                    StartMouseCapture();
-                    return true;
-                }
-
-                return base.OnMouseDown(location, button);
-            }
-
-            public override void OnMouseMove(Vector2 location)
-            {
-                base.OnMouseMove(location);
-
-                if (_clicked)
-                {
-                    var height = Mathf.Clamp(PointToParent(location).Y, 40.0f, 1000.0f);
-                    if (!Mathf.NearEqual(height, _track._expandedHeight))
-                    {
-                        _track.Height = _track._expandedHeight = height;
-                        _track.Timeline.ArrangeTracks();
-                    }
-                }
-            }
-
-            public override bool OnMouseUp(Vector2 location, MouseButton button)
-            {
-                if (button == MouseButton.Left && _clicked)
-                {
-                    _clicked = false;
-                    EndMouseCapture();
-                    return true;
-                }
-
-                return base.OnMouseUp(location, button);
-            }
-        }
-
         private byte[] _curveEditingStartData;
         private float _expandedHeight = 120.0f;
         private Splitter _splitter;
@@ -237,7 +157,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             Curve.KeyframesEditorContext = Timeline;
             Curve.CustomViewPanning = Timeline.OnKeyframesViewPanning;
             Curve.Bounds = new Rectangle(Timeline.StartOffset, Y + 1.0f, Timeline.Duration * Timeline.UnitsPerSecond * Timeline.Zoom, Height - 2.0f);
-            Curve.ViewScale = new Vector2(Timeline.Zoom, Curve.ViewScale.Y);
+            Curve.ViewScale = new Float2(Timeline.Zoom, Curve.ViewScale.Y);
             Curve.ShowCollapsed = !expanded;
             Curve.ShowAxes = expanded ? CurveEditorBase.UseMode.Horizontal : CurveEditorBase.UseMode.Off;
             Curve.EnableZoom = expanded ? CurveEditorBase.UseMode.Vertical : CurveEditorBase.UseMode.Off;
@@ -250,12 +170,21 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 {
                     _splitter = new Splitter
                     {
-                        _track = this,
+                        Moved = OnSplitterMoved,
                         Parent = Curve,
                     };
                 }
-                var splitterHeight = 5.0f;
-                _splitter.Bounds = new Rectangle(0, Curve.Height - splitterHeight, Curve.Width, splitterHeight);
+                _splitter.Bounds = new Rectangle(0, Curve.Height - Splitter.DefaultHeight, Curve.Width, Splitter.DefaultHeight);
+            }
+        }
+
+        private void OnSplitterMoved(Float2 location)
+        {
+            var height = Mathf.Clamp(_splitter.PointToParent(location).Y + Height - Curve.Height, 40.0f, 1000.0f);
+            if (!Mathf.NearEqual(height, _expandedHeight))
+            {
+                Height = _expandedHeight = height;
+                Timeline.ArrangeTracks();
             }
         }
 
@@ -363,7 +292,19 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             Height = IsExpanded ? _expandedHeight : CollapsedHeight;
             UpdateCurve();
             if (IsExpanded)
+            {
+                // Layout bug: whole curve showing after track resize needs panel scrolls bars s smoothing disabled and showing twice
+                if (Curve.MainPanel.VScrollBar != null)
+                    Curve.MainPanel.VScrollBar.EnableSmoothing = false;
+                if (Curve.MainPanel.HScrollBar != null)
+                    Curve.MainPanel.HScrollBar.EnableSmoothing = false;
                 Curve.ShowWholeCurve();
+                Curve.ShowWholeCurve();
+                if (Curve.MainPanel.VScrollBar != null)
+                    Curve.MainPanel.VScrollBar.EnableSmoothing = true;
+                if (Curve.MainPanel.HScrollBar != null)
+                    Curve.MainPanel.HScrollBar.EnableSmoothing = true;
+            }
 
             base.OnExpandedChanged();
         }
@@ -382,7 +323,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             UpdatePreviewValue();
         }
 
-        /// <inheritdoc />
+        /// <inheritdoc />  
         public override void OnUndo()
         {
             base.OnUndo();
@@ -462,7 +403,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         }
 
         /// <inheritdoc />
-        public new void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Vector2 location, bool start, bool end)
+        public new void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Float2 location, bool start, bool end)
         {
             if (Curve != null && Curve.Visible)
                 Curve.OnKeyframesMove(editor, control, location, start, end);
@@ -523,7 +464,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         {
             var e = (CurvePropertyTrack)track;
 
-            e.ValueSize = stream.ReadInt32();
+            int valueSize = stream.ReadInt32();
             int propertyNameLength = stream.ReadInt32();
             int propertyTypeNameLength = stream.ReadInt32();
             int keyframesCount = stream.ReadInt32();
@@ -539,29 +480,24 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 throw new Exception("Invalid track data.");
 
             var keyframes = new object[keyframesCount];
-            var dataBuffer = new byte[e.ValueSize];
-            var propertyType = Scripting.TypeUtils.GetType(e.MemberTypeName).Type;
+            var propertyType = TypeUtils.GetType(e.MemberTypeName).Type;
             if (propertyType == null)
             {
-                stream.ReadBytes(keyframesCount * (sizeof(float) + e.ValueSize * 3));
+                stream.ReadBytes(keyframesCount * (sizeof(float) + valueSize * 3));
                 if (!string.IsNullOrEmpty(e.MemberTypeName))
                     Editor.LogError("Cannot load track " + e.MemberName + " of type " + e.MemberTypeName + ". Failed to find the value type information.");
                 return;
             }
 
+            e.ValueSize = e.GetValueDataSize(propertyType);
+            var dataBuffer = new byte[valueSize];
             GCHandle handle = GCHandle.Alloc(dataBuffer, GCHandleType.Pinned);
             for (int i = 0; i < keyframesCount; i++)
             {
                 var time = stream.ReadSingle();
-
-                stream.Read(dataBuffer, 0, e.ValueSize);
-                var value = Marshal.PtrToStructure(handle.AddrOfPinnedObject(), propertyType);
-
-                stream.Read(dataBuffer, 0, e.ValueSize);
-                var tangentIn = Marshal.PtrToStructure(handle.AddrOfPinnedObject(), propertyType);
-
-                stream.Read(dataBuffer, 0, e.ValueSize);
-                var tangentOut = Marshal.PtrToStructure(handle.AddrOfPinnedObject(), propertyType);
+                var value = ReadValue(stream, ref handle, dataBuffer, e.ValueSize, propertyType);
+                var tangentIn = ReadValue(stream, ref handle, dataBuffer, e.ValueSize, propertyType);
+                var tangentOut = ReadValue(stream, ref handle, dataBuffer, e.ValueSize, propertyType);
 
                 keyframes[i] = new BezierCurve<object>.Keyframe
                 {
@@ -583,6 +519,34 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 e.CreateCurve(propertyType, typeof(BezierCurveEditor<>));
             }
             e.Curve.SetKeyframes(keyframes);
+        }
+
+        private static object ReadValue(BinaryReader stream, ref GCHandle handle, byte[] dataBuffer, int valueSize, Type propertyType)
+        {
+            stream.Read(dataBuffer, 0, dataBuffer.Length);
+            if (valueSize != dataBuffer.Length)
+            {
+                // Convert curve data into the runtime type (eg. when using animation saved with Vector3=Double3 and playing it in a build with Vector3=Float3)
+                if (propertyType == typeof(Vector2))
+                {
+                    if (dataBuffer.Length == Double2.SizeInBytes)
+                        return (Vector2)(Double2)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Double2));
+                    return (Vector2)(Float2)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Float2));
+                }
+                if (propertyType == typeof(Vector3))
+                {
+                    if (dataBuffer.Length == Double3.SizeInBytes)
+                        return (Vector3)(Double3)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Double3));
+                    return (Vector3)(Float3)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Float3));
+                }
+                if (propertyType == typeof(Vector4))
+                {
+                    if (dataBuffer.Length == Double4.SizeInBytes)
+                        return (Vector4)(Double4)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Double4));
+                    return (Vector4)(Float4)Marshal.PtrToStructure(handle.AddrOfPinnedObject(), typeof(Float4));
+                }
+            }
+            return Marshal.PtrToStructure(handle.AddrOfPinnedObject(), propertyType);
         }
 
         private static void SaveTrack(Track track, BinaryWriter stream)

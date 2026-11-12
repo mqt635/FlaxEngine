@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_ASSETS_IMPORTER
 
 #include "AssetsImportingManager.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Utilities.h"
 #include "Engine/Serialization/JsonWriters.h"
 #include "Engine/Threading/MainThreadTask.h"
@@ -10,11 +11,12 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Content/Cache/AssetsCache.h"
 #include "Engine/Engine/EngineService.h"
-#include "Engine/Core/Log.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Platform/Platform.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#include "Engine/Engine/Globals.h"
 #include "ImportTexture.h"
-#include "ImportModelFile.h"
+#include "ImportModel.h"
 #include "ImportAudio.h"
 #include "ImportShader.h"
 #include "ImportFont.h"
@@ -31,7 +33,33 @@
 #include "CreateParticleEmitterFunction.h"
 #include "CreateAnimationGraphFunction.h"
 #include "CreateVisualScript.h"
+#include "CreateAnimation.h"
+#include "CreateBehaviorTree.h"
 #include "CreateJson.h"
+#include "Engine/Content/Assets/Model.h"
+
+namespace
+{
+    bool IsAssetTypeNameTextureFile(const String& typeName)
+    {
+        return typeName == Texture::TypeName || typeName == SpriteAtlas::TypeName;
+    }
+
+    bool IsAssetTypeNameModelFile(const String& typeName)
+    {
+        return typeName == Model::TypeName || typeName == SkinnedModel::TypeName || typeName == Animation::TypeName;
+    }
+
+    bool IsAssetTypeNameMatch(const String& a, const String& b)
+    {
+        // Special case when reimporting model/texture but different type
+        if (IsAssetTypeNameTextureFile(a) && IsAssetTypeNameTextureFile(b))
+            return true;
+        if (IsAssetTypeNameModelFile(a) && IsAssetTypeNameModelFile(b))
+            return true;
+        return a == b;
+    }
+}
 
 // Tags used to detect asset creation mode
 const String AssetsImportingManager::CreateTextureTag(TEXT("Texture"));
@@ -51,12 +79,13 @@ const String AssetsImportingManager::CreateSceneAnimationTag(TEXT("SceneAnimatio
 const String AssetsImportingManager::CreateMaterialFunctionTag(TEXT("MaterialFunction"));
 const String AssetsImportingManager::CreateParticleEmitterFunctionTag(TEXT("ParticleEmitterFunction"));
 const String AssetsImportingManager::CreateAnimationGraphFunctionTag(TEXT("AnimationGraphFunction"));
+const String AssetsImportingManager::CreateAnimationTag(TEXT("Animation"));
+const String AssetsImportingManager::CreateBehaviorTreeTag(TEXT("BehaviorTree"));
 const String AssetsImportingManager::CreateVisualScriptTag(TEXT("VisualScript"));
 
 class AssetsImportingManagerService : public EngineService
 {
 public:
-
     AssetsImportingManagerService()
         : EngineService(TEXT("AssetsImportingManager"), -400)
     {
@@ -70,6 +99,7 @@ AssetsImportingManagerService AssetsImportingManagerServiceInstance;
 
 Array<AssetImporter> AssetsImportingManager::Importers;
 Array<AssetCreator> AssetsImportingManager::Creators;
+bool AssetsImportingManager::UseImportPathRelative = false;
 
 CreateAssetContext::CreateAssetContext(const StringView& inputPath, const StringView& outputPath, const Guid& id, void* arg)
 {
@@ -78,13 +108,13 @@ CreateAssetContext::CreateAssetContext(const StringView& inputPath, const String
     CustomArg = arg;
     Data.Header.ID = id;
     SkipMetadata = false;
-
-    // TODO: we should use ASNI only chars path (Assimp can use only that kind)
     OutputPath = Content::CreateTemporaryAssetPath();
 }
 
 CreateAssetResult CreateAssetContext::Run(const CreateAssetFunction& callback)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
     ASSERT(callback.IsBinded());
 
     // Call action
@@ -114,6 +144,24 @@ CreateAssetResult CreateAssetContext::Run(const CreateAssetFunction& callback)
         }
         writer.EndObject();
         Data.Metadata.Copy((const byte*)buffer.GetString(), (uint32)buffer.GetSize());
+    }
+
+    // Check if target asset already exists but has different type
+    AssetInfo targetAssetInfo;
+    if (Content::GetAssetInfo(TargetAssetPath, targetAssetInfo) && !IsAssetTypeNameMatch(targetAssetInfo.TypeName, Data.Header.TypeName))
+    {
+        // Change path
+        int32 index = 0;
+        String newTargetAssetPath;
+        do
+        {
+            newTargetAssetPath = StringUtils::GetDirectoryName(TargetAssetPath);
+            newTargetAssetPath /= StringUtils::GetFileNameWithoutExtension(TargetAssetPath) + String::Format(TEXT(" ({})."), index++) + FileSystem::GetExtension(TargetAssetPath);
+        } while (index < 100 && FileSystem::FileExists(newTargetAssetPath));
+        TargetAssetPath = newTargetAssetPath;
+
+        // Change id
+        Data.Header.ID = Guid::New();
     }
 
     // Save file
@@ -146,32 +194,34 @@ bool CreateAssetContext::AllocateChunk(int32 index)
     }
 
     // Create new chunk
-    const auto chunk = New<FlaxChunk>();
-    Data.Header.Chunks[index] = chunk;
-
-    if (chunk == nullptr)
-    {
-        OUT_OF_MEMORY;
-    }
-
+    PROFILE_MEM(ContentFiles);
+    Data.Header.Chunks[index] = New<FlaxChunk>();
     return false;
 }
 
 void CreateAssetContext::AddMeta(JsonWriter& writer) const
 {
     writer.JKEY("ImportPath");
-    writer.String(InputPath);
+    writer.String(AssetsImportingManager::GetImportPath(InputPath));
     writer.JKEY("ImportUsername");
     writer.String(Platform::GetUserName());
 }
 
 void CreateAssetContext::ApplyChanges()
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
+
     // Get access
     auto storage = ContentStorageManager::TryGetStorage(TargetAssetPath);
     if (storage && storage->IsLoaded())
     {
-        storage->CloseFileHandles();
+        if (storage->CloseFileHandles())
+        {
+            LOG(Error, "Cannot close file access for '{}'", TargetAssetPath);
+            _applyChangesResult = CreateAssetResult::CannotSaveFile;
+            return;
+        }
     }
 
     // Move file
@@ -224,12 +274,13 @@ bool AssetsImportingManager::Create(const String& tag, const StringView& outputP
         LOG(Warning, "Cannot find asset creator object for tag \'{0}\'.", tag);
         return true;
     }
-
     return Create(creator->Callback, outputPath, assetId, arg);
 }
 
 bool AssetsImportingManager::Import(const StringView& inputPath, const StringView& outputPath, Guid& assetId, void* arg)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
     LOG(Info, "Importing file '{0}' to '{1}'...", inputPath, outputPath);
 
     // Check if input file exists
@@ -286,8 +337,25 @@ bool AssetsImportingManager::ImportIfEdited(const StringView& inputPath, const S
     return false;
 }
 
+String AssetsImportingManager::GetImportPath(const String& path)
+{
+    if (UseImportPathRelative && !FileSystem::IsRelative(path)
+#if PLATFORM_WINDOWS
+        // Import path from other drive should be stored as absolute on Windows to prevent issues
+        && path.Length() > 2 && Globals::ProjectFolder.Length() > 2 && path[0] == Globals::ProjectFolder[0]
+#endif
+    )
+    {
+        return FileSystem::ConvertAbsolutePathToRelative(Globals::ProjectFolder, path);
+    }
+    return path;
+}
+
 bool AssetsImportingManager::Create(const Function<CreateAssetResult(CreateAssetContext&)>& callback, const StringView& inputPath, const StringView& outputPath, Guid& assetId, void* arg)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
+    ZoneText(*outputPath, outputPath.Length());
     const auto startTime = Platform::GetTimeSeconds();
 
     // Pick ID if not specified
@@ -351,7 +419,7 @@ bool AssetsImportingManager::Create(const Function<CreateAssetResult(CreateAsset
     if (result == CreateAssetResult::Ok)
     {
         // Register asset
-        Content::GetRegistry()->RegisterAsset(context.Data.Header, outputPath);
+        Content::GetRegistry()->RegisterAsset(context.Data.Header, context.TargetAssetPath);
 
         // Done
         const auto endTime = Platform::GetTimeSeconds();
@@ -362,7 +430,7 @@ bool AssetsImportingManager::Create(const Function<CreateAssetResult(CreateAsset
         // Do nothing
         return true;
     }
-    else
+    else if (result != CreateAssetResult::Skip)
     {
         LOG(Error, "Cannot import file '{0}'! Result: {1}", inputPath, ::ToString(result));
         return true;
@@ -388,6 +456,7 @@ bool AssetsImportingManagerService::Init()
         { TEXT("jpg"), ASSET_FILES_EXTENSION, ImportTexture::Import },
         { TEXT("hdr"), ASSET_FILES_EXTENSION, ImportTexture::Import },
         { TEXT("raw"), ASSET_FILES_EXTENSION, ImportTexture::Import },
+        { TEXT("exr"), ASSET_FILES_EXTENSION, ImportTexture::Import },
 
         // IES Profiles
         { TEXT("ies"), ASSET_FILES_EXTENSION, ImportTexture::ImportIES },
@@ -407,37 +476,37 @@ bool AssetsImportingManagerService::Init()
         { TEXT("otf"), ASSET_FILES_EXTENSION, ImportFont::Import },
 
         // Models
-        { TEXT("obj"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("fbx"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("x"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("dae"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("gltf"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("glb"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
+        { TEXT("obj"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("fbx"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("x"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("dae"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("gltf"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("glb"), ASSET_FILES_EXTENSION, ImportModel::Import },
 
         // gettext PO files
         { TEXT("po"), TEXT("json"), CreateJson::ImportPo },
 
         // Models (untested formats - may fail :/)
-        { TEXT("blend"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("bvh"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("ase"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("ply"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("dxf"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("ifc"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("nff"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("smd"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("vta"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("mdl"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("md2"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("md3"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("md5mesh"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("q3o"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("q3s"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("ac"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("stl"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("lwo"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("lws"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
-        { TEXT("lxo"), ASSET_FILES_EXTENSION, ImportModelFile::Import },
+        { TEXT("blend"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("bvh"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("ase"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("ply"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("dxf"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("ifc"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("nff"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("smd"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("vta"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("mdl"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("md2"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("md3"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("md5mesh"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("q3o"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("q3s"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("ac"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("stl"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("lwo"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("lws"), ASSET_FILES_EXTENSION, ImportModel::Import },
+        { TEXT("lxo"), ASSET_FILES_EXTENSION, ImportModel::Import },
     };
     AssetsImportingManager::Importers.Add(InBuildImporters, ARRAY_COUNT(InBuildImporters));
 
@@ -455,7 +524,7 @@ bool AssetsImportingManagerService::Init()
         { AssetsImportingManager::CreateMaterialInstanceTag, CreateMaterialInstance::Create },
 
         // Models
-        { AssetsImportingManager::CreateModelTag, ImportModelFile::Create },
+        { AssetsImportingManager::CreateModelTag, ImportModel::Create },
 
         // Other
         { AssetsImportingManager::CreateRawDataTag, CreateRawData::Create },
@@ -468,6 +537,8 @@ bool AssetsImportingManagerService::Init()
         { AssetsImportingManager::CreateMaterialFunctionTag, CreateMaterialFunction::Create },
         { AssetsImportingManager::CreateParticleEmitterFunctionTag, CreateParticleEmitterFunction::Create },
         { AssetsImportingManager::CreateAnimationGraphFunctionTag, CreateAnimationGraphFunction::Create },
+        { AssetsImportingManager::CreateAnimationTag, CreateAnimation::Create },
+        { AssetsImportingManager::CreateBehaviorTreeTag, CreateBehaviorTree::Create },
         { AssetsImportingManager::CreateVisualScriptTag, CreateVisualScript::Create },
     };
     AssetsImportingManager::Creators.Add(InBuildCreators, ARRAY_COUNT(InBuildCreators));

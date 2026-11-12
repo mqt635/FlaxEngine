@@ -1,23 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using FlaxEditor.Gizmo;
 using FlaxEditor.GUI.Tree;
 using FlaxEditor.SceneGraph;
 using FlaxEditor.SceneGraph.GUI;
-using FlaxEditor.Viewport.Cameras;
 using FlaxEngine;
 
 namespace FlaxEditor.Windows.Assets
 {
     public sealed partial class PrefabWindow
     {
-        /// <summary>
-        /// The current selection (readonly).
-        /// </summary>
-        public readonly List<SceneGraphNode> Selection = new List<SceneGraphNode>();
+        private readonly List<SceneGraphNode> _selection = new List<SceneGraphNode>();
 
         /// <summary>
         /// Occurs when selection gets changed.
@@ -56,6 +51,9 @@ namespace FlaxEditor.Windows.Assets
         /// <param name="before">The selection before the change.</param>
         public void OnSelectionChanged(SceneGraphNode[] before)
         {
+            if (LockSelection)
+                return;
+
             Undo.AddAction(new SelectionChangeAction(before, Selection.ToArray(), OnSelectionUndo));
 
             OnSelectionChanges();
@@ -64,8 +62,11 @@ namespace FlaxEditor.Windows.Assets
         private void OnSelectionUndo(SceneGraphNode[] toSelect)
         {
             Selection.Clear();
-            Selection.AddRange(toSelect);
-
+            foreach (var e in toSelect)
+            {
+                if (e != null)
+                    Selection.Add(e);
+            }
             OnSelectionChanges();
         }
 
@@ -96,10 +97,7 @@ namespace FlaxEditor.Windows.Assets
 
                 // For single node selected scroll view so user can see it
                 if (nodes.Count == 1)
-                {
-                    nodes[0].ExpandAllParents(true);
-                    ScrollViewTo(nodes[0]);
-                }
+                    ScrollToSelectedNode();
             }
 
             // Update properties editor
@@ -118,11 +116,13 @@ namespace FlaxEditor.Windows.Assets
         /// <param name="nodes">The nodes.</param>
         public void Select(List<SceneGraphNode> nodes)
         {
+            nodes?.RemoveAll(x => x == null);
             if (nodes == null || nodes.Count == 0)
             {
                 Deselect();
                 return;
             }
+
             if (Utils.ArraysEqual(Selection, nodes))
                 return;
 

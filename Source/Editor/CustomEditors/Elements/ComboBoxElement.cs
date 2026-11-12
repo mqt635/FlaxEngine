@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI;
 using FlaxEngine.GUI;
@@ -6,7 +6,7 @@ using FlaxEngine.GUI;
 namespace FlaxEditor.CustomEditors.Elements
 {
     /// <summary>
-    /// The combobx element.
+    /// The combobox element.
     /// </summary>
     /// <seealso cref="FlaxEditor.CustomEditors.LayoutElement" />
     public class ComboBoxElement : LayoutElement

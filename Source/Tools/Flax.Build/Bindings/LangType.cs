@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -12,9 +12,10 @@ namespace Flax.Build.Bindings
         public override bool IsValueType => true;
         public override bool IsPod => true;
 
-        public LangType(string name)
+        public LangType(string name, string nativeName = null)
         {
             Name = name;
+            NativeName = nativeName;
             IsInBuild = true;
         }
 

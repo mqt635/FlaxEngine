@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,6 +8,7 @@
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Input/KeyboardKeys.h"
 #include "Engine/Input/Enums.h"
+#include "Enums.h"
 
 class Input;
 class Engine;
@@ -17,283 +18,41 @@ class GPUSwapChain;
 class TextureData;
 class IGuiData;
 
-/// <summary>
-/// Window closing reasons.
-/// </summary>
-API_ENUM() enum class ClosingReason
-{
-    /// <summary>
-    /// The unknown.
-    /// </summary>
-    Unknown = 0,
-
-    /// <summary>
-    /// The user.
-    /// </summary>
-    User,
-
-    /// <summary>
-    /// The engine exit.
-    /// </summary>
-    EngineExit,
-
-    /// <summary>
-    /// The close event.
-    /// </summary>
-    CloseEvent,
-};
-
-/// <summary>
-/// Types of default cursors.
-/// </summary>
-API_ENUM() enum class CursorType
-{
-    /// <summary>
-    /// The default.
-    /// </summary>
-    Default = 0,
-
-    /// <summary>
-    /// The cross.
-    /// </summary>
-    Cross,
-
-    /// <summary>
-    /// The hand.
-    /// </summary>
-    Hand,
-
-    /// <summary>
-    /// The help icon
-    /// </summary>
-    Help,
-
-    /// <summary>
-    /// The I beam.
-    /// </summary>
-    IBeam,
-
-    /// <summary>
-    /// The blocking image.
-    /// </summary>
-    No,
-
-    /// <summary>
-    /// The wait.
-    /// </summary>
-    Wait,
-
-    /// <summary>
-    /// The size all sides.
-    /// </summary>
-    SizeAll,
-
-    /// <summary>
-    /// The size NE-SW.
-    /// </summary>
-    SizeNESW,
-
-    /// <summary>
-    /// The size NS.
-    /// </summary>
-    SizeNS,
-
-    /// <summary>
-    /// The size NW-SE.
-    /// </summary>
-    SizeNWSE,
-
-    /// <summary>
-    /// The size WE.
-    /// </summary>
-    SizeWE,
-
-    /// <summary>
-    /// The cursor is hidden.
-    /// </summary>
-    Hidden,
-
-    MAX
-};
-
-/// <summary>
-/// Data drag and drop effects.
-/// </summary>
-API_ENUM() enum class DragDropEffect
-{
-    /// <summary>
-    /// The none.
-    /// </summary>
-    None = 0,
-
-    /// <summary>
-    /// The copy.
-    /// </summary>
-    Copy,
-
-    /// <summary>
-    /// The move.
-    /// </summary>
-    Move,
-
-    /// <summary>
-    /// The link.
-    /// </summary>
-    Link,
-};
-
-/// <summary>
-/// Window hit test codes. Note: they are 1:1 mapping for Win32 values.
-/// </summary>
-API_ENUM() enum class WindowHitCodes
-{
-    /// <summary>
-    /// The transparent area.
-    /// </summary>
-    Transparent = -1,
-
-    /// <summary>
-    /// The no hit.
-    /// </summary>
-    NoWhere = 0,
-
-    /// <summary>
-    /// The client area.
-    /// </summary>
-    Client = 1,
-
-    /// <summary>
-    /// The caption area.
-    /// </summary>
-    Caption = 2,
-
-    /// <summary>
-    /// The system menu.
-    /// </summary>
-    SystemMenu = 3,
-
-    /// <summary>
-    /// The grow box
-    /// </summary>
-    GrowBox = 4,
-
-    /// <summary>
-    /// The menu.
-    /// </summary>
-    Menu = 5,
-
-    /// <summary>
-    /// The horizontal scroll.
-    /// </summary>
-    HScroll = 6,
-
-    /// <summary>
-    /// The vertical scroll.
-    /// </summary>
-    VScroll = 7,
-
-    /// <summary>
-    /// The minimize button.
-    /// </summary>
-    MinButton = 8,
-
-    /// <summary>
-    /// The maximize button.
-    /// </summary>
-    MaxButton = 9,
-
-    /// <summary>
-    /// The left side;
-    /// </summary>
-    Left = 10,
-
-    /// <summary>
-    /// The right side.
-    /// </summary>
-    Right = 11,
-
-    /// <summary>
-    /// The top side.
-    /// </summary>
-    Top = 12,
-
-    /// <summary>
-    /// The top left corner.
-    /// </summary>
-    TopLeft = 13,
-
-    /// <summary>
-    /// The top right corner.
-    /// </summary>
-    TopRight = 14,
-
-    /// <summary>
-    /// The bottom side.
-    /// </summary>
-    Bottom = 15,
-
-    /// <summary>
-    /// The bottom left corner.
-    /// </summary>
-    BottomLeft = 16,
-
-    /// <summary>
-    /// The bottom right corner.
-    /// </summary>
-    BottomRight = 17,
-
-    /// <summary>
-    /// The border.
-    /// </summary>
-    Border = 18,
-
-    /// <summary>
-    /// The object.
-    /// </summary>
-    Object = 19,
-
-    /// <summary>
-    /// The close button.
-    /// </summary>
-    Close = 20,
-
-    /// <summary>
-    /// The help button.
-    /// </summary>
-    Help = 21,
-};
-
-API_INJECT_CPP_CODE("#include \"Engine/Platform/Window.h\"");
+API_INJECT_CODE(cpp, "#include \"Engine/Platform/Window.h\"");
 
 /// <summary>
 /// Native platform window object.
 /// </summary>
-API_CLASS(NoSpawn, NoConstructor, Sealed, Name="Window")
-class FLAXENGINE_API WindowBase : public PersistentScriptingObject
+API_CLASS(NoSpawn, NoConstructor, Sealed, Name="Window", Tag="NativeInvokeUseName")
+class FLAXENGINE_API WindowBase : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(WindowBase);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(WindowBase);
     friend GPUSwapChain;
 protected:
-
     bool _visible, _minimized, _maximized, _isClosing, _showAfterFirstPaint, _focused;
     GPUSwapChain* _swapChain;
+    void* _cursorImage = nullptr;
     CreateWindowSettings _settings;
     String _title;
     CursorType _cursor;
-    Vector2 _clientSize;
-    int _dpi;
+    Float2 _clientSize;
+    int32 _dpi;
     float _dpiScale;
 
-    Vector2 _trackingMouseOffset;
-    bool _isUsingMouseOffset;
+    Float2 _trackingMouseOffset;
     Rectangle _mouseOffsetScreenSize;
-    bool _isTrackingMouse;
+    bool _isUsingMouseOffset = false;
+    bool _isTrackingMouse = false;
+    bool _isTextInputEnabled = false;
+    bool _isHorizontalFlippingMouse = false;
+    bool _isVerticalFlippingMouse = false;
+    bool _isClippingCursor = false;
+    bool _restoreRelativeMode = false;
 
     explicit WindowBase(const CreateWindowSettings& settings);
     virtual ~WindowBase();
 
 public:
-
     /// <summary>
     /// The rendering task for that window.
     /// </summary>
@@ -313,6 +72,11 @@ public:
     /// Event fired when window gets closed.
     /// </summary>
     Action Closed;
+
+    /// <summary>
+    /// Event fired when window gets resized.
+    /// </summary>
+    Delegate<Float2> Resized;
 
     /// <summary>
     /// Event fired when window gets focused.
@@ -335,7 +99,6 @@ public:
     Action Draw;
 
 public:
-
     // Returns true if that window is the main Engine window (works in both editor and game mode)
     bool IsMain() const;
 
@@ -398,13 +161,23 @@ public:
     }
 
     /// <summary>
+    /// Gets a value that indicates whether a window is always on top of other windows.
+    /// </summary>
+    API_PROPERTY() virtual bool IsAlwaysOnTop() const;
+
+    /// <summary>
+    /// Sets a value that indicates whether a window is always on top of other windows.
+    /// </summary>
+    /// <param name="isAlwaysOnTop">True if always on top.</param>
+    API_PROPERTY() virtual void SetIsAlwaysOnTop(bool isAlwaysOnTop);
+
+    /// <summary>
     /// Gets the native window handle.
     /// </summary>
     /// <returns>The native window object handle.</returns>
     API_PROPERTY() virtual void* GetNativePtr() const = 0;
 
 public:
-
     /// <summary>
     /// Performs the UI update.
     /// </summary>
@@ -447,6 +220,15 @@ public:
     }
 
     /// <summary>
+    /// Sets the window to be borderless or not and to be fullscreen.
+    /// </summary>
+    /// <param name="isBorderless">Whether or not to have borders on window.</param>
+    /// <param name="maximized">Whether or not to make the borderless window fullscreen (maximize to cover whole screen).</param>
+    API_FUNCTION() virtual void SetBorderless(bool isBorderless, bool maximized = false)
+    {
+    }
+
+    /// <summary>
     /// Restores the window state before minimizing or maximizing.
     /// </summary>
     API_FUNCTION() virtual void Restore()
@@ -462,19 +244,14 @@ public:
     /// <summary>
     /// Checks if window is closed.
     /// </summary>
-    API_PROPERTY() virtual bool IsClosed() const
-    {
-        return _isClosing;
-    }
+    API_PROPERTY() virtual bool IsClosed() const;
 
     /// <summary>
     /// Checks if window is foreground (the window with which the user is currently working).
     /// </summary>
-    /// <returns>True if window is foreground, otherwise false.</returns>
     API_PROPERTY() virtual bool IsForegroundWindow() const;
 
 public:
-
     /// <summary>
     /// Gets the client bounds of the window (client area not including border).
     /// </summary>
@@ -494,39 +271,40 @@ public:
     /// <summary>
     /// Gets the window position (in screen coordinates).
     /// </summary>
-    API_PROPERTY() virtual Vector2 GetPosition() const
+    API_PROPERTY() virtual Float2 GetPosition() const
     {
-        return Vector2::Zero;
+        return Float2::Zero;
     }
 
     /// <summary>
     /// Sets the window position (in screen coordinates).
     /// </summary>
     /// <param name="position">The position.</param>
-    API_PROPERTY() virtual void SetPosition(const Vector2& position)
+    API_PROPERTY() virtual void SetPosition(const Float2& position)
     {
     }
 
     /// <summary>
     /// Gets the client position of the window (client area not including border).
     /// </summary>
-    API_PROPERTY() FORCE_INLINE Vector2 GetClientPosition() const
+    API_PROPERTY() FORCE_INLINE Float2 GetClientPosition() const
     {
-        return ClientToScreen(Vector2::Zero);
+        return ClientToScreen(Float2::Zero);
     }
 
     /// <summary>
     /// Sets the client position of the window (client area not including border)
     /// </summary>
     /// <param name="position">The client area position.</param>
-    API_PROPERTY() virtual void SetClientPosition(const Vector2& position)
+    API_PROPERTY() virtual void SetClientPosition(const Float2& position)
     {
+        SetClientBounds(Rectangle(position, GetClientSize()));
     }
 
     /// <summary>
     /// Gets the window size (including border).
     /// </summary>
-    API_PROPERTY() virtual Vector2 GetSize() const
+    API_PROPERTY() virtual Float2 GetSize() const
     {
         return _clientSize;
     }
@@ -534,7 +312,7 @@ public:
     /// <summary>
     /// Gets the size of the client area of the window (not including border).
     /// </summary>
-    API_PROPERTY() virtual Vector2 GetClientSize() const
+    API_PROPERTY() virtual Float2 GetClientSize() const
     {
         return _clientSize;
     }
@@ -543,7 +321,7 @@ public:
     /// Sets the size of the client area of the window (not including border).
     /// </summary>
     /// <param name="size">The window client area size.</param>
-    API_PROPERTY() void SetClientSize(const Vector2& size)
+    API_PROPERTY() void SetClientSize(const Float2& size)
     {
         SetClientBounds(Rectangle(GetClientPosition(), size));
     }
@@ -553,7 +331,7 @@ public:
     /// </summary>
     /// <param name="screenPos">The screen position.</param>
     /// <returns>The client space position.</returns>
-    API_FUNCTION() virtual Vector2 ScreenToClient(const Vector2& screenPos) const
+    API_FUNCTION() virtual Float2 ScreenToClient(const Float2& screenPos) const
     {
         return screenPos;
     }
@@ -563,7 +341,7 @@ public:
     /// </summary>
     /// <param name="clientPos">The client position.</param>
     /// <returns>The screen space position.</returns>
-    API_FUNCTION() virtual Vector2 ClientToScreen(const Vector2& clientPos) const
+    API_FUNCTION() virtual Float2 ClientToScreen(const Float2& clientPos) const
     {
         return clientPos;
     }
@@ -583,41 +361,30 @@ public:
     {
         return Platform::CustomDpiScale * _dpiScale;
     }
-public:
 
+public:
     /// <summary>
     /// Gets the window title.
     /// </summary>
     /// <returns>The window title.</returns>
-    API_PROPERTY() virtual String GetTitle() const
-    {
-        return _title;
-    }
+    API_PROPERTY() StringView GetTitle() const;
 
     /// <summary>
     /// Sets the window title.
     /// </summary>
     /// <param name="title">The title.</param>
-    API_PROPERTY() virtual void SetTitle(const StringView& title)
-    {
-        _title = title;
-    }
+    API_PROPERTY() virtual void SetTitle(const StringView& title);
 
     /// <summary>
     /// Gets window opacity value (valid only for windows created with SupportsTransparency flag). Opacity values are normalized to range [0;1].
     /// </summary>
-    API_PROPERTY() virtual float GetOpacity() const
-    {
-        return 1.0f;
-    }
+    API_PROPERTY() virtual float GetOpacity() const;
 
     /// <summary>
     /// Sets window opacity value (valid only for windows created with SupportsTransparency flag). Opacity values are normalized to range [0;1].
     /// </summary>
     /// <param name="opacity">The opacity.</param>
-    API_PROPERTY() virtual void SetOpacity(float opacity)
-    {
-    }
+    API_PROPERTY() virtual void SetOpacity(float opacity);
 
     /// <summary>
     /// Determines whether this window is focused.
@@ -650,13 +417,24 @@ public:
     }
 
 public:
-
     /// <summary>
-    /// Starts drag and drop operation
+    /// Starts a drag and drop operation.
     /// </summary>
     /// <param name="data">The data.</param>
     /// <returns>The result.</returns>
     API_FUNCTION() virtual DragDropEffect DoDragDrop(const StringView& data)
+    {
+        return DragDropEffect::None;
+    }
+
+    /// <summary>
+    /// Starts a window drag and drop operation.
+    /// </summary>
+    /// <param name="data">The data.</param>
+    /// <param name="offset">The offset for positioning the window from cursor.</param>
+    /// <param name="dragSourceWindow">The window where dragging started.</param>
+    /// <returns>The result.</returns>
+    API_FUNCTION() virtual DragDropEffect DoDragDrop(const StringView& data, const Float2& offset, Window* dragSourceWindow)
     {
         return DragDropEffect::None;
     }
@@ -672,10 +450,33 @@ public:
     /// <summary>
     /// Gets the mouse tracking offset.
     /// </summary>
-    /// <returns>The mouse screen offset.</returns>
-    API_PROPERTY() Vector2 GetTrackingMouseOffset() const
+    API_PROPERTY() Float2 GetTrackingMouseOffset() const
     {
         return _trackingMouseOffset;
+    }
+
+    /// <summary>
+    /// Gets the value indicating whenever mouse input is tracked by this window.
+    /// </summary>
+    API_PROPERTY() bool IsMouseTracking() const
+    {
+        return _isTrackingMouse;
+    }
+
+    /// <summary>
+    /// Gets the value indicating if the mouse flipped to the other screen edge horizontally
+    /// </summary>
+    API_PROPERTY() bool IsMouseFlippingHorizontally() const
+    {
+        return _isHorizontalFlippingMouse;
+    }
+
+    /// <summary>
+    /// Gets the value indicating if the mouse flipped to the other screen edge vertically
+    /// </summary>
+    API_PROPERTY() bool IsMouseFlippingVertically() const
+    {
+        return _isVerticalFlippingMouse;
     }
 
     /// <summary>
@@ -684,11 +485,58 @@ public:
     API_FUNCTION() virtual void EndTrackingMouse()
     {
     }
+    
+    /// <summary>
+    /// Enables character input events.
+    /// </summary>
+    API_FUNCTION() virtual void StartTextInput()
+    {
+    }
+    
+    /// <summary>
+    /// Disables character input events.
+    /// </summary>
+    API_FUNCTION() virtual void EndTextInput()
+    {
+    }
+
+    /// <summary>
+    /// Starts the cursor clipping.
+    /// </summary>
+    /// <param name="bounds">The screen-space bounds that the cursor will be confined to.</param>
+    API_FUNCTION() virtual void StartClippingCursor(const Rectangle& bounds)
+    {
+    }
+
+    /// <summary>
+    /// Gets the value indicating whenever the cursor is being clipped.
+    /// </summary>
+    API_PROPERTY() bool IsCursorClipping() const
+    {
+        return _isClippingCursor;
+    }
+
+    /// <summary>
+    /// Ends the cursor clipping.
+    /// </summary>
+    API_FUNCTION() virtual void EndClippingCursor()
+    {
+    }
+
+    /// <summary>
+    /// Gets the mouse position in window coordinates.
+    /// </summary>
+    API_PROPERTY() virtual Float2 GetMousePosition() const;
+
+    /// <summary>
+    /// Sets the mouse position in window coordinates.
+    /// </summary>
+    /// <param name="position">Mouse position to set on</param>
+    API_PROPERTY() virtual void SetMousePosition(const Float2& position) const;
 
     /// <summary>
     /// Gets the mouse cursor.
     /// </summary>
-    /// <returns>The cursor type</returns>
     API_PROPERTY() FORCE_INLINE CursorType GetCursor() const
     {
         return _cursor;
@@ -704,10 +552,56 @@ public:
     }
 
     /// <summary>
+    /// Gets the mouse cursor image handle.
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE void* GetCursorImage() const
+    {
+        return _cursorImage;
+    }
+
+    /// <summary>
+    /// Sets the mouse cursor image handle.
+    /// </summary>
+    /// <param name="image">The cursor image.</param>
+    API_PROPERTY() virtual void SetCursorImage(void* image)
+    {
+        _cursorImage = image;
+    }
+
+    /// <summary>
+    /// Loads a cursor file as a cursor image. Returns a native cursor handle that can be used with `SetCursorImage`. Support depends on platform (eg. Windows uses .cur/.ani files).
+    /// </summary>
+    /// <param name="path">Path to the cursor file (absolute or relative).</param>
+    /// <returns>Loaded cursor image handle, or null if failed.</returns>
+    API_FUNCTION() static void* LoadCursorImage(const StringView& path)
+    {
+        return nullptr;
+    }
+
+    /// <summary>
+    /// Loads a texture as a cursor image. Returns a native cursor handle that can be used with `SetCursorImage`. Support depends on platform.
+    /// </summary>
+    /// <param name="image">Texture data with a cursor image.</param>
+    /// <param name="hotSpot">The texture coordinate of a cursor's hot spot that defines the exact 'clickable' point.</param>
+    /// <returns>Loaded cursor image handle, or null if failed.</returns>
+    API_FUNCTION() static void* LoadCursorImage(const TextureData& image, const Int2& hotSpot = Int2::Zero)
+    {
+        return nullptr;
+    }
+
+    /// <summary>
+    /// Destroys a cursor image loaded with `LoadCursorImage`. Should be called to release native resources after the cursor image is not needed anymore.
+    /// </summary>
+    /// <param name="image">The cursor image.</param>
+    API_FUNCTION() static void DestroyCursorImage(void* image)
+    {
+    }
+
+    /// <summary>
     /// Sets the window icon.
     /// </summary>
     /// <param name="icon">The icon.</param>
-    virtual void SetIcon(TextureData& icon)
+    virtual void SetIcon(const TextureData& icon)
     {
     }
 
@@ -722,15 +616,14 @@ public:
     API_PROPERTY() void SetRenderingEnabled(bool value);
 
 public:
-
     typedef Delegate<Char> CharDelegate;
     typedef Delegate<KeyboardKeys> KeyboardDelegate;
-    typedef Delegate<const Vector2&> MouseDelegate;
-    typedef Delegate<const Vector2&, MouseButton> MouseButtonDelegate;
-    typedef Delegate<const Vector2&, float> MouseWheelDelegate;
-    typedef Delegate<const Vector2&, int32> TouchDelegate;
-    typedef Delegate<IGuiData*, const Vector2&, DragDropEffect&> DragDelegate;
-    typedef Delegate<const Vector2&, WindowHitCodes&, bool&> HitTestDelegate;
+    typedef Delegate<const Float2&> MouseDelegate;
+    typedef Delegate<const Float2&, MouseButton> MouseButtonDelegate;
+    typedef Delegate<const Float2&, float> MouseWheelDelegate;
+    typedef Delegate<const Float2&, int32> TouchDelegate;
+    typedef Delegate<IGuiData*, const Float2&, DragDropEffect&> DragDelegate;
+    typedef Delegate<const Float2&, WindowHitCodes&, bool&> HitTestDelegate;
     typedef Delegate<WindowHitCodes, bool&> ButtonHitDelegate;
     typedef Delegate<ClosingReason, bool&> ClosingDelegate;
 
@@ -756,31 +649,37 @@ public:
     /// Event fired when mouse button goes down.
     /// </summary>
     MouseButtonDelegate MouseDown;
-    void OnMouseDown(const Vector2& mousePosition, MouseButton button);
+    void OnMouseDown(const Float2& mousePosition, MouseButton button);
 
     /// <summary>
     /// Event fired when mouse button goes up.
     /// </summary>
     MouseButtonDelegate MouseUp;
-    void OnMouseUp(const Vector2& mousePosition, MouseButton button);
+    void OnMouseUp(const Float2& mousePosition, MouseButton button);
 
     /// <summary>
     /// Event fired when mouse button double clicks.
     /// </summary>
     MouseButtonDelegate MouseDoubleClick;
-    void OnMouseDoubleClick(const Vector2& mousePosition, MouseButton button);
+    void OnMouseDoubleClick(const Float2& mousePosition, MouseButton button);
 
     /// <summary>
     /// Event fired when mouse wheel is scrolling (wheel delta is normalized).
     /// </summary>
     MouseWheelDelegate MouseWheel;
-    void OnMouseWheel(const Vector2& mousePosition, float delta);
+    void OnMouseWheel(const Float2& mousePosition, float delta);
 
     /// <summary>
     /// Event fired when mouse moves.
     /// </summary>
     MouseDelegate MouseMove;
-    void OnMouseMove(const Vector2& mousePosition);
+    void OnMouseMove(const Float2& mousePosition);
+
+    /// <summary>
+    /// Event fired when mouse moves in relative mode.
+    /// </summary>
+    MouseDelegate MouseMoveRelative;
+    void OnMouseMoveRelative(const Float2& mousePositionRelative);
 
     /// <summary>
     /// Event fired when mouse leaves window.
@@ -792,37 +691,37 @@ public:
     /// Event fired when touch action begins.
     /// </summary>
     TouchDelegate TouchDown;
-    void OnTouchDown(const Vector2& pointerPosition, int32 pointerIndex);
+    void OnTouchDown(const Float2& pointerPosition, int32 pointerIndex);
 
     /// <summary>
     /// Event fired when touch action moves.
     /// </summary>
     TouchDelegate TouchMove;
-    void OnTouchMove(const Vector2& pointerPosition, int32 pointerIndex);
+    void OnTouchMove(const Float2& pointerPosition, int32 pointerIndex);
 
     /// <summary>
     /// Event fired when touch action ends.
     /// </summary>
     TouchDelegate TouchUp;
-    void OnTouchUp(const Vector2& pointerPosition, int32 pointerIndex);
+    void OnTouchUp(const Float2& pointerPosition, int32 pointerIndex);
 
     /// <summary>
     /// Event fired when drag&drop enters window.
     /// </summary>
     DragDelegate DragEnter;
-    void OnDragEnter(IGuiData* data, const Vector2& mousePosition, DragDropEffect& result);
+    void OnDragEnter(IGuiData* data, const Float2& mousePosition, DragDropEffect& result);
 
     /// <summary>
     /// Event fired when drag&drop moves over window.
     /// </summary>
     DragDelegate DragOver;
-    void OnDragOver(IGuiData* data, const Vector2& mousePosition, DragDropEffect& result);
+    void OnDragOver(IGuiData* data, const Float2& mousePosition, DragDropEffect& result);
 
     /// <summary>
     /// Event fired when drag&drop ends over window with drop.
     /// </summary>
     DragDelegate DragDrop;
-    void OnDragDrop(IGuiData* data, const Vector2& mousePosition, DragDropEffect& result);
+    void OnDragDrop(IGuiData* data, const Float2& mousePosition, DragDropEffect& result);
 
     /// <summary>
     /// Event fired when drag&drop leaves window.
@@ -834,7 +733,7 @@ public:
     /// Event fired when system tests if the specified location is part of the window.
     /// </summary>
     HitTestDelegate HitTest;
-    void OnHitTest(const Vector2& mousePosition, WindowHitCodes& result, bool& handled);
+    void OnHitTest(const Float2& mousePosition, WindowHitCodes& result, bool& handled);
 
     /// <summary>
     /// Event fired when system tests if the left button hit the window for the given hit code.
@@ -849,7 +748,6 @@ public:
     void OnClosing(ClosingReason reason, bool& cancel);
 
 public:
-
     /// <summary>
     /// Gets the text entered during the current frame (Unicode).
     /// </summary>
@@ -880,27 +778,14 @@ public:
 public:
 
     /// <summary>
-    /// Gets the mouse position in window coordinates.
-    /// </summary>
-    /// <returns>Mouse cursor coordinates</returns>
-    API_PROPERTY() Vector2 GetMousePosition() const;
-
-    /// <summary>
-    /// Sets the mouse position in window coordinates.
-    /// </summary>
-    /// <param name="position">Mouse position to set on</param>
-    API_PROPERTY() void SetMousePosition(const Vector2& position) const;
-
-    /// <summary>
     /// Gets the mouse position change during the last frame.
     /// </summary>
     /// <returns>Mouse cursor position delta</returns>
-    API_PROPERTY() Vector2 GetMousePositionDelta() const;
+    API_PROPERTY() Float2 GetMousePositionDelta() const;
 
     /// <summary>
     /// Gets the mouse wheel change during the last frame.
     /// </summary>
-    /// <returns>Mouse wheel value delta</returns>
     API_PROPERTY() float GetMouseScrollDelta() const;
 
     /// <summary>
@@ -925,7 +810,6 @@ public:
     API_FUNCTION() bool GetMouseButtonUp(MouseButton button) const;
 
 public:
-
     void OnShow();
     void OnResize(int32 width, int32 height);
     void OnClosed();
@@ -933,15 +817,13 @@ public:
     void OnLostFocus();
 
 private:
-
     void OnMainRenderTaskDelete(class ScriptingObject* obj)
     {
         RenderTask = nullptr;
     }
 
 public:
-
-    // [PersistentScriptingObject]
+    // [ScriptingObject]
     String ToString() const override;
     void OnDeleteObject() override;
 };

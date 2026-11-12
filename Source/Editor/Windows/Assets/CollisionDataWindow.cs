@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Xml;
@@ -7,6 +7,7 @@ using FlaxEditor.Content.Create;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.CustomEditors.Elements;
+using FlaxEditor.GUI;
 using FlaxEditor.Viewport.Cameras;
 using FlaxEditor.Viewport.Previews;
 using FlaxEngine;
@@ -102,6 +103,8 @@ namespace FlaxEditor.Windows.Assets
 
             private class CookData : CreateFileEntry
             {
+                public override bool CanBeCreated => true;
+
                 public PropertiesProxy Proxy;
                 public CollisionDataType Type;
                 public ModelBase Model;
@@ -169,12 +172,40 @@ namespace FlaxEditor.Windows.Assets
         }
 
         private readonly SplitPanel _split;
-        private readonly ModelBasePreview _preview;
+        private readonly CollisionDataPreview _preview;
         private readonly CustomEditorPresenter _propertiesPresenter;
         private readonly PropertiesProxy _properties;
         private Model _collisionWiresModel;
         private StaticModel _collisionWiresShowActor;
         private bool _updateWireMesh;
+
+        private class CollisionDataPreview : ModelBasePreview
+        {
+            public bool ShowInfo;
+            public string Info;
+            
+            /// <inheritdoc />
+            public CollisionDataPreview(bool useWidgets) 
+            : base(useWidgets)
+            {
+                ViewportCamera = new FPSCamera();
+                Task.ViewFlags &= ~ViewFlags.Sky & ~ViewFlags.Bloom & ~ViewFlags.EyeAdaptation;
+            }
+
+            /// <inheritdoc />
+            public override void Draw()
+            {
+                base.Draw();
+
+                if (ShowInfo)
+                {
+                    var font = Style.Current.FontMedium;
+                    var pos = new Float2(10, 50);
+                    Render2D.DrawText(font, Info, new Rectangle(pos + Float2.One, Size), Color.Black);
+                    Render2D.DrawText(font, Info, new Rectangle(pos, Size), Color.White);
+                }
+            }
+        }
 
         /// <inheritdoc />
         public CollisionDataWindow(Editor editor, AssetItem item)
@@ -182,6 +213,13 @@ namespace FlaxEditor.Windows.Assets
         {
             // Toolstrip
             _toolstrip.AddSeparator();
+            _toolstrip.AddButton(editor.Icons.CenterView64, () => _preview.ResetCamera()).LinkTooltip("Show whole collision");
+            var infoButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Info64).LinkTooltip("Show Collision Data info");
+            infoButton.Clicked += () =>
+            {
+                _preview.ShowInfo = !_preview.ShowInfo;
+                infoButton.Checked = _preview.ShowInfo;
+            };
             _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/physics/colliders/collision-data.html")).LinkTooltip("See documentation to learn more");
 
             // Split Panel
@@ -194,9 +232,8 @@ namespace FlaxEditor.Windows.Assets
             };
 
             // Model preview
-            _preview = new ModelBasePreview(true)
+            _preview = new CollisionDataPreview(true)
             {
-                ViewportCamera = new FPSCamera(),
                 Parent = _split.Panel1
             };
 
@@ -236,7 +273,7 @@ namespace FlaxEditor.Windows.Assets
                 _collisionWiresModel = FlaxEngine.Content.CreateVirtualAsset<Model>();
                 _collisionWiresModel.SetupLODs(new[] { 1 });
             }
-            Editor.Internal_GetCollisionWires(FlaxEngine.Object.GetUnmanagedPtr(Asset), out var triangles, out var indices);
+            Editor.Internal_GetCollisionWires(FlaxEngine.Object.GetUnmanagedPtr(Asset), out var triangles, out var indices, out var triangleCount, out var indicesCount);
             if (triangles != null && indices != null)
                 _collisionWiresModel.LODs[0].Meshes[0].UpdateMesh(triangles, indices);
             else
@@ -248,6 +285,7 @@ namespace FlaxEditor.Windows.Assets
             }
             _collisionWiresShowActor.Model = _collisionWiresModel;
             _collisionWiresShowActor.SetMaterial(0, FlaxEngine.Content.LoadAsyncInternal<MaterialBase>(EditorAssets.WiresDebugMaterial));
+            _preview.Info = string.Format("\nTriangles: {0:N0}\nVertices: {1:N0}\nMemory Size: {2}", triangleCount, indicesCount / 3, Utilities.Utils.FormatBytesCount(Asset.MemoryUsage));
             _preview.Asset = FlaxEngine.Content.LoadAsync<ModelBase>(_asset.Options.Model);
         }
 
@@ -305,6 +343,8 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            if (IsDisposing)
+                return;
             base.OnDestroy();
 
             Object.Destroy(ref _collisionWiresShowActor);
@@ -317,14 +357,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

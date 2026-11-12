@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.Utilities;
@@ -48,14 +48,19 @@ namespace FlaxEditor.States
         public virtual bool CanChangeScene => false;
 
         /// <summary>
-        /// Checks if can enter play mode in this state.
+        /// Checks if can start play mode in this state.
         /// </summary>
         public virtual bool CanEnterPlayMode => false;
 
         /// <summary>
-        /// Checks if can enter recompile scripts in this state.
+        /// Checks if can recompile scripts in this state.
         /// </summary>
         public virtual bool CanReloadScripts => false;
+
+        /// <summary>
+        /// Checks if can cook game in this state.
+        /// </summary>
+        public virtual bool CanCookGame => false;
 
         /// <summary>
         /// Checks if static is valid for Editor UI calls and other stuff.
@@ -93,12 +98,13 @@ namespace FlaxEditor.States
         /// </summary>
         public virtual void UpdateFPS()
         {
-            var editorFps = Editor.Options.Options.General.EditorFPS;
+            var generalOptions = Editor.Options.Options.General;
+            var editorFps = generalOptions.EditorFPS;
             if (!Platform.HasFocus)
             {
                 // Drop performance if app has no focus
-                Time.DrawFPS = 15;
-                Time.UpdateFPS = 15;
+                Time.DrawFPS = generalOptions.EditorFPSWhenNotFocused;
+                Time.UpdateFPS = generalOptions.EditorFPSWhenNotFocused;
             }
             else if (editorFps < 1)
             {

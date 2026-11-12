@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using Flax.Build.NativeCpp;
 
@@ -22,10 +22,9 @@ namespace Flax.Build
             options.PublicDependencies.Add("Scripting");
 
             // Setup scripting API environment
-            var engineVersion = EngineTarget.EngineVersion;
+            EngineTarget.AddVersionDefines(options.ScriptingAPI.Defines);
+            EngineTarget.AddVersionDefines(options.CompileEnv.PreprocessorDefinitions);
             options.ScriptingAPI.Defines.Add("FLAX");
-            options.ScriptingAPI.Defines.Add(string.Format("FLAX_{0}", engineVersion.Major));
-            options.ScriptingAPI.Defines.Add(string.Format("FLAX_{0}_{1}", engineVersion.Major, engineVersion.Minor));
             options.ScriptingAPI.Defines.Add("FLAX_ASSERTIONS");
             if (options.Target.IsEditor)
             {

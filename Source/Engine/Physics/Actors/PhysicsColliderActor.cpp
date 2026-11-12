@@ -1,7 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "PhysicsColliderActor.h"
-#include "Engine/Scripting/Script.h"
 #include "RigidBody.h"
 
 PhysicsColliderActor::PhysicsColliderActor(const SpawnParams& params)

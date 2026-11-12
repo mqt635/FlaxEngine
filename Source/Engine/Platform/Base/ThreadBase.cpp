@@ -1,12 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Engine/Platform/Thread.h"
 #include "Engine/Threading/IRunnable.h"
 #include "Engine/Threading/ThreadRegistry.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Scripting/ManagedCLR/MCore.h"
 #if TRACY_ENABLE
 #include "Engine/Core/Math/Math.h"
-#include <ThirdParty/tracy/Tracy.h>
+#include <ThirdParty/tracy/tracy/Tracy.hpp>
 #endif
 
 Delegate<Thread*> ThreadBase::ThreadStarting;
@@ -42,9 +43,17 @@ void ThreadBase::SetPriority(ThreadPriority priority)
 void ThreadBase::Kill(bool waitForJoin)
 {
     if (!_isRunning)
+    {
+        ClearHandleInternal();
+        if (_callAfterWork)
+        {
+            _callAfterWork = false;
+            _runnable->AfterWork(true);
+        }
         return;
+    }
     ASSERT(GetID());
-    const auto thread = static_cast<Thread*>(this);
+    Thread* thread = (Thread*)this;
 
     // Stop runnable object
     if (_callAfterWork && _runnable)
@@ -104,10 +113,11 @@ int32 ThreadBase::Run()
         _callAfterWork = false;
         _runnable->AfterWork(false);
     }
-    ClearHandleInternal();
     _isRunning = false;
     ThreadExiting(thread, exitCode);
     ThreadRegistry::Remove(thread);
+    MCore::Thread::Exit(); // TODO: use mono_thread_detach instead of ext and unlink mono runtime from thread in ThreadExiting delegate
+    // mono terminates the native thread..
 
     return exitCode;
 }

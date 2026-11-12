@@ -1,9 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System.Collections.Generic;
-using System.IO;
 using Flax.Build.Graph;
 using Flax.Build.NativeCpp;
+using System;
+using System.Collections.Generic;
+using System.IO;
+
+namespace Flax.Build
+{
+    partial class LinuxConfiguration
+    {
+        /// <summary>
+        /// Specifies the minimum Clang compiler version to use on Linux (eg. 10).
+        /// </summary>
+        [CommandLine("clangMinVer", "<version>", "Specifies the minimum Clang compiler version to use on Linux (eg. 10).")]
+        public static string ClangMinVer = "14";
+    }
+}
 
 namespace Flax.Build.Platforms
 {
@@ -22,10 +35,31 @@ namespace Flax.Build.Platforms
         public LinuxToolchain(LinuxPlatform platform, TargetArchitecture architecture)
         : base(platform, architecture, platform.ToolchainRoot, platform.Compiler)
         {
+            // Check version
+            if (Utilities.ParseVersion(LinuxConfiguration.ClangMinVer, out var minClangVer) && ClangVersion < minClangVer)
+                Log.Error($"Old Clang version {ClangVersion}. Minimum supported is {minClangVer}.");
+
             // Setup system paths
-            SystemIncludePaths.Add(Path.Combine(ToolsetRoot, "usr", "include"));
-            SystemIncludePaths.Add(Path.Combine(ToolsetRoot, "include", "c++", "5.2.0"));
-            SystemIncludePaths.Add(Path.Combine(ToolsetRoot, "lib", "clang", ClangVersion.Major.ToString(), "include"));
+            var includePath = Path.Combine(ToolsetRoot, "usr", "include");
+            if (Directory.Exists(includePath))
+                SystemIncludePaths.Add(includePath);
+            else
+                Log.Error($"Missing toolset header files location {includePath}");
+            var cppIncludePath = Path.Combine(includePath, "c++", LibStdCppVersion);
+            if (Directory.Exists(cppIncludePath))
+                SystemIncludePaths.Add(cppIncludePath);
+            else
+                Log.Verbose($"Missing Clang {ClangVersion} C++ header files location {cppIncludePath}");
+            var clangLibPath = Path.Combine(ToolsetRoot, "usr", "lib", "clang");
+            var clangIncludePath = Path.Combine(clangLibPath, ClangVersion.Major.ToString(), "include");
+            if (!Directory.Exists(clangIncludePath))
+            {
+                var error = $"Missing Clang {ClangVersion} header files location {clangIncludePath}";
+                clangIncludePath = Path.Combine(clangLibPath, ClangVersion.ToString(), "include");
+                if (!Directory.Exists(clangIncludePath))
+                    Log.Error(error);
+            }
+            SystemIncludePaths.Add(clangIncludePath);
         }
 
         /// <inheritdoc />
@@ -68,6 +102,8 @@ namespace Flax.Build.Platforms
 
             args.Add("-Wl,-rpath,\"\\$ORIGIN\"");
             //args.Add("-Wl,--as-needed");
+            if (LdKind == "bfd")
+                args.Add("-Wl,--copy-dt-needed-entries");
             args.Add("-Wl,--hash-style=gnu");
             //args.Add("-Wl,--build-id");
 
@@ -80,6 +116,18 @@ namespace Flax.Build.Platforms
                 //args.Add(string.Format("-Wl,-soname=\"{0}\"", soname));
             }
 
+            // Include any external folders into rpath for proper dlopen (eg. when opening Editor project with plugins)
+            if (options.LinkEnv.Output == LinkerOutput.SharedLibrary || options.LinkEnv.Output == LinkerOutput.Executable)
+            {
+                var originDir = Path.GetDirectoryName(outputFilePath);
+                foreach (var lib in options.LinkEnv.InputLibraries)
+                {
+                    var libDir = Path.GetDirectoryName(lib);
+                    if (libDir != originDir)
+                        args.Add($"-Wl,-rpath,\"{libDir}\"");
+                }
+            }
+
             args.Add(string.Format("-target {0}", ArchitectureName));
             args.Add(string.Format("--sysroot=\"{0}\"", ToolsetRoot.Replace('\\', '/')));
 
@@ -87,12 +135,25 @@ namespace Flax.Build.Platforms
             args.Add("-pthread");
             args.Add("-ldl");
             args.Add("-lrt");
+            args.Add("-lz");
 
             // Link X11
             args.Add("-L/usr/X11R6/lib");
             args.Add("-lX11");
             args.Add("-lXcursor");
             args.Add("-lXinerama");
+            args.Add("-lXfixes");
+
+            if (EngineConfiguration.WithSDL(options))
+            {
+                // Link Wayland
+                args.Add("-lwayland-client");
+
+                // Link GLib for libportal
+                args.Add("-lglib-2.0");
+                args.Add("-lgio-2.0");
+                args.Add("-lgobject-2.0");
+            }
         }
 
         /// <inheritdoc />

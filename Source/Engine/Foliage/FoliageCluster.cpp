@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FoliageCluster.h"
 #include "FoliageInstance.h"
@@ -9,6 +9,7 @@ void FoliageCluster::Init(const BoundingBox& bounds)
     Bounds = bounds;
     TotalBounds = bounds;
     MaxCullDistance = 0.0f;
+    IsMinor = false;
 
     Children[0] = nullptr;
     Children[1] = nullptr;
@@ -20,26 +21,7 @@ void FoliageCluster::Init(const BoundingBox& bounds)
 
 void FoliageCluster::UpdateTotalBoundsAndCullDistance()
 {
-    if (Children[0])
-    {
-        ASSERT(Instances.IsEmpty());
-
-        Children[0]->UpdateTotalBoundsAndCullDistance();
-        Children[1]->UpdateTotalBoundsAndCullDistance();
-        Children[2]->UpdateTotalBoundsAndCullDistance();
-        Children[3]->UpdateTotalBoundsAndCullDistance();
-
-        TotalBounds = Children[0]->TotalBounds;
-        BoundingBox::Merge(TotalBounds, Children[1]->TotalBounds, TotalBounds);
-        BoundingBox::Merge(TotalBounds, Children[2]->TotalBounds, TotalBounds);
-        BoundingBox::Merge(TotalBounds, Children[3]->TotalBounds, TotalBounds);
-
-        MaxCullDistance = Children[0]->MaxCullDistance;
-        MaxCullDistance = Math::Max(MaxCullDistance, Children[1]->MaxCullDistance);
-        MaxCullDistance = Math::Max(MaxCullDistance, Children[2]->MaxCullDistance);
-        MaxCullDistance = Math::Max(MaxCullDistance, Children[3]->MaxCullDistance);
-    }
-    else if (Instances.HasItems())
+    if (Instances.HasItems())
     {
         BoundingBox box;
         BoundingBox::FromSphere(Instances[0]->Bounds, TotalBounds);
@@ -55,6 +37,30 @@ void FoliageCluster::UpdateTotalBoundsAndCullDistance()
     {
         TotalBounds = Bounds;
         MaxCullDistance = 0;
+    }
+
+    if (Children[0])
+    {
+        Children[0]->UpdateTotalBoundsAndCullDistance();
+        Children[1]->UpdateTotalBoundsAndCullDistance();
+        Children[2]->UpdateTotalBoundsAndCullDistance();
+        Children[3]->UpdateTotalBoundsAndCullDistance();
+
+        if (Instances.HasItems())
+            BoundingBox::Merge(TotalBounds, Children[0]->TotalBounds, TotalBounds);
+        else
+            TotalBounds = Children[0]->TotalBounds;
+        BoundingBox::Merge(TotalBounds, Children[1]->TotalBounds, TotalBounds);
+        BoundingBox::Merge(TotalBounds, Children[2]->TotalBounds, TotalBounds);
+        BoundingBox::Merge(TotalBounds, Children[3]->TotalBounds, TotalBounds);
+
+        if (Instances.HasItems())
+            MaxCullDistance = Math::Max(MaxCullDistance, Children[0]->MaxCullDistance);
+        else
+            MaxCullDistance = Children[0]->MaxCullDistance;
+        MaxCullDistance = Math::Max(MaxCullDistance, Children[1]->MaxCullDistance);
+        MaxCullDistance = Math::Max(MaxCullDistance, Children[2]->MaxCullDistance);
+        MaxCullDistance = Math::Max(MaxCullDistance, Children[3]->MaxCullDistance);
     }
 
     BoundingSphere::FromBox(TotalBounds, TotalBoundsSphere);
@@ -88,10 +94,10 @@ void FoliageCluster::UpdateCullDistance()
     }
 }
 
-bool FoliageCluster::Intersects(Foliage* foliage, const Ray& ray, float& distance, Vector3& normal, FoliageInstance*& instance)
+bool FoliageCluster::Intersects(Foliage* foliage, const Ray& ray, Real& distance, Vector3& normal, FoliageInstance*& instance)
 {
     bool result = false;
-    float minDistance = MAX_float;
+    Real minDistance = MAX_Real;
     Vector3 minDistanceNormal = Vector3::Up;
     FoliageInstance* minInstance = nullptr;
 
@@ -118,7 +124,8 @@ bool FoliageCluster::Intersects(Foliage* foliage, const Ray& ray, float& distanc
         {
             auto& ii = *Instances[i];
             auto& type = foliage->FoliageTypes[ii.Type];
-            if (type.IsReady() && ii.Bounds.Intersects(ray) && type.Model->Intersects(ray, ii.World, distance, normal, &mesh) && minDistance > distance)
+            const Transform transform = foliage->GetTransform().LocalToWorld(ii.Transform);
+            if (type.IsReady() && ii.Bounds.Intersects(ray) && type.Model->Intersects(ray, transform, distance, normal, &mesh) && minDistance > distance)
             {
                 minDistanceNormal = normal;
                 minDistance = distance;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -29,6 +29,8 @@ namespace FlaxEditor.Surface
         private bool _isModified;
         private VisjectSurface _surface;
         private SurfaceMeta _meta = new SurfaceMeta();
+        internal Float2 _cachedViewCenterPosition;
+        internal float _cachedViewScale = -1; // Negative scale to indicate missing data (will show whole surface on start)
 
         /// <summary>
         /// The parent context. Defines the higher key surface graph context. May be null for the top-level context.
@@ -78,10 +80,33 @@ namespace FlaxEditor.Surface
                 var result = new List<SurfaceComment>();
                 for (int i = 0; i < RootControl.Children.Count; i++)
                 {
-                    if (RootControl.Children[i] is SurfaceComment comment)
-                        result.Add(comment);
+                    var child = RootControl.Children[i];
+                    if (child is ResizableSurfaceNode.ResizeBorder border && border.ResizableNode is SurfaceComment comment2)
+                        result.Add(comment2);
                 }
                 return result;
+            }
+        }
+
+        /// <summary>
+        /// Gets the amount of surface comments
+        /// </summary>
+        /// <remarks>
+        /// This is used as an alternative to <see cref="Comments"/>, if only the amount of comments is important.
+        /// Is faster and doesn't allocate as much memory
+        /// </remarks>
+        public int CommentCount
+        {
+            get
+            {
+                int count = 0;
+                for (int i = 0; i < RootControl.Children.Count; i++)
+                {
+                    var child = RootControl.Children[i];
+                    if (child is ResizableSurfaceNode.ResizeBorder border && border.ResizableNode is SurfaceComment)
+                        count++;
+                }
+                return count;
             }
         }
 
@@ -136,6 +161,11 @@ namespace FlaxEditor.Surface
         public event Action<SurfaceControl> ControlDeleted;
 
         /// <summary>
+        /// Identifier of the node that 'owns' this context (eg. State Machine which created this graph of state nodes).
+        /// </summary>
+        public uint OwnerNodeID;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="VisjectSurfaceContext"/> class.
         /// </summary>
         /// <param name="surface">The Visject surface using this context.</param>
@@ -161,7 +191,7 @@ namespace FlaxEditor.Surface
             RootControl = rootControl ?? throw new ArgumentNullException(nameof(rootControl));
 
             // Set initial scale to provide nice zoom in effect on startup
-            RootControl.Scale = new Vector2(0.5f);
+            RootControl.Scale = new Float2(0.5f);
         }
 
         /// <summary>
@@ -226,9 +256,10 @@ namespace FlaxEditor.Surface
         public SurfaceParameter GetParameter(Guid id)
         {
             SurfaceParameter result = null;
-            for (int i = 0; i < Parameters.Count; i++)
+            var parameters = Parameters;
+            for (int i = 0; i < parameters.Count; i++)
             {
-                var parameter = Parameters[i];
+                var parameter = parameters[i];
                 if (parameter.ID == id)
                 {
                     result = parameter;
@@ -246,9 +277,10 @@ namespace FlaxEditor.Surface
         public SurfaceParameter GetParameter(string name)
         {
             SurfaceParameter result = null;
-            for (int i = 0; i < Parameters.Count; i++)
+            var parameters = Parameters;
+            for (int i = 0; i < parameters.Count; i++)
             {
-                var parameter = Parameters[i];
+                var parameter = parameters[i];
                 if (parameter.Name == name)
                 {
                     result = parameter;
@@ -285,14 +317,16 @@ namespace FlaxEditor.Surface
         /// <param name="surfaceArea">The surface area to create comment.</param>
         /// <param name="title">The comment title.</param>
         /// <param name="color">The comment color.</param>
+        /// <param name="customOrder">The comment order or -1 to use default.</param>
         /// <returns>The comment object</returns>
-        public virtual SurfaceComment SpawnComment(ref Rectangle surfaceArea, string title, Color color)
+        public virtual SurfaceComment SpawnComment(ref Rectangle surfaceArea, string title, Color color, int customOrder = -1)
         {
             var values = new object[]
             {
                 title, // Title
                 color, // Color
                 surfaceArea.Size, // Size
+                customOrder, // Order
             };
             return (SurfaceComment)SpawnNode(7, 11, surfaceArea.Location, values);
         }
@@ -303,11 +337,12 @@ namespace FlaxEditor.Surface
         /// <param name="surfaceArea">The surface area to create comment.</param>
         /// <param name="title">The comment title.</param>
         /// <param name="color">The comment color.</param>
+        /// <param name="customOrder">The comment order or -1 to use default.</param>
         /// <returns>The comment object</returns>
-        public SurfaceComment CreateComment(ref Rectangle surfaceArea, string title, Color color)
+        public SurfaceComment CreateComment(ref Rectangle surfaceArea, string title, Color color, int customOrder = -1)
         {
             // Create comment
-            var comment = SpawnComment(ref surfaceArea, title, color);
+            var comment = SpawnComment(ref surfaceArea, title, color, customOrder);
             if (comment == null)
             {
                 Editor.LogWarning("Failed to create comment.");
@@ -315,9 +350,9 @@ namespace FlaxEditor.Surface
             }
 
             // Initialize
-            OnControlLoaded(comment);
-            comment.OnSurfaceLoaded();
-            OnControlSpawned(comment);
+            OnControlLoaded(comment, SurfaceNodeActions.User);
+            comment.OnSurfaceLoaded(SurfaceNodeActions.User);
+            OnControlSpawned(comment, SurfaceNodeActions.User);
 
             MarkAsModified();
 
@@ -333,9 +368,10 @@ namespace FlaxEditor.Surface
         /// <param name="customValues">The custom values array. Must match node archetype <see cref="NodeArchetype.DefaultValues"/> size. Pass null to use default values.</param>
         /// <param name="beforeSpawned">The custom callback action to call after node creation but just before invoking spawn event. Can be used to initialize custom node data.</param>
         /// <returns>Created node.</returns>
-        public SurfaceNode SpawnNode(ushort groupID, ushort typeID, Vector2 location, object[] customValues = null, Action<SurfaceNode> beforeSpawned = null)
+        public SurfaceNode SpawnNode(ushort groupID, ushort typeID, Float2 location, object[] customValues = null, Action<SurfaceNode> beforeSpawned = null)
         {
-            if (NodeFactory.GetArchetype(_surface.NodeArchetypes, groupID, typeID, out var groupArchetype, out var nodeArchetype))
+            var nodeArchetypes = _surface?.NodeArchetypes ?? NodeFactory.DefaultGroups;
+            if (NodeFactory.GetArchetype(nodeArchetypes, groupID, typeID, out var groupArchetype, out var nodeArchetype))
             {
                 return SpawnNode(groupArchetype, nodeArchetype, location, customValues, beforeSpawned);
             }
@@ -351,7 +387,7 @@ namespace FlaxEditor.Surface
         /// <param name="customValues">The custom values array. Must match node archetype <see cref="NodeArchetype.DefaultValues"/> size. Pass null to use default values.</param>
         /// <param name="beforeSpawned">The custom callback action to call after node creation but just before invoking spawn event. Can be used to initialize custom node data.</param>
         /// <returns>Created node.</returns>
-        public SurfaceNode SpawnNode(GroupArchetype groupArchetype, NodeArchetype nodeArchetype, Vector2 location, object[] customValues = null, Action<SurfaceNode> beforeSpawned = null)
+        public SurfaceNode SpawnNode(GroupArchetype groupArchetype, NodeArchetype nodeArchetype, Float2 location, object[] customValues = null, Action<SurfaceNode> beforeSpawned = null)
         {
             if (groupArchetype == null || nodeArchetype == null)
                 throw new ArgumentNullException();
@@ -360,7 +396,7 @@ namespace FlaxEditor.Surface
             var flags = nodeArchetype.Flags;
             nodeArchetype.Flags &= ~NodeFlags.NoSpawnViaGUI;
             nodeArchetype.Flags &= ~NodeFlags.NoSpawnViaPaste;
-            if (!_surface.CanUseNodeType(nodeArchetype))
+            if (_surface != null && !_surface.CanUseNodeType(groupArchetype, nodeArchetype))
             {
                 nodeArchetype.Flags = flags;
                 Editor.LogWarning("Cannot spawn given node type. Title: " + nodeArchetype.Title);
@@ -388,13 +424,14 @@ namespace FlaxEditor.Surface
                     throw new InvalidOperationException("Invalid node custom values.");
             }
             node.Location = location;
-            OnControlLoaded(node);
+            OnControlLoaded(node, SurfaceNodeActions.User);
             beforeSpawned?.Invoke(node);
-            node.OnSurfaceLoaded();
-            OnControlSpawned(node);
+            node.OnSurfaceLoaded(SurfaceNodeActions.User);
+            OnControlSpawned(node, SurfaceNodeActions.User);
 
             // Undo action
-            Surface.Undo?.AddAction(new AddRemoveNodeAction(node, true));
+            if (Surface != null)
+                Surface.AddBatchedUndoAction(new AddRemoveNodeAction(node, true));
 
             MarkAsModified();
 

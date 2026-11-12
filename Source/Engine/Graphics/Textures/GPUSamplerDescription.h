@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -47,6 +47,8 @@ API_ENUM() enum class GPUSamplerCompareFunction
     Never = 0,
     /// <summary>If the source data is less than the destination data, the comparison passes.</summary>
     Less = 1,
+    /// <summary>If the source data is greater than the destination data, the comparison passes.</summary>
+    Greater = 2,
 
     API_ENUM(Attributes="HideInEditor") MAX
 };
@@ -79,7 +81,7 @@ API_ENUM() enum class GPUSamplerBorderColor
 /// </summary>
 API_STRUCT() struct FLAXENGINE_API GPUSamplerDescription
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(GPUSamplerDescription);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(GPUSamplerDescription);
 
     /// <summary>
     /// The filtering method to use when sampling a texture.
@@ -132,7 +134,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(GPUSamplerDescription);
     API_FIELD() GPUSamplerCompareFunction ComparisonFunction;
 
 public:
-
     /// <summary>
     /// Creates a new <see cref="GPUSamplerDescription" /> with default settings.
     /// </summary>
@@ -142,13 +143,11 @@ public:
     static GPUSamplerDescription New(GPUSamplerFilter filter = GPUSamplerFilter::Point, GPUSamplerAddressMode addressMode = GPUSamplerAddressMode::Wrap);
 
 public:
-
     void Clear();
     bool Equals(const GPUSamplerDescription& other) const;
     String ToString() const;
 
 public:
-
     FORCE_INLINE bool operator==(const GPUSamplerDescription& other) const
     {
         return Equals(other);

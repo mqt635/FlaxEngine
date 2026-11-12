@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -8,6 +8,7 @@ namespace FlaxEngine.GUI
     /// The basic GUI image control. Shows texture, sprite or render target.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public class Image : ContainerControl
     {
         /// <summary>
@@ -25,19 +26,19 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the color used to multiply the image pixels.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Image Style"), EditorOrder(2010), ExpandGroups]
         public Color Color { get; set; } = Color.White;
 
         /// <summary>
         /// Gets or sets the color used to multiply the image pixels when mouse is over the image.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Image Style"), EditorOrder(2011)]
         public Color MouseOverColor { get; set; } = Color.White;
 
         /// <summary>
         /// Gets or sets the color used to multiply the image pixels when control is disabled.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Image Style"), EditorOrder(2012)]
         public Color DisabledTint { get; set; } = Color.Gray;
 
         /// <summary>
@@ -66,7 +67,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public Image(Vector2 location, Vector2 size)
+        public Image(Float2 location, Float2 size)
         : base(location, size)
         {
             AutoFocus = false;
@@ -109,19 +110,19 @@ namespace FlaxEngine.GUI
             }
             else
             {
-                rect = new Rectangle(Vector2.Zero, Size);
+                rect = new Rectangle(Float2.Zero, Size);
             }
 
             Margin.ShrinkRectangle(ref rect);
 
-            var color = IsMouseOver ? MouseOverColor : Color;
+            var color = IsMouseOver || IsNavFocused ? MouseOverColor : Color;
             if (!Enabled)
                 color *= DisabledTint;
             Brush.Draw(rect, color);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (base.OnMouseUp(location, button))
                 return true;
@@ -133,6 +134,15 @@ namespace FlaxEngine.GUI
             }
 
             return false;
+        }
+
+        /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            base.OnSubmit();
+
+            // Execute default user interaction via mouse click
+            Clicked?.Invoke(this, MouseButton.Left);
         }
     }
 }

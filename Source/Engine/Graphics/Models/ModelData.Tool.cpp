@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MODEL_TOOL
 
@@ -6,20 +6,45 @@
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Utilities.h"
 #include "Engine/Core/Types/DateTime.h"
-#include "Engine/Core/Types/TimeSpan.h"
+#include "Engine/Core/Types/Stopwatch.h"
 #include "Engine/Core/Collections/BitArray.h"
 #include "Engine/Tools/ModelTool/ModelTool.h"
 #include "Engine/Tools/ModelTool/VertexTriangleAdjacency.h"
 #include "Engine/Platform/Platform.h"
+#include "Engine/Platform/MessageBox.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include <ThirdParty/meshoptimizer/meshoptimizer.h>
+#define USE_MIKKTSPACE 1
+#include <ThirdParty/MikkTSpace/mikktspace.h>
 #if USE_ASSIMP
-#define USE_SPARIAL_SORT 1
+#define USE_SPATIAL_SORT 1
 #define ASSIMP_BUILD_NO_EXPORT
 #include "Engine/Tools/ModelTool/SpatialSort.h"
 //#include <ThirdParty/assimp/SpatialSort.h>
 #else
-#define USE_SPARIAL_SORT 0
+#define USE_SPATIAL_SORT 0
 #endif
 #include <stack>
+
+bool InitedMeshOpt = false;
+
+void* MeshOptAllocate(size_t size)
+{
+    return Allocator::Allocate(size);
+}
+
+void MeshOptDeallocate(void* ptr)
+{
+    Allocator::Free(ptr);
+}
+
+void InitMeshOpt()
+{
+    if (InitedMeshOpt)
+        return;
+    InitedMeshOpt = true;
+    meshopt_setAllocator(MeshOptAllocate, MeshOptDeallocate);
+}
 
 #if PLATFORM_WINDOWS
 
@@ -74,8 +99,40 @@ void RemapArrayHelper(Array<T>& target, const std::vector<uint32_t>& remap)
     }
 }
 
+void MeshData::SetLightmapUVsSource(ModelLightmapUVsSource source)
+{
+    if (source == ModelLightmapUVsSource::Disable)
+    {
+        // No lightmap UVs
+    }
+    else if (source == ModelLightmapUVsSource::Generate)
+    {
+        // Generate lightmap UVs
+        if (GenerateLightmapUVs())
+        {
+            LOG(Error, "Failed to generate lightmap uvs");
+        }
+    }
+    else
+    {
+        // Select input channel index
+        const int32 inputChannelIndex = (int32)source - (int32)ModelLightmapUVsSource::Channel0;
+        if (inputChannelIndex >= 0 && inputChannelIndex < UVs.Count() && UVs[inputChannelIndex].HasItems())
+        {
+            LightmapUVsIndex = inputChannelIndex;
+        }
+        else
+        {
+            LOG(Warning, "Cannot import result lightmap uvs. Missing texcoords channel {0}.", inputChannelIndex);
+        }
+    }
+}
+
 bool MeshData::GenerateLightmapUVs()
 {
+    if (Positions.IsEmpty() || Indices.IsEmpty())
+        return true;
+    PROFILE_CPU();
 #if PLATFORM_WINDOWS
     // Prepare
     HRESULT hr;
@@ -83,8 +140,7 @@ bool MeshData::GenerateLightmapUVs()
     int32 facesCount = Indices.Count() / 3;
     DirectX::XMFLOAT3* positions = (DirectX::XMFLOAT3*)Positions.Get();
     LOG(Info, "Generating lightmaps UVs ({0} vertices, {1} triangles)...", verticesCount, facesCount);
-
-    DateTime startTime = DateTime::Now();
+    Stopwatch stopwatch;
 
     // Generate adjacency data
     const float adjacencyEpsilon = 0.001f;
@@ -122,28 +178,32 @@ bool MeshData::GenerateLightmapUVs()
         return true;
     }
 
-    const DateTime endTime = DateTime::Now();
-
     // Log info
-    const int32 nTotalVerts = (int32)vb.size();
-    const int32 msTime = Math::CeilToInt((float)(endTime - startTime).GetTotalMilliseconds());
-    LOG(Info, "Lightmap UVs generated! Charts: {0}, stretching: {1}, {2} vertices. Time: {3}ms", outCharts, outStretch, nTotalVerts, msTime);
+    stopwatch.Stop();
+    LOG(Info, "Lightmap UVs generated! Charts: {0}, stretching: {1}, {2} vertices. Time: {3}ms", outCharts, outStretch, (int32)vb.size(), stopwatch.GetMilliseconds());
 
     // Update mesh data (remap vertices due to vertex buffer and index buffer change)
     RemapArrayHelper(Positions, vertexRemapArray);
-    RemapArrayHelper(UVs, vertexRemapArray);
+    LightmapUVsIndex = Math::Min(UVs.Count(), MODEL_MAX_UV - 1);
+    for (int32 channel = 0; channel < LightmapUVsIndex; channel++)
+        RemapArrayHelper(UVs[channel], vertexRemapArray);
     RemapArrayHelper(Normals, vertexRemapArray);
     RemapArrayHelper(Tangents, vertexRemapArray);
     RemapArrayHelper(Colors, vertexRemapArray);
     RemapArrayHelper(BlendIndices, vertexRemapArray);
     RemapArrayHelper(BlendWeights, vertexRemapArray);
-    LightmapUVs.Resize(nTotalVerts, false);
-    for (int32 i = 0; i < nTotalVerts; i++)
-        LightmapUVs[i] = *(Vector2*)&vb[i].uv;
     uint32* ibP = (uint32*)ib.data();
     for (int32 i = 0; i < Indices.Count(); i++)
         Indices[i] = *ibP++;
+
+    // Add generated data
+    UVs.Resize(LightmapUVsIndex + 1);
+    auto& lightmapChannel = UVs[LightmapUVsIndex];
+    lightmapChannel.Resize((int32)vb.size(), false);
+    for (int32 i = 0; i < (int32)vb.size(); i++)
+        lightmapChannel.Get()[i] = *(Float2*)&vb[i].uv;
 #else
+    MessageBox::Show(TEXT("Model lightmap UVs generation is not supported on this platform."), TEXT("Import error"), MessageBoxButtons::OK, MessageBoxIcon::Error);
     LOG(Error, "Model lightmap UVs generation is not supported on this platform.");
 #endif
 
@@ -151,55 +211,73 @@ bool MeshData::GenerateLightmapUVs()
 }
 
 int32 FindVertex(const MeshData& mesh, int32 vertexIndex, int32 startIndex, int32 searchRange, const Array<int32>& mapping
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
                  , const Assimp::SpatialSort& spatialSort
-                 , std::vector<unsigned int>& sparialSortCache
+                 , std::vector<unsigned int>& spatialSortCache
+                 , float posEpsilon
 #endif
 )
 {
     const float uvEpsSqr = (1.0f / 250.0f) * (1.0f / 250.0f);
+    const Float2* uv0 = mesh.UVs.Count() > 0 && mesh.UVs[0].HasItems() ? mesh.UVs[0].Get() : nullptr;
+    const Float2* uv1 = mesh.UVs.Count() > 1 && mesh.UVs[1].HasItems() ? mesh.UVs[1].Get() : nullptr;
+    const Float2* uv2 = mesh.UVs.Count() > 2 && mesh.UVs[2].HasItems() ? mesh.UVs[2].Get() : nullptr;
+    const Float2* uv3 = mesh.UVs.Count() > 3 && mesh.UVs[3].HasItems() ? mesh.UVs[3].Get() : nullptr;
 
-#if USE_SPARIAL_SORT
-    const Vector3 vPosition = mesh.Positions[vertexIndex];
-    spatialSort.FindPositions(*(aiVector3D*)&vPosition, 1e-4f, sparialSortCache);
-    if (sparialSortCache.empty())
+#if USE_SPATIAL_SORT
+    const Float3 vPosition = mesh.Positions[vertexIndex];
+    spatialSort.FindPositions(*(aiVector3D*)&vPosition, posEpsilon, spatialSortCache);
+    if (spatialSortCache.empty())
         return INVALID_INDEX;
 
-    const Vector2 vUV = mesh.UVs.HasItems() ? mesh.UVs[vertexIndex] : Vector2::Zero;
-    const Vector3 vNormal = mesh.Normals.HasItems() ? mesh.Normals[vertexIndex] : Vector3::Zero;
-    const Vector3 vTangent = mesh.Tangents.HasItems() ? mesh.Tangents[vertexIndex] : Vector3::Zero;
-    const Vector2 vLightmapUV = mesh.LightmapUVs.HasItems() ? mesh.LightmapUVs[vertexIndex] : Vector2::Zero;
+    const Float2 vUV0 = uv0 ? uv0[vertexIndex] : Float2::Zero;
+    const Float2 vUV1 = uv1 ? uv1[vertexIndex] : Float2::Zero;
+    const Float2 vUV2 = uv2 ? uv2[vertexIndex] : Float2::Zero;
+    const Float2 vUV3 = uv3 ? uv3[vertexIndex] : Float2::Zero;
+    const Float3 vNormal = mesh.Normals.HasItems() ? mesh.Normals[vertexIndex] : Float3::Zero;
+    const Float3 vTangent = mesh.Tangents.HasItems() ? mesh.Tangents[vertexIndex] : Float3::Zero;
+    const Color vColor = mesh.Colors.HasItems() ? mesh.Colors[vertexIndex] : Color::Black; // Assuming Color::Black as a default color
+
     const int32 end = startIndex + searchRange;
 
-    for (size_t i = 0; i < sparialSortCache.size(); i++)
+    for (size_t i = 0; i < spatialSortCache.size(); i++)
     {
-        const int32 v = sparialSortCache[i];
+        const int32 v = spatialSortCache[i];
         if (v < startIndex || v >= end)
             continue;
 #else
-	const Vector3 vPosition = mesh.Positions[vertexIndex];
-	const Vector2 vUV = mesh.UVs.HasItems() ? mesh.UVs[vertexIndex] : Vector2::Zero;
-	const Vector3 vNormal = mesh.Normals.HasItems() ? mesh.Normals[vertexIndex] : Vector3::Zero;
-	const Vector3 vTangent = mesh.Tangents.HasItems() ? mesh.Tangents[vertexIndex] : Vector3::Zero;
-	const Vector2 vLightmapUV = mesh.LightmapUVs.HasItems() ? mesh.LightmapUVs[vertexIndex] : Vector2::Zero;
+	const Float3 vPosition = mesh.Positions[vertexIndex];
+    const Float2 vUV0 = uv0 ? uv0[vertexIndex] : Float2::Zero;
+    const Float2 vUV1 = uv1 ? uv1[vertexIndex] : Float2::Zero;
+    const Float2 vUV2 = uv2 ? uv2[vertexIndex] : Float2::Zero;
+    const Float2 vUV3 = uv3 ? uv3[vertexIndex] : Float2::Zero;
+	const Float3 vNormal = mesh.Normals.HasItems() ? mesh.Normals[vertexIndex] : Float3::Zero;
+	const Float3 vTangent = mesh.Tangents.HasItems() ? mesh.Tangents[vertexIndex] : Float3::Zero;
+    const Color vColor = mesh.Colors.HasItems() ? mesh.Colors[vertexIndex] : Color::Black; // Assuming Color::Black as a default color
+
 	const int32 end = startIndex + searchRange;
 
 	for (int32 v = startIndex; v < end; v++)
 	{
-		if (!Vector3::NearEqual(vPosition, mesh.Positions[v]))
+		if (!Float3::NearEqual(vPosition, mesh.Positions[v]))
 			continue;
 #endif
         if (mapping[v] == INVALID_INDEX)
             continue;
-        if (mesh.UVs.HasItems() && (vUV - mesh.UVs[v]).LengthSquared() > uvEpsSqr)
+        if (uv0 && (vUV0 - uv0[v]).LengthSquared() > uvEpsSqr)
             continue;
-        if (mesh.Normals.HasItems() && Vector3::Dot(vNormal, mesh.Normals[v]) < 0.98f)
+        if (uv1 && (vUV1 - uv1[v]).LengthSquared() > uvEpsSqr)
             continue;
-        if (mesh.Tangents.HasItems() && Vector3::Dot(vTangent, mesh.Tangents[v]) < 0.98f)
+        if (uv2 && (vUV2 - uv2[v]).LengthSquared() > uvEpsSqr)
             continue;
-        if (mesh.LightmapUVs.HasItems() && (vLightmapUV - mesh.LightmapUVs[v]).LengthSquared() > uvEpsSqr)
+        if (uv3 && (vUV3 - uv3[v]).LengthSquared() > uvEpsSqr)
             continue;
-        // TODO: check more components?
+        if (mesh.Normals.HasItems() && Float3::Dot(vNormal, mesh.Normals[v]) < 0.98f)
+            continue;
+        if (mesh.Tangents.HasItems() && Float3::Dot(vTangent, mesh.Tangents[v]) < 0.98f)
+            continue;
+        if (mesh.Colors.HasItems() && vColor != mesh.Colors[v])
+            continue;
 
         return v;
     }
@@ -227,7 +305,8 @@ void RemapBuffer(Array<T>& src, Array<T>& dst, const Array<int32>& mapping, int3
 
 void MeshData::BuildIndexBuffer()
 {
-    const auto startTime = Platform::GetTimeSeconds();
+    PROFILE_CPU();
+    Stopwatch stopwatch;
 
     const int32 vertexCount = Positions.Count();
     MeshData newMesh;
@@ -236,11 +315,19 @@ void MeshData::BuildIndexBuffer()
     mapping.Resize(vertexCount);
     int32 newVertexCounter = 0;
 
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
     // Set up a SpatialSort to quickly find all vertices close to a given position
     Assimp::SpatialSort vertexFinder;
-    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Vector3));
-    std::vector<unsigned int> sparialSortCache;
+    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Float3));
+    std::vector<unsigned int> spatialSortCache;
+
+    // Ensure that the weld radius stays above float precision based on the mesh's largest coordinate
+    float maxAbs = 0.0f;
+    for (int32 i = 0; i < vertexCount; i++)
+    {
+        maxAbs = Math::Max(maxAbs, Positions[i].GetAbsolute().MaxValue());
+    }
+    const float posEpsilon = Math::Max(1e-5f, maxAbs * 1e-6f);
 #endif
 
     // Build index buffer
@@ -248,8 +335,8 @@ void MeshData::BuildIndexBuffer()
     {
         // Find duplicated vertex before the current one
         const int32 reuseVertexIndex = FindVertex(*this, vertexIndex, 0, vertexIndex, mapping
-#if USE_SPARIAL_SORT
-                                                  , vertexFinder, sparialSortCache
+#if USE_SPATIAL_SORT
+                                                  , vertexFinder, spatialSortCache, posEpsilon
 #endif
         );
         if (reuseVertexIndex == INVALID_INDEX)
@@ -276,13 +363,15 @@ void MeshData::BuildIndexBuffer()
     newMesh.SwapBuffers(*this);
 #define REMAP_BUFFER(name) RemapBuffer(newMesh.name, name, mapping, newVertexCounter)
     REMAP_BUFFER(Positions);
-    REMAP_BUFFER(UVs);
     REMAP_BUFFER(Normals);
     REMAP_BUFFER(Tangents);
-    REMAP_BUFFER(LightmapUVs);
+    REMAP_BUFFER(BitangentSigns);
     REMAP_BUFFER(Colors);
     REMAP_BUFFER(BlendIndices);
     REMAP_BUFFER(BlendWeights);
+    UVs.Resize(newMesh.UVs.Count());
+    for (int32 channelIdx = 0; channelIdx < UVs.Count(); channelIdx++)
+        REMAP_BUFFER(UVs[channelIdx]);
 #undef REMAP_BUFFER
     BlendShapes.Resize(newMesh.BlendShapes.Count());
     for (int32 blendShapeIndex = 0; blendShapeIndex < newMesh.BlendShapes.Count(); blendShapeIndex++)
@@ -292,33 +381,32 @@ void MeshData::BuildIndexBuffer()
 
         dstBlendShape.Name = srcBlendShape.Name;
         dstBlendShape.Weight = srcBlendShape.Weight;
-        dstBlendShape.Vertices.Resize(newVertexCounter);
-        for (int32 i = 0, j = 0; i < srcBlendShape.Vertices.Count(); i++)
+        dstBlendShape.Vertices.EnsureCapacity(srcBlendShape.Vertices.Count());
+        for (int32 i = 0; i < srcBlendShape.Vertices.Count(); i++)
         {
-            const auto idx = mapping[i];
-            if (idx != INVALID_INDEX)
+            auto& v = srcBlendShape.Vertices[i];
+            int32 newVertexIndex = v.VertexIndex < (uint32)vertexCount ? mapping[v.VertexIndex] : INVALID_INDEX;
+            if (newVertexIndex != INVALID_INDEX)
             {
-                auto& v = srcBlendShape.Vertices[i];
-                ASSERT_LOW_LAYER(v.VertexIndex < (uint32)vertexCount);
-                ASSERT_LOW_LAYER(mapping[v.VertexIndex] != INVALID_INDEX);
-                v.VertexIndex = mapping[v.VertexIndex];
-                ASSERT_LOW_LAYER(v.VertexIndex < (uint32)newVertexCounter);
-                dstBlendShape.Vertices[j++] = v;
+                v.VertexIndex = newVertexIndex;
+                dstBlendShape.Vertices.Add(v);
             }
         }
     }
 
-    const auto endTime = Platform::GetTimeSeconds();
-    LOG(Info, "Generated index buffer for mesh in {0}s ({1} vertices, {2} indices)", Utilities::RoundTo2DecimalPlaces(endTime - startTime), Positions.Count(), Indices.Count());
+    stopwatch.Stop();
+    const double time = Utilities::RoundTo2DecimalPlaces(stopwatch.GetTotalSeconds());
+    if (time > 0.5f) // Don't log if generation was fast enough
+        LOG(Info, "Generated {3} for mesh in {0}s ({1} vertices, {2} indices)", time, vertexCount, Indices.Count(), TEXT("indices"));
 }
 
-void MeshData::FindPositions(const Vector3& position, float epsilon, Array<int32>& result)
+void MeshData::FindPositions(const Float3& position, float epsilon, Array<int32>& result)
 {
     result.Clear();
 
     for (int32 i = 0; i < Positions.Count(); i++)
     {
-        if (Vector3::NearEqual(position, Positions[i], epsilon))
+        if (Float3::NearEqual(position, Positions[i], epsilon))
             result.Add(i);
     }
 }
@@ -330,6 +418,7 @@ bool MeshData::GenerateNormals(float smoothingAngle)
         LOG(Warning, "Missing vertex or index data to generate normals.");
         return true;
     }
+    PROFILE_CPU();
 
     const auto startTime = Platform::GetTimeSeconds();
 
@@ -339,32 +428,32 @@ bool MeshData::GenerateNormals(float smoothingAngle)
     smoothingAngle = Math::Clamp(smoothingAngle, 0.0f, 175.0f);
 
     // Compute per-face normals but store them per-vertex
-    Vector3 min, max;
+    Float3 min, max;
     min = max = Positions[0];
     for (int32 i = 0; i < indexCount; i += 3)
     {
-        const Vector3 v1 = Positions[Indices[i + 0]];
-        const Vector3 v2 = Positions[Indices[i + 1]];
-        const Vector3 v3 = Positions[Indices[i + 2]];
-        const Vector3 n = ((v2 - v1) ^ (v3 - v1));
+        const Float3 v1 = Positions[Indices[i + 0]];
+        const Float3 v2 = Positions[Indices[i + 1]];
+        const Float3 v3 = Positions[Indices[i + 2]];
+        const Float3 n = ((v2 - v1) ^ (v3 - v1));
 
         Normals[Indices[i + 0]] = n;
         Normals[Indices[i + 1]] = n;
         Normals[Indices[i + 2]] = n;
 
-        Vector3::Min(min, v1, min);
-        Vector3::Min(min, v2, min);
-        Vector3::Min(min, v3, min);
+        Float3::Min(min, v1, min);
+        Float3::Min(min, v2, min);
+        Float3::Min(min, v3, min);
 
-        Vector3::Max(max, v1, max);
-        Vector3::Max(max, v2, max);
-        Vector3::Max(max, v3, max);
+        Float3::Max(max, v1, max);
+        Float3::Max(max, v2, max);
+        Float3::Max(max, v3, max);
     }
 
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
     // Set up a SpatialSort to quickly find all vertices close to a given position
     Assimp::SpatialSort vertexFinder;
-    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Vector3));
+    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Float3));
     std::vector<uint32> verticesFound(16);
 #else
 	Array<int32> verticesFound(16);
@@ -384,7 +473,7 @@ bool MeshData::GenerateNormals(float smoothingAngle)
                 continue;
 
             // Get all vertices that share this one
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
             vertexFinder.FindPositions(*(aiVector3D*)&Positions[i], posEpsilon, verticesFound);
             const int32 verticesFoundCount = (int32)verticesFound.size();
 #else
@@ -393,7 +482,7 @@ bool MeshData::GenerateNormals(float smoothingAngle)
 #endif
 
             // Get the smooth normal
-            Vector3 n;
+            Float3 n;
             for (int32 a = 0; a < verticesFoundCount; a++)
                 n += Normals[verticesFound[a]];
             n.Normalize();
@@ -414,7 +503,7 @@ bool MeshData::GenerateNormals(float smoothingAngle)
         for (int32 i = 0; i < vertexCount; i++)
         {
             // Get all vertices that share this one
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
             vertexFinder.FindPositions(*(aiVector3D*)&Positions[i], posEpsilon, verticesFound);
             const int32 verticesFoundCount = (int32)verticesFound.size();
 #else
@@ -423,27 +512,108 @@ bool MeshData::GenerateNormals(float smoothingAngle)
 #endif
 
             // Get the smooth normal
-            Vector3 vr = Normals[i];
+            Float3 vr = Normals[i];
             const float vrlen = vr.Length();
-            Vector3 n;
+            Float3 n;
             for (int32 a = 0; a < verticesFoundCount; a++)
             {
-                Vector3 v = Normals[verticesFound[a]];
+                Float3 v = Normals[verticesFound[a]];
 
                 // Check whether the angle between the two normals is not too large
                 // TODO: use length squared?
                 if (v * vr >= limit * vrlen * v.Length())
                     n += v;
             }
-            Normals[i] = Vector3::Normalize(n);
+            Normals[i] = Float3::Normalize(n);
         }
     }
 
     const auto endTime = Platform::GetTimeSeconds();
-    LOG(Info, "Generated tangents for mesh in {0}s ({1} vertices, {2} indices)", Utilities::RoundTo2DecimalPlaces(endTime - startTime), vertexCount, indexCount);
+    const double time = Utilities::RoundTo2DecimalPlaces(endTime - startTime);
+    if (time > 0.5f) // Don't log if generation was fast enough
+        LOG(Info, "Generated {3} for mesh in {0}s ({1} vertices, {2} indices)", time, vertexCount, indexCount, TEXT("normals"));
 
     return false;
 }
+
+#if USE_MIKKTSPACE
+namespace
+{
+    int GetNumFaces(const SMikkTSpaceContext* pContext)
+    {
+        const auto meshData = (MeshData*)pContext->m_pUserData;
+        return meshData->Indices.Count() / 3;
+    }
+
+    int GetNumVerticesOfFace(const SMikkTSpaceContext* pContext, const int iFace)
+    {
+        return 3;
+    }
+
+    void GetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert)
+    {
+        const auto meshData = (MeshData*)pContext->m_pUserData;
+        const auto e = meshData->Positions[meshData->Indices[iFace * 3 + iVert]];
+        fvPosOut[0] = e.X;
+        fvPosOut[1] = e.Y;
+        fvPosOut[2] = e.Z;
+    }
+
+    void GetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert)
+    {
+        const auto meshData = (MeshData*)pContext->m_pUserData;
+        const auto e = meshData->Normals[meshData->Indices[iFace * 3 + iVert]];
+        fvNormOut[0] = e.X;
+        fvNormOut[1] = e.Y;
+        fvNormOut[2] = e.Z;
+    }
+
+    void GetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert)
+    {
+        const auto meshData = (MeshData*)pContext->m_pUserData;
+        const auto e = meshData->UVs[0][meshData->Indices[iFace * 3 + iVert]];
+        fvTexcOut[0] = e.X;
+        fvTexcOut[1] = e.Y;
+    }
+
+    struct MikkTSpaceContext : SMikkTSpaceContext
+    {
+        Array<int32>* NextCopy; // Per vertex: It's next copy with another tangent frame (-1 if none)
+    };
+
+    void SetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert)
+    {
+        const auto meshData = (MeshData*)pContext->m_pUserData;
+        auto& nextCopy = *((const MikkTSpaceContext*)pContext)->NextCopy;
+        const Float3 tangent(fvTangent);
+        auto& v = meshData->Indices[iFace * 3 + iVert];
+        while (meshData->BitangentSigns[v] != 0.0f && (meshData->BitangentSigns[v] != fSign || Float3::Dot(meshData->Tangents[v], tangent) < 0.9995f))
+        {
+            // Corner across a UV mirror: move it to a copy of the vertex so no triangle blends the sign through 0
+
+            if (nextCopy[v] == -1)
+            {
+                nextCopy[v] = meshData->Positions.Count();
+                nextCopy.Add(-1);
+#define COPY_VERTEX(buffer) if (buffer.HasItems()) { const auto value = buffer[v]; buffer.Add(value); }
+                COPY_VERTEX(meshData->Positions);
+                COPY_VERTEX(meshData->Normals);
+                COPY_VERTEX(meshData->Tangents);
+                COPY_VERTEX(meshData->Colors);
+                COPY_VERTEX(meshData->BlendIndices);
+                COPY_VERTEX(meshData->BlendWeights);
+                for (auto& uvs : meshData->UVs)
+                    COPY_VERTEX(uvs);
+#undef COPY_VERTEX
+                meshData->BitangentSigns.Add(0.0f); // Not written yet
+            }
+            v = (uint32)nextCopy[v];
+        }
+        meshData->Tangents[v] = tangent;
+        meshData->BitangentSigns[v] = fSign;
+    }
+}
+#endif
 
 bool MeshData::GenerateTangents(float smoothingAngle)
 {
@@ -454,60 +624,95 @@ bool MeshData::GenerateTangents(float smoothingAngle)
     }
     if (Normals.IsEmpty() || UVs.IsEmpty())
     {
-        LOG(Warning, "Missing normals or texcoors data to generate tangents.");
+        LOG(Warning, "Missing normals or texcoords data to generate tangents.");
         return true;
     }
+    PROFILE_CPU();
 
     const auto startTime = Platform::GetTimeSeconds();
-
     const int32 vertexCount = Positions.Count();
     const int32 indexCount = Indices.Count();
     Tangents.Resize(vertexCount, false);
     smoothingAngle = Math::Clamp(smoothingAngle, 0.0f, 45.0f);
 
-    // Note: this assumes that mesh is in a verbose format
-    // where each triangle has its own set of vertices
-    // and no vertices are shared between triangles (dummy index buffer).
+    // TODO: use meshoptimizer 1.2 with new meshopt_generateTangents
+#if USE_MIKKTSPACE
+    SMikkTSpaceInterface callbacks = {
+        GetNumFaces,
+        GetNumVerticesOfFace,
+        GetPosition,
+        GetNormal,
+        GetTexCoord,
+        SetTSpaceBasic,
+        nullptr
+    };
+    Array<int32> nextCopy;
+    nextCopy.Resize(vertexCount, false);
+    nextCopy.SetAll(-1);
+    MikkTSpaceContext context;
+    context.m_pInterface = &callbacks;
+    context.m_pUserData = this;
+    context.NextCopy = &nextCopy;
+    BitangentSigns.Resize(vertexCount, false);
+    BitangentSigns.SetAll(0.0f); //Not written yet
+    genTangSpace(&context, 180.0f - smoothingAngle);
 
+    // Blend shapes move the vertex copies too
+    for (auto& blendShape : BlendShapes)
+    {
+        const int32 count = blendShape.Vertices.Count();
+        for (int32 i = 0; i < count; i++)
+        {
+            BlendShapeVertex v = blendShape.Vertices[i];
+            if (v.VertexIndex >= (uint32)vertexCount)
+                continue;
+            for (int32 copy = nextCopy[v.VertexIndex]; copy != -1; copy = nextCopy[copy]) 
+            {
+                v.VertexIndex = copy;
+                blendShape.Vertices.Add(v);
+            }
+        }
+    }
+#else
+    
     const float angleEpsilon = 0.9999f;
     BitArray<> vertexDone;
     vertexDone.Resize(vertexCount);
     vertexDone.SetAll(false);
 
-    const Vector3* meshNorm = Normals.Get();
-    const Vector2* meshTex = UVs.Get();
-    Vector3* meshTang = Tangents.Get();
+    const Float3* meshNorm = Normals.Get();
+    const Float2* meshTex = UVs[0].Get();
+    Float3* meshTang = Tangents.Get();
 
-    // Calculate the tangent for every face
-    Vector3 min, max;
-    min = max = Positions[0];
+    // Calculate the tangent per-triangle
+    Float3 min, max;
+    min = max = Positions[Indices[0]];
     for (int32 i = 0; i < indexCount; i += 3)
     {
         const int32 p0 = Indices[i + 0], p1 = Indices[i + 1], p2 = Indices[i + 2];
 
-        const Vector3 v1 = Positions[p0];
-        const Vector3 v2 = Positions[p1];
-        const Vector3 v3 = Positions[p2];
+        const Float3 v0 = Positions[p0];
+        const Float3 v1 = Positions[p1];
+        const Float3 v2 = Positions[p2];
 
-        Vector3::Min(min, v1, min);
-        Vector3::Min(min, v2, min);
-        Vector3::Min(min, v3, min);
+        Float3::Min(min, v0, min);
+        Float3::Min(min, v1, min);
+        Float3::Min(min, v2, min);
 
-        Vector3::Max(max, v1, max);
-        Vector3::Max(max, v2, max);
-        Vector3::Max(max, v3, max);
+        Float3::Max(max, v0, max);
+        Float3::Max(max, v1, max);
+        Float3::Max(max, v2, max);
 
         // Position differences p1->p2 and p1->p3
-        Vector3 v = v2 - v1, w = v3 - v1;
+        Float3 v = v1 - v0, w = v2 - v0;
 
         // Texture offset p1->p2 and p1->p3
         float sx = meshTex[p1].X - meshTex[p0].X, sy = meshTex[p1].Y - meshTex[p0].Y;
         float tx = meshTex[p2].X - meshTex[p0].X, ty = meshTex[p2].Y - meshTex[p0].Y;
-        const float dirCorrection = (tx * sy - ty * sx) < 0.0f ? -1.0f : 1.0f;
-
-        // When t1, t2, t3 in same position in UV space, just use default UV direction
+        const float dir = (tx * sy - ty * sx) < 0.0f ? -1.0f : 1.0f;
         if (sx * ty == sy * tx)
         {
+            // Use default UV direction for invalid case
             sx = 0.0;
             sy = 1.0;
             tx = 1.0;
@@ -516,22 +721,22 @@ bool MeshData::GenerateTangents(float smoothingAngle)
 
         // Tangent points in the direction where to positive X axis of the texture coord's would point in model space
         // Bitangent's points along the positive Y axis of the texture coord's, respectively
-        Vector3 tangent, bitangent;
-        tangent.X = (w.X * sy - v.X * ty) * dirCorrection;
-        tangent.Y = (w.Y * sy - v.Y * ty) * dirCorrection;
-        tangent.Z = (w.Z * sy - v.Z * ty) * dirCorrection;
-        bitangent.X = (w.X * sx - v.X * tx) * dirCorrection;
-        bitangent.Y = (w.Y * sx - v.Y * tx) * dirCorrection;
-        bitangent.Z = (w.Z * sx - v.Z * tx) * dirCorrection;
+        Float3 tangent, bitangent;
+        tangent.X = (w.X * sy - v.X * ty) * dir;
+        tangent.Y = (w.Y * sy - v.Y * ty) * dir;
+        tangent.Z = (w.Z * sy - v.Z * ty) * dir;
+        bitangent.X = (w.X * sx - v.X * tx) * dir;
+        bitangent.Y = (w.Y * sx - v.Y * tx) * dir;
+        bitangent.Z = (w.Z * sx - v.Z * tx) * dir;
 
-        // Store for every vertex of that face
+        // Set tangent frame for every vertex in that triangle
         for (int32 b = 0; b < 3; b++)
         {
             const int32 p = Indices[i + b];
 
-            // Project tangent and bitangent into the plane formed by the vertex' normal
-            Vector3 localTangent = tangent - meshNorm[p] * (tangent * meshNorm[p]);
-            Vector3 localBitangent = bitangent - meshNorm[p] * (bitangent * meshNorm[p]);
+            // Project tangent and bitangent into the plane formed by the normal
+            Float3 localTangent = tangent - meshNorm[p] * (tangent * meshNorm[p]);
+            Float3 localBitangent = bitangent - meshNorm[p] * (bitangent * meshNorm[p]);
             localTangent.Normalize();
             localBitangent.Normalize();
 
@@ -547,10 +752,10 @@ bool MeshData::GenerateTangents(float smoothingAngle)
         }
     }
 
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
     // Set up a SpatialSort to quickly find all vertices close to a given position
     Assimp::SpatialSort vertexFinder;
-    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Vector3));
+    vertexFinder.Fill((const aiVector3D*)Positions.Get(), vertexCount, sizeof(Float3));
     std::vector<uint32> verticesFound(16);
 #else
 	Array<int32> verticesFound(16);
@@ -566,13 +771,13 @@ bool MeshData::GenerateTangents(float smoothingAngle)
         if (vertexDone[a])
             continue;
 
-        const Vector3 origPos = Positions[a];
-        const Vector3 origNorm = Normals[a];
-        const Vector3 origTang = Tangents[a];
+        const Float3 origPos = Positions[a];
+        const Float3 origNorm = Normals[a];
+        const Float3 origTang = Tangents[a];
         closeVertices.Clear();
 
         // Find all vertices close to that position
-#if USE_SPARIAL_SORT
+#if USE_SPATIAL_SORT
         vertexFinder.FindPositions(*(aiVector3D*)&origPos, posEpsilon, verticesFound);
         const int32 verticesFoundCount = (int32)verticesFound.size();
 #else
@@ -601,10 +806,11 @@ bool MeshData::GenerateTangents(float smoothingAngle)
         }
 
         // Smooth the tangents of all vertices that were found to be close enough
-        Vector3 smoothTangent(0, 0, 0);
+        Float3 smoothTangent(0, 0, 0), smoothBitangent(0, 0, 0);
         for (int32 b = 0; b < closeVertices.Count(); b++)
         {
-            smoothTangent += meshTang[closeVertices[b]];
+            auto p = closeVertices[b];
+            smoothTangent += meshTang[p];
         }
         smoothTangent.Normalize();
 
@@ -614,9 +820,12 @@ bool MeshData::GenerateTangents(float smoothingAngle)
             meshTang[closeVertices[b]] = smoothTangent;
         }
     }
+#endif
 
     const auto endTime = Platform::GetTimeSeconds();
-    LOG(Info, "Generated tangents for mesh in {0}s ({1} vertices, {2} indices)", Utilities::RoundTo2DecimalPlaces(endTime - startTime), vertexCount, indexCount);
+    const double time = Utilities::RoundTo2DecimalPlaces(endTime - startTime);
+    if (time > 0.5f) // Don't log if generation was fast enough
+        LOG(Info, "Generated {3} for mesh in {0}s ({1} vertices, {2} indices)", time, vertexCount, indexCount, TEXT("tangents"));
 
     return false;
 }
@@ -631,6 +840,7 @@ void MeshData::ImproveCacheLocality()
 
     if (Positions.IsEmpty() || Indices.IsEmpty() || Positions.Count() <= VertexCacheSize)
         return;
+    PROFILE_CPU();
 
     const auto startTime = Platform::GetTimeSeconds();
 
@@ -646,14 +856,13 @@ void MeshData::ImproveCacheLocality()
     Platform::MemoryClear(piCachingStamps, vertexCount * sizeof(uint32));
 
     // Allocate an empty output index buffer. We store the output indices in one large array.
-    // Since the number of triangles won't change the input faces can be reused. This is how
-    // We save thousands of redundant mini allocations for aiFace::mIndices
+    // Since the number of triangles won't change the input triangles can be reused. This is how
     const uint32 iIdxCnt = indexCount;
     uint32* const piIBOutput = NewArray<uint32>(iIdxCnt);
     uint32* piCSIter = piIBOutput;
 
     // Allocate the flag array to hold the information
-    // Whether a face has already been emitted or not
+    // Whether a triangle has already been emitted or not
     std::vector<bool> abEmitted(indexCount / 3, false);
 
     // Dead-end vertex index stack
@@ -805,19 +1014,39 @@ void MeshData::ImproveCacheLocality()
     Allocator::Free(piCandidates);
 
     const auto endTime = Platform::GetTimeSeconds();
-    LOG(Info, "Cache relevant optimize for {0} vertices and {1} indices. Average output ACMR is {2}. Time: {3}s", vertexCount, indexCount, (float)iCacheMisses / indexCount / 3, Utilities::RoundTo2DecimalPlaces(endTime - startTime));
+    const double time = Utilities::RoundTo2DecimalPlaces(endTime - startTime);
+    if (time > 0.5f) // Don't log if generation was fast enough
+        LOG(Info, "Generated {3} for mesh in {0}s ({1} vertices, {2} indices)", time, vertexCount, indexCount, TEXT("optimized indices"));
+}
+
+void MeshData::Optimize()
+{
+    if (Indices.IsEmpty() || Positions.IsEmpty())
+        return;
+    PROFILE_CPU();
+    InitMeshOpt();
+
+    // Vertex cache optimization (https://meshoptimizer.org/#vertex-cache-optimization)
+    Array<uint32> tmpIndices;
+    tmpIndices.Resize(Indices.Count());
+    meshopt_optimizeVertexCache(tmpIndices.Get(), Indices.Get(), Indices.Count(), Positions.Count());
+
+    // Overdraw optimization (https://meshoptimizer.org/#overdraw-optimization)
+    const float overdrawThreshold = 1.05f;
+    meshopt_optimizeOverdraw(Indices.Get(), tmpIndices.Get(), Indices.Count(), (const float*)Positions.Get(), Positions.Count(), sizeof(Float3), overdrawThreshold);
 }
 
 float MeshData::CalculateTrianglesArea() const
 {
+    PROFILE_CPU();
     float sum = 0;
     // TODO: use SIMD
     for (int32 i = 0; i + 2 < Indices.Count(); i += 3)
     {
-        const Vector3 v1 = Positions[Indices[i + 0]];
-        const Vector3 v2 = Positions[Indices[i + 1]];
-        const Vector3 v3 = Positions[Indices[i + 2]];
-        sum += Vector3::TriangleArea(v1, v2, v3);
+        const Float3 v1 = Positions[Indices[i + 0]];
+        const Float3 v2 = Positions[Indices[i + 1]];
+        const Float3 v3 = Positions[Indices[i + 2]];
+        sum += Float3::TriangleArea(v1, v2, v3);
     }
     return sum;
 }

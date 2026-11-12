@@ -1,10 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Variant.h"
-#include "CommonValue.h"
 #include "Engine/Core/Collections/HashFunctions.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Content/Asset.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Mathd.h"
 #include "Engine/Core/Math/BoundingBox.h"
@@ -12,31 +12,81 @@
 #include "Engine/Core/Math/Vector2.h"
 #include "Engine/Core/Math/Vector3.h"
 #include "Engine/Core/Math/Vector4.h"
-#include "Engine/Core/Math/Int2.h"
-#include "Engine/Core/Math/Int3.h"
-#include "Engine/Core/Math/Int4.h"
 #include "Engine/Core/Math/Quaternion.h"
 #include "Engine/Core/Math/Color.h"
 #include "Engine/Core/Math/Matrix.h"
 #include "Engine/Core/Math/Ray.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Core/Math/Transform.h"
+#include "Engine/Scripting/BinaryModule.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/ScriptingObject.h"
+#include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MCore.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
 #include "Engine/Utilities/Crc.h"
 #include "Engine/Utilities/StringConverter.h"
-#if USE_MONO
-#include <ThirdParty/mono-2.0/mono/metadata/object.h>
-#endif
+
+#define MANAGED_GC_HANDLE AsUint64
+#define AsEnum AsUint64
+
+namespace
+{
+    const char* InBuiltTypesTypeNames[40] =
+    {
+        // @formatter:off
+        "",// Null
+        "System.Void",// Void
+        "System.Boolean",// Bool
+        "System.Int32",// Int
+        "System.UInt32",// Uint
+        "System.Int64",// Int64
+        "System.UInt64",// Uint64
+        "System.Single",// Float
+        "System.Double",// Double
+        "System.IntPtr",// Pointer
+        "System.String",// String
+        "System.Object",// Object
+        "",// Structure
+        "FlaxEngine.Asset",// Asset
+        "System.Byte[]",// Blob
+        "",// Enum
+        "FlaxEngine.Float2",// Float2
+        "FlaxEngine.Float3",// Float3
+        "FlaxEngine.Float4",// Float4
+        "FlaxEngine.Color",// Color
+        "System.Guid",// Guid
+        "FlaxEngine.BoundingBox",// BoundingBox
+        "FlaxEngine.BoundingSphere",// BoundingSphere
+        "FlaxEngine.Quaternion",// Quaternion
+        "FlaxEngine.Transform",// Transform
+        "FlaxEngine.Rectangle",// Rectangle
+        "FlaxEngine.Ray",// Ray
+        "FlaxEngine.Matrix",// Matrix
+        "System.Object[]",// Array
+        "System.Collections.Generic.Dictionary`2[System.Object,System.Object]",// Dictionary
+        "System.Object",// ManagedObject
+        "System.Type",// Typename
+        "FlaxEngine.Int2",// Int2
+        "FlaxEngine.Int3",// Int3
+        "FlaxEngine.Int4",// Int4
+        "System.Int16",// Int16
+        "System.UInt16",// Uint16
+        "FlaxEngine.Double2",// Double2
+        "FlaxEngine.Double3",// Double3
+        "FlaxEngine.Double4",// Double4
+        // @formatter:on
+    };
+}
 
 static_assert(sizeof(VariantType) <= 16, "Invalid VariantType size!");
+static_assert((int32)VariantType::Types::MAX == ARRAY_COUNT(InBuiltTypesTypeNames), "Invalid amount of in-built types infos!");
 
 VariantType::VariantType(Types type, const StringView& typeName)
 {
     Type = type;
+    StaticName = 0;
     TypeName = nullptr;
     const int32 length = typeName.Length();
     if (length)
@@ -47,66 +97,163 @@ VariantType::VariantType(Types type, const StringView& typeName)
     }
 }
 
-VariantType::VariantType(Types type, const StringAnsiView& typeName)
+VariantType::VariantType(Types type, const StringAnsiView& typeName, bool staticName)
 {
     Type = type;
-    TypeName = nullptr;
-    int32 length = typeName.Length();
-    if (length)
+    StaticName = staticName && (typeName.HasChars() && typeName[typeName.Length()] == 0); // Require string to be null-terminated (not fully safe check)
+    if (staticName)
     {
-        length++;
-        TypeName = static_cast<char*>(Allocator::Allocate(length));
-        Platform::MemoryCopy(TypeName, typeName.Get(), length);
+        TypeName = (char*)typeName.Get();
+    }
+    else
+    {
+        TypeName = nullptr;
+        int32 length = typeName.Length();
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, typeName.Get(), length);
+            TypeName[length] = 0;
+        }
     }
 }
 
-VariantType::VariantType(Types type, _MonoClass* klass)
+VariantType::VariantType(Types type, const ScriptingType& sType)
+    : VariantType(type)
+{
+    SetTypeName(sType.Fullname, !sType.Module->CanReload);
+}
+
+VariantType::VariantType(Types type, const MClass* klass)
 {
     Type = type;
+    StaticName = false;
     TypeName = nullptr;
+#if USE_CSHARP
     if (klass)
+        SetTypeName(*klass);
+#endif
+}
+
+VariantType::VariantType(const StringAnsiView& typeName)
+{
+    // Try using in-built type
+    for (uint32 i = 0; i < ARRAY_COUNT(InBuiltTypesTypeNames); i++)
     {
-        MString typeName;
-        MUtils::GetClassFullname(klass, typeName);
-        int32 length = typeName.Length() + 1;
-        TypeName = static_cast<char*>(Allocator::Allocate(length));
-        Platform::MemoryCopy(TypeName, typeName.Get(), length);
+        if (typeName == InBuiltTypesTypeNames[i])
+        {
+            new(this) VariantType((Types)i);
+            return;
+        }
     }
+    {
+        // Aliases
+        if (typeName == "FlaxEngine.Vector2")
+        {
+            new(this) VariantType(Vector2);
+            return;
+        }
+        if (typeName == "FlaxEngine.Vector3")
+        {
+            new(this) VariantType(Vector3);
+            return;
+        }
+        if (typeName == "FlaxEngine.Vector4")
+        {
+            new(this) VariantType(Vector4);
+            return;
+        }
+    }
+
+    // Check case for array
+    if (typeName.EndsWith(StringAnsiView("[]"), StringSearchCase::CaseSensitive))
+    {
+        new(this) VariantType(Array, typeName);
+        return;
+    }
+
+    // Try using scripting type
+    const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(typeName);
+    if (typeHandle)
+    {
+        const ScriptingType& type = typeHandle.GetType();
+        switch (type.Type)
+        {
+        case ScriptingTypes::Script:
+        case ScriptingTypes::Class:
+        case ScriptingTypes::Interface:
+            new(this) VariantType(Object, typeName);
+            return;
+        case ScriptingTypes::Structure:
+            new(this) VariantType(Structure, typeName);
+            return;
+        case ScriptingTypes::Enum:
+            new(this) VariantType(Enum, typeName);
+            return;
+        }
+    }
+
+    // Try using managed class
+#if USE_CSHARP
+    if (const auto mclass = Scripting::FindClass(typeName))
+    {
+        if (mclass->IsEnum())
+            new(this) VariantType(Enum, mclass);
+        else
+            new(this) VariantType(ManagedObject, mclass);
+        return;
+    }
+#endif
+
+    new(this) VariantType();
+    LOG(Warning, "Missing scripting type \'{0}\'", ::String(typeName));
 }
 
 VariantType::VariantType(const VariantType& other)
 {
     Type = other.Type;
-    TypeName = nullptr;
-    int32 length = StringUtils::Length(other.TypeName);
-    if (length)
+    StaticName = other.StaticName;
+    if (StaticName)
     {
-        length++;
-        TypeName = static_cast<char*>(Allocator::Allocate(length));
-        Platform::MemoryCopy(TypeName, other.TypeName, length);
+        TypeName = other.TypeName;
+    }
+    else
+    {
+        TypeName = nullptr;
+        const int32 length = StringUtils::Length(other.TypeName);
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, other.TypeName, length);
+            TypeName[length] = 0;
+        }
     }
 }
 
 VariantType::VariantType(VariantType&& other) noexcept
 {
     Type = other.Type;
+    StaticName = other.StaticName;
     TypeName = other.TypeName;
     other.Type = Null;
     other.TypeName = nullptr;
+    other.StaticName = 0;
 }
 
 VariantType& VariantType::operator=(const Types& type)
 {
     Type = type;
-    Allocator::Free(TypeName);
+    if (!StaticName)
+        Allocator::Free(TypeName);
     TypeName = nullptr;
+    StaticName = 0;
     return *this;
 }
 
 VariantType& VariantType::operator=(VariantType&& other)
 {
     ASSERT(this != &other);
-    Swap(Type, other.Type);
+    Swap(Packed, other.Packed);
     Swap(TypeName, other.TypeName);
     return *this;
 }
@@ -115,14 +262,23 @@ VariantType& VariantType::operator=(const VariantType& other)
 {
     ASSERT(this != &other);
     Type = other.Type;
-    Allocator::Free(TypeName);
-    TypeName = nullptr;
-    int32 length = StringUtils::Length(other.TypeName);
-    if (length)
+    if (!StaticName)
+        Allocator::Free(TypeName);
+    StaticName = other.StaticName;
+    if (StaticName)
     {
-        length++;
-        TypeName = static_cast<char*>(Allocator::Allocate(length));
-        Platform::MemoryCopy(TypeName, other.TypeName, length);
+        TypeName = other.TypeName;
+    }
+    else
+    {
+        TypeName = nullptr;
+        const int32 length = StringUtils::Length(other.TypeName);
+        if (length)
+        {
+            TypeName = static_cast<char*>(Allocator::Allocate(length + 1));
+            Platform::MemoryCopy(TypeName, other.TypeName, length);
+            TypeName[length] = 0;
+        }
     }
     return *this;
 }
@@ -145,91 +301,122 @@ bool VariantType::operator==(const VariantType& other) const
     return false;
 }
 
+bool VariantType::operator==(const ScriptingTypeHandle& type) const
+{
+    if (Type == Null)
+        return !type;
+    return type && type.GetType().Fullname == GetTypeName();
+}
+
 void VariantType::SetTypeName(const StringView& typeName)
 {
     if (StringUtils::Length(TypeName) != typeName.Length())
     {
-        Allocator::Free(TypeName);
+        if (!StaticName)
+            Allocator::Free(TypeName);
+        StaticName = 0;
         TypeName = static_cast<char*>(Allocator::Allocate(typeName.Length() + 1));
         TypeName[typeName.Length()] = 0;
     }
     StringUtils::ConvertUTF162ANSI(typeName.Get(), TypeName, typeName.Length());
 }
 
-void VariantType::SetTypeName(const StringAnsiView& typeName)
+void VariantType::SetTypeName(const StringAnsiView& typeName, bool staticName)
 {
-    if (StringUtils::Length(TypeName) != typeName.Length())
+    if (StringUtils::Length(TypeName) != typeName.Length() || StaticName != staticName)
     {
-        Allocator::Free(TypeName);
+        if (!StaticName)
+            Allocator::Free(TypeName);
+        StaticName = staticName;
+        if (staticName)
+        {
+            TypeName = (char*)typeName.Get();
+            return;
+        }
         TypeName = static_cast<char*>(Allocator::Allocate(typeName.Length() + 1));
         TypeName[typeName.Length()] = 0;
     }
     Platform::MemoryCopy(TypeName, typeName.Get(), typeName.Length());
 }
 
+void VariantType::SetTypeName(const ScriptingType& type)
+{
+    SetTypeName(type.Fullname, !type.Module->CanReload);
+}
+
+void VariantType::SetTypeName(const MClass& klass)
+{
+#if USE_CSHARP
+    SetTypeName(klass.GetFullName(), !klass.GetAssembly()->CanReload());
+#endif
+}
+
 const char* VariantType::GetTypeName() const
 {
     if (TypeName)
         return TypeName;
+    return InBuiltTypesTypeNames[Type];
+}
+
+ScriptingTypeHandle VariantType::GetScriptingType() const
+{
+    return Scripting::FindScriptingType(GetTypeName());
+}
+
+VariantType VariantType::GetElementType() const
+{
+    if (Type == Array)
+    {
+        if (TypeName)
+        {
+            const StringAnsiView elementTypename(TypeName, StringUtils::Length(TypeName) - 2);
+            return VariantType(elementTypename);
+        }
+        return VariantType(Object);
+    }
+    return VariantType();
+}
+
+bool VariantType::IsScalar() const
+{
     switch (Type)
     {
-    case Void:
-        return "System.Void";
     case Bool:
-        return "System.Boolean";
-    case Int16:
-        return "System.Int16";
-    case Uint16:
-        return "System.UInt16";
     case Int:
-        return "System.Int32";
     case Uint:
-        return "System.UInt32";
     case Int64:
-        return "System.Int64";
     case Uint64:
-        return "System.UInt64";
     case Float:
-        return "System.Single";
     case Double:
-        return "System.Double";
-    case Pointer:
-        return "System.IntPtr";
-    case String:
-        return "System.String";
-    case Object:
-        return "System.Object";
-    case Asset:
-        return "FlaxEngine.Asset";
-    case Vector2:
-        return "FlaxEngine.Vector2";
-    case Vector3:
-        return "FlaxEngine.Vector3";
-    case Vector4:
-        return "FlaxEngine.Vector4";
-    case Color:
-        return "FlaxEngine.Color";
-    case Guid:
-        return "System.Guid";
-    case BoundingBox:
-        return "FlaxEngine.BoundingBox";
-    case BoundingSphere:
-        return "FlaxEngine.BoundingSphere";
-    case Quaternion:
-        return "FlaxEngine.Quaternion";
-    case Transform:
-        return "FlaxEngine.Transform";
-    case Rectangle:
-        return "FlaxEngine.Rectangle";
-    case Ray:
-        return "FlaxEngine.Ray";
-    case Matrix:
-        return "FlaxEngine.Matrix";
-    case Typename:
-        return "System.Type";
+    case Int16:
+    case Uint16:
+        return true;
     default:
-        return "";
+        return false;
     }
+}
+
+void VariantType::Inline()
+{
+    // Check if the typename comes from static assembly which can be used to inline name instead of dynamic memory allocation
+    StringAnsiView typeName(TypeName);
+    auto& modules = BinaryModule::GetModules();
+    for (auto module : modules)
+    {
+        int32 typeIndex;
+        if (!module->CanReload && module->FindScriptingType(typeName, typeIndex))
+        {
+            ScriptingTypeHandle typeHandle(module, typeIndex);
+            SetTypeName(typeHandle.GetType().Fullname, true);
+            return;
+        }
+    }
+
+#if USE_CSHARP
+    // Try with C#-only types
+    if (const auto mclass = Scripting::FindClass(TypeName))
+        SetTypeName(*mclass);
+#endif
 }
 
 ::String VariantType::ToString() const
@@ -291,14 +478,14 @@ const char* VariantType::GetTypeName() const
     case Enum:
         result = TEXT("Enum");
         break;
-    case Vector2:
-        result = TEXT("Vector2");
+    case Float2:
+        result = TEXT("Float2");
         break;
-    case Vector3:
-        result = TEXT("Vector3");
+    case Float3:
+        result = TEXT("Float3");
         break;
-    case Vector4:
-        result = TEXT("Vector4");
+    case Float4:
+        result = TEXT("Float4");
         break;
     case Color:
         result = TEXT("Color");
@@ -339,7 +526,23 @@ const char* VariantType::GetTypeName() const
     case Typename:
         result = TEXT("Type");
         break;
-    case MAX:
+    case Int2:
+        result = TEXT("Int2");
+        break;
+    case Int3:
+        result = TEXT("Int3");
+        break;
+    case Int4:
+        result = TEXT("Int4");
+        break;
+    case Double2:
+        result = TEXT("Double2");
+        break;
+    case Double3:
+        result = TEXT("Double3");
+        break;
+    case Double4:
+        result = TEXT("Double4");
         break;
     default: ;
     }
@@ -358,20 +561,29 @@ FLAXENGINE_API uint32 GetHash(const VariantType& key)
     return hash;
 }
 
-static_assert(sizeof(Variant) <= 32, "Invalid Variant size!");
-static_assert(sizeof(Variant::AsData) >= sizeof(Vector2), "Invalid Variant data size!");
-static_assert(sizeof(Variant::AsData) >= sizeof(Vector3), "Invalid Variant data size!");
-static_assert(sizeof(Variant::AsData) >= sizeof(Vector4), "Invalid Variant data size!");
+static_assert(sizeof(Variant) <= 40, "Invalid Variant size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Float2), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Float3), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Float4), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Double2), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Double3), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Int2), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Int3), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Int4), "Invalid Variant data size!");
 static_assert(sizeof(Variant::AsData) >= sizeof(Color), "Invalid Variant data size!");
 static_assert(sizeof(Variant::AsData) >= sizeof(Quaternion), "Invalid Variant data size!");
 static_assert(sizeof(Variant::AsData) >= sizeof(Rectangle), "Invalid Variant data size!");
 static_assert(sizeof(Variant::AsData) >= sizeof(Guid), "Invalid Variant data size!");
+#if !USE_LARGE_WORLDS
 static_assert(sizeof(Variant::AsData) >= sizeof(BoundingSphere), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(BoundingBox), "Invalid Variant data size!");
+static_assert(sizeof(Variant::AsData) >= sizeof(Ray), "Invalid Variant data size!");
+#endif
 static_assert(sizeof(Variant::AsData) >= sizeof(Array<Variant, HeapAllocation>), "Invalid Variant data size!");
 
 const Variant Variant::Zero(0.0f);
 const Variant Variant::One(1.0f);
-const Variant Variant::Null(static_cast<void*>(nullptr));
+const Variant Variant::Null(nullptr);
 const Variant Variant::False(false);
 const Variant Variant::True(true);
 
@@ -399,8 +611,8 @@ Variant::Variant(Variant&& other) noexcept
         AsAsset = other.AsAsset;
         if (AsAsset)
         {
-            AsAsset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(&other);
-            AsAsset->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(&other);
+            AsAsset->Unloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
             other.AsAsset = nullptr;
         }
         break;
@@ -413,8 +625,8 @@ Variant::Variant(Variant&& other) noexcept
         other.AsDictionary = nullptr;
         break;
     case VariantType::ManagedObject:
-        AsUint = other.AsUint;
-        other.AsUint = 0;
+        MANAGED_GC_HANDLE = other.MANAGED_GC_HANDLE;
+        other.MANAGED_GC_HANDLE = 0;
         break;
     case VariantType::Null:
     case VariantType::Void:
@@ -423,9 +635,7 @@ Variant::Variant(Variant&& other) noexcept
     case VariantType::Structure:
     case VariantType::Blob:
     case VariantType::String:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
         AsBlob.Data = other.AsBlob.Data;
         AsBlob.Length = other.AsBlob.Length;
@@ -436,6 +646,21 @@ Variant::Variant(Variant&& other) noexcept
         Platform::MemoryCopy(AsData, other.AsData, sizeof(AsData));
         break;
     }
+}
+
+Variant::Variant(decltype(nullptr))
+    : Type(VariantType::Null)
+{
+}
+
+Variant::Variant(const VariantType& type)
+    : Type(type)
+{
+}
+
+Variant::Variant(VariantType&& type)
+    : Type(MoveTemp(type))
+{
 }
 
 Variant::Variant(bool v)
@@ -503,7 +728,10 @@ Variant::Variant(ScriptingObject* v)
 {
     AsObject = v;
     if (v)
+    {
+        Type.SetTypeName(v->GetType());
         v->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(this);
+    }
 }
 
 Variant::Variant(Asset* v)
@@ -513,15 +741,28 @@ Variant::Variant(Asset* v)
     if (v)
     {
         v->AddReference();
-        v->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
+        Type.SetTypeName(v->GetType());
+        v->Unloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
     }
 }
 
-Variant::Variant(_MonoObject* v)
-    : Type(VariantType::ManagedObject, v ? mono_object_get_class(v) : nullptr)
+#if USE_CSHARP
+
+Variant::Variant(MObject* v)
+    : Type(VariantType::ManagedObject, v ? MCore::Object::GetClass(v) : nullptr)
 {
-    AsUint = v ? mono_gchandle_new(v, true) : 0;
+    MANAGED_GC_HANDLE = v ? MCore::GCHandle::New(v) : 0;
 }
+
+#else
+
+Variant::Variant(MObject* v)
+    : Type(VariantType::ManagedObject, nullptr)
+{
+    AsUint = 0;
+}
+
+#endif
 
 Variant::Variant(const StringView& v)
     : Type(VariantType::String)
@@ -549,7 +790,8 @@ Variant::Variant(const StringAnsiView& v)
         const int32 length = v.Length() * sizeof(Char) + 2;
         AsBlob.Data = Allocator::Allocate(length);
         AsBlob.Length = length;
-        StringUtils::ConvertANSI2UTF16(v.Get(), (Char*)AsBlob.Data, v.Length());
+        int32 tmp;
+        StringUtils::ConvertANSI2UTF16(v.Get(), (Char*)AsBlob.Data, v.Length(), tmp);
         ((Char*)AsBlob.Data)[v.Length()] = 0;
     }
     else
@@ -575,22 +817,42 @@ Variant::Variant(const Guid& v)
     *(Guid*)AsData = v;
 }
 
-Variant::Variant(const Vector2& v)
-    : Type(VariantType::Vector2)
+Variant::Variant(const Float2& v)
+    : Type(VariantType::Float2)
 {
-    *(Vector2*)AsData = v;
+    *(Float2*)AsData = v;
 }
 
-Variant::Variant(const Vector3& v)
-    : Type(VariantType::Vector3)
+Variant::Variant(const Float3& v)
+    : Type(VariantType::Float3)
 {
-    *(Vector3*)AsData = v;
+    *(Float3*)AsData = v;
 }
 
-Variant::Variant(const Vector4& v)
-    : Type(VariantType::Vector4)
+Variant::Variant(const Float4& v)
+    : Type(VariantType::Float4)
 {
-    *(Vector4*)AsData = v;
+    *(Float4*)AsData = v;
+}
+
+Variant::Variant(const Double2& v)
+    : Type(VariantType::Double2)
+{
+    *(Double2*)AsData = v;
+}
+
+Variant::Variant(const Double3& v)
+    : Type(VariantType::Double3)
+{
+    *(Double3*)AsData = v;
+}
+
+Variant::Variant(const Double4& v)
+    : Type(VariantType::Double4)
+{
+    AsBlob.Length = sizeof(Double4);
+    AsBlob.Data = Allocator::Allocate(AsBlob.Length);
+    *(Double4*)AsBlob.Data = v;
 }
 
 Variant::Variant(const Int2& v)
@@ -626,7 +888,13 @@ Variant::Variant(const Quaternion& v)
 Variant::Variant(const BoundingSphere& v)
     : Type(VariantType::BoundingSphere)
 {
+#if USE_LARGE_WORLDS
+    AsBlob.Length = sizeof(BoundingSphere);
+    AsBlob.Data = Allocator::Allocate(AsBlob.Length);
+    *(BoundingSphere*)AsBlob.Data = v;
+#else
     *(BoundingSphere*)AsData = v;
+#endif
 }
 
 Variant::Variant(const Rectangle& v)
@@ -638,9 +906,13 @@ Variant::Variant(const Rectangle& v)
 Variant::Variant(const BoundingBox& v)
     : Type(VariantType::BoundingBox)
 {
+#if USE_LARGE_WORLDS
     AsBlob.Length = sizeof(BoundingBox);
     AsBlob.Data = Allocator::Allocate(AsBlob.Length);
     *(BoundingBox*)AsBlob.Data = v;
+#else
+    *(BoundingBox*)AsData = v;
+#endif
 }
 
 Variant::Variant(const Transform& v)
@@ -654,9 +926,13 @@ Variant::Variant(const Transform& v)
 Variant::Variant(const Ray& v)
     : Type(VariantType::Ray)
 {
+#if USE_LARGE_WORLDS
     AsBlob.Length = sizeof(Ray);
     AsBlob.Data = Allocator::Allocate(AsBlob.Length);
     *(Ray*)AsBlob.Data = v;
+#else
+    *(Ray*)AsData = v;
+#endif
 }
 
 Variant::Variant(const Matrix& v)
@@ -681,77 +957,30 @@ Variant::Variant(const Array<Variant, HeapAllocation>& v)
     new(array)Array<Variant, HeapAllocation>(v);
 }
 
+Variant::Variant(Dictionary<Variant, Variant>&& v)
+    : Type(VariantType::Dictionary)
+{
+    AsDictionary = New<Dictionary<Variant, Variant>>(MoveTemp(v));
+}
+
 Variant::Variant(const Dictionary<Variant, Variant>& v)
     : Type(VariantType::Dictionary)
 {
     AsDictionary = New<Dictionary<Variant, Variant>>(v);
 }
 
-Variant::Variant(const CommonValue& value)
-    : Variant()
+Variant::Variant(const Span<byte>& v)
+    : Type(VariantType::Blob)
 {
-    // [Deprecated on 31.07.2020, expires on 31.07.2022]
-    switch (value.Type)
+    AsBlob.Length = v.Length();
+    if (AsBlob.Length > 0)
     {
-    case CommonType::Bool:
-        *this = value.AsBool;
-        break;
-    case CommonType::Integer:
-        *this = value.AsInteger;
-        break;
-    case CommonType::Float:
-        *this = value.AsFloat;
-        break;
-    case CommonType::Vector2:
-        *this = value.AsVector2;
-        break;
-    case CommonType::Vector3:
-        *this = value.AsVector3;
-        break;
-    case CommonType::Vector4:
-        *this = value.AsVector4;
-        break;
-    case CommonType::Color:
-        *this = value.AsColor;
-        break;
-    case CommonType::Guid:
-        *this = value.AsGuid;
-        break;
-    case CommonType::String:
-        SetString(StringView(value.AsString));
-        break;
-    case CommonType::Box:
-        *this = Variant(value.AsBox);
-        break;
-    case CommonType::Rotation:
-        *this = value.AsRotation;
-        break;
-    case CommonType::Transform:
-        *this = Variant(value.AsTransform);
-        break;
-    case CommonType::Sphere:
-        *this = value.AsSphere;
-        break;
-    case CommonType::Rectangle:
-        *this = value.AsRectangle;
-        break;
-    case CommonType::Pointer:
-        *this = value.AsPointer;
-        break;
-    case CommonType::Matrix:
-        *this = Variant(value.AsMatrix);
-        break;
-    case CommonType::Blob:
-        SetBlob(value.AsBlob.Data, value.AsBlob.Length);
-        break;
-    case CommonType::Object:
-        SetObject(value.AsObject);
-        break;
-    case CommonType::Ray:
-        *this = Variant(value.AsRay);
-        break;
-    default:
-        CRASH;
+        AsBlob.Data = Allocator::Allocate(AsBlob.Length);
+        Platform::MemoryCopy(AsBlob.Data, v.Get(), AsBlob.Length);
+    }
+    else
+    {
+        AsBlob.Data = nullptr;
     }
 }
 
@@ -766,7 +995,7 @@ Variant::~Variant()
     case VariantType::Asset:
         if (AsAsset)
         {
-            AsAsset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
             AsAsset->RemoveReference();
         }
         break;
@@ -775,11 +1004,15 @@ Variant::~Variant()
         break;
     case VariantType::String:
     case VariantType::Blob:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
     case VariantType::Typename:
+    case VariantType::Double4:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         Allocator::Free(AsBlob.Data);
         break;
     case VariantType::Array:
@@ -788,12 +1021,10 @@ Variant::~Variant()
     case VariantType::Dictionary:
         Delete(AsDictionary);
         break;
-#if USE_MONO
     case VariantType::ManagedObject:
-        if (AsUint)
-            mono_gchandle_free(AsUint);
+        if (MANAGED_GC_HANDLE)
+            MCore::GCHandle::Free(MANAGED_GC_HANDLE);
         break;
-#endif
     default: ;
     }
 }
@@ -808,11 +1039,15 @@ Variant& Variant::operator=(Variant&& other)
     case VariantType::String:
     case VariantType::Structure:
     case VariantType::Blob:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
     case VariantType::Typename:
+    case VariantType::Double4:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         AsBlob.Data = other.AsBlob.Data;
         AsBlob.Length = other.AsBlob.Length;
         break;
@@ -828,8 +1063,8 @@ Variant& Variant::operator=(Variant&& other)
         AsAsset = other.AsAsset;
         if (AsAsset)
         {
-            AsAsset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(&other);
-            AsAsset->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(&other);
+            AsAsset->Unloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
         }
         break;
     case VariantType::Array:
@@ -841,8 +1076,8 @@ Variant& Variant::operator=(Variant&& other)
         other.AsDictionary = nullptr;
         break;
     case VariantType::ManagedObject:
-        AsUint = other.AsUint;
-        other.AsUint = 0;
+        MANAGED_GC_HANDLE = other.MANAGED_GC_HANDLE;
+        other.MANAGED_GC_HANDLE = 0;
         break;
     case VariantType::Null:
     case VariantType::Void:
@@ -866,11 +1101,15 @@ Variant& Variant::operator=(const Variant& other)
         break;
     case VariantType::String:
     case VariantType::Blob:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
     case VariantType::Typename:
+    case VariantType::Double4:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         if (other.AsBlob.Data)
         {
             if (!AsBlob.Data || AsBlob.Length != other.AsBlob.Length)
@@ -890,16 +1129,14 @@ Variant& Variant::operator=(const Variant& other)
     case VariantType::Object:
         AsObject = other.AsObject;
         if (other.AsObject)
-        {
             AsObject->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(this);
-        }
         break;
     case VariantType::Asset:
         AsAsset = other.AsAsset;
         if (other.AsAsset)
         {
             AsAsset->AddReference();
-            AsAsset->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
         }
         break;
     case VariantType::Array:
@@ -912,7 +1149,7 @@ Variant& Variant::operator=(const Variant& other)
             AsDictionary = New<Dictionary<Variant, Variant>>(*other.AsDictionary);
         break;
     case VariantType::ManagedObject:
-        AsUint = other.AsUint ? mono_gchandle_new(mono_gchandle_get_target(other.AsUint), true) : 0;
+        MANAGED_GC_HANDLE = other.MANAGED_GC_HANDLE ? MCore::GCHandle::New(MCore::GCHandle::GetTarget(other.MANAGED_GC_HANDLE)) : 0;
         break;
     case VariantType::Null:
     case VariantType::Void:
@@ -946,12 +1183,13 @@ bool Variant::operator==(const Variant& other) const
         case VariantType::Int64:
             return AsInt64 == other.AsInt64;
         case VariantType::Uint64:
-        case VariantType::Enum:
             return AsUint64 == other.AsUint64;
+        case VariantType::Enum:
+            return AsEnum == other.AsEnum;
         case VariantType::Float:
-            return Math::NearEqual(AsFloat, other.AsFloat);
+            return AsFloat == other.AsFloat;
         case VariantType::Double:
-            return Math::Abs(AsDouble - other.AsDouble) < ZeroTolerance;
+            return AsDouble == other.AsDouble;
         case VariantType::Pointer:
             return AsPointer == other.AsPointer;
         case VariantType::String:
@@ -966,19 +1204,28 @@ bool Variant::operator==(const Variant& other) const
             return AsObject == other.AsObject;
         case VariantType::Structure:
         case VariantType::Blob:
-        case VariantType::BoundingBox:
         case VariantType::Transform:
-        case VariantType::Ray:
         case VariantType::Matrix:
+        case VariantType::Double4:
             return AsBlob.Length == other.AsBlob.Length && Platform::MemoryCompare(AsBlob.Data, other.AsBlob.Data, AsBlob.Length) == 0;
         case VariantType::Asset:
             return AsAsset == other.AsAsset;
-        case VariantType::Vector2:
-            return *(Vector2*)AsData == *(Vector2*)other.AsData;
-        case VariantType::Vector3:
-            return *(Vector3*)AsData == *(Vector3*)other.AsData;
-        case VariantType::Vector4:
-            return *(Vector4*)AsData == *(Vector4*)other.AsData;
+        case VariantType::Float2:
+            return *(Float2*)AsData == *(Float2*)other.AsData;
+        case VariantType::Float3:
+            return *(Float3*)AsData == *(Float3*)other.AsData;
+        case VariantType::Float4:
+            return *(Float4*)AsData == *(Float4*)other.AsData;
+        case VariantType::Int2:
+            return *(Int2*)AsData == *(Int2*)other.AsData;
+        case VariantType::Int3:
+            return *(Int3*)AsData == *(Int3*)other.AsData;
+        case VariantType::Int4:
+            return *(Int4*)AsData == *(Int4*)other.AsData;
+        case VariantType::Double2:
+            return *(Double2*)AsData == *(Double2*)other.AsData;
+        case VariantType::Double3:
+            return *(Double3*)AsData == *(Double3*)other.AsData;
         case VariantType::Color:
             return *(Color*)AsData == *(Color*)other.AsData;
         case VariantType::Quaternion:
@@ -986,7 +1233,11 @@ bool Variant::operator==(const Variant& other) const
         case VariantType::Rectangle:
             return *(Rectangle*)AsData == *(Rectangle*)other.AsData;
         case VariantType::BoundingSphere:
-            return *(BoundingSphere*)AsData == *(BoundingSphere*)other.AsData;
+            return AsBoundingSphere() == other.AsBoundingSphere();
+        case VariantType::BoundingBox:
+            return AsBoundingBox() == other.AsBoundingBox();
+        case VariantType::Ray:
+            return AsRay() == other.AsRay();
         case VariantType::Guid:
             return *(Guid*)AsData == *(Guid*)other.AsData;
         case VariantType::Array:
@@ -1015,9 +1266,6 @@ bool Variant::operator==(const Variant& other) const
                     return false;
             }
             return true;
-        case VariantType::ManagedObject:
-            // TODO: invoke C# Equality logic?
-            return AsUint == other.AsUint || mono_gchandle_get_target(AsUint) == mono_gchandle_get_target(other.AsUint);
         case VariantType::Typename:
             if (AsBlob.Data == nullptr && other.AsBlob.Data == nullptr)
                 return true;
@@ -1026,6 +1274,13 @@ bool Variant::operator==(const Variant& other) const
             if (other.AsBlob.Data == nullptr)
                 return false;
             return AsBlob.Length == other.AsBlob.Length && StringUtils::Compare(static_cast<const char*>(AsBlob.Data), static_cast<const char*>(other.AsBlob.Data), AsBlob.Length - 1) == 0;
+        case VariantType::ManagedObject:
+#if USE_CSHARP
+            // TODO: invoke C# Equality logic?
+            return MANAGED_GC_HANDLE == other.MANAGED_GC_HANDLE || MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE) == MCore::GCHandle::GetTarget(other.MANAGED_GC_HANDLE);
+#else
+            return false;
+#endif
         default:
             return false;
         }
@@ -1059,8 +1314,9 @@ bool Variant::operator<(const Variant& other) const
         case VariantType::Int64:
             return AsInt64 < other.AsInt64;
         case VariantType::Uint64:
-        case VariantType::Enum:
             return AsUint64 < other.AsUint64;
+        case VariantType::Enum:
+            return AsEnum < other.AsEnum;
         case VariantType::Float:
             return AsFloat < other.AsFloat;
         case VariantType::Double:
@@ -1115,7 +1371,11 @@ Variant::operator bool() const
     case VariantType::Asset:
         return AsAsset != nullptr;
     case VariantType::ManagedObject:
-        return AsUint != 0 && mono_gchandle_get_target(AsUint) != nullptr;
+#if USE_CSHARP
+        return MANAGED_GC_HANDLE != 0 && MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE) != nullptr;
+#else
+        return false;
+#endif
     default:
         return false;
     }
@@ -1153,92 +1413,17 @@ Variant::operator Char() const
 
 Variant::operator int8() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return (int8)AsInt16;
-    case VariantType::Uint16:
-        return (int8)AsUint16;
-    case VariantType::Int:
-        return (int8)AsInt;
-    case VariantType::Uint:
-        return (int8)AsUint;
-    case VariantType::Int64:
-        return (int8)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (int8)AsUint64;
-    case VariantType::Float:
-        return (int8)AsFloat;
-    case VariantType::Double:
-        return (int8)AsDouble;
-    case VariantType::Pointer:
-        return (int8)(intptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (int8)operator int64();
 }
 
 Variant::operator int16() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return AsInt16;
-    case VariantType::Uint16:
-        return (int16)AsUint16;
-    case VariantType::Int:
-        return (int16)AsInt;
-    case VariantType::Uint:
-        return (int16)AsUint;
-    case VariantType::Int64:
-        return (int16)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (int16)AsUint64;
-    case VariantType::Float:
-        return (int16)AsFloat;
-    case VariantType::Double:
-        return (int16)AsDouble;
-    case VariantType::Pointer:
-        return (int16)(intptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (int16)operator int64();
 }
 
 Variant::operator int32() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return (int32)AsInt16;
-    case VariantType::Uint16:
-        return (int32)AsUint16;
-    case VariantType::Int:
-        return AsInt;
-    case VariantType::Uint:
-        return (int32)AsUint;
-    case VariantType::Int64:
-        return (int32)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (int32)AsUint64;
-    case VariantType::Float:
-        return (int32)AsFloat;
-    case VariantType::Double:
-        return (int32)AsDouble;
-    case VariantType::Pointer:
-        return (int32)(intptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (int32)operator int64();
 }
 
 Variant::operator int64() const
@@ -1266,6 +1451,24 @@ Variant::operator int64() const
         return (int64)AsDouble;
     case VariantType::Pointer:
         return (int64)AsPointer;
+    case VariantType::Float2:
+        return (int64)AsFloat2().X;
+    case VariantType::Float3:
+        return (int64)AsFloat3().X;
+    case VariantType::Float4:
+        return (int64)AsFloat4().X;
+    case VariantType::Double2:
+        return (int64)AsDouble2().X;
+    case VariantType::Double3:
+        return (int64)AsDouble3().X;
+    case VariantType::Double4:
+        return (int64)AsDouble4().X;
+    case VariantType::Int2:
+        return (int64)AsInt2().X;
+    case VariantType::Int3:
+        return (int64)AsInt3().X;
+    case VariantType::Int4:
+        return (int64)AsInt4().X;
     default:
         return 0;
     }
@@ -1273,92 +1476,17 @@ Variant::operator int64() const
 
 Variant::operator uint8() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return (uint8)AsInt16;
-    case VariantType::Uint16:
-        return (uint8)AsUint16;
-    case VariantType::Int:
-        return (uint8)AsInt;
-    case VariantType::Uint:
-        return (uint8)AsUint;
-    case VariantType::Int64:
-        return (uint8)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (uint8)AsUint64;
-    case VariantType::Float:
-        return (uint8)AsFloat;
-    case VariantType::Double:
-        return (uint8)AsDouble;
-    case VariantType::Pointer:
-        return (uint8)(uintptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (uint8)operator uint64();
 }
 
 Variant::operator uint16() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return (uint16)AsInt16;
-    case VariantType::Uint16:
-        return AsUint16;
-    case VariantType::Int:
-        return (uint16)AsInt;
-    case VariantType::Uint:
-        return (uint16)AsUint;
-    case VariantType::Int64:
-        return (uint16)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (uint16)AsUint64;
-    case VariantType::Float:
-        return (uint16)AsFloat;
-    case VariantType::Double:
-        return (uint16)AsDouble;
-    case VariantType::Pointer:
-        return (uint16)(uintptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (uint16)operator uint64();
 }
 
 Variant::operator uint32() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return AsBool ? 1 : 0;
-    case VariantType::Int16:
-        return (uint32)AsInt16;
-    case VariantType::Uint16:
-        return (uint32)AsUint16;
-    case VariantType::Int:
-        return (uint32)AsInt;
-    case VariantType::Uint:
-        return AsUint;
-    case VariantType::Int64:
-        return (uint32)AsInt64;
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return (uint32)AsUint64;
-    case VariantType::Float:
-        return (uint32)AsFloat;
-    case VariantType::Double:
-        return (uint32)AsDouble;
-    case VariantType::Pointer:
-        return (uint32)(uintptr)AsPointer;
-    default:
-        return 0;
-    }
+    return (uint32)operator uint64();
 }
 
 Variant::operator uint64() const
@@ -1386,6 +1514,24 @@ Variant::operator uint64() const
         return (uint64)AsDouble;
     case VariantType::Pointer:
         return (uint64)AsPointer;
+    case VariantType::Float2:
+        return (uint64)AsFloat2().X;
+    case VariantType::Float3:
+        return (uint64)AsFloat3().X;
+    case VariantType::Float4:
+        return (uint64)AsFloat4().X;
+    case VariantType::Double2:
+        return (uint64)AsDouble2().X;
+    case VariantType::Double3:
+        return (uint64)AsDouble3().X;
+    case VariantType::Double4:
+        return (uint64)AsDouble4().X;
+    case VariantType::Int2:
+        return (uint64)AsInt2().X;
+    case VariantType::Int3:
+        return (uint64)AsInt3().X;
+    case VariantType::Int4:
+        return (uint64)AsInt4().X;
     default:
         return 0;
     }
@@ -1414,6 +1560,35 @@ Variant::operator float() const
         return AsFloat;
     case VariantType::Double:
         return (float)AsDouble;
+    case VariantType::Float2:
+        return AsFloat2().X;
+    case VariantType::Float3:
+        return AsFloat3().X;
+    case VariantType::Float4:
+    case VariantType::Color:
+        return AsFloat4().X;
+    case VariantType::Double2:
+        return (float)AsDouble2().X;
+    case VariantType::Double3:
+        return (float)AsDouble3().X;
+    case VariantType::Double4:
+        return (float)AsDouble4().X;
+    case VariantType::Int2:
+        return (float)AsInt2().X;
+    case VariantType::Int3:
+        return (float)AsInt3().X;
+    case VariantType::Int4:
+        return (float)AsInt4().X;
+    case VariantType::Pointer:
+        return AsPointer ? 1.0f : 0.0f;
+    case VariantType::Object:
+        return AsObject ? 1.0f : 0.0f;
+    case VariantType::Asset:
+        return AsAsset ? 1.0f : 0.0f;
+    case VariantType::Blob:
+        return AsBlob.Length > 0 ? 1.0f : 0.0f;
+    case VariantType::ManagedObject:
+        return MANAGED_GC_HANDLE ? 1.0f : 0.0f;
     default:
         return 0;
     }
@@ -1442,6 +1617,24 @@ Variant::operator double() const
         return (double)AsFloat;
     case VariantType::Double:
         return AsDouble;
+    case VariantType::Float2:
+        return (double)AsFloat2().X;
+    case VariantType::Float3:
+        return (double)AsFloat3().X;
+    case VariantType::Float4:
+        return (double)AsFloat4().X;
+    case VariantType::Double2:
+        return (double)AsDouble2().X;
+    case VariantType::Double3:
+        return (double)AsDouble3().X;
+    case VariantType::Double4:
+        return (double)AsDouble4().X;
+    case VariantType::Int2:
+        return (double)AsInt2().X;
+    case VariantType::Int3:
+        return (double)AsInt3().X;
+    case VariantType::Int4:
+        return (double)AsInt4().X;
     default:
         return 0;
     }
@@ -1461,7 +1654,11 @@ Variant::operator void*() const
     case VariantType::Blob:
         return AsBlob.Data;
     case VariantType::ManagedObject:
-        return AsUint ? mono_gchandle_get_target(AsUint) : nullptr;
+#if USE_CSHARP
+        return MANAGED_GC_HANDLE ? MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE) : nullptr;
+#else
+        return nullptr;
+#endif
     default:
         return nullptr;
     }
@@ -1502,9 +1699,13 @@ Variant::operator ScriptingObject*() const
     }
 }
 
-Variant::operator _MonoObject*() const
+Variant::operator MObject*() const
 {
-    return Type.Type == VariantType::ManagedObject && AsUint ? mono_gchandle_get_target(AsUint) : nullptr;
+#if USE_CSHARP
+    return Type.Type == VariantType::ManagedObject && MANAGED_GC_HANDLE ? MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE) : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 Variant::operator Asset*() const
@@ -1518,216 +1719,280 @@ Variant::operator Asset*() const
     }
 }
 
-Variant::operator Vector2() const
+Variant::operator Float2() const
 {
     switch (Type.Type)
     {
     case VariantType::Bool:
-        return Vector2(AsBool ? 1.0f : 0.0f);
+        return Float2(AsBool ? 1.0f : 0.0f);
     case VariantType::Int16:
-        return Vector2((float)AsInt16);
+        return Float2((float)AsInt16);
     case VariantType::Uint16:
-        return Vector2((float)AsUint16);
+        return Float2((float)AsUint16);
     case VariantType::Int:
-        return Vector2((float)AsInt);
+        return Float2((float)AsInt);
     case VariantType::Uint:
-        return Vector2((float)AsUint);
+        return Float2((float)AsUint);
     case VariantType::Int64:
-        return Vector2((float)AsInt64);
+        return Float2((float)AsInt64);
     case VariantType::Uint64:
     case VariantType::Enum:
-        return Vector2((float)AsUint64);
+        return Float2((float)AsUint64);
     case VariantType::Float:
-        return Vector2(AsFloat);
+        return Float2(AsFloat);
     case VariantType::Double:
-        return Vector2((float)AsDouble);
+        return Float2((float)AsDouble);
     case VariantType::Pointer:
-        return Vector2((float)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return *(Vector2*)AsData;
-    case VariantType::Vector3:
-        return Vector2(*(Vector3*)AsData);
-    case VariantType::Vector4:
+        return Float2((float)(intptr)AsPointer);
+    case VariantType::Float2:
+        return *(Float2*)AsData;
+    case VariantType::Float3:
+        return Float2(*(Float3*)AsData);
+    case VariantType::Float4:
     case VariantType::Color:
-        return Vector2(*(Vector4*)AsData);
+        return Float2(*(Float4*)AsData);
+    case VariantType::Double2:
+        return Float2(AsDouble2());
+    case VariantType::Double3:
+        return Float2(AsDouble3());
+    case VariantType::Double4:
+        return Float2(AsDouble4());
+    case VariantType::Int2:
+        return Float2(AsInt2());
+    case VariantType::Int3:
+        return Float2(AsInt3());
+    case VariantType::Int4:
+        return Float2(AsInt4());
     case VariantType::Structure:
-        if (StringUtils::Compare(Type.TypeName, Vector2::TypeInitializer.GetType().Fullname.Get()) == 0)
-            return *(Vector2*)AsBlob.Data;
+        if (StringUtils::Compare(Type.TypeName, Float2::TypeInitializer.GetType().Fullname.Get()) == 0)
+            return *(Float2*)AsBlob.Data;
     default:
-        return Vector2::Zero;
+        return Float2::Zero;
     }
 }
 
-Variant::operator Vector3() const
+Variant::operator Float3() const
 {
     switch (Type.Type)
     {
     case VariantType::Bool:
-        return Vector3(AsBool ? 1.0f : 0.0f);
+        return Float3(AsBool ? 1.0f : 0.0f);
     case VariantType::Int16:
-        return Vector3((float)AsInt16);
+        return Float3((float)AsInt16);
     case VariantType::Uint16:
-        return Vector3((float)AsUint16);
+        return Float3((float)AsUint16);
     case VariantType::Int:
-        return Vector3((float)AsInt);
+        return Float3((float)AsInt);
     case VariantType::Uint:
-        return Vector3((float)AsUint);
+        return Float3((float)AsUint);
     case VariantType::Int64:
-        return Vector3((float)AsInt64);
+        return Float3((float)AsInt64);
     case VariantType::Uint64:
     case VariantType::Enum:
-        return Vector3((float)AsUint64);
+        return Float3((float)AsUint64);
     case VariantType::Float:
-        return Vector3(AsFloat);
+        return Float3(AsFloat);
     case VariantType::Double:
-        return Vector3((float)AsDouble);
+        return Float3((float)AsDouble);
     case VariantType::Pointer:
-        return Vector3((float)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Vector3(*(Vector2*)AsData, 0.0f);
-    case VariantType::Vector3:
-        return *(Vector3*)AsData;
-    case VariantType::Vector4:
+        return Float3((float)(intptr)AsPointer);
+    case VariantType::Float2:
+        return Float3(*(Float2*)AsData, 0.0f);
+    case VariantType::Float3:
+        return *(Float3*)AsData;
+    case VariantType::Float4:
     case VariantType::Color:
-        return Vector3(*(Vector4*)AsData);
+        return Float3(*(Float4*)AsData);
+    case VariantType::Double2:
+        return Float3(AsDouble2());
+    case VariantType::Double3:
+        return Float3(AsDouble3());
+    case VariantType::Double4:
+        return Float3(AsDouble4());
+    case VariantType::Int2:
+        return Float3(AsInt2(), 0.0f);
+    case VariantType::Int3:
+        return Float3(AsInt3());
+    case VariantType::Int4:
+        return Float3(AsInt4());
     case VariantType::Structure:
-        if (StringUtils::Compare(Type.TypeName, Vector3::TypeInitializer.GetType().Fullname.Get()) == 0)
-            return *(Vector3*)AsBlob.Data;
+        if (StringUtils::Compare(Type.TypeName, Float3::TypeInitializer.GetType().Fullname.Get()) == 0)
+            return *(Float3*)AsBlob.Data;
     default:
-        return Vector3::Zero;
+        return Float3::Zero;
     }
 }
 
-Variant::operator Vector4() const
+Variant::operator Float4() const
 {
     switch (Type.Type)
     {
     case VariantType::Bool:
-        return Vector4(AsBool ? 1.0f : 0.0f);
+        return Float4(AsBool ? 1.0f : 0.0f);
     case VariantType::Int16:
-        return Vector4((float)AsInt16);
+        return Float4((float)AsInt16);
     case VariantType::Uint16:
-        return Vector4((float)AsUint16);
+        return Float4((float)AsUint16);
     case VariantType::Int:
-        return Vector4((float)AsInt);
+        return Float4((float)AsInt);
     case VariantType::Uint:
-        return Vector4((float)AsUint);
+        return Float4((float)AsUint);
     case VariantType::Int64:
-        return Vector4((float)AsInt64);
+        return Float4((float)AsInt64);
     case VariantType::Uint64:
     case VariantType::Enum:
-        return Vector4((float)AsUint64);
+        return Float4((float)AsUint64);
     case VariantType::Float:
-        return Vector4(AsFloat);
+        return Float4(AsFloat);
     case VariantType::Double:
-        return Vector4((float)AsDouble);
+        return Float4((float)AsDouble);
     case VariantType::Pointer:
-        return Vector4((float)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Vector4(*(Vector2*)AsData, 0.0f, 0.0f);
-    case VariantType::Vector3:
-        return Vector4(*(Vector3*)AsData, 0.0f);
-    case VariantType::Vector4:
+        return Float4((float)(intptr)AsPointer);
+    case VariantType::Float2:
+        return Float4(*(Float2*)AsData, 0.0f, 0.0f);
+    case VariantType::Float3:
+        return Float4(*(Float3*)AsData, 0.0f);
+    case VariantType::Float4:
     case VariantType::Color:
-        return *(Vector4*)AsData;
+    case VariantType::Quaternion:
+        return *(Float4*)AsData;
+    case VariantType::Double2:
+        return Float4(AsDouble2(), 0.0f, 0.0f);
+    case VariantType::Double3:
+        return Float4(AsDouble3(), 0.0f);
+    case VariantType::Double4:
+        return Float4(AsDouble4());
+    case VariantType::Int2:
+        return Float4(AsInt2(), 0.0f, 0.0f);
+    case VariantType::Int3:
+        return Float4(AsInt3(), 0.0f);
+    case VariantType::Int4:
+        return Float4(AsInt4());
     case VariantType::Structure:
-        if (StringUtils::Compare(Type.TypeName, Vector4::TypeInitializer.GetType().Fullname.Get()) == 0)
-            return *(Vector4*)AsBlob.Data;
+        if (StringUtils::Compare(Type.TypeName, Float4::TypeInitializer.GetType().Fullname.Get()) == 0)
+            return *(Float4*)AsBlob.Data;
     default:
-        return Vector4::Zero;
+        return Float4::Zero;
+    }
+}
+
+Variant::operator Double2() const
+{
+    return Double2(operator Double3());
+}
+
+Variant::operator Double3() const
+{
+    switch (Type.Type)
+    {
+    case VariantType::Bool:
+        return Double3(AsBool ? 1.0 : 0.0);
+    case VariantType::Int16:
+        return Double3((double)AsInt16);
+    case VariantType::Uint16:
+        return Double3((double)AsUint16);
+    case VariantType::Int:
+        return Double3((double)AsInt);
+    case VariantType::Uint:
+        return Double3((double)AsUint);
+    case VariantType::Int64:
+        return Double3((double)AsInt64);
+    case VariantType::Uint64:
+    case VariantType::Enum:
+        return Double3((double)AsUint64);
+    case VariantType::Float:
+        return Double3(AsFloat);
+    case VariantType::Double:
+        return Double3(AsDouble);
+    case VariantType::Pointer:
+        return Double3((double)(intptr)AsPointer);
+    case VariantType::Float2:
+        return Double3(*(Float2*)AsData, 0.0);
+    case VariantType::Float3:
+        return Double3(*(Float3*)AsData);
+    case VariantType::Float4:
+    case VariantType::Color:
+        return Double3(*(Float4*)AsData);
+    case VariantType::Double2:
+        return Double3(AsDouble2());
+    case VariantType::Double3:
+        return AsDouble3();
+    case VariantType::Double4:
+        return Double3(AsDouble4());
+    case VariantType::Int2:
+        return Double3(AsInt2(), 0.0);
+    case VariantType::Int3:
+        return Double3(AsInt3());
+    case VariantType::Int4:
+        return Double3(AsInt4());
+    case VariantType::Structure:
+        if (StringUtils::Compare(Type.TypeName, Double3::TypeInitializer.GetType().Fullname.Get()) == 0)
+            return *(Double3*)AsBlob.Data;
+    default:
+        return Double3::Zero;
+    }
+}
+
+Variant::operator Double4() const
+{
+    switch (Type.Type)
+    {
+    case VariantType::Bool:
+        return Double4(AsBool ? 1.0 : 0.0);
+    case VariantType::Int16:
+        return Double4((double)AsInt16);
+    case VariantType::Uint16:
+        return Double4((double)AsUint16);
+    case VariantType::Int:
+        return Double4((double)AsInt);
+    case VariantType::Uint:
+        return Double4((double)AsUint);
+    case VariantType::Int64:
+        return Double4((double)AsInt64);
+    case VariantType::Uint64:
+    case VariantType::Enum:
+        return Double4((double)AsUint64);
+    case VariantType::Float:
+        return Double4(AsFloat);
+    case VariantType::Double:
+        return Double4(AsDouble);
+    case VariantType::Pointer:
+        return Double4((double)(intptr)AsPointer);
+    case VariantType::Float2:
+        return Double4(*(Float2*)AsData, 0.0, 0.0);
+    case VariantType::Float3:
+        return Double4(*(Float3*)AsData, 0.0);
+    case VariantType::Float4:
+    case VariantType::Color:
+        return Double4(*(const Float4*)AsData);
+    case VariantType::Double2:
+        return Double4(AsDouble2(), 0.0, 0.0);
+    case VariantType::Double3:
+        return Double4(AsDouble3(), 0.0);
+    case VariantType::Double4:
+        return AsDouble4();
+    case VariantType::Int2:
+        return Double4(AsInt2(), 0.0, 0.0);
+    case VariantType::Int3:
+        return Double4(AsInt3(), 0.0);
+    case VariantType::Int4:
+        return Double4(AsInt4());
+    case VariantType::Structure:
+        if (StringUtils::Compare(Type.TypeName, Double4::TypeInitializer.GetType().Fullname.Get()) == 0)
+            return *(Double4*)AsBlob.Data;
+    default:
+        return Double4::Zero;
     }
 }
 
 Variant::operator Int2() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return Int2((int32)(AsBool ? 1.0f : 0.0f));
-    case VariantType::Int16:
-        return Int2((int32)AsInt16);
-    case VariantType::Uint16:
-        return Int2((int32)AsUint16);
-    case VariantType::Int:
-        return Int2((int32)AsInt);
-    case VariantType::Uint:
-        return Int2((int32)AsUint);
-    case VariantType::Int64:
-        return Int2((int32)AsInt64);
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return Int2((int32)AsUint64);
-    case VariantType::Float:
-        return Int2((int32)AsFloat);
-    case VariantType::Double:
-        return Int2((int32)AsDouble);
-    case VariantType::Pointer:
-        return Int2((int32)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Int2(*(Vector2*)AsData);
-    case VariantType::Vector3:
-        return Int2(*(Vector3*)AsData);
-    case VariantType::Vector4:
-        return Int2(*(Vector4*)AsData);
-    case VariantType::Int2:
-        return Int2(*(Int2*)AsData);
-    case VariantType::Int3:
-        return Int2(*(Int3*)AsData);
-    case VariantType::Int4:
-    case VariantType::Color:
-        return Int2(*(Int4*)AsData);
-    case VariantType::Structure:
-        if (StringUtils::Compare(Type.TypeName, Int2::TypeInitializer.GetType().Fullname.Get()) == 0)
-            return *(Int2*)AsBlob.Data;
-    default:
-        return Int3::Zero;
-    }
+    return Int2(operator Int4());
 }
 
 Variant::operator Int3() const
 {
-    switch (Type.Type)
-    {
-    case VariantType::Bool:
-        return Int3((int32)(AsBool ? 1 : 0));
-    case VariantType::Int16:
-        return Int3((int32)AsInt16);
-    case VariantType::Uint16:
-        return Int3((int32)AsUint16);
-    case VariantType::Int:
-        return Int3((int32)AsInt);
-    case VariantType::Uint:
-        return Int3((int32)AsUint);
-    case VariantType::Int64:
-        return Int3((int32)AsInt64);
-    case VariantType::Uint64:
-    case VariantType::Enum:
-        return Int3((int32)AsUint64);
-    case VariantType::Float:
-        return Int3((int32)AsFloat);
-    case VariantType::Double:
-        return Int3((int32)AsDouble);
-    case VariantType::Pointer:
-        return Int3((int32)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Int3(*(Vector2*)AsData, 0);
-    case VariantType::Vector3:
-        return Int3(*(Vector3*)AsData);
-    case VariantType::Vector4:
-        return Int3(*(Vector4*)AsData);
-    case VariantType::Int2:
-        return Int3(*(Int2*)AsData, 0);
-    case VariantType::Int3:
-        return Int3(*(Int3*)AsData);
-    case VariantType::Int4:
-    case VariantType::Color:
-        return Int3(*(Int4*)AsData);
-    case VariantType::Structure:
-        if (StringUtils::Compare(Type.TypeName, Int3::TypeInitializer.GetType().Fullname.Get()) == 0)
-            return *(Int3*)AsBlob.Data;
-    default:
-        return Int3::Zero;
-    }
+    return Int3(operator Int4());
 }
 
 Variant::operator Int4() const
@@ -1755,19 +2020,25 @@ Variant::operator Int4() const
         return Int4((int32)AsDouble);
     case VariantType::Pointer:
         return Int4((int32)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Int4(*(Vector2*)AsData, 0, 0);
-    case VariantType::Vector3:
-        return Int4(*(Vector3*)AsData, 0);
-    case VariantType::Vector4:
-        return Int4(*(Vector4*)AsData);
+    case VariantType::Float2:
+        return Int4(*(Float2*)AsData, 0, 0);
+    case VariantType::Float3:
+        return Int4(*(Float3*)AsData, 0);
+    case VariantType::Float4:
+    case VariantType::Color:
+        return Int4(*(Float4*)AsData);
     case VariantType::Int2:
         return Int4(*(Int2*)AsData, 0, 0);
     case VariantType::Int3:
         return Int4(*(Int3*)AsData, 0);
     case VariantType::Int4:
-    case VariantType::Color:
         return *(Int4*)AsData;
+    case VariantType::Double2:
+        return Int4(AsDouble2(), 0, 0);
+    case VariantType::Double3:
+        return Int4(AsDouble3(), 0);
+    case VariantType::Double4:
+        return Int4(AsDouble4());
     case VariantType::Structure:
         if (StringUtils::Compare(Type.TypeName, Int4::TypeInitializer.GetType().Fullname.Get()) == 0)
             return *(Int4*)AsBlob.Data;
@@ -1801,11 +2072,11 @@ Variant::operator Color() const
         return Color((float)AsDouble);
     case VariantType::Pointer:
         return Color((float)(intptr)AsPointer);
-    case VariantType::Vector2:
-        return Color((*(Vector2*)AsData).X, (*(Vector2*)AsData).Y, 0.0f, 1.0f);
-    case VariantType::Vector3:
-        return Color(*(Vector3*)AsData, 1.0f);
-    case VariantType::Vector4:
+    case VariantType::Float2:
+        return Color((*(Float2*)AsData).X, (*(Float2*)AsData).Y, 0.0f, 1.0f);
+    case VariantType::Float3:
+        return Color(*(Float3*)AsData, 1.0f);
+    case VariantType::Float4:
     case VariantType::Color:
         return *(Color*)AsData;
     case VariantType::Structure:
@@ -1820,8 +2091,10 @@ Variant::operator Quaternion() const
 {
     switch (Type.Type)
     {
-    case VariantType::Vector3:
-        return Quaternion::Euler(*(Vector3*)AsData);
+    case VariantType::Float3:
+        return Quaternion::Euler(*(Float3*)AsData);
+    case VariantType::Double3:
+        return Quaternion::Euler((Float3)*(Double3*)AsData);
     case VariantType::Quaternion:
         return *(Quaternion*)AsData;
     case VariantType::Structure:
@@ -1852,7 +2125,7 @@ Variant::operator BoundingSphere() const
     switch (Type.Type)
     {
     case VariantType::BoundingSphere:
-        return *(BoundingSphere*)AsData;
+        return AsBoundingSphere();
     case VariantType::Structure:
         if (StringUtils::Compare(Type.TypeName, BoundingSphere::TypeInitializer.GetType().Fullname.Get()) == 0)
             return *(BoundingSphere*)AsBlob.Data;
@@ -1866,7 +2139,7 @@ Variant::operator BoundingBox() const
     switch (Type.Type)
     {
     case VariantType::BoundingBox:
-        return *(BoundingBox*)AsBlob.Data;
+        return AsBoundingBox();
     case VariantType::Structure:
         if (StringUtils::Compare(Type.TypeName, BoundingBox::TypeInitializer.GetType().Fullname.Get()) == 0)
             return *(BoundingBox*)AsBlob.Data;
@@ -1908,7 +2181,7 @@ Variant::operator Ray() const
     switch (Type.Type)
     {
     case VariantType::Ray:
-        return *(Ray*)AsBlob.Data;
+        return AsRay();
     case VariantType::Structure:
         if (StringUtils::Compare(Type.TypeName, Ray::TypeInitializer.GetType().Fullname.Get()) == 0)
             return *(Ray*)AsBlob.Data;
@@ -1943,7 +2216,46 @@ const Vector3& Variant::AsVector3() const
 
 const Vector4& Variant::AsVector4() const
 {
+#if USE_LARGE_WORLDS
+    return *(const Vector4*)AsBlob.Data;
+#else
     return *(const Vector4*)AsData;
+#endif
+}
+
+const Float2& Variant::AsFloat2() const
+{
+    return *(const Float2*)AsData;
+}
+
+Float3& Variant::AsFloat3()
+{
+    return *(Float3*)AsData;
+}
+
+const Float3& Variant::AsFloat3() const
+{
+    return *(const Float3*)AsData;
+}
+
+const Float4& Variant::AsFloat4() const
+{
+    return *(const Float4*)AsData;
+}
+
+const Double2& Variant::AsDouble2() const
+{
+    return *(const Double2*)AsData;
+}
+
+const Double3& Variant::AsDouble3() const
+{
+    return *(const Double3*)AsData;
+}
+
+const Double4& Variant::AsDouble4() const
+{
+    return *(const Double4*)AsBlob.Data;
 }
 
 const Int2& Variant::AsInt2() const
@@ -1971,6 +2283,95 @@ const Quaternion& Variant::AsQuaternion() const
     return *(const Quaternion*)AsData;
 }
 
+const Rectangle& Variant::AsRectangle() const
+{
+    return *(const Rectangle*)AsData;
+}
+
+const Guid& Variant::AsGuid() const
+{
+    return *(const Guid*)AsData;
+}
+
+BoundingSphere& Variant::AsBoundingSphere()
+{
+#if USE_LARGE_WORLDS
+    return *(BoundingSphere*)AsBlob.Data;
+#else
+    return *(BoundingSphere*)AsData;
+#endif
+}
+
+const BoundingSphere& Variant::AsBoundingSphere() const
+{
+#if USE_LARGE_WORLDS
+    return *(const BoundingSphere*)AsBlob.Data;
+#else
+    return *(const BoundingSphere*)AsData;
+#endif
+}
+
+BoundingBox& Variant::AsBoundingBox()
+{
+#if USE_LARGE_WORLDS
+    return *(BoundingBox*)AsBlob.Data;
+#else
+    return *(BoundingBox*)AsData;
+#endif
+}
+
+const BoundingBox& Variant::AsBoundingBox() const
+{
+#if USE_LARGE_WORLDS
+    return *(const BoundingBox*)AsBlob.Data;
+#else
+    return *(const BoundingBox*)AsData;
+#endif
+}
+
+Ray& Variant::AsRay()
+{
+#if USE_LARGE_WORLDS
+    return *(Ray*)AsBlob.Data;
+#else
+    return *(Ray*)AsData;
+#endif
+}
+
+const Ray& Variant::AsRay() const
+{
+#if USE_LARGE_WORLDS
+    return *(const Ray*)AsBlob.Data;
+#else
+    return *(const Ray*)AsData;
+#endif
+}
+
+Transform& Variant::AsTransform()
+{
+    return *(Transform*)AsBlob.Data;
+}
+
+const Transform& Variant::AsTransform() const
+{
+    return *(const Transform*)AsBlob.Data;
+}
+
+const Matrix& Variant::AsMatrix() const
+{
+    return *(const Matrix*)AsBlob.Data;
+}
+
+Array<Variant>& Variant::AsArray()
+{
+    return *reinterpret_cast<Array<Variant, HeapAllocation>*>(AsData);
+}
+
+const Array<Variant>& Variant::AsArray() const
+{
+    return *reinterpret_cast<const Array<Variant, HeapAllocation>*>(AsData);
+}
+
 void Variant::SetType(const VariantType& type)
 {
     if (Type == type)
@@ -1987,7 +2388,7 @@ void Variant::SetType(const VariantType& type)
     case VariantType::Asset:
         if (AsAsset)
         {
-            AsAsset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
             AsAsset->RemoveReference();
         }
         break;
@@ -1996,11 +2397,15 @@ void Variant::SetType(const VariantType& type)
         break;
     case VariantType::String:
     case VariantType::Blob:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
     case VariantType::Typename:
+    case VariantType::Double4:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         Allocator::Free(AsBlob.Data);
         break;
     case VariantType::Array:
@@ -2011,8 +2416,10 @@ void Variant::SetType(const VariantType& type)
             Delete(AsDictionary);
         break;
     case VariantType::ManagedObject:
-        if (AsUint)
-            mono_gchandle_free(AsUint);
+#if USE_CSHARP
+        if (MANAGED_GC_HANDLE)
+            MCore::GCHandle::Free(MANAGED_GC_HANDLE);
+#endif
         break;
     default: ;
     }
@@ -2033,17 +2440,27 @@ void Variant::SetType(const VariantType& type)
     case VariantType::Asset:
         AsAsset = nullptr;
         break;
+    case VariantType::Double4:
+        AsBlob.Data = Allocator::Allocate(sizeof(Double4));
+        AsBlob.Length = sizeof(Double4);
+        break;
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+        AsBlob.Data = Allocator::Allocate(sizeof(BoundingSphere));
+        AsBlob.Length = sizeof(BoundingSphere);
+        break;
     case VariantType::BoundingBox:
         AsBlob.Data = Allocator::Allocate(sizeof(BoundingBox));
         AsBlob.Length = sizeof(BoundingBox);
         break;
-    case VariantType::Transform:
-        AsBlob.Data = Allocator::Allocate(sizeof(Transform));
-        AsBlob.Length = sizeof(Transform);
-        break;
     case VariantType::Ray:
         AsBlob.Data = Allocator::Allocate(sizeof(Ray));
         AsBlob.Length = sizeof(Ray);
+        break;
+#endif
+    case VariantType::Transform:
+        AsBlob.Data = Allocator::Allocate(sizeof(Transform));
+        AsBlob.Length = sizeof(Transform);
         break;
     case VariantType::Matrix:
         AsBlob.Data = Allocator::Allocate(sizeof(Matrix));
@@ -2056,12 +2473,16 @@ void Variant::SetType(const VariantType& type)
         AsDictionary = New<Dictionary<Variant, Variant>>();
         break;
     case VariantType::ManagedObject:
-        AsUint = 0;
+#if USE_CSHARP
+        MANAGED_GC_HANDLE = 0;
+#endif
         break;
     case VariantType::Structure:
         AllocStructure();
         break;
-    default: ;
+    default:
+        AsUint64 = 0;
+        break;
     }
 }
 
@@ -2081,7 +2502,7 @@ void Variant::SetType(VariantType&& type)
     case VariantType::Asset:
         if (AsAsset)
         {
-            AsAsset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
+            AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
             AsAsset->RemoveReference();
         }
         break;
@@ -2090,11 +2511,15 @@ void Variant::SetType(VariantType&& type)
         break;
     case VariantType::String:
     case VariantType::Blob:
-    case VariantType::BoundingBox:
     case VariantType::Transform:
-    case VariantType::Ray:
     case VariantType::Matrix:
     case VariantType::Typename:
+    case VariantType::Double4:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         Allocator::Free(AsBlob.Data);
         break;
     case VariantType::Array:
@@ -2105,8 +2530,10 @@ void Variant::SetType(VariantType&& type)
             Delete(AsDictionary);
         break;
     case VariantType::ManagedObject:
-        if (AsUint)
-            mono_gchandle_free(AsUint);
+#if USE_CSHARP
+        if (MANAGED_GC_HANDLE)
+            MCore::GCHandle::Free(MANAGED_GC_HANDLE);
+#endif
         break;
     default: ;
     }
@@ -2127,17 +2554,27 @@ void Variant::SetType(VariantType&& type)
     case VariantType::Asset:
         AsAsset = nullptr;
         break;
+    case VariantType::Double4:
+        AsBlob.Data = Allocator::Allocate(sizeof(Double4));
+        AsBlob.Length = sizeof(Double4);
+        break;
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+        AsBlob.Data = Allocator::Allocate(sizeof(BoundingSphere));
+        AsBlob.Length = sizeof(BoundingSphere);
+        break;
     case VariantType::BoundingBox:
         AsBlob.Data = Allocator::Allocate(sizeof(BoundingBox));
         AsBlob.Length = sizeof(BoundingBox);
         break;
-    case VariantType::Transform:
-        AsBlob.Data = Allocator::Allocate(sizeof(Transform));
-        AsBlob.Length = sizeof(Transform);
-        break;
     case VariantType::Ray:
         AsBlob.Data = Allocator::Allocate(sizeof(Ray));
         AsBlob.Length = sizeof(Ray);
+        break;
+#endif
+    case VariantType::Transform:
+        AsBlob.Data = Allocator::Allocate(sizeof(Transform));
+        AsBlob.Length = sizeof(Transform);
         break;
     case VariantType::Matrix:
         AsBlob.Data = Allocator::Allocate(sizeof(Matrix));
@@ -2150,7 +2587,9 @@ void Variant::SetType(VariantType&& type)
         AsDictionary = New<Dictionary<Variant, Variant>>();
         break;
     case VariantType::ManagedObject:
-        AsUint = 0;
+#if USE_CSHARP
+        MANAGED_GC_HANDLE = 0;
+#endif
         break;
     case VariantType::Structure:
         AllocStructure();
@@ -2162,6 +2601,13 @@ void Variant::SetType(VariantType&& type)
 void Variant::SetString(const StringView& str)
 {
     SetType(VariantType(VariantType::String));
+    if (str.Length() <= 0)
+    {
+        Allocator::Free(AsBlob.Data);
+        AsBlob.Data = nullptr;
+        AsBlob.Length = 0;
+        return;
+    }
     const int32 length = str.Length() * sizeof(Char) + 2;
     if (AsBlob.Length != length)
     {
@@ -2176,6 +2622,13 @@ void Variant::SetString(const StringView& str)
 void Variant::SetString(const StringAnsiView& str)
 {
     SetType(VariantType(VariantType::String));
+    if (str.Length() <= 0)
+    {
+        Allocator::Free(AsBlob.Data);
+        AsBlob.Data = nullptr;
+        AsBlob.Length = 0;
+        return;
+    }
     const int32 length = str.Length() * sizeof(Char) + 2;
     if (AsBlob.Length != length)
     {
@@ -2183,13 +2636,21 @@ void Variant::SetString(const StringAnsiView& str)
         AsBlob.Data = Allocator::Allocate(length);
         AsBlob.Length = length;
     }
-    StringUtils::ConvertANSI2UTF16(str.Get(), (Char*)AsBlob.Data, str.Length());
+    int32 tmp;
+    StringUtils::ConvertANSI2UTF16(str.Get(), (Char*)AsBlob.Data, str.Length(), tmp);
     ((Char*)AsBlob.Data)[str.Length()] = 0;
 }
 
 void Variant::SetTypename(const StringView& typeName)
 {
     SetType(VariantType(VariantType::Typename));
+    if (typeName.Length() <= 0)
+    {
+        Allocator::Free(AsBlob.Data);
+        AsBlob.Data = nullptr;
+        AsBlob.Length = 0;
+        return;
+    }
     const int32 length = typeName.Length() + 1;
     if (AsBlob.Length != length)
     {
@@ -2204,6 +2665,13 @@ void Variant::SetTypename(const StringView& typeName)
 void Variant::SetTypename(const StringAnsiView& typeName)
 {
     SetType(VariantType(VariantType::Typename));
+    if (typeName.Length() <= 0)
+    {
+        Allocator::Free(AsBlob.Data);
+        AsBlob.Data = nullptr;
+        AsBlob.Length = 0;
+        return;
+    }
     const int32 length = typeName.Length() + 1;
     if (AsBlob.Length != length)
     {
@@ -2243,20 +2711,22 @@ void Variant::SetObject(ScriptingObject* object)
         object->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(this);
 }
 
-void Variant::SetManagedObject(_MonoObject* object)
+void Variant::SetManagedObject(MObject* object)
 {
+#if USE_CSHARP
     if (object)
     {
         if (Type.Type != VariantType::ManagedObject)
-            SetType(VariantType(VariantType::ManagedObject, mono_object_get_class(object)));
-        AsUint = mono_gchandle_new(object, true);
+            SetType(VariantType(VariantType::ManagedObject, MCore::Object::GetClass(object)));
+        MANAGED_GC_HANDLE = MCore::GCHandle::New(object);
     }
     else
     {
         if (Type.Type != VariantType::ManagedObject || Type.TypeName)
             SetType(VariantType(VariantType::ManagedObject));
-        AsUint = 0;
+        MANAGED_GC_HANDLE = 0;
     }
+#endif
 }
 
 void Variant::SetAsset(Asset* asset)
@@ -2265,14 +2735,14 @@ void Variant::SetAsset(Asset* asset)
         SetType(VariantType(VariantType::Asset));
     if (AsAsset)
     {
-        asset->OnUnloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
-        asset->RemoveReference();
+        AsAsset->Unloaded.Unbind<Variant, &Variant::OnAssetUnloaded>(this);
+        AsAsset->RemoveReference();
     }
     AsAsset = asset;
     if (asset)
     {
         asset->AddReference();
-        asset->OnUnloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
+        asset->Unloaded.Bind<Variant, &Variant::OnAssetUnloaded>(this);
     }
 }
 
@@ -2291,8 +2761,22 @@ String Variant::ToString() const
     case VariantType::Int:
         return StringUtils::ToString(AsInt);
     case VariantType::Uint:
-    case VariantType::Enum:
         return StringUtils::ToString(AsUint);
+    case VariantType::Enum:
+        if (Type.TypeName)
+        {
+            const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(StringAnsiView(Type.TypeName));
+            if (typeHandle && typeHandle.GetType().Type == ScriptingTypes::Enum)
+            {
+                const auto items = typeHandle.GetType().Enum.Items;
+                for (int32 i = 0; items[i].Name; i++)
+                {
+                    if (items[i].Value == AsUint64)
+                        return String(items[i].Name);
+                }
+            }
+        }
+        return StringUtils::ToString(AsUint64);
     case VariantType::Int64:
         return StringUtils::ToString(AsInt64);
     case VariantType::Uint64:
@@ -2314,37 +2798,396 @@ String Variant::ToString() const
     case VariantType::Dictionary:
     case VariantType::Array:
         return Type.ToString();
-    case VariantType::Vector2:
-        return (*(Vector2*)AsData).ToString();
-    case VariantType::Vector3:
-        return (*(Vector3*)AsData).ToString();
-    case VariantType::Vector4:
-        return (*(Vector4*)AsData).ToString();
+    case VariantType::Float2:
+        return (*(Float2*)AsData).ToString();
+    case VariantType::Float3:
+        return (*(Float3*)AsData).ToString();
+    case VariantType::Float4:
+        return (*(Float4*)AsData).ToString();
+    case VariantType::Double2:
+        return AsDouble2().ToString();
+    case VariantType::Double3:
+        return AsDouble3().ToString();
+    case VariantType::Double4:
+        return AsDouble4().ToString();
+    case VariantType::Int2:
+        return AsInt2().ToString();
+    case VariantType::Int3:
+        return AsInt3().ToString();
+    case VariantType::Int4:
+        return AsInt4().ToString();
     case VariantType::Color:
         return (*(Color*)AsData).ToString();
     case VariantType::Guid:
         return (*(Guid*)AsData).ToString();
     case VariantType::BoundingSphere:
-        return (*(BoundingSphere*)AsData).ToString();
+        return AsBoundingSphere().ToString();
     case VariantType::Quaternion:
         return (*(Quaternion*)AsData).ToString();
     case VariantType::Rectangle:
         return (*(Rectangle*)AsData).ToString();
     case VariantType::BoundingBox:
-        return (*(BoundingBox*)AsBlob.Data).ToString();
+        return AsBoundingBox().ToString();
     case VariantType::Transform:
         return (*(Transform*)AsBlob.Data).ToString();
     case VariantType::Ray:
-        return (*(Ray*)AsBlob.Data).ToString();
+        return AsRay().ToString();
     case VariantType::Matrix:
         return (*(Matrix*)AsBlob.Data).ToString();
-    case VariantType::ManagedObject:
-        return AsUint ? String(MUtils::ToString(mono_object_to_string(mono_gchandle_get_target(AsUint), nullptr))) : TEXT("null");
     case VariantType::Typename:
         return String((const char*)AsBlob.Data, AsBlob.Length ? AsBlob.Length - 1 : 0);
+    case VariantType::ManagedObject:
+#if USE_CSHARP
+        return MANAGED_GC_HANDLE ? String(MUtils::ToString(MCore::Object::ToString(MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE)))) : TEXT("null");
+#else
+        return String::Empty;
+#endif
     default:
         return String::Empty;
     }
+}
+
+void Variant::Inline()
+{
+    VariantType::Types type = VariantType::Null;
+    byte data[sizeof(Matrix)];
+    if (Type.Type == VariantType::Structure && AsBlob.Data && AsBlob.Length <= sizeof(Matrix))
+    {
+        for (int32 i = 2; i < VariantType::MAX; i++)
+        {
+            if (StringUtils::Compare(Type.TypeName, InBuiltTypesTypeNames[i]) == 0)
+            {
+                type = (VariantType::Types)i;
+                break;
+            }
+        }
+        if (type == VariantType::Null)
+        {
+            // Aliases
+            if (StringUtils::Compare(Type.TypeName, "FlaxEngine.Vector2") == 0)
+                type = VariantType::Types::Vector2;
+            else if (StringUtils::Compare(Type.TypeName, "FlaxEngine.Vector3") == 0)
+                type = VariantType::Types::Vector3;
+            else if (StringUtils::Compare(Type.TypeName, "FlaxEngine.Vector4") == 0)
+                type = VariantType::Types::Vector4;
+        }
+        if (type != VariantType::Null)
+        {
+            ASSERT(sizeof(data) >= AsBlob.Length);
+            Platform::MemoryCopy(data, AsBlob.Data, AsBlob.Length);
+        }
+    }
+    if (type != VariantType::Null)
+    {
+        switch (type)
+        {
+        case VariantType::Bool:
+            *this = *(bool*)data;
+            break;
+        case VariantType::Int:
+            *this = *(int32*)data;
+            break;
+        case VariantType::Uint:
+            *this = *(uint32*)data;
+            break;
+        case VariantType::Int64:
+            *this = *(int64*)data;
+            break;
+        case VariantType::Uint64:
+            *this = *(uint64*)data;
+            break;
+        case VariantType::Float:
+            *this = *(float*)data;
+            break;
+        case VariantType::Double:
+            *this = *(double*)data;
+            break;
+        case VariantType::Float2:
+            *this = *(Float2*)data;
+            break;
+        case VariantType::Float3:
+            *this = *(Float3*)data;
+            break;
+        case VariantType::Float4:
+            *this = *(Float4*)data;
+            break;
+        case VariantType::Color:
+            *this = *(Color*)data;
+            break;
+        case VariantType::Guid:
+            *this = *(Guid*)data;
+            break;
+        case VariantType::BoundingBox:
+            *this = Variant(*(BoundingBox*)data);
+            break;
+        case VariantType::BoundingSphere:
+            *this = *(BoundingSphere*)data;
+            break;
+        case VariantType::Quaternion:
+            *this = *(Quaternion*)data;
+            break;
+        case VariantType::Transform:
+            *this = Variant(*(Transform*)data);
+            break;
+        case VariantType::Rectangle:
+            *this = *(Rectangle*)data;
+            break;
+        case VariantType::Ray:
+            *this = Variant(*(Ray*)data);
+            break;
+        case VariantType::Matrix:
+            *this = Variant(*(Matrix*)data);
+            break;
+        case VariantType::Int2:
+            *this = *(Int2*)data;
+            break;
+        case VariantType::Int3:
+            *this = *(Int3*)data;
+            break;
+        case VariantType::Int4:
+            *this = *(Int4*)data;
+            break;
+        case VariantType::Int16:
+            *this = *(int16*)data;
+            break;
+        case VariantType::Uint16:
+            *this = *(uint16*)data;
+            break;
+        case VariantType::Double2:
+            *this = *(Double2*)data;
+            break;
+        case VariantType::Double3:
+            *this = *(Double3*)data;
+            break;
+        case VariantType::Double4:
+            *this = *(Double4*)data;
+            break;
+        }
+    }
+}
+
+void Variant::InvertInline()
+{
+    byte data[sizeof(Matrix)];
+    switch (Type.Type)
+    {
+    case VariantType::Bool:
+    case VariantType::Int:
+    case VariantType::Uint:
+    case VariantType::Int64:
+    case VariantType::Uint64:
+    case VariantType::Float:
+    case VariantType::Double:
+    case VariantType::Pointer:
+    case VariantType::String:
+    case VariantType::Float2:
+    case VariantType::Float3:
+    case VariantType::Float4:
+    case VariantType::Color:
+#if !USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
+    case VariantType::Guid:
+    case VariantType::Quaternion:
+    case VariantType::Rectangle:
+    case VariantType::Int2:
+    case VariantType::Int3:
+    case VariantType::Int4:
+    case VariantType::Int16:
+    case VariantType::Uint16:
+    case VariantType::Double2:
+    case VariantType::Double3:
+    case VariantType::Double4:
+        static_assert(sizeof(data) >= sizeof(AsData), "Invalid memory size.");
+        Platform::MemoryCopy(data, AsData, sizeof(AsData));
+        break;
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
+    case VariantType::Transform:
+    case VariantType::Matrix:
+        ASSERT(sizeof(data) >= AsBlob.Length);
+        Platform::MemoryCopy(data, AsBlob.Data, AsBlob.Length);
+        break;
+    default:
+        return; // Not used
+    }
+    SetType(VariantType(VariantType::Structure, InBuiltTypesTypeNames[Type.Type]));
+    CopyStructure(data);
+}
+
+Variant Variant::NewValue(const StringAnsiView& typeName)
+{
+    Variant v;
+    const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(typeName);
+    if (typeHandle)
+    {
+        const ScriptingType& type = typeHandle.GetType();
+        switch (type.Type)
+        {
+        case ScriptingTypes::Script:
+            v.SetType(VariantType(VariantType::Object, type));
+            v.AsObject = type.Script.Spawn(ScriptingObjectSpawnParams(Guid::New(), typeHandle));
+            if (v.AsObject)
+                v.AsObject->Deleted.Bind<Variant, &Variant::OnObjectDeleted>(&v);
+            break;
+        case ScriptingTypes::Structure:
+            v.SetType(VariantType(VariantType::Structure, type));
+            break;
+        case ScriptingTypes::Enum:
+            v.SetType(VariantType(VariantType::Enum, type));
+            v.AsEnum = 0;
+            break;
+        default:
+            LOG(Error, "Unsupported scripting type '{}' for Variant", typeName.ToString());
+            break;
+        }
+    }
+#if USE_CSHARP
+    else if (const auto mclass = Scripting::FindClass(typeName))
+    {
+        // Fallback to C#-only types
+        if (mclass->IsEnum())
+        {
+            v.SetType(VariantType(VariantType::Enum, mclass));
+            v.AsEnum = 0;
+        }
+        else if (mclass->IsValueType())
+        {
+            v.SetType(VariantType(VariantType::Structure, mclass));
+        }
+        else
+        {
+            v.SetType(VariantType(VariantType::ManagedObject, mclass));
+            MObject* instance = mclass->CreateInstance();
+            if (instance)
+            {
+                v.MANAGED_GC_HANDLE = MCore::GCHandle::New(instance);
+            }
+        }
+    }
+#endif
+    else if (typeName.HasChars())
+    {
+        LOG(Warning, "Missing scripting type \'{0}\'", String(typeName));
+    }
+    v.Inline(); // Wrap in-built types
+    return MoveTemp(v);
+}
+
+void Variant::DeleteValue()
+{
+    // Delete any object owned by the Variant
+    switch (Type.Type)
+    {
+    case VariantType::Object:
+        if (AsObject)
+        {
+            AsObject->Deleted.Unbind<Variant, &Variant::OnObjectDeleted>(this);
+            AsObject->DeleteObject();
+            AsObject = nullptr;
+        }
+        break;
+    }
+
+    // Go back to null
+    SetType(VariantType(VariantType::Null));
+}
+
+Variant Variant::Parse(const StringView& text, const VariantType& type)
+{
+    Variant result;
+    result.SetType(type);
+    if (text.IsEmpty())
+        return result;
+    if (type != VariantType())
+    {
+        switch (type.Type)
+        {
+        case VariantType::Bool:
+            if (text == TEXT("1") || text.Compare(StringView(TEXT("true"), 4), StringSearchCase::IgnoreCase) == 0)
+                result.AsBool = true;
+            break;
+        case VariantType::Int16:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsInt16);
+            break;
+        case VariantType::Uint16:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsUint16);
+            break;
+        case VariantType::Int:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsInt);
+            break;
+        case VariantType::Uint:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsUint);
+            break;
+        case VariantType::Int64:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsInt64);
+            break;
+        case VariantType::Uint64:
+            StringUtils::Parse(text.Get(), text.Length(), &result.AsInt64);
+            break;
+        case VariantType::Enum:
+            if (!StringUtils::Parse(text.Get(), text.Length(), &result.AsEnum))
+            {
+            }
+            else if (type.TypeName)
+            {
+                const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(StringAnsiView(type.TypeName));
+                if (typeHandle && typeHandle.GetType().Type == ScriptingTypes::Enum)
+                {
+                    const auto items = typeHandle.GetType().Enum.Items;
+                    StringAsANSI<32> textAnsi(text.Get(), text.Length());
+                    StringAnsiView textAnsiView(textAnsi.Get());
+                    for (int32 i = 0; items[i].Name; i++)
+                    {
+                        if (textAnsiView == items[i].Name)
+                        {
+                            result.AsEnum = items[i].Value;
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+        case VariantType::Float:
+            StringUtils::Parse(text.Get(), &result.AsFloat);
+            break;
+        case VariantType::Double:
+            StringUtils::Parse(text.Get(), &result.AsFloat);
+            result.AsDouble = (float)result.AsFloat;
+            break;
+        case VariantType::String:
+            result.SetString(text);
+        default:
+            break;
+        }
+    }
+    else
+    {
+        // Parse as number
+        int32 valueInt;
+        if (!StringUtils::Parse(text.Get(), text.Length(), &valueInt))
+        {
+            result = valueInt;
+        }
+        else
+        {
+            // Fallback to string
+            result.SetString(text);
+        }
+    }
+    return result;
+}
+
+Variant Variant::Typename(const StringAnsiView& value)
+{
+    Variant result;
+    result.SetTypename(value);
+    return result;
 }
 
 bool Variant::CanCast(const Variant& v, const VariantType& to)
@@ -2364,10 +3207,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Uint64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2383,10 +3233,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Uint64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2402,10 +3259,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Uint64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2421,10 +3285,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Uint64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2440,10 +3311,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2459,10 +3337,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Uint64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2478,10 +3363,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2497,10 +3389,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Uint64:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
@@ -2516,15 +3415,22 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Uint64:
         case VariantType::Float:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+        case VariantType::Int2:
+        case VariantType::Int3:
+        case VariantType::Int4:
+        case VariantType::Enum:
             return true;
         default:
             return false;
         }
-    case VariantType::Vector2:
+    case VariantType::Float2:
         switch (to.Type)
         {
         case VariantType::Bool:
@@ -2535,14 +3441,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float3:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
             return true;
         default:
             return false;
         }
-    case VariantType::Vector3:
+    case VariantType::Float3:
         switch (to.Type)
         {
         case VariantType::Bool:
@@ -2553,14 +3462,17 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float4:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
             return true;
         default:
             return false;
         }
-    case VariantType::Vector4:
+    case VariantType::Float4:
         switch (to.Type)
         {
         case VariantType::Bool:
@@ -2571,9 +3483,12 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
+        case VariantType::Float2:
+        case VariantType::Float3:
         case VariantType::Color:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
             return true;
         default:
             return false;
@@ -2589,9 +3504,22 @@ bool Variant::CanCast(const Variant& v, const VariantType& to)
         case VariantType::Int64:
         case VariantType::Float:
         case VariantType::Double:
-        case VariantType::Vector2:
-        case VariantType::Vector3:
-        case VariantType::Vector4:
+        case VariantType::Float2:
+        case VariantType::Float3:
+        case VariantType::Float4:
+        case VariantType::Double2:
+        case VariantType::Double3:
+        case VariantType::Double4:
+            return true;
+        default:
+            return false;
+        }
+    case VariantType::Null:
+        switch (to.Type)
+        {
+    case VariantType::Asset:
+    case VariantType::ManagedObject:
+    case VariantType::Object:
             return true;
         default:
             return false;
@@ -2626,14 +3554,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant(v.AsBool ? 1.0f : 0.0f);
         case VariantType::Double:
             return Variant(v.AsBool ? 1.0 : 0.0);
-        case VariantType::Vector2:
-            return Variant(Vector2(v.AsBool ? 1.0f : 0.0f));
-        case VariantType::Vector3:
-            return Variant(Vector3(v.AsBool ? 1.0f : 0.0f));
-        case VariantType::Vector4:
-            return Variant(Vector4(v.AsBool ? 1.0f : 0.0f));
+        case VariantType::Float2:
+            return Variant(Float2(v.AsBool ? 1.0f : 0.0f));
+        case VariantType::Float3:
+            return Variant(Float3(v.AsBool ? 1.0f : 0.0f));
+        case VariantType::Float4:
+            return Variant(Float2(v.AsBool ? 1.0f : 0.0f));
         case VariantType::Color:
             return Variant(Color(v.AsBool ? 1.0f : 0.0f));
+        case VariantType::Double2:
+            return Variant(Double2(v.AsBool ? 1.0 : 0.0));
+        case VariantType::Double3:
+            return Variant(Double3(v.AsBool ? 1.0 : 0.0));
+        case VariantType::Double4:
+            return Variant(Double4(v.AsBool ? 1.0 : 0.0));
+        case VariantType::Int2:
+            return Variant(Int2(v.AsBool ? 1 : 0));
+        case VariantType::Int3:
+            return Variant(Int3(v.AsBool ? 1 : 0));
+        case VariantType::Int4:
+            return Variant(Int4(v.AsBool ? 1 : 0));
+    case VariantType::Enum:
+            return Enum(to, v.AsBool ? 1 : 0);
         default: ;
         }
         break;
@@ -2656,14 +3598,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)v.AsInt16);
         case VariantType::Double:
             return Variant((double)v.AsInt16);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsInt16));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsInt16));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsInt16));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsInt16));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsInt16));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsInt16));
         case VariantType::Color:
             return Variant(Color((float)v.AsInt16));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsInt16));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsInt16));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsInt16));
+        case VariantType::Int2:
+            return Variant(Int2(v.AsInt16));
+        case VariantType::Int3:
+            return Variant(Int3(v.AsInt16));
+        case VariantType::Int4:
+            return Variant(Int4(v.AsInt16));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsInt16);
         default: ;
         }
         break;
@@ -2686,14 +3642,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)v.AsInt);
         case VariantType::Double:
             return Variant((double)v.AsInt);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsInt));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsInt));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsInt));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsInt));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsInt));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsInt));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsInt));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsInt));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsInt));
+        case VariantType::Int2:
+            return Variant(Int2(v.AsInt));
+        case VariantType::Int3:
+            return Variant(Int3(v.AsInt));
+        case VariantType::Int4:
+            return Variant(Int4(v.AsInt));
         case VariantType::Color:
             return Variant(Color((float)v.AsInt));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsInt);
         default: ;
         }
         break;
@@ -2716,14 +3686,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)v.AsUint16);
         case VariantType::Double:
             return Variant((double)v.AsUint16);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsUint16));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsUint16));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsUint16));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsUint16));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsUint16));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsUint16));
         case VariantType::Color:
             return Variant(Color((float)v.AsUint16));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsUint16));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsUint16));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsUint16));
+        case VariantType::Int2:
+            return Variant(Int2(v.AsUint16));
+        case VariantType::Int3:
+            return Variant(Int3(v.AsUint16));
+        case VariantType::Int4:
+            return Variant(Int4(v.AsUint16));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsUint16);
         default: ;
         }
         break;
@@ -2746,14 +3730,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)v.AsUint);
         case VariantType::Double:
             return Variant((double)v.AsUint);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsUint));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsUint));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsUint));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsUint));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsUint));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsUint));
         case VariantType::Color:
             return Variant(Color((float)v.AsUint));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsUint));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsUint));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsUint));
+        case VariantType::Int2:
+            return Variant(Int2((int32)v.AsUint));
+        case VariantType::Int3:
+            return Variant(Int3((int32)v.AsUint));
+        case VariantType::Int4:
+            return Variant(Int4((int32)v.AsUint));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsUint);
         default: ;
         }
         break;
@@ -2776,14 +3774,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)v.AsInt64);
         case VariantType::Double:
             return Variant((double)v.AsInt64);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsInt64));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsInt64));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsInt64));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsInt64));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsInt64));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsInt64));
         case VariantType::Color:
             return Variant(Color((float)v.AsInt64));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsInt64));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsInt64));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsInt64));
+        case VariantType::Int2:
+            return Variant(Int2((int32)v.AsInt64));
+        case VariantType::Int3:
+            return Variant(Int3((int32)v.AsInt64));
+        case VariantType::Int4:
+            return Variant(Int4((int32)v.AsInt64));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsInt64);
         default: ;
         }
         break;
@@ -2801,19 +3813,33 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
         case VariantType::Uint16:
             return Variant((uint16)v.AsUint16);
         case VariantType::Uint:
-            return Variant((uint32)v.AsUint);
+            return Variant((uint32)v.AsUint64);
         case VariantType::Float:
             return Variant((float)v.AsUint64);
         case VariantType::Double:
             return Variant((double)v.AsUint64);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsInt));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsInt));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsInt));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsUint64));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsUint64));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsUint64));
         case VariantType::Color:
-            return Variant(Color((float)v.AsInt));
+            return Variant(Color((float)v.AsUint64));
+        case VariantType::Double2:
+            return Variant(Double2((double)v.AsUint64));
+        case VariantType::Double3:
+            return Variant(Double3((double)v.AsUint64));
+        case VariantType::Double4:
+            return Variant(Double4((double)v.AsUint64));
+        case VariantType::Int2:
+            return Variant(Int2((int32)v.AsUint64));
+        case VariantType::Int3:
+            return Variant(Int3((int32)v.AsUint64));
+        case VariantType::Int4:
+            return Variant(Int4((int32)v.AsUint64));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsInt);
         default: ;
         }
         break;
@@ -2836,14 +3862,28 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((uint64)v.AsFloat);
         case VariantType::Double:
             return Variant((double)v.AsFloat);
-        case VariantType::Vector2:
-            return Variant(Vector2(v.AsFloat));
-        case VariantType::Vector3:
-            return Variant(Vector3(v.AsFloat));
-        case VariantType::Vector4:
-            return Variant(Vector4(v.AsFloat));
+        case VariantType::Float2:
+            return Variant(Float2(v.AsFloat));
+        case VariantType::Float3:
+            return Variant(Float3(v.AsFloat));
+        case VariantType::Float4:
+            return Variant(Float4(v.AsFloat));
         case VariantType::Color:
             return Variant(Color(v.AsFloat));
+        case VariantType::Double2:
+            return Variant(Double2(v.AsFloat));
+        case VariantType::Double3:
+            return Variant(Double3(v.AsFloat));
+        case VariantType::Double4:
+            return Variant(Double4(v.AsFloat));
+        case VariantType::Int2:
+            return Variant(Int2((int32)v.AsFloat));
+        case VariantType::Int3:
+            return Variant(Int3((int32)v.AsFloat));
+        case VariantType::Int4:
+            return Variant(Int4((int32)v.AsFloat));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsFloat);
         default: ;
         }
         break;
@@ -2866,104 +3906,244 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((uint64)v.AsDouble);
         case VariantType::Float:
             return Variant((float)v.AsDouble);
-        case VariantType::Vector2:
-            return Variant(Vector2((float)v.AsDouble));
-        case VariantType::Vector3:
-            return Variant(Vector3((float)v.AsDouble));
-        case VariantType::Vector4:
-            return Variant(Vector4((float)v.AsDouble));
+        case VariantType::Float2:
+            return Variant(Float2((float)v.AsDouble));
+        case VariantType::Float3:
+            return Variant(Float3((float)v.AsDouble));
+        case VariantType::Float4:
+            return Variant(Float4((float)v.AsDouble));
         case VariantType::Color:
             return Variant(Color((float)v.AsDouble));
+        case VariantType::Double2:
+            return Variant(Double2(v.AsDouble));
+        case VariantType::Double3:
+            return Variant(Double3(v.AsDouble));
+        case VariantType::Double4:
+            return Variant(Double4(v.AsDouble));
+        case VariantType::Int2:
+            return Variant(Int2((int32)v.AsFloat));
+        case VariantType::Int3:
+            return Variant(Int3((int32)v.AsFloat));
+        case VariantType::Int4:
+            return Variant(Int4((int32)v.AsFloat));
+        case VariantType::Enum:
+            return Enum(to, (int64)v.AsDouble);
         default: ;
         }
         break;
-    case VariantType::Vector2:
+    case VariantType::Float2:
         switch (to.Type)
         {
         case VariantType::Bool:
-            return Variant(Math::Abs(((Vector2*)v.AsData)->X) > ZeroTolerance);
+            return Variant(Math::Abs(((Float2*)v.AsData)->X) > ZeroTolerance);
         case VariantType::Int16:
-            return Variant((int16)((Vector2*)v.AsData)->X);
+            return Variant((int16)((Float2*)v.AsData)->X);
         case VariantType::Int:
-            return Variant((int32)((Vector2*)v.AsData)->X);
+            return Variant((int32)((Float2*)v.AsData)->X);
         case VariantType::Uint16:
-            return Variant((uint16)((Vector2*)v.AsData)->X);
+            return Variant((uint16)((Float2*)v.AsData)->X);
         case VariantType::Uint:
-            return Variant((uint32)((Vector2*)v.AsData)->X);
+            return Variant((uint32)((Float2*)v.AsData)->X);
         case VariantType::Int64:
-            return Variant((int64)((Vector2*)v.AsData)->X);
+            return Variant((int64)((Float2*)v.AsData)->X);
         case VariantType::Uint64:
-            return Variant((uint64)((Vector2*)v.AsData)->X);
+            return Variant((uint64)((Float2*)v.AsData)->X);
         case VariantType::Float:
-            return Variant((float)((Vector2*)v.AsData)->X);
+            return Variant((float)((Float2*)v.AsData)->X);
         case VariantType::Double:
-            return Variant((double)((Vector2*)v.AsData)->X);
-        case VariantType::Vector3:
-            return Variant(Vector3(*(Vector2*)v.AsData, 0.0f));
-        case VariantType::Vector4:
-            return Variant(Vector4(*(Vector2*)v.AsData, 0.0f, 0.0f));
+            return Variant((double)((Float2*)v.AsData)->X);
+        case VariantType::Float3:
+            return Variant(Float3(*(Float2*)v.AsData, 0.0f));
+        case VariantType::Float4:
+            return Variant(Float4(*(Float2*)v.AsData, 0.0f, 0.0f));
         case VariantType::Color:
-            return Variant(Color(((Vector2*)v.AsData)->X, ((Vector2*)v.AsData)->Y, 0.0f, 0.0f));
+            return Variant(Color(((Float2*)v.AsData)->X, ((Float2*)v.AsData)->Y, 0.0f, 0.0f));
+        case VariantType::Double2:
+            return Variant(Double2(*(Float2*)v.AsData));
+        case VariantType::Double3:
+            return Variant(Double3(*(Float2*)v.AsData, 0.0));
+        case VariantType::Double4:
+            return Variant(Double4(*(Float2*)v.AsData, 0.0, 0.0));
         default: ;
         }
         break;
-    case VariantType::Vector3:
+    case VariantType::Float3:
         switch (to.Type)
         {
         case VariantType::Bool:
-            return Variant(Math::Abs(((Vector3*)v.AsData)->X) > ZeroTolerance);
+            return Variant(Math::Abs(((Float3*)v.AsData)->X) > ZeroTolerance);
         case VariantType::Int16:
-            return Variant((int16)((Vector3*)v.AsData)->X);
+            return Variant((int16)((Float3*)v.AsData)->X);
         case VariantType::Int:
-            return Variant((int32)((Vector3*)v.AsData)->X);
+            return Variant((int32)((Float3*)v.AsData)->X);
         case VariantType::Uint16:
-            return Variant((uint16)((Vector3*)v.AsData)->X);
+            return Variant((uint16)((Float3*)v.AsData)->X);
         case VariantType::Uint:
-            return Variant((uint32)((Vector3*)v.AsData)->X);
+            return Variant((uint32)((Float3*)v.AsData)->X);
         case VariantType::Int64:
-            return Variant((int64)((Vector3*)v.AsData)->X);
+            return Variant((int64)((Float3*)v.AsData)->X);
         case VariantType::Uint64:
-            return Variant((uint64)((Vector3*)v.AsData)->X);
+            return Variant((uint64)((Float3*)v.AsData)->X);
         case VariantType::Float:
-            return Variant((float)((Vector3*)v.AsData)->X);
+            return Variant((float)((Float3*)v.AsData)->X);
         case VariantType::Double:
-            return Variant((double)((Vector3*)v.AsData)->X);
-        case VariantType::Vector2:
-            return Variant(Vector2(*(Vector3*)v.AsData));
-        case VariantType::Vector4:
-            return Variant(Vector4(*(Vector3*)v.AsData, 0.0f));
+            return Variant((double)((Float3*)v.AsData)->X);
+        case VariantType::Float2:
+            return Variant(Float2(*(Float3*)v.AsData));
+        case VariantType::Float4:
+            return Variant(Float4(*(Float3*)v.AsData, 0.0f));
         case VariantType::Color:
-            return Variant(Color(((Vector3*)v.AsData)->X, ((Vector3*)v.AsData)->Y, ((Vector3*)v.AsData)->Z, 0.0f));
+            return Variant(Color(((Float3*)v.AsData)->X, ((Float3*)v.AsData)->Y, ((Float3*)v.AsData)->Z, 0.0f));
+        case VariantType::Double2:
+            return Variant(Double2(*(Float3*)v.AsData));
+        case VariantType::Double3:
+            return Variant(Double3(*(Float3*)v.AsData));
+        case VariantType::Double4:
+            return Variant(Double4(*(Float3*)v.AsData, 0.0));
         default: ;
         }
         break;
-    case VariantType::Vector4:
+    case VariantType::Float4:
         switch (to.Type)
         {
         case VariantType::Bool:
-            return Variant(Math::Abs(((Vector4*)v.AsData)->X) > ZeroTolerance);
+            return Variant(Math::Abs(((Float4*)v.AsData)->X) > ZeroTolerance);
         case VariantType::Int16:
-            return Variant((int16)((Vector4*)v.AsData)->X);
+            return Variant((int16)((Float4*)v.AsData)->X);
         case VariantType::Int:
-            return Variant((int32)((Vector4*)v.AsData)->X);
+            return Variant((int32)((Float4*)v.AsData)->X);
         case VariantType::Uint16:
-            return Variant((uint16)((Vector4*)v.AsData)->X);
+            return Variant((uint16)((Float4*)v.AsData)->X);
         case VariantType::Uint:
-            return Variant((uint32)((Vector4*)v.AsData)->X);
+            return Variant((uint32)((Float4*)v.AsData)->X);
         case VariantType::Int64:
-            return Variant((int64)((Vector4*)v.AsData)->X);
+            return Variant((int64)((Float4*)v.AsData)->X);
         case VariantType::Uint64:
-            return Variant((uint64)((Vector4*)v.AsData)->X);
+            return Variant((uint64)((Float4*)v.AsData)->X);
         case VariantType::Float:
-            return Variant((float)((Vector4*)v.AsData)->X);
+            return Variant((float)((Float4*)v.AsData)->X);
         case VariantType::Double:
-            return Variant((double)((Vector4*)v.AsData)->X);
-        case VariantType::Vector2:
-            return Variant(Vector2(*(Vector4*)v.AsData));
-        case VariantType::Vector3:
-            return Variant(Vector3(*(Vector4*)v.AsData));
+            return Variant((double)((Float4*)v.AsData)->X);
+        case VariantType::Float2:
+            return Variant(Float2(*(Float4*)v.AsData));
+        case VariantType::Float3:
+            return Variant(Float3(*(Float4*)v.AsData));
         case VariantType::Color:
-            return Variant(*(Vector4*)v.AsData);
+            return Variant(*(Float4*)v.AsData);
+        case VariantType::Double2:
+            return Variant(Double2(*(Float4*)v.AsData));
+        case VariantType::Double3:
+            return Variant(Double3(*(Float4*)v.AsData));
+        case VariantType::Double4:
+            return Variant(Double4(*(Float4*)v.AsData));
+        default: ;
+        }
+        break;
+    case VariantType::Double2:
+        switch (to.Type)
+        {
+        case VariantType::Bool:
+            return Variant(Math::Abs(((Double2*)v.AsData)->X) > ZeroTolerance);
+        case VariantType::Int16:
+            return Variant((int16)((Double2*)v.AsData)->X);
+        case VariantType::Int:
+            return Variant((int32)((Double2*)v.AsData)->X);
+        case VariantType::Uint16:
+            return Variant((uint16)((Double2*)v.AsData)->X);
+        case VariantType::Uint:
+            return Variant((uint32)((Double2*)v.AsData)->X);
+        case VariantType::Int64:
+            return Variant((int64)((Double2*)v.AsData)->X);
+        case VariantType::Uint64:
+            return Variant((uint64)((Double2*)v.AsData)->X);
+        case VariantType::Float:
+            return Variant((float)((Double2*)v.AsData)->X);
+        case VariantType::Double:
+            return Variant((double)((Double2*)v.AsData)->X);
+        case VariantType::Float2:
+            return Variant(Float2(*(Double2*)v.AsData));
+        case VariantType::Float3:
+            return Variant(Float3(*(Double2*)v.AsData, 0.0f));
+        case VariantType::Float4:
+            return Variant(Float4(*(Double2*)v.AsData, 0.0f, 0.0f));
+        case VariantType::Color:
+            return Variant(Color((float)((Double2*)v.AsData)->X, (float)((Double2*)v.AsData)->Y, 0.0f, 0.0f));
+        case VariantType::Double3:
+            return Variant(Double3(*(Double2*)v.AsData, 0.0));
+        case VariantType::Double4:
+            return Variant(Double4(*(Double2*)v.AsData, 0.0, 0.0));
+        default: ;
+        }
+        break;
+    case VariantType::Double3:
+        switch (to.Type)
+        {
+        case VariantType::Bool:
+            return Variant(Math::Abs(((Double3*)v.AsData)->X) > ZeroTolerance);
+        case VariantType::Int16:
+            return Variant((int16)((Double3*)v.AsData)->X);
+        case VariantType::Int:
+            return Variant((int32)((Double3*)v.AsData)->X);
+        case VariantType::Uint16:
+            return Variant((uint16)((Double3*)v.AsData)->X);
+        case VariantType::Uint:
+            return Variant((uint32)((Double3*)v.AsData)->X);
+        case VariantType::Int64:
+            return Variant((int64)((Double3*)v.AsData)->X);
+        case VariantType::Uint64:
+            return Variant((uint64)((Double3*)v.AsData)->X);
+        case VariantType::Float:
+            return Variant((float)((Double3*)v.AsData)->X);
+        case VariantType::Double:
+            return Variant((double)((Double3*)v.AsData)->X);
+        case VariantType::Float2:
+            return Variant(Float2(*(Double3*)v.AsData));
+        case VariantType::Float3:
+            return Variant(Float3(*(Double3*)v.AsData));
+        case VariantType::Float4:
+            return Variant(Float4(*(Double3*)v.AsData, 0.0f));
+        case VariantType::Color:
+            return Variant(Color((float)((Double3*)v.AsData)->X, (float)((Double3*)v.AsData)->Y, (float)((Double3*)v.AsData)->Z, 0.0f));
+        case VariantType::Double2:
+            return Variant(Double2(*(Double3*)v.AsData));
+        case VariantType::Double4:
+            return Variant(Double4(*(Double3*)v.AsData, 0.0));
+        default: ;
+        }
+        break;
+    case VariantType::Double4:
+        switch (to.Type)
+        {
+        case VariantType::Bool:
+            return Variant(Math::Abs(((Double4*)v.AsData)->X) > ZeroTolerance);
+        case VariantType::Int16:
+            return Variant((int16)((Double4*)v.AsData)->X);
+        case VariantType::Int:
+            return Variant((int32)((Double4*)v.AsData)->X);
+        case VariantType::Uint16:
+            return Variant((uint16)((Double4*)v.AsData)->X);
+        case VariantType::Uint:
+            return Variant((uint32)((Double4*)v.AsData)->X);
+        case VariantType::Int64:
+            return Variant((int64)((Double4*)v.AsData)->X);
+        case VariantType::Uint64:
+            return Variant((uint64)((Double4*)v.AsData)->X);
+        case VariantType::Float:
+            return Variant((float)((Double4*)v.AsData)->X);
+        case VariantType::Double:
+            return Variant((double)((Double4*)v.AsData)->X);
+        case VariantType::Float2:
+            return Variant(Float2(*(Double4*)v.AsData));
+        case VariantType::Float3:
+            return Variant(Float3(*(Double4*)v.AsData));
+        case VariantType::Float4:
+            return Variant(Float4(*(Double4*)v.AsData));
+        case VariantType::Color:
+            return Variant(*(Double4*)v.AsData);
+        case VariantType::Double2:
+            return Variant(Double2(*(Double4*)v.AsData));
+        case VariantType::Double3:
+            return Variant(Double3(*(Double4*)v.AsData));
         default: ;
         }
         break;
@@ -2988,15 +4168,57 @@ Variant Variant::Cast(const Variant& v, const VariantType& to)
             return Variant((float)((Color*)v.AsData)->R);
         case VariantType::Double:
             return Variant((double)((Color*)v.AsData)->R);
-        case VariantType::Vector2:
-            return Variant(Vector2(*(Color*)v.AsData));
-        case VariantType::Vector3:
-            return Variant(Vector3(*(Color*)v.AsData));
-        case VariantType::Vector4:
+        case VariantType::Float2:
+            return Variant(Float2(*(Color*)v.AsData));
+        case VariantType::Float3:
+            return Variant(Float3(*(Color*)v.AsData));
+        case VariantType::Float4:
             return Variant(*(Color*)v.AsData);
+        case VariantType::Double2:
+            return Variant(Double2(*(Color*)v.AsData));
+        case VariantType::Double3:
+            return Variant(Double3(*(Color*)v.AsData));
+        case VariantType::Double4:
+            return Variant(Double4(*(Color*)v.AsData));
         default: ;
         }
         break;
+    case VariantType::Enum:
+        switch (to.Type)
+        {
+    case VariantType::Bool:
+            return Variant(v.AsEnum != 0);
+        case VariantType::Int:
+            return Variant((int32)v.AsEnum);
+        case VariantType::Uint:
+            return Variant((uint32)v.AsEnum);
+        case VariantType::Int64:
+            return Variant((int64)v.AsEnum);
+        case VariantType::Uint64:
+            return Variant((uint64)v.AsEnum);
+        case VariantType::Float:
+            return Variant((float)v.AsEnum);
+        case VariantType::Double:
+            return Variant((double)v.AsEnum);
+        }
+        break;
+    case VariantType::Null:
+        switch (to.Type)
+        {
+        case VariantType::Asset:
+            return Variant((Asset*)nullptr);
+        case VariantType::Object:
+            return Variant((ScriptingObject*)nullptr);
+        case VariantType::ManagedObject:
+        {
+            Variant result;
+            result.SetType(VariantType(VariantType::ManagedObject));
+            result.MANAGED_GC_HANDLE = 0;
+            return result;
+        }
+        default:
+            return false;
+        }
     default: ;
     }
     LOG(Error, "Cannot cast Variant from {0} to {1}", v.Type, to);
@@ -3019,26 +4241,32 @@ bool Variant::NearEqual(const Variant& a, const Variant& b, float epsilon)
         return Math::NearEqual(a.AsFloat, b.AsFloat, epsilon);
     case VariantType::Double:
         return Math::NearEqual((float)a.AsDouble, (float)b.AsDouble, epsilon);
-    case VariantType::Vector2:
-        return Vector2::NearEqual(*(Vector2*)a.AsData, *(Vector2*)b.AsData, epsilon);
-    case VariantType::Vector3:
-        return Vector3::NearEqual(*(Vector3*)a.AsData, *(Vector3*)b.AsData, epsilon);
-    case VariantType::Vector4:
-        return Vector4::NearEqual(*(Vector4*)a.AsData, *(Vector4*)b.AsData, epsilon);
+    case VariantType::Float2:
+        return Float2::NearEqual(*(Float2*)a.AsData, *(Float2*)b.AsData, epsilon);
+    case VariantType::Float3:
+        return Float3::NearEqual(*(Float3*)a.AsData, *(Float3*)b.AsData, epsilon);
+    case VariantType::Float4:
+        return Float4::NearEqual(*(Float4*)a.AsData, *(Float4*)b.AsData, epsilon);
+    case VariantType::Double2:
+        return Double2::NearEqual(*(Double2*)a.AsData, *(Double2*)b.AsData, epsilon);
+    case VariantType::Double3:
+        return Double3::NearEqual(*(Double3*)a.AsData, *(Double3*)b.AsData, epsilon);
+    case VariantType::Double4:
+        return Double4::NearEqual(*(Double4*)a.AsBlob.Data, *(Double4*)b.AsBlob.Data, epsilon);
     case VariantType::Color:
         return Color::NearEqual(*(Color*)a.AsData, *(Color*)b.AsData, epsilon);
     case VariantType::BoundingSphere:
-        return BoundingSphere::NearEqual(*(BoundingSphere*)a.AsData, *(BoundingSphere*)b.AsData, epsilon);
+        return BoundingSphere::NearEqual(a.AsBoundingSphere(), b.AsBoundingSphere(), epsilon);
     case VariantType::Quaternion:
         return Quaternion::NearEqual(*(Quaternion*)a.AsData, *(Quaternion*)b.AsData, epsilon);
     case VariantType::Rectangle:
         return Rectangle::NearEqual(*(Rectangle*)a.AsData, *(Rectangle*)b.AsData, epsilon);
     case VariantType::BoundingBox:
-        return BoundingBox::NearEqual(*(BoundingBox*)a.AsBlob.Data, *(BoundingBox*)b.AsBlob.Data, epsilon);
+        return BoundingBox::NearEqual(a.AsBoundingBox(), b.AsBoundingBox(), epsilon);
     case VariantType::Transform:
         return Transform::NearEqual(*(Transform*)a.AsBlob.Data, *(Transform*)b.AsBlob.Data, epsilon);
     case VariantType::Ray:
-        return Ray::NearEqual(*(Ray*)a.AsBlob.Data, *(Ray*)b.AsBlob.Data, epsilon);
+        return Ray::NearEqual(a.AsRay(), b.AsRay(), epsilon);
     default:
         return a == b;
     }
@@ -3066,29 +4294,45 @@ Variant Variant::Lerp(const Variant& a, const Variant& b, float alpha)
         return Math::Lerp(a.AsUint64, b.AsUint64, alpha);
     case VariantType::Float:
         return Math::Lerp(a.AsFloat, b.AsFloat, alpha);
-    case VariantType::Vector2:
-        return Vector2::Lerp(*(Vector2*)a.AsData, *(Vector2*)b.AsData, alpha);
-    case VariantType::Vector3:
-        return Vector3::Lerp(*(Vector3*)a.AsData, *(Vector3*)b.AsData, alpha);
-    case VariantType::Vector4:
-        return Vector4::Lerp(*(Vector4*)a.AsData, *(Vector4*)b.AsData, alpha);
+    case VariantType::Float2:
+        return Float2::Lerp(*(Float2*)a.AsData, *(Float2*)b.AsData, alpha);
+    case VariantType::Float3:
+        return Float3::Lerp(*(Float3*)a.AsData, *(Float3*)b.AsData, alpha);
+    case VariantType::Float4:
+        return Float4::Lerp(*(Float4*)a.AsData, *(Float4*)b.AsData, alpha);
+    case VariantType::Double2:
+        return Double2::Lerp(*(Double2*)a.AsData, *(Double2*)b.AsData, alpha);
+    case VariantType::Double3:
+        return Double3::Lerp(*(Double3*)a.AsData, *(Double3*)b.AsData, alpha);
+    case VariantType::Double4:
+        return Double4::Lerp(*(Double4*)a.AsBlob.Data, *(Double4*)b.AsBlob.Data, alpha);
     case VariantType::Color:
         return Color::Lerp(*(Color*)a.AsData, *(Color*)b.AsData, alpha);
     case VariantType::Quaternion:
         return Quaternion::Lerp(*(Quaternion*)a.AsData, *(Quaternion*)b.AsData, alpha);
     case VariantType::BoundingSphere:
-        return BoundingSphere(Vector3::Lerp((*(BoundingSphere*)a.AsData).Center, (*(BoundingSphere*)b.AsData).Center, alpha), Math::Lerp((*(BoundingSphere*)a.AsData).Radius, (*(BoundingSphere*)b.AsData).Radius, alpha));
+        return BoundingSphere(Vector3::Lerp(a.AsBoundingSphere().Center, b.AsBoundingSphere().Center, alpha), Math::Lerp(a.AsBoundingSphere().Radius, b.AsBoundingSphere().Radius, alpha));
     case VariantType::Rectangle:
-        return Rectangle(Vector2::Lerp((*(Rectangle*)a.AsData).Location, (*(Rectangle*)b.AsData).Location, alpha), Vector2::Lerp((*(Rectangle*)a.AsData).Size, (*(Rectangle*)b.AsData).Size, alpha));
+        return Rectangle(Float2::Lerp((*(Rectangle*)a.AsData).Location, (*(Rectangle*)b.AsData).Location, alpha), Float2::Lerp((*(Rectangle*)a.AsData).Size, (*(Rectangle*)b.AsData).Size, alpha));
     case VariantType::Transform:
         return Variant(Transform::Lerp(*(Transform*)a.AsBlob.Data, *(Transform*)b.AsBlob.Data, alpha));
     case VariantType::BoundingBox:
-        return Variant(BoundingBox(Vector3::Lerp((*(BoundingBox*)a.AsBlob.Data).Minimum, (*(BoundingBox*)b.AsBlob.Data).Minimum, alpha), Vector3::Lerp((*(BoundingBox*)a.AsBlob.Data).Maximum, (*(BoundingBox*)b.AsBlob.Data).Maximum, alpha)));
+        return Variant(BoundingBox(Vector3::Lerp(a.AsBoundingBox().Minimum, b.AsBoundingBox().Minimum, alpha), Vector3::Lerp(a.AsBoundingBox().Maximum, b.AsBoundingBox().Maximum, alpha)));
     case VariantType::Ray:
-        return Variant(Ray(Vector3::Lerp((*(Ray*)a.AsBlob.Data).Position, (*(Ray*)b.AsBlob.Data).Position, alpha), Vector3::Normalize(Vector3::Lerp((*(Ray*)a.AsBlob.Data).Direction, (*(Ray*)b.AsBlob.Data).Direction, alpha))));
+        return Variant(Ray(Vector3::Lerp(a.AsRay().Position, b.AsRay().Position, alpha), Vector3::Normalize(Vector3::Lerp(a.AsRay().Direction, b.AsRay().Direction, alpha))));
     default:
         return a;
     }
+}
+
+void Variant::OnObjectDeleted(ScriptingObject* obj)
+{
+    AsObject = nullptr;
+}
+
+void Variant::OnAssetUnloaded(Asset* obj)
+{
+    AsAsset = nullptr;
 }
 
 void Variant::AllocStructure()
@@ -3100,6 +4344,7 @@ void Variant::AllocStructure()
         const ScriptingType& type = typeHandle.GetType();
         AsBlob.Length = type.Size;
         AsBlob.Data = Allocator::Allocate(AsBlob.Length);
+        Platform::MemoryClear(AsBlob.Data, AsBlob.Length);
         type.Struct.Ctor(AsBlob.Data);
     }
     else if (typeName == "System.Int16" || typeName == "System.UInt16")
@@ -3109,23 +4354,25 @@ void Variant::AllocStructure()
         AsBlob.Length = 2;
         AsBlob.Data = Allocator::Allocate(AsBlob.Length);
         *((int16*)AsBlob.Data) = 0;
+        MARK_CONTENT_DEPRECATED();
     }
+#if USE_CSHARP
     else if (const auto mclass = Scripting::FindClass(typeName))
     {
         // Fallback to C#-only types
-        MCore::AttachThread();
-        auto instance = mclass->CreateInstance();
+        MCore::Thread::Attach();
+        MObject* instance = mclass->CreateInstance();
         if (instance)
         {
 #if 0
-            void* data = mono_object_unbox(instance);
-            int32 instanceSize = mono_class_instance_size(mclass->GetNative());
+            void* data = MCore::Object::Unbox(instance);
+            int32 instanceSize = mclass->GetInstanceSize();
             AsBlob.Length = instanceSize - (int32)((uintptr)data - (uintptr)instance);
             AsBlob.Data = Allocator::Allocate(AsBlob.Length);
             Platform::MemoryCopy(AsBlob.Data, data, AsBlob.Length);
 #else
             Type.Type = VariantType::ManagedObject;
-            AsUint = mono_gchandle_new(instance, true);
+            MANAGED_GC_HANDLE = MCore::GCHandle::New(instance);
 #endif
         }
         else
@@ -3134,11 +4381,12 @@ void Variant::AllocStructure()
             AsBlob.Length = 0;
         }
     }
+#endif
     else
     {
         if (typeName.Length() != 0)
         {
-            LOG(Warning, "Missing scripting type \'{0}\'", String(typeName.Get()));
+            LOG(Warning, "Missing scripting type \'{0}\'", String(typeName));
         }
         AsBlob.Data = nullptr;
         AsBlob.Length = 0;
@@ -3149,15 +4397,32 @@ void Variant::CopyStructure(void* src)
 {
     if (AsBlob.Data && src)
     {
-        const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(StringAnsiView(Type.TypeName));
+        const StringAnsiView typeName(Type.TypeName);
+        const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(typeName);
         if (typeHandle)
         {
             auto& type = typeHandle.GetType();
             type.Struct.Copy(AsBlob.Data, src);
         }
+#if USE_CSHARP
+        else if (const auto mclass = Scripting::FindClass(typeName))
+        {
+            // Fallback to C#-only types
+            MCore::Thread::Attach();
+            if (MANAGED_GC_HANDLE && mclass->IsValueType())
+            {
+                MObject* instance = MCore::GCHandle::GetTarget(MANAGED_GC_HANDLE);
+                void* data = MCore::Object::Unbox(instance);
+                Platform::MemoryCopy(data, src, mclass->GetInstanceSize());
+            }
+        }
+#endif
         else
         {
-            Platform::MemoryCopy(AsBlob.Data, src, AsBlob.Length);
+            if (typeName.Length() != 0)
+            {
+                LOG(Warning, "Missing scripting type \'{0}\'", String(typeName));
+            }
         }
     }
 }
@@ -3173,6 +4438,14 @@ void Variant::FreeStructure()
         type.Struct.Dtor(AsBlob.Data);
     }
     Allocator::Free(AsBlob.Data);
+}
+
+Variant Variant::Enum(const VariantType& type, const uint64 value)
+{
+    Variant v;
+    v.SetType(type);
+    v.AsEnum = value;
+    return MoveTemp(v);
 }
 
 uint32 GetHash(const Variant& key)
@@ -3192,8 +4465,9 @@ uint32 GetHash(const Variant& key)
     case VariantType::Int64:
         return GetHash(key.AsInt64);
     case VariantType::Uint64:
-    case VariantType::Enum:
         return GetHash(key.AsUint64);
+    case VariantType::Enum:
+        return GetHash(key.AsEnum);
     case VariantType::Float:
         return GetHash(key.AsFloat);
     case VariantType::Double:
@@ -3206,6 +4480,13 @@ uint32 GetHash(const Variant& key)
         return GetHash((void*)key.AsObject);
     case VariantType::Structure:
     case VariantType::Blob:
+    case VariantType::Transform:
+    case VariantType::Matrix:
+#if USE_LARGE_WORLDS
+    case VariantType::BoundingSphere:
+    case VariantType::BoundingBox:
+    case VariantType::Ray:
+#endif
         return Crc::MemCrc32(key.AsBlob.Data, key.AsBlob.Length);
     case VariantType::Asset:
         return GetHash((void*)key.AsAsset);
@@ -3213,10 +4494,32 @@ uint32 GetHash(const Variant& key)
         return GetHash(*(Color*)key.AsData);
     case VariantType::Guid:
         return GetHash(*(Guid*)key.AsData);
-    case VariantType::ManagedObject:
-        return key.AsUint ? (uint32)mono_object_hash(mono_gchandle_get_target(key.AsUint)) : 0;
     case VariantType::Typename:
         return GetHash((const char*)key.AsBlob.Data);
+    case VariantType::Float2:
+        return GetHash(*(const Float2*)key.AsData);
+    case VariantType::Float3:
+        return GetHash(*(const Float3*)key.AsData);
+    case VariantType::Float4:
+        return GetHash(*(const Float4*)key.AsData);
+    case VariantType::Int2:
+        return GetHash(*(const Int2*)key.AsData);
+    case VariantType::Int3:
+        return GetHash(*(const Int3*)key.AsData);
+    case VariantType::Int4:
+        return GetHash(*(const Int4*)key.AsData);
+    case VariantType::Double2:
+        return GetHash(*(const Double2*)key.AsData);
+    case VariantType::Double3:
+        return GetHash(*(const Double3*)key.AsData);
+    case VariantType::Double4:
+        return GetHash(*(const Double4*)key.AsBlob.Data);
+    case VariantType::ManagedObject:
+#if USE_CSHARP
+        return key.MANAGED_GC_HANDLE ? (uint32)MCore::Object::GetHashCode(MCore::GCHandle::GetTarget(key.MANAGED_GC_HANDLE)) : 0;
+#else
+        return 0;
+#endif
     default:
         return 0;
     }

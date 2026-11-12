@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -49,7 +49,7 @@ namespace Flax.Build.Bindings
                 reader.ReadBoolean() != Module.BuildCSharp ||
                 reader.ReadString() != Globals.Project.Name ||
                 reader.ReadString() != Globals.Project.Version.ToString()
-            )
+               )
                 throw new Exception();
 
             base.Read(reader);

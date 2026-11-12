@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -7,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://curl.haxx.se/
 /// </summary>
-public class curl : DepsModule
+public class curl : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -16,9 +16,6 @@ public class curl : DepsModule
 
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "curl License.txt";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -39,6 +36,10 @@ public class curl : DepsModule
             break;
         case TargetPlatform.Linux:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libcurl.a"));
+            break;
+        case TargetPlatform.Mac:
+            options.OutputFiles.Add(Path.Combine(depsRoot, "libcurl.a"));
+            options.OutputFiles.Add("Security.framework");
             break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }

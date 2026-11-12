@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -18,7 +18,7 @@ class CreateAssetContext;
 /// <summary>
 /// Create/Import new asset callback result
 /// </summary>
-DECLARE_ENUM_7(CreateAssetResult, Ok, Abort, Error, CannotSaveFile, InvalidPath, CannotAllocateChunk, InvalidTypeID);
+DECLARE_ENUM_8(CreateAssetResult, Ok, Abort, Error, CannotSaveFile, InvalidPath, CannotAllocateChunk, InvalidTypeID, Skip);
 
 /// <summary>
 /// Create/Import new asset callback function
@@ -28,14 +28,12 @@ typedef Function<CreateAssetResult(CreateAssetContext&)> CreateAssetFunction;
 /// <summary>
 /// Importing/creating asset context structure
 /// </summary>
-class CreateAssetContext : public NonCopyable
+class FLAXENGINE_API CreateAssetContext : public NonCopyable
 {
 private:
-
     CreateAssetResult _applyChangesResult;
 
 public:
-
     /// <summary>
     /// Path of the input file (may be empty if creating new asset)
     /// </summary>
@@ -70,7 +68,6 @@ public:
     // TODO: add cancellation feature - so progress can be aborted on demand
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="CreateAssetContext"/> class.
     /// </summary>
@@ -88,7 +85,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Runs the specified callback.
     /// </summary>
@@ -97,7 +93,6 @@ public:
     CreateAssetResult Run(const CreateAssetFunction& callback);
 
 public:
-
     /// <summary>
     /// Allocates the chunk in the output data so upgrader can write to it.
     /// </summary>
@@ -112,17 +107,15 @@ public:
     void AddMeta(JsonWriter& writer) const;
 
 private:
-
     void ApplyChanges();
 };
 
 /// <summary>
 /// Asset importer entry
 /// </summary>
-struct AssetImporter
+struct FLAXENGINE_API AssetImporter
 {
 public:
-
     /// <summary>
     /// Extension of the file to import with that importer (without leading dot).
     /// </summary>
@@ -142,10 +135,9 @@ public:
 /// <summary>
 /// Asset creator entry
 /// </summary>
-struct AssetCreator
+struct FLAXENGINE_API AssetCreator
 {
 public:
-
     /// <summary>
     /// Asset creators are identifiable by tag
     /// </summary>

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Decal.h"
 #include "Engine/Content/Assets/MaterialInstance.h"
@@ -6,16 +6,16 @@
 #include "Engine/Renderer/RenderList.h"
 #include "Engine/Level/Scene/SceneRendering.h"
 #include "Engine/Graphics/RenderView.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/RenderTools.h"
 
 Decal::Decal(const SpawnParams& params)
     : Actor(params)
     , _size(100.0f)
 {
-    _world = Matrix::Scaling(_size);
-    _bounds.Extents = Vector3::Half;
-    _bounds.Transformation = _world;
+    _drawCategory = SceneRendering::PreRender;
+    _bounds.Extents = _size * 0.5f;
+    _bounds.Transformation = _transform;
     _bounds.GetBoundingBox(_box);
     BoundingSphere::FromBox(_box, _sphere);
 }
@@ -26,12 +26,7 @@ void Decal::SetSize(const Vector3& value)
     if (v != _size)
     {
         _size = v;
-
-        Transform t = _transform;
-        t.Scale *= _size;
-        t.GetWorld(_world);
-        _bounds.Extents = Vector3::Half;
-        _bounds.Transformation = _world;
+        _bounds.Extents = v * 0.5f;
         _bounds.GetBoundingBox(_box);
         BoundingSphere::FromBox(_box, _sphere);
     }
@@ -58,29 +53,44 @@ void Decal::OnDebugDrawSelected()
     Actor::OnDebugDrawSelected();
 }
 
+BoundingBox Decal::GetEditorBoundingBox() const
+{
+    const Vector3 size(10.0f);
+    return BoundingBox(_transform.Translation - size, _transform.Translation + size);
+}
+
 #endif
 
 void Decal::OnLayerChanged()
 {
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateCommon(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Layer);
 }
 
-void Decal::Draw(RenderContext& renderContext)
+void Decal::Draw(RenderContextBatch& renderContextBatch)
 {
-    if ((renderContext.View.Flags & ViewFlags::Decals) != 0 &&
-        Material &&
-        Material->IsLoaded() &&
-        Material->IsDecal())
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
+    MaterialBase* material = Material;
+    if (EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::Decals) &&
+        EnumHasAnyFlags(renderContext.View.Pass, DrawPass::GBuffer) &&
+        material &&
+        material->IsLoaded() &&
+        material->IsDecal())
     {
-        const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
-        const float screenRadiusSquared = RenderTools::ComputeBoundsScreenRadiusSquared(_sphere.Center, _sphere.Radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
-
         // Check if decal is being culled
+        const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
+        const float screenRadiusSquared = RenderTools::ComputeBoundsScreenRadiusSquared(_sphere.Center - renderContext.View.Origin, (float)_sphere.Radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
         if (Math::Square(DrawMinScreenSize * 0.5f) > screenRadiusSquared)
             return;
 
-        renderContext.List->Decals.Add(this);
+        RenderDecalData data;
+        Transform transform = GetTransform();
+        transform.Scale *= _size;
+        renderContext.View.GetWorldMatrix(transform, data.World);
+        data.SortOrder = SortOrder;
+        data.RenderLayersMask = RenderLayersMask;
+        data.Material = material;
+        renderContext.List->Decals.Add(data);
     }
 }
 
@@ -94,6 +104,7 @@ void Decal::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE(Material);
     SERIALIZE_MEMBER(Size, _size);
     SERIALIZE(SortOrder);
+    SERIALIZE(RenderLayersMask);
     SERIALIZE(DrawMinScreenSize);
 }
 
@@ -105,17 +116,20 @@ void Decal::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
     DESERIALIZE(Material);
     DESERIALIZE_MEMBER(Size, _size);
     DESERIALIZE(SortOrder);
+    DESERIALIZE(RenderLayersMask);
     DESERIALIZE(DrawMinScreenSize);
+
+    _bounds.Extents = _size * 0.5f;
 }
 
-bool Decal::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool Decal::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return _bounds.Intersects(ray, distance, normal);
 }
 
 void Decal::OnEnable()
 {
-    _sceneRenderingKey = GetSceneRendering()->AddCommon(this);
+    GetSceneRendering()->AddActor(this, _sceneRenderingKey);
 #if USE_EDITOR
     GetSceneRendering()->AddViewportIcon(this);
 #endif
@@ -129,7 +143,7 @@ void Decal::OnDisable()
 #if USE_EDITOR
     GetSceneRendering()->RemoveViewportIcon(this);
 #endif
-    GetSceneRendering()->RemoveCommon(this, _sceneRenderingKey);
+    GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
 
     // Base
     Actor::OnDisable();
@@ -140,15 +154,10 @@ void Decal::OnTransformChanged()
     // Base
     Actor::OnTransformChanged();
 
-    Transform t = _transform;
-    t.Scale *= _size;
-    t.GetWorld(_world);
-
-    _bounds.Extents = Vector3::Half;
-    _bounds.Transformation = _world;
+    _bounds.Transformation = _transform;
     _bounds.GetBoundingBox(_box);
     BoundingSphere::FromBox(_box, _sphere);
 
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateCommon(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey);
 }

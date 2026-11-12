@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ThreadPool.h"
 #include "IRunnable.h"
@@ -7,27 +7,48 @@
 #include "ConcurrentTaskQueue.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Math.h"
+#include "Engine/Core/Types/String.h"
+#include "Engine/Core/Collections/Array.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Platform/ConditionVariable.h"
 #include "Engine/Platform/CPUInfo.h"
 #include "Engine/Platform/Thread.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#include "Engine/Scripting/Internal/InternalCalls.h"
 
 FLAXENGINE_API bool IsInMainThread()
 {
     return Globals::MainThreadID == Platform::GetCurrentThreadID();
 }
 
+FLAXENGINE_API bool IsInRenderThread()
+{
+    return Globals::RenderThreadID == Platform::GetCurrentThreadID();
+}
+
+String ThreadPoolTask::ToString() const
+{
+    return String::Format(TEXT("Thread Pool Task ({0})"), (int32)GetState());
+}
+
+#if PLATFORM_THREADS_LIMIT > 1
+
 namespace ThreadPoolImpl
 {
-    volatile int64 ExitFlag = 0;
+    volatile intptr ExitFlag = 0;
     Array<Thread*> Threads;
     ConcurrentTaskQueue<ThreadPoolTask> Jobs; // Hello Steve!
     ConditionVariable JobsSignal;
+    CriticalSection JobsMutex;
+#ifdef THREAD_POOL_AFFINITY_MASK
+    volatile int64 ThreadIndex = 0;
+#endif
 }
 
 void ThreadPoolTask::Enqueue()
 {
+    PROFILE_MEM(EngineThreading);
     ThreadPoolImpl::Jobs.Add(this);
     ThreadPoolImpl::JobsSignal.NotifyOne();
 }
@@ -50,12 +71,15 @@ ThreadPoolService ThreadPoolServiceInstance;
 
 bool ThreadPoolService::Init()
 {
+    PROFILE_MEM(EngineThreading);
+
     // Spawn threads
-    const int32 numThreads = Math::Clamp<int32>(Platform::GetCPUInfo().ProcessorCoreCount - 1, 2, PLATFORM_THREADS_LIMIT);
-    LOG(Info, "Spawning {0} Thread Pool workers", numThreads);
-    for (int32 i = ThreadPoolImpl::Threads.Count(); i < numThreads; i++)
+    const CPUInfo cpuInfo = Platform::GetCPUInfo();
+    const int32 count = Math::Clamp<int32>(cpuInfo.ProcessorCoreCount - 1, 2, PLATFORM_THREADS_LIMIT / 2);
+    LOG(Info, "Spawning {0} Thread Pool workers", count);
+    ThreadPoolImpl::Threads.Resize(count);
+    for (int32 i = 0; i < count; i++)
     {
-        // Create tread
         auto runnable = New<SimpleRunnable>(true);
         runnable->OnWork.Bind(ThreadPool::ThreadProc);
         auto thread = Thread::Create(runnable, String::Format(TEXT("Thread Pool {0}"), i));
@@ -64,9 +88,7 @@ bool ThreadPoolService::Init()
             LOG(Error, "Failed to spawn {0} thread in the Thread Pool", i + 1);
             return true;
         }
-
-        // Add to the list
-        ThreadPoolImpl::Threads.Add(thread);
+        ThreadPoolImpl::Threads[i] = thread;
     }
 
     return false;
@@ -91,34 +113,48 @@ void ThreadPoolService::Dispose()
     // Delete threads
     for (int32 i = 0; i < ThreadPoolImpl::Threads.Count(); i++)
     {
-        if (ThreadPoolImpl::Threads[i]->IsRunning())
-        {
-            ThreadPoolImpl::Threads[i]->Kill(true);
-        }
+        ThreadPoolImpl::Threads[i]->Kill(true);
     }
     ThreadPoolImpl::Threads.ClearDelete();
 }
 
 int32 ThreadPool::ThreadProc()
 {
+#ifdef THREAD_POOL_AFFINITY_MASK
+    const int64 index = Platform::InterlockedIncrement(&ThreadPoolImpl::ThreadIndex) - 1;
+    Platform::SetThreadAffinityMask(THREAD_POOL_AFFINITY_MASK((int32)index));
+#endif
     ThreadPoolTask* task;
+    MONO_THREAD_INFO_TYPE* monoThreadInfo = nullptr;
 
     // Work until end
-    CriticalSection mutex;
     while (Platform::AtomicRead(&ThreadPoolImpl::ExitFlag) == 0)
     {
         // Try to get a job
         if (ThreadPoolImpl::Jobs.try_dequeue(task))
         {
             task->Execute();
+            MONO_THREAD_INFO_GET(monoThreadInfo);
         }
         else
         {
-            mutex.Lock();
-            ThreadPoolImpl::JobsSignal.Wait(mutex);
-            mutex.Unlock();
+            MONO_ENTER_GC_SAFE_WITH_INFO(monoThreadInfo);
+            ThreadPoolImpl::JobsMutex.Lock();
+            ThreadPoolImpl::JobsSignal.Wait(ThreadPoolImpl::JobsMutex);
+            ThreadPoolImpl::JobsMutex.Unlock();
+            MONO_EXIT_GC_SAFE_WITH_INFO;
         }
     }
 
     return 0;
 }
+
+#else
+
+void ThreadPoolTask::Enqueue()
+{
+    // Run task on the main thread (fallback when no threading is supported)
+    Execute();
+}
+
+#endif

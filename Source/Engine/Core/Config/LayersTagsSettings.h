@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,11 +9,11 @@
 /// <summary>
 /// Layers and objects tags settings.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LayersAndTagsSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LayersAndTagsSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LayersAndTagsSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LayersAndTagsSettings);
 
+public:
     /// <summary>
     /// The tag names.
     /// </summary>
@@ -25,7 +25,6 @@ public:
     String Layers[32];
 
 public:
-
     /// <summary>
     /// Gets the instance of the settings asset (default value if missing). Object returned by this method is always loaded with valid data to use.
     /// </summary>
@@ -33,5 +32,8 @@ public:
 
     // [SettingsBase]
     void Apply() override;
+#if USE_EDITOR
+    void Serialize(SerializeStream& stream, const void* otherObj) override;
+#endif
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override;
 };

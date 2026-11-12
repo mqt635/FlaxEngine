@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -52,7 +52,7 @@ namespace FlaxEditor.Surface.Elements
 
             // Draw border
             if (!IsFocused)
-                Render2D.DrawRectangle(new Rectangle(Vector2.Zero, Size), Style.Current.BorderNormal);
+                Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), Style.Current.BorderNormal);
         }
     }
 }

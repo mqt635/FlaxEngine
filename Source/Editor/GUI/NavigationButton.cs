@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -37,15 +37,14 @@ namespace FlaxEditor.GUI
         /// <inheritdoc />
         public override void Draw()
         {
-            // Cache data
             var style = Style.Current;
-            var clientRect = new Rectangle(Vector2.Zero, Size);
-            var textRect = new Rectangle(4, 0, clientRect.Width - 4, clientRect.Height);
+            var clientRect = new Rectangle(Float2.Zero, Size);
 
             // Draw background
             if (IsDragOver && _validDragOver)
             {
-                Render2D.FillRectangle(clientRect, Style.Current.BackgroundSelected * 0.6f);
+                Render2D.FillRectangle(clientRect, style.Selection);
+                Render2D.DrawRectangle(clientRect, style.SelectionBorder);
             }
             else if (_isPressed)
             {
@@ -57,14 +56,13 @@ namespace FlaxEditor.GUI
             }
 
             // Draw text
-            Render2D.DrawText(style.FontMedium, Text, textRect, EnabledInHierarchy ? style.Foreground : style.ForegroundDisabled, TextAlignment.Near, TextAlignment.Center);
+            Render2D.DrawText(style.FontMedium, Text, clientRect, EnabledInHierarchy ? style.Foreground : style.ForegroundDisabled, TextAlignment.Center, TextAlignment.Center);
         }
 
         /// <inheritdoc />
         public override void PerformLayout(bool force = false)
         {
             var style = Style.Current;
-
             if (style.FontMedium)
             {
                 Width = style.FontMedium.MeasureText(Text).X + 2 * DefaultMargin;

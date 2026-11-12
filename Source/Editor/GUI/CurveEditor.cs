@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Linq;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.Options;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -18,18 +19,73 @@ namespace FlaxEditor.GUI
     /// <seealso cref="CurveEditorBase" />
     public abstract partial class CurveEditor<T> : CurveEditorBase where T : new()
     {
+        /// <summary>
+        /// Represents a single point in a <see cref="CurveEditorPreset"/>.
+        /// </summary>
+        protected struct CurvePresetPoint
+        {
+            /// <summary>
+            /// The time.
+            /// </summary>
+            public float Time;
+
+            /// <summary>
+            /// The value.
+            /// </summary>
+            public float Value;
+
+            /// <summary>
+            /// The in tangent. Will be ignored in <see cref="LinearCurveEditor{T}"/>
+            /// </summary>
+            public float TangentIn;
+
+            /// <summary>
+            /// The out tangent. Will be ignored in <see cref="LinearCurveEditor{T}"/>
+            /// </summary>
+            public float TangentOut;
+        }
+
+        /// <summary>
+        /// A curve preset.
+        /// </summary>
+        protected struct CurveEditorPreset()
+        {
+            /// <summary>
+            /// If the tangents will be linear or smooth.
+            /// </summary>
+            public bool LinearTangents;
+
+            /// <summary>
+            /// The points of the preset.
+            /// </summary>
+            public List<CurvePresetPoint> Points;
+        }
+
         private class Popup : ContextMenuBase
         {
+            private const float HeaderHeight = 12.0f;
+            private const float MinContentHeight = 120.0f;
+
             private CustomEditorPresenter _presenter;
             private CurveEditor<T> _editor;
             private List<int> _keyframeIndices;
+            private Panel _panel;
             private bool _isDirty;
+            private bool _isDragging;
+            private Float2 _dragStartScreenPos;
+            private Float2 _dragStartWindowPos;
 
-            public Popup(CurveEditor<T> editor, object[] selection, List<int> keyframeIndices = null, float height = 140.0f)
-            : this(editor, height)
+            public Popup(CurveEditor<T> editor, object[] selection, List<int> keyframeIndices = null, float maxHeight = 140.0f)
+            : this(editor, maxHeight)
             {
                 _presenter.Select(selection);
                 _presenter.OpenAllGroups();
+                var maxContentHeight = Mathf.Max(maxHeight - HeaderHeight, 1.0f);
+                var desiredHeight = _presenter.ContainerControl.Size.Y;
+                if (desiredHeight <= 1.0f)
+                    desiredHeight = maxContentHeight;
+                Size = new Float2(Size.X, HeaderHeight + Mathf.Min(Mathf.Max(desiredHeight, MinContentHeight), maxContentHeight));
+                UpdateContentBounds();
                 _keyframeIndices = keyframeIndices;
                 if (keyframeIndices != null && selection.Length != keyframeIndices.Count)
                     throw new Exception();
@@ -39,17 +95,38 @@ namespace FlaxEditor.GUI
             {
                 _editor = editor;
                 const float width = 340.0f;
-                Size = new Vector2(width, height);
-                var panel1 = new Panel(ScrollBars.Vertical)
+                Size = new Float2(width, height);
+                _panel = new Panel(ScrollBars.Vertical)
                 {
-                    Bounds = new Rectangle(0, 0.0f, width, height),
+                    Bounds = new Rectangle(0, HeaderHeight, width, Mathf.Max(height - HeaderHeight, 1.0f)),
                     Parent = this
                 };
                 _presenter = new CustomEditorPresenter(null);
                 _presenter.Panel.AnchorPreset = AnchorPresets.HorizontalStretchTop;
                 _presenter.Panel.IsScrollable = true;
-                _presenter.Panel.Parent = panel1;
+                _presenter.Panel.Parent = _panel;
                 _presenter.Modified += OnModified;
+            }
+
+            private void UpdateContentBounds()
+            {
+                if (_panel != null)
+                    _panel.Bounds = new Rectangle(0, HeaderHeight, Width, Mathf.Max(Height - HeaderHeight, 1.0f));
+            }
+
+            private bool IsOverHeader(ref Float2 location)
+            {
+                return location.X >= 0.0f && location.X <= Width && location.Y >= 0.0f && location.Y <= HeaderHeight;
+            }
+
+            private void EndDragging()
+            {
+                if (_isDragging)
+                {
+                    _isDragging = false;
+                    Cursor = CursorType.Default;
+                    EndMouseCapture();
+                }
             }
 
             private void OnModified()
@@ -64,7 +141,7 @@ namespace FlaxEditor.GUI
                 {
                     for (int i = 0; i < _presenter.SelectionCount; i++)
                     {
-                        _editor.SetKeyframeInternal(_keyframeIndices[i], _presenter.Selection[i]);
+                        _editor.SetKeyframeInternal(_keyframeIndices[i], _editor.GetKeyframeFromEditingProxy(_presenter.Selection[i]));
                     }
                 }
                 else if (_presenter.Selection[0] is IAllKeyframesProxy proxy)
@@ -86,11 +163,30 @@ namespace FlaxEditor.GUI
             }
 
             /// <inheritdoc />
+            public override void Draw()
+            {
+                base.Draw();
+
+                var style = Style.Current;
+                Render2D.FillRectangle(new Rectangle(0, 0, Width, HeaderHeight), style.BackgroundHighlighted);
+                Render2D.FillRectangle(new Rectangle(0, HeaderHeight - 1.0f, Width, 1.0f), style.Background);
+            }
+
+            /// <inheritdoc />
+            protected override void OnSizeChanged()
+            {
+                base.OnSizeChanged();
+
+                UpdateContentBounds();
+            }
+
+            /// <inheritdoc />
             public override void Hide()
             {
                 if (!Visible)
                     return;
 
+                EndDragging();
                 Focus(null);
 
                 if (_isDirty)
@@ -101,11 +197,85 @@ namespace FlaxEditor.GUI
 
                 if (_editor._popup == this)
                     _editor._popup = null;
+                _presenter.Modified -= OnModified;
                 _presenter = null;
                 _editor = null;
                 _keyframeIndices = null;
+                _panel = null;
 
                 base.Hide();
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseDown(Float2 location, MouseButton button)
+            {
+                if (button == MouseButton.Left && IsOverHeader(ref location))
+                {
+                    _isDragging = true;
+                    _dragStartScreenPos = FlaxEngine.Input.MouseScreenPosition;
+                    _dragStartWindowPos = WindowLocation;
+                    Cursor = CursorType.SizeAll;
+                    StartMouseCapture();
+                    Focus();
+                    return true;
+                }
+
+                return base.OnMouseDown(location, button);
+            }
+
+            /// <inheritdoc />
+            public override void OnMouseMove(Float2 location)
+            {
+                if (_isDragging)
+                {
+                    var screenPos = FlaxEngine.Input.MouseScreenPosition;
+                    MoveWindowTo(_dragStartWindowPos + screenPos - _dragStartScreenPos);
+                    Cursor = CursorType.SizeAll;
+                    return;
+                }
+
+                Cursor = IsOverHeader(ref location) ? CursorType.SizeAll : CursorType.Default;
+
+                base.OnMouseMove(location);
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseUp(Float2 location, MouseButton button)
+            {
+                if (button == MouseButton.Left && _isDragging)
+                {
+                    EndDragging();
+                    return true;
+                }
+
+                return base.OnMouseUp(location, button);
+            }
+
+            /// <inheritdoc />
+            public override void OnMouseLeave()
+            {
+                if (!_isDragging)
+                    Cursor = CursorType.Default;
+
+                base.OnMouseLeave();
+            }
+
+            /// <inheritdoc />
+            public override void OnLostFocus()
+            {
+                EndDragging();
+                Cursor = CursorType.Default;
+
+                base.OnLostFocus();
+            }
+
+            /// <inheritdoc />
+            public override void OnEndMouseCapture()
+            {
+                _isDragging = false;
+                Cursor = CursorType.Default;
+
+                base.OnEndMouseCapture();
             }
 
             /// <inheritdoc />
@@ -152,7 +322,7 @@ namespace FlaxEditor.GUI
             /// <summary>
             /// Gets the point time and value on a curve.
             /// </summary>
-            public Vector2 Point => Editor.GetKeyframePoint(Index, Component);
+            public Float2 Point => Editor.GetKeyframePoint(Index, Component);
 
             /// <summary>
             /// Gets the time of the keyframe point.
@@ -162,17 +332,19 @@ namespace FlaxEditor.GUI
             /// <inheritdoc />
             public override void Draw()
             {
-                var rect = new Rectangle(Vector2.Zero, Size);
-                var color = Editor.ShowCollapsed ? Color.Gray : Editor.Colors[Component];
+                var style = Style.Current;
+                var rect = new Rectangle(Float2.Zero, Size);
+                var axisColor = Editor.ShowCollapsed ? style.ForegroundDisabled : Editor.Colors[Component];
+                var color = axisColor;
                 if (IsSelected)
-                    color = Editor.ContainsFocus ? Color.YellowGreen : Color.Lerp(Color.Gray, Color.YellowGreen, 0.4f);
+                    color = Editor.ContainsFocus ? style.SelectionBorder : Color.Lerp(style.ForegroundDisabled, style.SelectionBorder, 0.4f);
                 if (IsMouseOver)
-                    color *= 1.1f;
+                    color *= 1.5f;
                 Render2D.FillRectangle(rect, color);
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
                 if (base.OnMouseDoubleClick(location, button))
                     return true;
@@ -243,17 +415,14 @@ namespace FlaxEditor.GUI
                 set => Editor.SetKeyframeTangentInternal(Index, IsIn, Component, value);
             }
 
+            private const float TangentVisualOffset = 50.0f;
+
+            internal float TangentOffset => TangentVisualOffset / Editor.ViewScale.X;
+
             /// <inheritdoc />
             public override void Draw()
             {
-                var pointPos = PointFromParent(Point.Center);
-                Render2D.DrawLine(Size * 0.5f, pointPos, Color.Gray);
-
-                var rect = new Rectangle(Vector2.Zero, Size);
-                var color = Color.MediumVioletRed;
-                if (IsMouseOver)
-                    color *= 1.1f;
-                Render2D.FillRectangle(rect, color);
+                // Drawn by the editor overlay to keep a constant screen-space size.
             }
 
             /// <summary>
@@ -278,7 +447,7 @@ namespace FlaxEditor.GUI
         /// <summary>
         /// The keyframes size.
         /// </summary>
-        protected static readonly Vector2 KeyframesSize = new Vector2(7.0f);
+        protected static readonly Float2 KeyframesSize = new Float2(8.0f);
 
         /// <summary>
         /// The colors for the keyframe points.
@@ -288,7 +457,7 @@ namespace FlaxEditor.GUI
         /// <summary>
         /// The curve time/value axes tick steps.
         /// </summary>
-        protected float[] TickSteps = Utilities.Utils.CurveTickSteps;
+        protected double[] TickSteps = Utilities.Utils.CurveTickSteps;
 
         /// <summary>
         /// The curve contents area.
@@ -320,6 +489,63 @@ namespace FlaxEditor.GUI
         private Font _labelsFont;
 
         /// <summary>
+        /// Preset values for <see cref="CurvePreset"/> to be applied to a <see cref="CurveEditor{T}"/>.
+        /// </summary>
+        protected Dictionary<CurvePreset, CurveEditorPreset> Presets = new Dictionary<CurvePreset, CurveEditorPreset>
+        {
+            { CurvePreset.Constant, new CurveEditorPreset
+                {
+                    LinearTangents = true,
+                    Points = new List<CurvePresetPoint>
+                    {
+                        new CurvePresetPoint { Time = 0f, Value = 0.5f, TangentIn = 0f, TangentOut = 0f },
+                        new CurvePresetPoint { Time = 1f, Value = 0.5f, TangentIn = 0f, TangentOut = 0f },
+                    }
+                }
+            },
+            { CurvePreset.EaseIn, new CurveEditorPreset
+                {
+                    LinearTangents = false,
+                    Points = new List<CurvePresetPoint>
+                    {
+                        new CurvePresetPoint { Time = 0f, Value = 0f, TangentIn = 0f, TangentOut = 0f },
+                        new CurvePresetPoint { Time = 1f, Value = 1f, TangentIn = -1.4f, TangentOut = 0f },
+                    }
+                }
+            },
+            { CurvePreset.EaseOut, new CurveEditorPreset
+                {
+                    LinearTangents = false,
+                    Points = new List<CurvePresetPoint>
+                    {
+                        new CurvePresetPoint { Time = 1f, Value = 1f, TangentIn = 0f, TangentOut = 0f },
+                        new CurvePresetPoint { Time = 0f, Value = 0f, TangentIn = 0f, TangentOut = 1.4f },
+                    }
+                }
+            },
+            { CurvePreset.Linear, new CurveEditorPreset
+                {
+                    LinearTangents = true,
+                    Points = new List<CurvePresetPoint>
+                    {
+                        new CurvePresetPoint { Time = 0f, Value = 0f, TangentIn = 0f, TangentOut = 0f },
+                        new CurvePresetPoint { Time = 1f, Value = 1f, TangentIn = 0f, TangentOut = 0f },
+                    }
+                }
+            },
+            { CurvePreset.Smoothstep, new CurveEditorPreset
+                {
+                    LinearTangents = false,
+                    Points = new List<CurvePresetPoint>
+                    {
+                        new CurvePresetPoint { Time = 0f, Value = 0f, TangentIn = 0f, TangentOut = 0f },
+                        new CurvePresetPoint { Time = 1f, Value = 1f, TangentIn = 0f, TangentOut = 0f },
+                    }
+                }
+            },
+        };
+
+        /// <summary>
         /// The keyframe UI points.
         /// </summary>
         protected readonly List<KeyframePoint> _points = new List<KeyframePoint>();
@@ -329,22 +555,57 @@ namespace FlaxEditor.GUI
         /// </summary>
         protected readonly TangentPoint[] _tangents = new TangentPoint[2];
 
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        /// <summary>
+        /// Returns the input value if finite, otherwise returns a finite fallback or zero.
+        /// </summary>
+        protected static float SanitizeFinite(float value, float fallback)
+        {
+            if (IsFinite(value))
+                return value;
+            return IsFinite(fallback) ? fallback : 0.0f;
+        }
+
+        private static float SanitizeViewScale(float value, float fallback)
+        {
+            if (!IsFinite(value))
+                value = IsFinite(fallback) ? fallback : 1.0f;
+            return Mathf.Clamp(value, 0.0001f, 1000.0f);
+        }
+
+        private static float GetSafeZoomRatio(float viewSize, float contentsSize)
+        {
+            return IsFinite(viewSize) && IsFinite(contentsSize) && viewSize > Mathf.Epsilon && contentsSize > Mathf.Epsilon ? viewSize / contentsSize : 0.0f;
+        }
+
         /// <inheritdoc />
-        public override Vector2 ViewOffset
+        public override Float2 ViewOffset
         {
             get => _mainPanel.ViewOffset;
             set
             {
+                value.X = SanitizeFinite(value.X, _mainPanel.ViewOffset.X);
+                value.Y = SanitizeFinite(value.Y, _mainPanel.ViewOffset.Y);
                 _mainPanel.ViewOffset = value;
                 _mainPanel.FastScroll();
             }
         }
 
         /// <inheritdoc />
-        public override Vector2 ViewScale
+        public override Float2 ViewScale
         {
             get => _contents.Scale;
-            set => _contents.Scale = Vector2.Clamp(value, new Vector2(0.0001f), new Vector2(1000.0f));
+            set
+            {
+                var scale = _contents.Scale;
+                value.X = SanitizeViewScale(value.X, scale.X);
+                value.Y = SanitizeViewScale(value.Y, scale.Y);
+                _contents.Scale = value;
+            }
         }
 
         /// <summary>
@@ -371,6 +632,9 @@ namespace FlaxEditor.GUI
 
         /// <inheritdoc />
         public override Type ValueType => typeof(T);
+
+        /// <inheritdoc />
+        public override Panel MainPanel => _mainPanel;
 
         /// <inheritdoc />
         public override float? FPS
@@ -430,7 +694,6 @@ namespace FlaxEditor.GUI
         /// </summary>
         protected CurveEditor()
         {
-            _tickStrengths = new float[TickSteps.Length];
             Accessor.GetDefaultValue(out DefaultValue);
 
             var style = Style.Current;
@@ -442,7 +705,7 @@ namespace FlaxEditor.GUI
             _mainPanel = new Panel(ScrollBars.Both)
             {
                 ScrollMargin = new Margin(150.0f),
-                AlwaysShowScrollbars = true,
+                AlwaysShowScrollbars = false,
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
                 Parent = this
@@ -520,7 +783,7 @@ namespace FlaxEditor.GUI
         /// Adds a new keyframe at the given location (in keyframes space).
         /// </summary>
         /// <param name="keyframesPos">The new keyframe position (in keyframes space).</param>
-        protected abstract void AddKeyframe(Vector2 keyframesPos);
+        protected abstract void AddKeyframe(Float2 keyframesPos);
 
         /// <summary>
         /// Sets the keyframe data (internally).
@@ -563,6 +826,28 @@ namespace FlaxEditor.GUI
         protected abstract void RemoveKeyframesInternal(HashSet<int> indicesToRemove);
 
         /// <summary>
+        /// Tries to convert a float to the type of the type wildcard of the curve editor.
+        /// </summary>
+        /// <param name="value">The float.</param>
+        /// <returns>The converted value.</returns>
+        public static object ConvertCurvePresetValueToCurveEditorType(float value)
+        {
+            if (typeof(T) == typeof(Float2))
+                return new Float2(value);
+            if (typeof(T) == typeof(Float3))
+                return new Float3(value);
+            if (typeof(T) == typeof(Float4))
+                return new Float4(value);
+            if (typeof(T) == typeof(Vector2))
+                return new Vector2(value);
+            if (typeof(T) == typeof(Vector3))
+                return new Vector3(value);
+            if (typeof(T) == typeof(Vector4))
+                return new Vector4(value);
+            return value;
+        }
+
+        /// <summary>
         /// Called when showing a context menu. Can be used to add custom buttons with actions.
         /// </summary>
         /// <param name="cm">The menu.</param>
@@ -578,6 +863,36 @@ namespace FlaxEditor.GUI
         protected abstract IAllKeyframesProxy GetAllKeyframesEditingProxy();
 
         /// <summary>
+        /// Creates an editing proxy for a single keyframe.
+        /// </summary>
+        /// <param name="index">The keyframe index.</param>
+        /// <param name="keyframe">The keyframe.</param>
+        /// <returns>The keyframe editing proxy.</returns>
+        protected virtual object CreateKeyframeEditingProxy(int index, object keyframe)
+        {
+            return keyframe;
+        }
+
+        /// <summary>
+        /// Gets keyframe data from its editing proxy.
+        /// </summary>
+        /// <param name="proxy">The keyframe editing proxy.</param>
+        /// <returns>The keyframe data.</returns>
+        protected virtual object GetKeyframeFromEditingProxy(object proxy)
+        {
+            return proxy;
+        }
+
+        /// <summary>
+        /// Gets the maximum height for keyframe editing popup.
+        /// </summary>
+        /// <returns>The maximum popup height.</returns>
+        protected virtual float GetKeyframeEditingPopupHeight()
+        {
+            return 320.0f;
+        }
+
+        /// <summary>
         /// Interface for keyframes editing proxy objects.
         /// </summary>
         protected interface IAllKeyframesProxy
@@ -588,13 +903,13 @@ namespace FlaxEditor.GUI
             void Apply();
         }
 
-        private void EditAllKeyframes(Control control, Vector2 pos)
+        private void EditAllKeyframes(Control control, Float2 pos)
         {
             _popup = new Popup(this, new object[] { GetAllKeyframesEditingProxy() }, null, 400.0f);
             _popup.Show(control, pos);
         }
 
-        private void EditKeyframes(Control control, Vector2 pos)
+        private void EditKeyframes(Control control, Float2 pos)
         {
             var keyframeIndices = new List<int>();
             for (int i = 0; i < _points.Count; i++)
@@ -607,13 +922,13 @@ namespace FlaxEditor.GUI
             EditKeyframes(control, pos, keyframeIndices);
         }
 
-        private void EditKeyframes(Control control, Vector2 pos, List<int> keyframeIndices)
+        private void EditKeyframes(Control control, Float2 pos, List<int> keyframeIndices)
         {
             var selection = new object[keyframeIndices.Count];
             var keyframes = GetKeyframes();
             for (int i = 0; i < keyframeIndices.Count; i++)
-                selection[i] = keyframes[keyframeIndices[i]];
-            _popup = new Popup(this, selection, keyframeIndices);
+                selection[i] = CreateKeyframeEditingProxy(keyframeIndices[i], keyframes[keyframeIndices[i]]);
+            _popup = new Popup(this, selection, keyframeIndices, GetKeyframeEditingPopupHeight());
             _popup.Show(control, pos);
         }
 
@@ -668,12 +983,98 @@ namespace FlaxEditor.GUI
             OnEditingEnd();
         }
 
+        private void ShowCurve(bool selectedOnly)
+        {
+            if (_points.Count == 0)
+                return;
+            int pass = 1;
+            REDO:
+
+            // Get curve bounds in Keyframes (time and value)
+            Float2 posMin = Float2.Maximum, posMax = Float2.Minimum;
+            // TODO: include bezier curve bounds calculation to handle curve outside the bounds made out of points
+            foreach (var point in _points)
+            {
+                if (selectedOnly && !point.IsSelected)
+                    continue;
+                var pos = point.Point;
+                Float2.Min(ref posMin, ref pos, out posMin);
+                Float2.Max(ref posMax, ref pos, out posMax);
+            }
+
+            // Apply margin around the area
+            var posMargin = (posMax - posMin) * 0.05f;
+            posMin -= posMargin;
+            posMax += posMargin;
+
+            // Convert from Keyframes to Contents
+            _mainPanel.GetDesireClientArea(out var viewRect);
+            PointFromKeyframesToContents(ref posMin, ref viewRect);
+            PointFromKeyframesToContents(ref posMax, ref viewRect);
+            var tmp = posMin;
+            Float2.Min(ref posMin, ref posMax, out posMin);
+            Float2.Max(ref posMax, ref tmp, out posMax);
+            var contentsSize = posMax - posMin;
+
+            // Convert from Contents to Main Panel
+            posMin = _contents.PointToParent(posMin);
+            posMax = _contents.PointToParent(posMax);
+            tmp = posMin;
+            Float2.Min(ref posMin, ref posMax, out posMin);
+            Float2.Max(ref posMax, ref tmp, out posMax);
+
+            // Update zoom (leave unchanged when focusing a single point)
+            var zoomMask = EnableZoom;
+            if (Mathf.IsZero(posMargin.X))
+                zoomMask &= ~UseMode.Horizontal;
+            if (Mathf.IsZero(posMargin.Y))
+                zoomMask &= ~UseMode.Vertical;
+            var viewScale = ApplyUseModeMask(zoomMask, viewRect.Size / contentsSize, ViewScale);
+            if (_showCollapsed)
+                viewScale.Y = 1.0f;
+            ViewScale = viewScale;
+
+            // Update scroll (attempt to center the area when it's smaller than the view)
+            Float2 viewOffset = -posMin;
+            Float2 viewSize = _mainPanel.Size;
+            Float2 viewSizeLeft = viewSize - Float2.Clamp(posMax - posMin, Float2.Zero, viewSize);
+            viewOffset += viewSizeLeft * 0.5f;
+            viewOffset = ApplyUseModeMask(EnablePanning, viewOffset, _mainPanel.ViewOffset);
+            if (_showCollapsed)
+                viewOffset.Y = 0;
+            _mainPanel.ViewOffset = viewOffset;
+
+            // Do it multiple times so the view offset can be properly calculate once the view scale gets changes
+            if (pass++ <= 2)
+                goto REDO;
+
+            UpdateKeyframes();
+        }
+
+        /// <summary>
+        /// Focuses the view on the selected keyframes.
+        /// </summary>
+        public void FocusSelection()
+        {
+            // Fallback to showing whole curve if nothing is selected
+            ShowCurve(SelectionCount != 0);
+        }
+
         /// <inheritdoc />
         public override void ShowWholeCurve()
         {
-            ViewScale = ApplyUseModeMask(EnableZoom, _mainPanel.Size / _contents.Size, ViewScale);
-            ViewOffset = ApplyUseModeMask(EnablePanning, -_mainPanel.ControlsBounds.Location, ViewOffset);
-            UpdateKeyframes();
+            ShowCurve(false);
+        }
+
+        /// <summary>
+        /// Applies a <see cref="CurvePreset"/> to the curve editor.
+        /// </summary>
+        /// <param name="preset">The preset.</param>
+        public virtual void ApplyPreset(CurvePreset preset)
+        {
+            // Remove existing keyframes
+            SelectAll();
+            RemoveKeyframes();
         }
 
         /// <inheritdoc />
@@ -713,15 +1114,28 @@ namespace FlaxEditor.GUI
             }
         }
 
+        private void BulkSelectUpdate(bool select = true)
+        {
+            for (int i = 0; i < _points.Count; i++)
+            {
+                _points[i].IsSelected = select;
+            }
+        }
+
         /// <summary>
         /// Selects all keyframes.
         /// </summary>
         public void SelectAll()
         {
-            for (int i = 0; i < _points.Count; i++)
-            {
-                _points[i].IsSelected = true;
-            }
+            BulkSelectUpdate(true);
+        }
+
+        /// <summary>
+        /// Deselects all keyframes.
+        /// </summary>
+        public void DeselectAll()
+        {
+            BulkSelectUpdate(false);
         }
 
         /// <summary>
@@ -730,7 +1144,7 @@ namespace FlaxEditor.GUI
         /// <param name="point">The point.</param>
         /// <param name="curveContentAreaBounds">The curve contents area bounds.</param>
         /// <returns>The result.</returns>
-        protected Vector2 PointToKeyframes(Vector2 point, ref Rectangle curveContentAreaBounds)
+        protected Float2 PointToKeyframes(Float2 point, ref Rectangle curveContentAreaBounds)
         {
             // Curve Editor -> Main Panel
             point = _mainPanel.PointFromParent(point);
@@ -739,10 +1153,7 @@ namespace FlaxEditor.GUI
             point = _contents.PointFromParent(point);
 
             // Contents -> Keyframes
-            return new Vector2(
-                               (point.X + _contents.Location.X) / UnitsPerSecond,
-                               (point.Y + _contents.Location.Y - curveContentAreaBounds.Height) / -UnitsPerSecond
-                              );
+            return PointFromContentsToKeyframes(ref point, ref curveContentAreaBounds);
         }
 
         /// <summary>
@@ -751,13 +1162,10 @@ namespace FlaxEditor.GUI
         /// <param name="point">The point.</param>
         /// <param name="curveContentAreaBounds">The curve contents area bounds.</param>
         /// <returns>The result.</returns>
-        protected Vector2 PointFromKeyframes(Vector2 point, ref Rectangle curveContentAreaBounds)
+        protected Float2 PointFromKeyframes(Float2 point, ref Rectangle curveContentAreaBounds)
         {
             // Keyframes -> Contents
-            point = new Vector2(
-                                point.X * UnitsPerSecond - _contents.Location.X,
-                                point.Y * -UnitsPerSecond + curveContentAreaBounds.Height - _contents.Location.Y
-                               );
+            PointFromKeyframesToContents(ref point, ref curveContentAreaBounds);
 
             // Contents -> Main Panel
             point = _contents.PointToParent(point);
@@ -766,75 +1174,65 @@ namespace FlaxEditor.GUI
             return _mainPanel.PointToParent(point);
         }
 
-        private void DrawAxis(Vector2 axis, ref Rectangle viewRect, float min, float max, float pixelRange)
+        internal Float2 PointFromContentsToKeyframes(ref Float2 point, ref Rectangle curveContentAreaBounds)
         {
-            int minDistanceBetweenTicks = 20;
-            int maxDistanceBetweenTicks = 60;
-            var range = max - min;
+            return new Float2(
+                              (point.X + _contents.Location.X) / UnitsPerSecond,
+                              (point.Y + _contents.Location.Y - curveContentAreaBounds.Height) / -UnitsPerSecond
+                             );
+        }
 
-            // Find the strength for each modulo number tick marker
-            int smallestTick = 0;
-            int biggestTick = TickSteps.Length - 1;
-            for (int i = TickSteps.Length - 1; i >= 0; i--)
+        internal void PointFromKeyframesToContents(ref Float2 point, ref Rectangle curveContentAreaBounds)
+        {
+            point = new Float2(
+                               point.X * UnitsPerSecond - _contents.Location.X,
+                               point.Y * -UnitsPerSecond + curveContentAreaBounds.Height - _contents.Location.Y
+                              );
+        }
+
+        private void DrawAxis(Float2 axis, Rectangle viewRect, float min, float max, float pixelRange)
+        {
+            Utilities.Utils.DrawCurveTicks((decimal tick, double step, float strength) =>
             {
-                // Calculate how far apart these modulo tick steps are spaced
-                float tickSpacing = TickSteps[i] * pixelRange / range;
+                var p = PointFromKeyframes(axis * (float)tick, ref viewRect);
 
-                // Calculate the strength of the tick markers based on the spacing
-                _tickStrengths[i] = Mathf.Saturate((tickSpacing - minDistanceBetweenTicks) / (maxDistanceBetweenTicks - minDistanceBetweenTicks));
+                // Draw line
+                var lineRect = new Rectangle
+                (
+                 viewRect.Location + (p - 0.5f) * axis,
+                 Float2.Lerp(viewRect.Size, Float2.One, axis)
+                );
+                Render2D.FillRectangle(lineRect, _linesColor.AlphaMultiplied(strength));
 
-                // Beyond threshold the ticks don't get any bigger or fatter
-                if (_tickStrengths[i] >= 1)
-                    biggestTick = i;
+                // Draw label
+                string label = tick.ToString(CultureInfo.InvariantCulture);
+                var labelRect = new Rectangle
+                (
+                 viewRect.X + 4.0f + (p.X * axis.X),
+                 viewRect.Y - LabelsSize + (p.Y * axis.Y) + (viewRect.Size.Y * axis.X),
+                 50,
+                 LabelsSize
+                );
+                Render2D.DrawText(_labelsFont, label, labelRect, _labelsColor.AlphaMultiplied(strength), TextAlignment.Near, TextAlignment.Center, TextWrapping.NoWrap, 1.0f, 0.7f);
+            }, TickSteps, ref _tickStrengths, min, max, pixelRange);
+        }
 
-                // Do not show small tick markers
-                if (tickSpacing <= minDistanceBetweenTicks)
-                {
-                    smallestTick = i;
-                    break;
-                }
-            }
+        private void SetupGrid(out Float2 min, out Float2 max, out Float2 pixelRange)
+        {
+            var viewRect = _mainPanel.GetClientArea();
+            var upperLeft = PointToKeyframes(viewRect.Location, ref viewRect);
+            var bottomRight = PointToKeyframes(viewRect.Size, ref viewRect);
 
-            // Draw all tick levels
-            int tickLevels = biggestTick - smallestTick + 1;
-            for (int level = 0; level < tickLevels; level++)
-            {
-                float strength = _tickStrengths[smallestTick + level];
-                if (strength <= Mathf.Epsilon)
-                    continue;
+            min = Float2.Min(upperLeft, bottomRight);
+            max = Float2.Max(upperLeft, bottomRight);
+            pixelRange = (max - min) * ViewScale * UnitsPerSecond;
+        }
 
-                // Draw all ticks
-                int l = Mathf.Clamp(smallestTick + level, 0, TickSteps.Length - 1);
-                int startTick = Mathf.FloorToInt(min / TickSteps[l]);
-                int endTick = Mathf.CeilToInt(max / TickSteps[l]);
-                for (int i = startTick; i <= endTick; i++)
-                {
-                    if (l < biggestTick && (i % Mathf.RoundToInt(TickSteps[l + 1] / TickSteps[l]) == 0))
-                        continue;
-
-                    var tick = i * TickSteps[l];
-                    var p = PointFromKeyframes(axis * tick, ref viewRect);
-
-                    // Draw line
-                    var lineRect = new Rectangle
-                    (
-                     viewRect.Location + (p - 0.5f) * axis,
-                     Vector2.Lerp(viewRect.Size, Vector2.One, axis)
-                    );
-                    Render2D.FillRectangle(lineRect, _linesColor.AlphaMultiplied(strength));
-
-                    // Draw label
-                    string label = tick.ToString(CultureInfo.InvariantCulture);
-                    var labelRect = new Rectangle
-                    (
-                     viewRect.X + 4.0f + (p.X * axis.X),
-                     viewRect.Y - LabelsSize + (p.Y * axis.Y) + (viewRect.Size.Y * axis.X),
-                     50,
-                     LabelsSize
-                    );
-                    Render2D.DrawText(_labelsFont, label, labelRect, _labelsColor.AlphaMultiplied(strength), TextAlignment.Near, TextAlignment.Center, TextWrapping.NoWrap, 1.0f, 0.7f);
-                }
-            }
+        private Float2 GetGridSnap()
+        {
+            SetupGrid(out var min, out var max, out var pixelRange);
+            return new Float2(Utilities.Utils.GetCurveGridSnap(TickSteps, ref _tickStrengths, min.X, max.X, pixelRange.X),
+                              Utilities.Utils.GetCurveGridSnap(TickSteps, ref _tickStrengths, min.Y, max.Y, pixelRange.Y));
         }
 
         /// <summary>
@@ -842,6 +1240,58 @@ namespace FlaxEditor.GUI
         /// </summary>
         /// <param name="viewRect">The main panel client area used as a view bounds.</param>
         protected abstract void DrawCurve(ref Rectangle viewRect);
+
+        private Float2 ContentsToEditor(Float2 location)
+        {
+            location = _contents.PointToParent(location);
+            return _mainPanel.PointToParent(location);
+        }
+
+        private Float2 GetControlCenterInEditor(Control control)
+        {
+            var center = control.PointToParent(control.Size * 0.5f);
+            return ContentsToEditor(center);
+        }
+
+        private void DrawTangentHandles()
+        {
+            var style = Style.Current;
+            for (int i = 0; i < _tangents.Length; i++)
+            {
+                var tangent = _tangents[i];
+                if (!tangent.Visible || tangent.Point == null || !tangent.Point.Visible)
+                    continue;
+
+                var tangentCenter = GetControlCenterInEditor(tangent);
+                var keyframeCenter = GetControlCenterInEditor(tangent.Point);
+                Render2D.DrawLine(tangentCenter, keyframeCenter, style.ForegroundDisabled, 2.0f);
+
+                var rect = new Rectangle(tangentCenter - KeyframesSize * 0.5f, KeyframesSize);
+                var color = style.BorderSelected;
+                if (tangent.IsMouseOver)
+                    color *= 1.1f;
+                Render2D.FillRectangle(rect, color);
+            }
+        }
+
+        private void DrawSelectedKeyframeLabels()
+        {
+            if (ShowCollapsed)
+                return;
+
+            var style = Style.Current;
+            for (int i = 0; i < _points.Count; i++)
+            {
+                var point = _points[i];
+                if (!point.Visible || !point.IsSelected)
+                    continue;
+
+                var center = GetControlCenterInEditor(point);
+                var label = GetComponentLabel(point.Component, ValueType);
+                var labelRect = new Rectangle(center.X + 12.0f, center.Y - 22.0f, 34.0f, 28.0f);
+                Render2D.DrawText(style.FontMedium, label, labelRect, Colors[point.Component], TextAlignment.Near, TextAlignment.Center, TextWrapping.NoWrap, 1.0f, 1.25f);
+            }
+        }
 
         /// <inheritdoc />
         public override void Draw()
@@ -854,7 +1304,7 @@ namespace FlaxEditor.GUI
             }
 
             var style = Style.Current;
-            var rect = new Rectangle(Vector2.Zero, Size);
+            var rect = new Rectangle(Float2.Zero, Size);
             var viewRect = _mainPanel.GetClientArea();
 
             // Draw background
@@ -866,19 +1316,14 @@ namespace FlaxEditor.GUI
             // Draw time and values axes
             if (ShowAxes != UseMode.Off)
             {
-                var upperLeft = PointToKeyframes(viewRect.Location, ref viewRect);
-                var bottomRight = PointToKeyframes(viewRect.Size, ref viewRect);
-
-                var min = Vector2.Min(upperLeft, bottomRight);
-                var max = Vector2.Max(upperLeft, bottomRight);
-                var pixelRange = (max - min) * ViewScale * UnitsPerSecond;
+                SetupGrid(out var min, out var max, out var pixelRange);
 
                 Render2D.PushClip(ref viewRect);
 
                 if ((ShowAxes & UseMode.Vertical) == UseMode.Vertical)
-                    DrawAxis(Vector2.UnitX, ref viewRect, min.X, max.X, pixelRange.X);
+                    DrawAxis(Float2.UnitX, viewRect, min.X, max.X, pixelRange.X);
                 if ((ShowAxes & UseMode.Horizontal) == UseMode.Horizontal)
-                    DrawAxis(Vector2.UnitY, ref viewRect, min.Y, max.Y, pixelRange.Y);
+                    DrawAxis(Float2.UnitY, viewRect, min.Y, max.Y, pixelRange.Y);
 
                 Render2D.PopClip();
             }
@@ -896,14 +1341,19 @@ namespace FlaxEditor.GUI
             {
                 var selectionRect = Rectangle.FromPoints
                 (
-                 _mainPanel.PointToParent(_contents.PointToParent(_contents._leftMouseDownPos)),
-                 _mainPanel.PointToParent(_contents.PointToParent(_contents._mousePos))
+                 ContentsToEditor(_contents._leftMouseDownPos),
+                 ContentsToEditor(_contents._mousePos)
                 );
-                Render2D.FillRectangle(selectionRect, Color.Orange * 0.4f);
-                Render2D.DrawRectangle(selectionRect, Color.Orange);
+                Render2D.FillRectangle(selectionRect, style.Selection);
+                Render2D.DrawRectangle(selectionRect, style.SelectionBorder);
             }
 
             base.Draw();
+
+            Render2D.PushClip(ref viewRect);
+            DrawTangentHandles();
+            DrawSelectedKeyframeLabels();
+            Render2D.PopClip();
 
             // Draw border
             if (ContainsFocus)
@@ -926,34 +1376,65 @@ namespace FlaxEditor.GUI
             if (base.OnKeyDown(key))
                 return true;
 
-            switch (key)
+            InputOptions options = Editor.Instance.Options.Options.Input;
+            if (options.SelectAll.Process(this))
             {
-            case KeyboardKeys.Delete:
+                SelectAll();
+                UpdateTangents();
+                return true;
+            }
+            else if (options.DeselectAll.Process(this))
+            {
+                DeselectAll();
+                UpdateTangents();
+                return true;
+            }
+            else if (options.Delete.Process(this))
+            {
                 RemoveKeyframes();
                 return true;
-            case KeyboardKeys.A:
-                if (Root.GetKey(KeyboardKeys.Control))
-                {
-                    SelectAll();
-                    UpdateTangents();
-                    return true;
-                }
-                break;
-            case KeyboardKeys.C:
-                if (Root.GetKey(KeyboardKeys.Control))
-                {
-                    CopyKeyframes();
-                    return true;
-                }
-                break;
-            case KeyboardKeys.V:
-                if (Root.GetKey(KeyboardKeys.Control))
-                {
-                    KeyframesEditorUtils.Paste(this);
-                    return true;
-                }
-                break;
             }
+            else if (options.Copy.Process(this))
+            {
+                CopyKeyframes();
+                return true;
+            }
+            else if (options.Paste.Process(this))
+            {
+                KeyframesEditorUtils.Paste(this);
+                return true;
+            }
+            else if (options.FocusSelection.Process(this))
+            {
+                FocusSelection();
+                return true;
+            }
+
+            bool left = key == KeyboardKeys.ArrowLeft;
+            bool right = key == KeyboardKeys.ArrowRight;
+            bool up = key == KeyboardKeys.ArrowUp;
+            bool down = key == KeyboardKeys.ArrowDown;
+
+            if (left || right || up || down)
+            {
+                bool shift = Root.GetKey(KeyboardKeys.Shift);
+                bool alt = Root.GetKey(KeyboardKeys.Alt);
+                float deltaValue = 10f;
+                if (shift || alt)
+                    deltaValue = shift ? 2.5f : 5f;
+
+                Float2 moveDelta = Float2.Zero;
+                if (left || right)
+                    moveDelta.X = left ? -deltaValue : deltaValue;
+                if (up || down)
+                    moveDelta.Y = up ? -deltaValue : deltaValue;
+
+                _contents.OnMoveStart(Float2.Zero);
+                _contents.OnMove(moveDelta);
+                _contents.OnMoveEnd(Float2.Zero);
+                return true;
+            }
+
             return false;
         }
 
@@ -1094,9 +1575,9 @@ namespace FlaxEditor.GUI
         /// <param name="k">The keyframe.</param>
         /// <param name="component">The keyframe value component index.</param>
         /// <returns>The point in time/value space.</returns>
-        private Vector2 GetKeyframePoint(ref LinearCurve<T>.Keyframe k, int component)
+        private Float2 GetKeyframePoint(ref LinearCurve<T>.Keyframe k, int component)
         {
-            return new Vector2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
+            return new Float2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
         }
 
         private void DrawLine(LinearCurve<T>.Keyframe startK, LinearCurve<T>.Keyframe endK, int component, ref Rectangle viewRect)
@@ -1179,7 +1660,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        protected override void AddKeyframe(Vector2 keyframesPos)
+        protected override void AddKeyframe(Float2 keyframesPos)
         {
             var k = new LinearCurve<T>.Keyframe
             {
@@ -1233,6 +1714,85 @@ namespace FlaxEditor.GUI
             }
         }
 
+        sealed class KeyframeProxy
+        {
+            [HideInEditor, NoSerialize]
+            public LinearCurveEditor<T> Editor;
+
+            [HideInEditor, NoSerialize]
+            public int Index;
+
+            private float _time;
+            private readonly float _originalTime;
+
+            [EditorDisplay("Time"), EditorOrder(0), VisibleIf(nameof(HasFPS))]
+            [Tooltip("The keyframe frame number.")]
+            public int Frame
+            {
+                get => HasFPS ? Mathf.FloorToInt(SanitizeFinite(_time, _originalTime) * Editor.FPS.Value) : 0;
+                set
+                {
+                    if (Editor?.FPS.HasValue == true && Editor.FPS.Value > Mathf.Epsilon)
+                        _time = value / Editor.FPS.Value;
+                }
+            }
+
+            [EditorDisplay("Time"), EditorOrder(1), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The time of the keyframe.")]
+            public float Time
+            {
+                get => _time;
+                set => _time = SanitizeFinite(value, _time);
+            }
+
+            [EditorDisplay("Value"), EditorOrder(10), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The value of the curve at keyframe.")]
+            public T Value;
+
+            private bool HasFPS => Editor?.FPS.HasValue == true && Editor.FPS.Value > Mathf.Epsilon;
+
+            public KeyframeProxy(LinearCurveEditor<T> editor, int index, LinearCurve<T>.Keyframe keyframe)
+            {
+                Editor = editor;
+                Index = index;
+                _time = _originalTime = keyframe.Time;
+                Value = keyframe.Value;
+            }
+
+            private float GetValidTime()
+            {
+                if (Editor == null)
+                    return SanitizeFinite(_time, _originalTime);
+                if (Editor.FPS.HasValue)
+                {
+                    var fps = Editor.FPS.Value;
+                    if (fps <= Mathf.Epsilon)
+                        return SanitizeFinite(_time, _originalTime);
+                    var frame = Mathf.FloorToInt(SanitizeFinite(_time, _originalTime) * fps);
+                    var minFrame = int.MinValue;
+                    var maxFrame = int.MaxValue;
+                    if (Index > 0)
+                        minFrame = Mathf.FloorToInt(Editor._keyframes[Index - 1].Time * fps) + 1;
+                    if (Index < Editor._keyframes.Count - 1)
+                        maxFrame = Mathf.FloorToInt(Editor._keyframes[Index + 1].Time * fps) - 1;
+                    if (minFrame > maxFrame)
+                        return _originalTime;
+                    frame = Mathf.Clamp(frame, minFrame, maxFrame);
+                    return frame / fps;
+                }
+                var minTime = Index > 0 ? Editor._keyframes[Index - 1].Time + Mathf.Epsilon : float.MinValue;
+                var maxTime = Index < Editor._keyframes.Count - 1 ? Editor._keyframes[Index + 1].Time - Mathf.Epsilon : float.MaxValue;
+                if (minTime > maxTime)
+                    return _originalTime;
+                return Mathf.Clamp(SanitizeFinite(_time, _originalTime), minTime, maxTime);
+            }
+
+            public LinearCurve<T>.Keyframe ToKeyframe()
+            {
+                return new LinearCurve<T>.Keyframe(GetValidTime(), Value);
+            }
+        }
+
         sealed class AllKeyframesProxy : IAllKeyframesProxy
         {
             [HideInEditor, NoSerialize]
@@ -1255,6 +1815,24 @@ namespace FlaxEditor.GUI
                 Editor = this,
                 Keyframes = _keyframes.ToArray(),
             };
+        }
+
+        /// <inheritdoc />
+        protected override object CreateKeyframeEditingProxy(int index, object keyframe)
+        {
+            return new KeyframeProxy(this, index, (LinearCurve<T>.Keyframe)keyframe);
+        }
+
+        /// <inheritdoc />
+        protected override object GetKeyframeFromEditingProxy(object proxy)
+        {
+            return proxy is KeyframeProxy keyframeProxy ? keyframeProxy.ToKeyframe() : proxy;
+        }
+
+        /// <inheritdoc />
+        protected override float GetKeyframeEditingPopupHeight()
+        {
+            return 240.0f;
         }
 
         /// <inheritdoc />
@@ -1320,10 +1898,22 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 GetKeyframePoint(int index, int component)
+        public override void SetKeyframeValue(int index, object value, object tangentIn, object tangentOut)
         {
             var k = _keyframes[index];
-            return new Vector2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
+            k.Value = (T)value;
+            _keyframes[index] = k;
+
+            UpdateKeyframes();
+            UpdateTooltips();
+            OnEdited();
+        }
+
+        /// <inheritdoc />
+        public override Float2 GetKeyframePoint(int index, int component)
+        {
+            var k = _keyframes[index];
+            return new Float2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
         }
 
         /// <inheritdoc />
@@ -1379,7 +1969,7 @@ namespace FlaxEditor.GUI
                 var k = _keyframes[p.Index];
 
                 var location = GetKeyframePoint(ref k, p.Component);
-                var point = new Vector2
+                var point = new Float2
                 (
                  location.X * UnitsPerSecond - p.Width * 0.5f,
                  location.Y * -UnitsPerSecond - p.Height * 0.5f + curveContentAreaBounds.Height
@@ -1388,7 +1978,7 @@ namespace FlaxEditor.GUI
                 if (_showCollapsed)
                 {
                     point.Y = 1.0f;
-                    p.Size = new Vector2(KeyframesSize.X / viewScale.X, Height - 2.0f);
+                    p.Size = new Float2(KeyframesSize.X / viewScale.X, Height - 2.0f);
                     p.Visible = p.Component == 0;
                 }
                 else
@@ -1402,9 +1992,7 @@ namespace FlaxEditor.GUI
             // Calculate bounds
             var bounds = _points[0].Bounds;
             for (var i = 1; i < _points.Count; i++)
-            {
                 bounds = Rectangle.Union(bounds, _points[i].Bounds);
-            }
 
             // Adjust contents bounds to fill the curve area
             if (EnablePanning != UseMode.Off || !ShowCollapsed)
@@ -1418,7 +2006,7 @@ namespace FlaxEditor.GUI
             }
             else if (_contents.Bounds == Rectangle.Empty)
             {
-                _contents.Bounds = Rectangle.Union(bounds, new Rectangle(Vector2.Zero, Vector2.One));
+                _contents.Bounds = Rectangle.Union(bounds, new Rectangle(Float2.Zero, Float2.One));
             }
 
             // Offset the keyframes (parent container changed its location)
@@ -1440,6 +2028,22 @@ namespace FlaxEditor.GUI
         {
             for (int i = 0; i < _tangents.Length; i++)
                 _tangents[i].Visible = false;
+        }
+
+        /// <inheritdoc />
+        public override void ApplyPreset(CurvePreset preset)
+        {
+            base.ApplyPreset(preset);
+
+            CurveEditorPreset data = Presets[preset];
+            foreach (var point in data.Points)
+            {
+                float time = point.Time;
+                object value = ConvertCurvePresetValueToCurveEditorType((float)point.Value);
+                AddKeyframe(time, value);
+            }
+
+            ShowWholeCurve();
         }
 
         /// <inheritdoc />
@@ -1650,6 +2254,7 @@ namespace FlaxEditor.GUI
                     var o = _keyframes[p.Index - 1];
                     var oValue = Accessor.GetCurveValue(ref o.Value, p.Component);
                     var slope = (value - oValue) / (k.Time - o.Time);
+                    slope = -slope;
                     Accessor.SetCurveValue(slope, ref k.TangentIn, p.Component);
                 }
 
@@ -1805,9 +2410,9 @@ namespace FlaxEditor.GUI
         /// <param name="k">The keyframe.</param>
         /// <param name="component">The keyframe value component index.</param>
         /// <returns>The point in time/value space.</returns>
-        private Vector2 GetKeyframePoint(ref BezierCurve<T>.Keyframe k, int component)
+        private Float2 GetKeyframePoint(ref BezierCurve<T>.Keyframe k, int component)
         {
-            return new Vector2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
+            return new Float2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
         }
 
         private void DrawLine(BezierCurve<T>.Keyframe startK, BezierCurve<T>.Keyframe endK, int component, ref Rectangle viewRect)
@@ -1890,7 +2495,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        protected override void AddKeyframe(Vector2 keyframesPos)
+        protected override void AddKeyframe(Float2 keyframesPos)
         {
             var k = new BezierCurve<T>.Keyframe
             {
@@ -1954,6 +2559,95 @@ namespace FlaxEditor.GUI
             }
         }
 
+        sealed class KeyframeProxy
+        {
+            [HideInEditor, NoSerialize]
+            public BezierCurveEditor<T> Editor;
+
+            [HideInEditor, NoSerialize]
+            public int Index;
+
+            private float _time;
+            private readonly float _originalTime;
+
+            [EditorDisplay("Time"), EditorOrder(0), VisibleIf(nameof(HasFPS))]
+            [Tooltip("The keyframe frame number.")]
+            public int Frame
+            {
+                get => HasFPS ? Mathf.FloorToInt(SanitizeFinite(_time, _originalTime) * Editor.FPS.Value) : 0;
+                set
+                {
+                    if (Editor?.FPS.HasValue == true && Editor.FPS.Value > Mathf.Epsilon)
+                        _time = value / Editor.FPS.Value;
+                }
+            }
+
+            [EditorDisplay("Time"), EditorOrder(1), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The time of the keyframe.")]
+            public float Time
+            {
+                get => _time;
+                set => _time = SanitizeFinite(value, _time);
+            }
+
+            [EditorDisplay("Value"), EditorOrder(10), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The value of the curve at keyframe.")]
+            public T Value;
+
+            [EditorDisplay("Tangents", "Tangent In"), EditorOrder(20), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The input tangent (going from the previous key to this one) of the key.")]
+            public T TangentIn;
+
+            [EditorDisplay("Tangents", "Tangent Out"), EditorOrder(21), Limit(float.MinValue, float.MaxValue, 0.01f)]
+            [Tooltip("The output tangent (going from this key to next one) of the key.")]
+            public T TangentOut;
+
+            private bool HasFPS => Editor?.FPS.HasValue == true && Editor.FPS.Value > Mathf.Epsilon;
+
+            public KeyframeProxy(BezierCurveEditor<T> editor, int index, BezierCurve<T>.Keyframe keyframe)
+            {
+                Editor = editor;
+                Index = index;
+                _time = _originalTime = keyframe.Time;
+                Value = keyframe.Value;
+                TangentIn = keyframe.TangentIn;
+                TangentOut = keyframe.TangentOut;
+            }
+
+            private float GetValidTime()
+            {
+                if (Editor == null)
+                    return SanitizeFinite(_time, _originalTime);
+                if (Editor.FPS.HasValue)
+                {
+                    var fps = Editor.FPS.Value;
+                    if (fps <= Mathf.Epsilon)
+                        return SanitizeFinite(_time, _originalTime);
+                    var frame = Mathf.FloorToInt(SanitizeFinite(_time, _originalTime) * fps);
+                    var minFrame = int.MinValue;
+                    var maxFrame = int.MaxValue;
+                    if (Index > 0)
+                        minFrame = Mathf.FloorToInt(Editor._keyframes[Index - 1].Time * fps) + 1;
+                    if (Index < Editor._keyframes.Count - 1)
+                        maxFrame = Mathf.FloorToInt(Editor._keyframes[Index + 1].Time * fps) - 1;
+                    if (minFrame > maxFrame)
+                        return _originalTime;
+                    frame = Mathf.Clamp(frame, minFrame, maxFrame);
+                    return frame / fps;
+                }
+                var minTime = Index > 0 ? Editor._keyframes[Index - 1].Time + Mathf.Epsilon : float.MinValue;
+                var maxTime = Index < Editor._keyframes.Count - 1 ? Editor._keyframes[Index + 1].Time - Mathf.Epsilon : float.MaxValue;
+                if (minTime > maxTime)
+                    return _originalTime;
+                return Mathf.Clamp(SanitizeFinite(_time, _originalTime), minTime, maxTime);
+            }
+
+            public BezierCurve<T>.Keyframe ToKeyframe()
+            {
+                return new BezierCurve<T>.Keyframe(GetValidTime(), Value, TangentIn, TangentOut);
+            }
+        }
+
         sealed class AllKeyframesProxy : IAllKeyframesProxy
         {
             [HideInEditor, NoSerialize]
@@ -1976,6 +2670,24 @@ namespace FlaxEditor.GUI
                 Editor = this,
                 Keyframes = _keyframes.ToArray(),
             };
+        }
+
+        /// <inheritdoc />
+        protected override object CreateKeyframeEditingProxy(int index, object keyframe)
+        {
+            return new KeyframeProxy(this, index, (BezierCurve<T>.Keyframe)keyframe);
+        }
+
+        /// <inheritdoc />
+        protected override object GetKeyframeFromEditingProxy(object proxy)
+        {
+            return proxy is KeyframeProxy keyframeProxy ? keyframeProxy.ToKeyframe() : proxy;
+        }
+
+        /// <inheritdoc />
+        protected override float GetKeyframeEditingPopupHeight()
+        {
+            return 320.0f;
         }
 
         /// <inheritdoc />
@@ -2042,10 +2754,24 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 GetKeyframePoint(int index, int component)
+        public override void SetKeyframeValue(int index, object value, object tangentIn, object tangentOut)
         {
             var k = _keyframes[index];
-            return new Vector2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
+            k.Value = (T)value;
+            k.TangentIn = (T)tangentIn;
+            k.TangentOut = (T)tangentOut;
+            _keyframes[index] = k;
+
+            UpdateKeyframes();
+            UpdateTooltips();
+            OnEdited();
+        }
+
+        /// <inheritdoc />
+        public override Float2 GetKeyframePoint(int index, int component)
+        {
+            var k = _keyframes[index];
+            return new Float2(k.Time, Accessor.GetCurveValue(ref k.Value, component));
         }
 
         /// <inheritdoc />
@@ -2094,13 +2820,13 @@ namespace FlaxEditor.GUI
             // Place keyframes
             Rectangle curveContentAreaBounds = _mainPanel.GetClientArea();
             var viewScale = ViewScale;
-            var pointsSize = _showCollapsed ? new Vector2(4.0f / viewScale.X, Height - 2.0f) : KeyframesSize / viewScale;
+            var pointsSize = _showCollapsed ? new Float2(4.0f / viewScale.X, Height - 2.0f) : KeyframesSize / viewScale;
             for (int i = 0; i < _points.Count; i++)
             {
                 var p = _points[i];
                 var k = _keyframes[p.Index];
                 var point = GetKeyframePoint(ref k, p.Component);
-                var location = new Vector2
+                var location = new Float2
                 (
                  point.X * UnitsPerSecond - pointsSize.X * 0.5f,
                  point.Y * -UnitsPerSecond - pointsSize.Y * 0.5f + curveContentAreaBounds.Height
@@ -2120,9 +2846,7 @@ namespace FlaxEditor.GUI
             // Calculate bounds
             var bounds = _points[0].Bounds;
             for (int i = 1; i < _points.Count; i++)
-            {
                 bounds = Rectangle.Union(bounds, _points[i].Bounds);
-            }
 
             // Adjust contents bounds to fill the curve area
             if (EnablePanning != UseMode.Off || !ShowCollapsed)
@@ -2136,7 +2860,7 @@ namespace FlaxEditor.GUI
             }
             else if (_contents.Bounds == Rectangle.Empty)
             {
-                _contents.Bounds = Rectangle.Union(bounds, new Rectangle(Vector2.Zero, Vector2.One));
+                _contents.Bounds = Rectangle.Union(bounds, new Rectangle(Float2.Zero, Float2.One));
             }
 
             // Offset the keyframes (parent container changed its location)
@@ -2188,12 +2912,12 @@ namespace FlaxEditor.GUI
 
                     var tangent = t.TangentValue;
                     var direction = t.IsIn ? -1.0f : 1.0f;
-                    var offset = 30.0f * direction;
+                    var offset = t.TangentOffset;
                     var location = GetKeyframePoint(ref k, selectedComponent);
                     t.Size = KeyframesSize / ViewScale;
-                    t.Location = new Vector2
+                    t.Location = new Float2
                     (
-                     location.X * UnitsPerSecond - t.Width * 0.5f + offset,
+                     location.X * UnitsPerSecond - t.Width * 0.5f + offset * direction,
                      location.Y * -UnitsPerSecond - t.Height * 0.5f + curveContentAreaBounds.Height - offset * tangent
                     );
 
@@ -2212,6 +2936,42 @@ namespace FlaxEditor.GUI
                 {
                     _tangents[i].Visible = false;
                 }
+            }
+        }
+
+        /// <inheritdoc />
+        public override void ApplyPreset(CurvePreset preset)
+        {
+            base.ApplyPreset(preset);
+
+            CurveEditorPreset data = Presets[preset];
+
+            foreach (var point in data.Points)
+            {
+                float time = point.Time;
+                object value = ConvertCurvePresetValueToCurveEditorType((float)point.Value);
+                object tangentIn = ConvertCurvePresetValueToCurveEditorType((float)point.TangentIn);
+                object tangentOut = ConvertCurvePresetValueToCurveEditorType((float)point.TangentOut);
+
+                AddKeyframe(time, value, tangentIn, tangentOut);
+            }
+
+            SelectAll();
+            if (data.LinearTangents)
+                SetTangentsLinear();
+
+            ShowWholeCurve();
+        }
+
+        /// <inheritdoc />
+        protected override void SetScaleInternal(ref Float2 scale)
+        {
+            base.SetScaleInternal(ref scale);
+
+            if (!_showCollapsed)
+            {
+                // Refresh keyframes when zooming (their size depends on the scale)
+                UpdateKeyframes();
             }
         }
 
@@ -2269,14 +3029,13 @@ namespace FlaxEditor.GUI
                     var startTangent = Accessor.GetCurveValue(ref startK.TangentOut, component);
                     var endTangent = Accessor.GetCurveValue(ref endK.TangentIn, component);
 
-                    var offset = (end.X - start.X) * 0.5f;
-
+                    var tangentScale = (endK.Time - startK.Time) / 3.0f;
                     var p1 = PointFromKeyframes(start, ref viewRect);
-                    var p2 = PointFromKeyframes(start + new Vector2(offset, startTangent * offset), ref viewRect);
-                    var p3 = PointFromKeyframes(end - new Vector2(offset, endTangent * offset), ref viewRect);
+                    var p2 = PointFromKeyframes(start + new Float2(0, startTangent * tangentScale), ref viewRect);
+                    var p3 = PointFromKeyframes(end + new Float2(0, endTangent * tangentScale), ref viewRect);
                     var p4 = PointFromKeyframes(end, ref viewRect);
 
-                    Render2D.DrawBezier(p1, p2, p3, p4, color);
+                    Render2D.DrawSpline(p1, p2, p3, p4, color);
                 }
             }
         }

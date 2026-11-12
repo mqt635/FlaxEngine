@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -188,8 +188,8 @@ namespace Flax.Build
                 Assembly assembly;
                 using (new ProfileEventScope("CompileRules"))
                 {
-                    var assembler = new Assembler();
-                    assembler.SourceFiles.AddRange(files);
+                    var assembler = new Assembler(files, Path.Combine(Globals.Root, Configuration.IntermediateFolder));
+                    EngineTarget.AddVersionDefines(assembler.PreprocessorSymbols);
                     assembly = assembler.Build();
                 }
 
@@ -271,8 +271,9 @@ namespace Flax.Build
         private static void FindRules(string directory, List<string> result)
         {
             // Optional way:
-            //result.AddRange(Directory.GetFiles(directory, '*' + BuildFilesPostfix, SearchOption.AllDirectories));
+            result.AddRange(Directory.GetFiles(directory, '*' + BuildFilesPostfix, SearchOption.AllDirectories));
 
+            /*
             var files = Directory.GetFiles(directory);
             for (int i = 0; i < files.Length; i++)
             {
@@ -287,6 +288,7 @@ namespace Flax.Build
             {
                 FindRules(directories[i], result);
             }
+            */
         }
     }
 }

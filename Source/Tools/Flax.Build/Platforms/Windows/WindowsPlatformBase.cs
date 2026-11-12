@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 // ReSharper disable InconsistentNaming
 
@@ -10,6 +10,8 @@ using Flax.Build.Projects;
 using Flax.Build.Projects.VisualStudio;
 using Flax.Build.Projects.VisualStudioCode;
 using Microsoft.Win32;
+
+#pragma warning disable CA1416
 
 namespace Flax.Build.Platforms
 {
@@ -42,6 +44,21 @@ namespace Flax.Build.Platforms
         /// Visual Studio 2019
         /// </summary>
         v142 = 142,
+
+        /// <summary>
+        /// Visual Studio 2022
+        /// </summary>
+        v143 = 143,
+
+        /// <summary>
+        /// Visual Studio 2022 (v17.10 and later)
+        /// </summary>
+        v144 = 144,
+
+        /// <summary>
+        /// Visual Studio 2026
+        /// </summary>
+        v145 = 145,
     }
 
     /// <summary>
@@ -103,6 +120,31 @@ namespace Flax.Build.Platforms
         /// Windows 10 SDK (10.0.19041.0)
         /// </summary>
         v10_0_19041_0,
+
+        /// <summary>
+        /// Windows 10 SDK (10.0.20348.0) 21H1
+        /// </summary>
+        v10_0_20348_0,
+
+        /// <summary>
+        /// Windows 11 SDK (10.0.22000.0)
+        /// </summary>
+        v10_0_22000_0,
+
+        /// <summary>
+        /// Windows 11 SDK (10.0.22621.0) 22H2
+        /// </summary>
+        v10_0_22621_0,
+
+        /// <summary>
+        /// Windows 11 SDK (10.0.26100.0) 24H2
+        /// </summary>
+        v10_0_26100_0,
+
+        /// <summary>
+        /// Windows 11 SDK (10.0.28000.0)
+        /// </summary>
+        v10_0_28000_0,
     }
 
     /// <summary>
@@ -124,7 +166,7 @@ namespace Flax.Build.Platforms
 
         /// <inheritdoc />
         public override bool HasSharedLibrarySupport => true;
-    
+
         /// <inheritdoc />
         public override bool HasExecutableFileReferenceSupport => true;
 
@@ -178,7 +220,6 @@ namespace Flax.Build.Platforms
                 value = null;
                 return false;
             }
-
             return true;
         }
 
@@ -192,25 +233,13 @@ namespace Flax.Build.Platforms
         public static bool TryReadInstallDirRegistryKey32(string keySuffix, string valueName, out string dir)
         {
             if (TryReadDirRegistryKey("HKEY_CURRENT_USER\\SOFTWARE\\" + keySuffix, valueName, out dir))
-            {
                 return true;
-            }
-
             if (TryReadDirRegistryKey("HKEY_LOCAL_MACHINE\\SOFTWARE\\" + keySuffix, valueName, out dir))
-            {
                 return true;
-            }
-
             if (TryReadDirRegistryKey("HKEY_CURRENT_USER\\SOFTWARE\\Wow6432Node\\" + keySuffix, valueName, out dir))
-            {
                 return true;
-            }
-
             if (TryReadDirRegistryKey("HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\" + keySuffix, valueName, out dir))
-            {
                 return true;
-            }
-
             return false;
         }
 
@@ -221,16 +250,22 @@ namespace Flax.Build.Platforms
             var toolsets = Directory.GetDirectories(rootDir);
             foreach (var toolset in toolsets)
             {
-                if (Version.TryParse(Path.GetFileName(toolset), out var version) && (
-                                                                                        File.Exists(Path.Combine(toolset, "bin", "Hostx64", "x64", "cl.exe"))
-                                                                                        ||
-                                                                                        File.Exists(Path.Combine(toolset, "bin", "Hostx86", "x64", "cl.exe"))
-                                                                                    ))
+                if (Version.TryParse(Path.GetFileName(toolset), out var version) &&
+                    (File.Exists(Path.Combine(toolset, "bin", "Hostx64", "x64", "cl.exe")) ||
+                     File.Exists(Path.Combine(toolset, "bin", "Hostx86", "x64", "cl.exe"))))
                 {
                     if (version.Major == 14 && version.Minor / 10 == 1)
                         _toolsets[WindowsPlatformToolset.v141] = toolset;
                     else if (version.Major == 14 && version.Minor / 10 == 2)
                         _toolsets[WindowsPlatformToolset.v142] = toolset;
+                    else if (version.Major == 14 && version.Minor / 10 == 3)
+                        _toolsets[WindowsPlatformToolset.v143] = toolset;
+                    else if (version.Major == 14 && version.Minor / 10 == 4)
+                        _toolsets[WindowsPlatformToolset.v144] = toolset;
+                    else if (version.Major == 14 && version.Minor / 10 == 5)
+                        _toolsets[WindowsPlatformToolset.v145] = toolset;
+                    else
+                        Log.Warning("Found Unsupported MSVC toolset version: " + version);
                 }
             }
         }
@@ -250,39 +285,33 @@ namespace Flax.Build.Platforms
                 return _toolsets;
 
             var vsInstances = VisualStudioInstance.GetInstances();
-    
+
             // Visual Studio 2015 - single instance
             var vs2015 = vsInstances.FirstOrDefault(x => x.Version == VisualStudioVersion.VisualStudio2015);
             if (vs2015 != null)
             {
                 string rootDir = Path.Combine(vs2015.Path, "VC");
-                if (Directory.Exists(rootDir) && (
-                                                     File.Exists(Path.Combine(rootDir, "bin", "amd64", "cl.exe"))
-                                                     ||
-                                                     File.Exists(Path.Combine(rootDir, "bin", "x86_amd64", "cl.exe"))
-                                                 ))
+                if (Directory.Exists(rootDir) &&
+                    (File.Exists(Path.Combine(rootDir, "bin", "amd64", "cl.exe")) ||
+                     File.Exists(Path.Combine(rootDir, "bin", "x86_amd64", "cl.exe"))))
                 {
                     _toolsets[WindowsPlatformToolset.v140] = rootDir;
                 }
             }
 
-            // Visual Studio 2017 - multiple instances
-            foreach (var vs2017 in vsInstances.Where(x => x.Version == VisualStudioVersion.VisualStudio2017))
+            // Visual Studio 2017 or later - multiple instances
+            foreach (var vs in vsInstances.Where(x =>
+                                                 x.Version == VisualStudioVersion.VisualStudio2017 ||
+                                                 x.Version == VisualStudioVersion.VisualStudio2019 ||
+                                                 x.Version == VisualStudioVersion.VisualStudio2022 ||
+                                                 x.Version == VisualStudioVersion.VisualStudio2026
+                                                ))
             {
-                FindMsvcToolsets(Path.Combine(vs2017.Path, "VC", "Tools", "MSVC"));
-            }
-
-            // Visual Studio 2019 - multiple instances
-            foreach (var vs2019 in vsInstances.Where(x => x.Version == VisualStudioVersion.VisualStudio2019))
-            {
-                FindMsvcToolsets(Path.Combine(vs2019.Path, "VC", "Tools", "MSVC"));
+                FindMsvcToolsets(Path.Combine(vs.Path, "VC", "Tools", "MSVC"));
             }
 
             foreach (var e in _toolsets)
-            {
                 Log.Verbose(string.Format("Found Windows toolset {0} at {1}", e.Key, e.Value));
-            }
-
             return _toolsets;
         }
 
@@ -305,6 +334,11 @@ namespace Flax.Build.Platforms
             case WindowsPlatformSDK.v10_0_17763_0: return new Version(10, 0, 17763, 0);
             case WindowsPlatformSDK.v10_0_18362_0: return new Version(10, 0, 18362, 0);
             case WindowsPlatformSDK.v10_0_19041_0: return new Version(10, 0, 19041, 0);
+            case WindowsPlatformSDK.v10_0_20348_0: return new Version(10, 0, 20348, 0);
+            case WindowsPlatformSDK.v10_0_22000_0: return new Version(10, 0, 22000, 0);
+            case WindowsPlatformSDK.v10_0_22621_0: return new Version(10, 0, 22621, 0);
+            case WindowsPlatformSDK.v10_0_26100_0: return new Version(10, 0, 26100, 0);
+            case WindowsPlatformSDK.v10_0_28000_0: return new Version(10, 0, 28000, 0);
             default: throw new ArgumentOutOfRangeException(nameof(sdk), sdk, null);
             }
         }
@@ -340,12 +374,28 @@ namespace Flax.Build.Platforms
                 {
                     sdk10Roots.Add(rootDir);
                 }
-
                 if (TryReadInstallDirRegistryKey32("Microsoft\\Microsoft SDKs\\Windows\\v10.0", "InstallationFolder", out rootDir))
                 {
                     sdk10Roots.Add(rootDir);
                 }
             }
+            var win10Sdks = new[]
+            {
+                WindowsPlatformSDK.v10_0_10240_0,
+                WindowsPlatformSDK.v10_0_10586_0,
+                WindowsPlatformSDK.v10_0_14393_0,
+                WindowsPlatformSDK.v10_0_15063_0,
+                WindowsPlatformSDK.v10_0_16299_0,
+                WindowsPlatformSDK.v10_0_17134_0,
+                WindowsPlatformSDK.v10_0_17763_0,
+                WindowsPlatformSDK.v10_0_18362_0,
+                WindowsPlatformSDK.v10_0_19041_0,
+                WindowsPlatformSDK.v10_0_20348_0,
+                WindowsPlatformSDK.v10_0_22000_0,
+                WindowsPlatformSDK.v10_0_22621_0,
+                WindowsPlatformSDK.v10_0_26100_0,
+                WindowsPlatformSDK.v10_0_28000_0,
+            };
             foreach (var sdk10 in sdk10Roots)
             {
                 var includeRootDir = Path.Combine(sdk10, "Include");
@@ -355,25 +405,17 @@ namespace Flax.Build.Platforms
                     {
                         if (Version.TryParse(Path.GetFileName(includeDir), out var version) && File.Exists(Path.Combine(includeDir, "um", "windows.h")))
                         {
-                            if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_10240_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_10240_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_10586_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_10586_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_14393_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_14393_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_15063_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_15063_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_16299_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_16299_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_17134_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_17134_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_17763_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_17763_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_18362_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_18362_0, sdk10);
-                            else if (version == GetSDKVersion(WindowsPlatformSDK.v10_0_19041_0))
-                                _sdks.Add(WindowsPlatformSDK.v10_0_19041_0, sdk10);
-                            else
+                            bool unknown = true;
+                            foreach (var win10Sdk in win10Sdks)
+                            {
+                                if (version == GetSDKVersion(win10Sdk))
+                                {
+                                    _sdks.Add(win10Sdk, sdk10);
+                                    unknown = false;
+                                    break;
+                                }
+                            }
+                            if (unknown)
                                 Log.Warning(string.Format("Unknown Windows 10 SDK version {0} at {1}", version, sdk10));
                         }
                     }
@@ -389,12 +431,16 @@ namespace Flax.Build.Platforms
         }
 
         /// <summary>
-        /// Gets the path to the 32-bit tool binaries.
+        /// Gets the path to the VC++ tool binaries for specified host and target architectures.
         /// </summary>
         /// <param name="toolset">The version of the toolset to use.</param>
-        /// <returns>The directory containing the 64-bit toolchain binaries.</returns>
-        public static string GetVCToolPath32(WindowsPlatformToolset toolset)
+        /// <param name="hostArchitecture">The host architecture for native binaries.</param>
+        /// <param name="architecture">The target architecture to build for.</param>
+        /// <returns>The directory containing the toolchain binaries.</returns>
+        public static string GetVCToolPath(WindowsPlatformToolset toolset, TargetArchitecture hostArchitecture, TargetArchitecture architecture)
         {
+            if (architecture == TargetArchitecture.AnyCPU)
+                architecture = hostArchitecture;
             var toolsets = GetToolsets();
             var vcToolChainDir = toolsets[toolset];
 
@@ -402,87 +448,56 @@ namespace Flax.Build.Platforms
             {
             case WindowsPlatformToolset.v140:
             {
-                string compilerPath = Path.Combine(vcToolChainDir, "bin", "cl.exe");
-                if (File.Exists(compilerPath))
+                if (architecture == TargetArchitecture.ARM64)
                 {
-                    return Path.GetDirectoryName(compilerPath);
+                    Log.Verbose(string.Format("Unsupported {0} architecture for v140 toolset", hostArchitecture.ToString()));
+                    return null;
                 }
+                else if (hostArchitecture == TargetArchitecture.x64)
+                {
+                    string nativeCompilerPath = Path.Combine(vcToolChainDir, "bin", "amd64", "cl.exe");
+                    if (File.Exists(nativeCompilerPath))
+                        return Path.GetDirectoryName(nativeCompilerPath);
 
-                throw new Exception(string.Format("No 32-bit compiler toolchain found in {0}", compilerPath));
+                    string crossCompilerPath = Path.Combine(vcToolChainDir, "bin", "x86_amd64", "cl.exe");
+                    if (File.Exists(crossCompilerPath))
+                        return Path.GetDirectoryName(crossCompilerPath);
+
+                    Log.Verbose(string.Format("No {0} host compiler toolchain found in {1} or {2}", hostArchitecture.ToString(), nativeCompilerPath, crossCompilerPath));
+                    return null;
+                }
+                else if (hostArchitecture == TargetArchitecture.x86)
+                {
+                    string compilerPath = Path.Combine(vcToolChainDir, "bin", "cl.exe");
+                    if (File.Exists(compilerPath))
+                        return Path.GetDirectoryName(compilerPath);
+                    Log.Verbose(string.Format("No {0} host compiler toolchain found in {1}", hostArchitecture.ToString(), compilerPath));
+                    return null;
+                }
+                else
+                {
+                    Log.Verbose(string.Format("Unsupported {0} host compiler for v140 toolset", hostArchitecture.ToString()));
+                    return null;
+                }
             }
-
             case WindowsPlatformToolset.v141:
             case WindowsPlatformToolset.v142:
+            case WindowsPlatformToolset.v143:
+            case WindowsPlatformToolset.v144:
+            case WindowsPlatformToolset.v145:
             {
-                /*
-                string crossCompilerPath = Path.Combine(vcToolChainDir, "bin", "HostX64", "x86", "cl.exe");
-                if (File.Exists(crossCompilerPath))
-                {
-                    return Path.GetDirectoryName(crossCompilerPath);
-                }
-                */
-
-                string nativeCompilerPath = Path.Combine(vcToolChainDir, "bin", "HostX86", "x86", "cl.exe");
+                string hostFolder = hostArchitecture == TargetArchitecture.x86 ? "HostX86" : $"Host{hostArchitecture.ToString().ToLower()}";
+                string nativeCompilerPath = Path.Combine(vcToolChainDir, "bin", hostFolder, architecture.ToString().ToLower(), "cl.exe");
                 if (File.Exists(nativeCompilerPath))
-                {
                     return Path.GetDirectoryName(nativeCompilerPath);
-                }
 
-                //throw new Exception(string.Format("No 32-bit compiler toolchain found in {0} or {1}", crossCompilerPath, nativeCompilerPath));
-                throw new Exception(string.Format("No 32-bit compiler toolchain found in {0}", nativeCompilerPath));
-            }
-
-            default: throw new ArgumentOutOfRangeException(nameof(toolset), toolset, null);
-            }
-        }
-
-        /// <summary>
-        /// Gets the path to the 64-bit tool binaries.
-        /// </summary>
-        /// <param name="toolset">The version of the toolset to use.</param>
-        /// <returns>The directory containing the 64-bit toolchain binaries.</returns>
-        public static string GetVCToolPath64(WindowsPlatformToolset toolset)
-        {
-            var toolsets = GetToolsets();
-            var vcToolChainDir = toolsets[toolset];
-
-            switch (toolset)
-            {
-            case WindowsPlatformToolset.v140:
-            {
-                string nativeCompilerPath = Path.Combine(vcToolChainDir, "bin", "amd64", "cl.exe");
-                if (File.Exists(nativeCompilerPath))
-                {
-                    return Path.GetDirectoryName(nativeCompilerPath);
-                }
-
-                string crossCompilerPath = Path.Combine(vcToolChainDir, "bin", "x86_amd64", "cl.exe");
+                string crossCompilerPath = Path.Combine(vcToolChainDir, "bin", hostFolder, architecture.ToString().ToLower(), "cl.exe");
                 if (File.Exists(crossCompilerPath))
-                {
                     return Path.GetDirectoryName(crossCompilerPath);
-                }
 
-                throw new Exception(string.Format("No 64-bit compiler toolchain found in {0} or {1}", nativeCompilerPath, crossCompilerPath));
+                Log.Verbose(string.Format("No {0} host compiler toolchain found in {1} or {2}", hostArchitecture.ToString(), nativeCompilerPath, crossCompilerPath));
+                return null;
             }
-
-            case WindowsPlatformToolset.v141:
-            case WindowsPlatformToolset.v142:
-            {
-                string nativeCompilerPath = Path.Combine(vcToolChainDir, "bin", "HostX64", "x64", "cl.exe");
-                if (File.Exists(nativeCompilerPath))
-                {
-                    return Path.GetDirectoryName(nativeCompilerPath);
-                }
-
-                string crossCompilerPath = Path.Combine(vcToolChainDir, "bin", "HostX86", "x64", "cl.exe");
-                if (File.Exists(crossCompilerPath))
-                {
-                    return Path.GetDirectoryName(crossCompilerPath);
-                }
-
-                throw new Exception(string.Format("No 64-bit compiler toolchain found in {0} or {1}", nativeCompilerPath, crossCompilerPath));
-            }
-
             default: throw new ArgumentOutOfRangeException(nameof(toolset), toolset, null);
             }
         }
@@ -502,3 +517,5 @@ namespace Flax.Build.Platforms
         }
     }
 }
+
+#pragma warning restore CA1416

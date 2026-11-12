@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -42,25 +42,29 @@ API_ENUM(Namespace="FlaxEngine.Networking") enum class NetworkEventType
 /// </summary>
 API_STRUCT(Namespace="FlaxEngine.Networking") struct FLAXENGINE_API NetworkEvent
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(NetworkEvent);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(NetworkEvent);
+
 public:
     /// <summary>
     /// The type of the received event.
     /// </summary>
-    API_FIELD();
-    NetworkEventType EventType;
+    API_FIELD() NetworkEventType EventType;
 
     /// <summary>
     /// The message when this event is an "message" event - not valid in any other cases.
     /// If this is an message-event, make sure to return the message using RecycleMessage function of the peer after processing it!
     /// </summary>
-    API_FIELD();
-    NetworkMessage Message;
+    API_FIELD() NetworkMessage Message;
 
     /// <summary>
     /// The connected of the client that has sent message, connected, disconnected or got a timeout.
     /// </summary>
     /// <remarks>Only valid when event has been received on server-peer.</remarks>
-    API_FIELD();
-    NetworkConnection Sender;
+    API_FIELD() NetworkConnection Sender;
+};
+
+template<>
+struct TIsPODType<NetworkEvent>
+{
+    enum { Value = true };
 };

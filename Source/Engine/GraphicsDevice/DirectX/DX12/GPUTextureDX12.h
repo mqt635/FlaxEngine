@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,31 +15,13 @@
 class GPUTextureViewDX12 : public GPUTextureView, public IShaderResourceDX12
 {
 private:
-
     GPUDeviceDX12* _device = nullptr;
     ResourceOwnerDX12* _owner = nullptr;
     DescriptorHeapWithSlotsDX12::Slot _rtv, _srv, _dsv, _uav;
 
 public:
-
     GPUTextureViewDX12()
     {
-    }
-
-    GPUTextureViewDX12(const GPUTextureViewDX12& other)
-        : GPUTextureViewDX12()
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-    }
-
-    GPUTextureViewDX12& operator=(const GPUTextureViewDX12& other)
-    {
-#if !BUILD_RELEASE
-        CRASH; // Not used
-#endif
-        return *this;
     }
 
     ~GPUTextureViewDX12()
@@ -48,7 +30,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -72,14 +53,11 @@ public:
     void Release();
 
 public:
-
     bool ReadOnlyDepthView = false;
     void SetRTV(D3D12_RENDER_TARGET_VIEW_DESC& rtvDesc);
     void SetSRV(D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc);
     void SetDSV(D3D12_DEPTH_STENCIL_VIEW_DESC& dsvDesc);
     void SetUAV(D3D12_UNORDERED_ACCESS_VIEW_DESC& uavDesc, ID3D12Resource* counterResource = nullptr);
-
-public:
 
     /// <summary>
     /// Gets the CPU handle to the render target view descriptor.
@@ -98,7 +76,6 @@ public:
     }
 
 public:
-
     // [GPUResourceView]
     void* GetNativePtr() const override
     {
@@ -108,7 +85,7 @@ public:
     // [IShaderResourceDX12]
     bool IsDepthStencilResource() const override
     {
-        return _dsv.IsValid();
+        return ReadOnlyDepthView || _dsv.IsValid();
     }
     D3D12_CPU_DESCRIPTOR_HANDLE SRV() const override
     {
@@ -130,10 +107,10 @@ public:
 class GPUTextureDX12 : public GPUResourceDX12<GPUTexture>, public ResourceOwnerDX12, public IShaderResourceDX12
 {
 private:
-
     GPUTextureViewDX12 _handleArray;
     GPUTextureViewDX12 _handleVolume;
     GPUTextureViewDX12 _handleReadOnlyDepth;
+    GPUTextureViewDX12 _handleStencil;
     Array<GPUTextureViewDX12> _handlesPerSlice; // [slice]
     Array<Array<GPUTextureViewDX12>> _handlesPerMip; // [slice][mip]
 
@@ -146,18 +123,15 @@ private:
     DXGI_FORMAT _dxgiFormatUAV;
 
 public:
-
     GPUTextureDX12(GPUDeviceDX12* device, const StringView& name)
         : GPUResourceDX12<GPUTexture>(device, name)
     {
     }
 
 private:
-
     void initHandles();
 
 public:
-
     // [GPUTexture]
     GPUTextureView* View(int32 arrayOrDepthIndex) const override
     {
@@ -182,11 +156,16 @@ public:
         ASSERT(_desc.Flags & GPUTextureFlags::ReadOnlyDepthView);
         return (GPUTextureView*)&_handleReadOnlyDepth;
     }
+    GPUTextureView* ViewStencil() const override
+    {
+        ASSERT(_desc.Flags & GPUTextureFlags::DepthStencil);
+        return (GPUTextureView*)&_handleStencil;
+    }
     void* GetNativePtr() const override
     {
         return (void*)_resource;
     }
-    bool GetData(int32 arrayOrDepthSliceIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch) override;
+    bool GetData(int32 arrayIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch) override;
 
     // [ResourceOwnerDX12]
     GPUResource* AsGPUResource() const override
@@ -197,7 +176,7 @@ public:
     // [IShaderResourceDX12]
     bool IsDepthStencilResource() const override
     {
-        return (_desc.Flags & GPUTextureFlags::DepthStencil) != 0;
+        return (_desc.Flags & GPUTextureFlags::DepthStencil) != GPUTextureFlags::None;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE SRV() const override
     {
@@ -213,11 +192,13 @@ public:
     }
 
 protected:
-
     // [GPUTexture]
     bool OnInit() override;
-    void onResidentMipsChanged() override;
+    void OnResidentMipsChanged() override;
     void OnReleaseGPU() override;
+#if GPU_ENABLE_RESOURCE_NAMING
+    void OnRenamed() override;
+#endif
 };
 
 #endif

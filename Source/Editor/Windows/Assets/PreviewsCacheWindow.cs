@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.Content;
 using FlaxEditor.Viewport.Previews;
@@ -28,7 +28,7 @@ namespace FlaxEditor.Windows.Assets
             };
 
             // Toolstrip
-            _toolstrip.AddButton(editor.Icons.CenterView64, _preview.CenterView).LinkTooltip("Center view");
+            _toolstrip.AddButton(editor.Icons.CenterView64, _preview.CenterView).LinkTooltip("Center view", ref editor.Options.Options.Input.ShowEditorContents);
         }
 
         /// <inheritdoc />

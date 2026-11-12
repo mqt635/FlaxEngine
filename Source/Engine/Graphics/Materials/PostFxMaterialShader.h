@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,6 @@
 class PostFxMaterialShader : public MaterialShader
 {
 private:
-
     struct Cache
     {
         GPUPipelineState* Default = nullptr;
@@ -22,11 +21,9 @@ private:
     };
 
 private:
-
     Cache _cache;
 
 public:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -37,13 +34,11 @@ public:
     }
 
 public:
-
     // [MaterialShader]
     void Bind(BindParameters& params) override;
     void Unload() override;
 
 protected:
-
     // [MaterialShader]
     bool Load() override;
 };

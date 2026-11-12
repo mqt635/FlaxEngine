@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "NavModifierVolume.h"
 #include "NavigationSettings.h"
-#include "NavMeshBuilder.h"
+#include "Navigation.h"
 #include "Engine/Level/Scene/Scene.h"
 #include "Engine/Serialization/Serialization.h"
 #if USE_EDITOR
@@ -47,6 +47,20 @@ void NavModifierVolume::Deserialize(DeserializeStream& stream, ISerializeModifie
     DESERIALIZE(AreaName);
 }
 
+void NavModifierVolume::OnEnable()
+{
+    GetScene()->Navigation.Actors.Add(this);
+
+    BoxVolume::OnEnable();
+}
+
+void NavModifierVolume::OnDisable()
+{
+    BoxVolume::OnDisable();
+
+    GetScene()->Navigation.Actors.Remove(this);
+}
+
 void NavModifierVolume::OnBoundsChanged(const BoundingBox& prevBounds)
 {
 #if COMPILE_WITH_NAV_MESH_BUILDER
@@ -69,7 +83,7 @@ void NavModifierVolume::OnBoundsChanged(const BoundingBox& prevBounds)
 #else
         const float timeoutMs = 0.0f;
 #endif
-        NavMeshBuilder::Build(GetScene(), dirtyBounds, timeoutMs);
+        Navigation::BuildNavMesh(dirtyBounds, GetScene(), timeoutMs);
     }
 #endif
 }

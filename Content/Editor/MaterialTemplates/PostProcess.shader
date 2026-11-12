@@ -2,6 +2,7 @@
 // Version: @0
 
 #define MATERIAL 1
+#define MaterialTextureMipBias 0.0f
 @3
 
 #include "./Flax/Common.hlsl"
@@ -18,6 +19,9 @@ float TimeParam;
 float4 ViewInfo;
 float4 ScreenSize;
 float4 TemporalAAJitter;
+float4x4 InverseViewProjectionMatrix;
+float3 ViewPadding0;
+float ScaledTimeParam;
 @1META_CB_END
 
 // Shader resources
@@ -60,6 +64,14 @@ MaterialInput GetMaterialInput(PixelInput input)
 	result.TwoSidedSign = input.IsFrontFace ? 1.0 : -1.0;
 	result.SvPosition = input.Position;
 	return result;
+}
+
+// Gets world space position at given pixel coordinate with given device depth
+float3 GetWorldPos(float2 uv, float deviceDepth)
+{
+	float4 clipPos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), deviceDepth, 1.0);
+	float4 wsPos = mul(clipPos, InverseViewProjectionMatrix);
+	return wsPos.xyz / wsPos.w;
 }
 
 // Transforms a vector from tangent space to world space

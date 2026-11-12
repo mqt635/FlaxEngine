@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -7,42 +7,39 @@
 #include "GPUContextDX12.h"
 #include "../RenderToolsDX.h"
 
-QueryHeapDX12::QueryHeapDX12(GPUDeviceDX12* device, const D3D12_QUERY_HEAP_TYPE& queryHeapType, int32 queryHeapCount)
-    : _device(device)
-    , _queryHeap(nullptr)
-    , _resultBuffer(nullptr)
-    , _queryHeapType(queryHeapType)
-    , _currentIndex(0)
-    , _queryHeapCount(queryHeapCount)
+bool QueryHeapDX12::Init(GPUDeviceDX12* device, GPUQueryType type, uint32 size)
 {
-    if (queryHeapType == D3D12_QUERY_HEAP_TYPE_OCCLUSION)
-    {
-        _resultSize = sizeof(uint64);
-        _queryType = D3D12_QUERY_TYPE_OCCLUSION;
-    }
-    else if (queryHeapType == D3D12_QUERY_HEAP_TYPE_TIMESTAMP)
-    {
-        _resultSize = sizeof(uint64);
-        _queryType = D3D12_QUERY_TYPE_TIMESTAMP;
-    }
-    else
-    {
-        MISSING_CODE("Not support D3D12 query heap type.");
-    }
-}
-
-bool QueryHeapDX12::Init()
-{
-    _resultData.Resize(_resultSize * _queryHeapCount);
-
     // Create the query heap
-    D3D12_QUERY_HEAP_DESC heapDesc;
-    heapDesc.Type = _queryHeapType;
+    Type = type;
+    _device = device;
+    _queryHeapCount = size;
+    D3D12_QUERY_HEAP_DESC heapDesc = {};
     heapDesc.Count = _queryHeapCount;
     heapDesc.NodeMask = 0;
-    HRESULT result = _device->GetDevice()->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&_queryHeap));
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
-    DX_SET_DEBUG_NAME(_queryHeap, "Query Heap");
+    switch (type)
+    {
+    case GPUQueryType::Timer:
+        _resultSize = sizeof(uint64);
+        QueryType = D3D12_QUERY_TYPE_TIMESTAMP;
+        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        break;
+    case GPUQueryType::Occlusion:
+        _resultSize = sizeof(uint64);
+        QueryType = D3D12_QUERY_TYPE_OCCLUSION;
+        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+        break;
+    case GPUQueryType::BinaryOcclusion:
+        _resultSize = sizeof(uint64);
+        QueryType = D3D12_QUERY_TYPE_BINARY_OCCLUSION;
+        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+        break;
+    case GPUQueryType::MAX:
+        return true;
+    }
+    _resultData.Resize(_resultSize * _queryHeapCount);
+    HRESULT result = _device->GetDevice()->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&QueryHeap));
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
+    DX_SET_DEBUG_NAME(QueryHeap, "Query Heap");
 
     // Create the result buffer
     D3D12_HEAP_PROPERTIES heapProperties;
@@ -64,7 +61,7 @@ bool QueryHeapDX12::Init()
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
     result = _device->GetDevice()->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&_resultBuffer));
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
     DX_SET_DEBUG_NAME(_resultBuffer, "Query Heap Result Buffer");
 
     // Start out with an open query batch
@@ -77,58 +74,51 @@ bool QueryHeapDX12::Init()
 void QueryHeapDX12::Destroy()
 {
     SAFE_RELEASE(_resultBuffer);
-    SAFE_RELEASE(_queryHeap);
-    _currentBatch.Clear();
+    SAFE_RELEASE(QueryHeap);
+    _currentBatch = QueryBatch();
     _resultData.SetCapacity(0);
 }
 
-void QueryHeapDX12::EndQueryBatchAndResolveQueryData(GPUContextDX12* context)
+void QueryHeapDX12::EndFrame(GPUContextDX12* context)
 {
-    ASSERT(_currentBatch.Open);
-    if (_currentBatch.Count == 0)
-        return;
+    // Update existing batches to avoid leaks
+    for (int32 i = 0; i < _batches.Count(); i++)
+    {
+        if (--_batches[i].TTL == 0)
+        {
+            _batches.RemoveAt(i--);
+        }
+    }
 
-    // Close the current batch
+    // Close the current batch (if not empty)
+    if (!_currentBatch.Open || _currentBatch.Count == 0)
+        return;
     _currentBatch.Open = false;
 
     // Resolve the batch
-    const int32 offset = _currentBatch.Start * _resultSize;
-    context->GetCommandList()->ResolveQueryData(_queryHeap, _queryType, _currentBatch.Start, _currentBatch.Count, _resultBuffer, offset);
-    _currentBatch.Sync = _device->GetCommandQueue()->GetSyncPoint();
+    const uint32 offset = _currentBatch.Start * _resultSize;
+    context->GetCommandList()->ResolveQueryData(QueryHeap, QueryType, _currentBatch.Start, _currentBatch.Count, _resultBuffer, offset);
+    const auto queue = _device->GetCommandQueue();
+    _currentBatch.Sync = queue->GetSyncPoint();
+
+    // Get GPU clock frequency for timer queries
+    if (Type == GPUQueryType::Timer)
+    {
+        VALIDATE_DIRECTX_CALL(queue->GetCommandQueue()->GetTimestampFrequency(&_currentBatch.TimestampFrequency));
+    }
 
     // Begin a new query batch
     _batches.Add(_currentBatch);
     StartQueryBatch();
 }
 
-void QueryHeapDX12::AllocQuery(GPUContextDX12* context, ElementHandle& handle)
+void QueryHeapDX12::Alloc(ElementHandle& handle)
 {
     ASSERT(_currentBatch.Open);
-
-    // Check if need to start from the buffer head
-    if (_currentIndex >= GetQueryHeapCount())
-    {
-        // We're in the middle of a batch, but we're at the end of the heap so split the batch in two
-        EndQueryBatchAndResolveQueryData(context);
-    }
 
     // Allocate element into the current batch
     handle = _currentIndex++;
     _currentBatch.Count++;
-}
-
-void QueryHeapDX12::BeginQuery(GPUContextDX12* context, ElementHandle& handle)
-{
-    AllocQuery(context, handle);
-
-    context->GetCommandList()->BeginQuery(_queryHeap, _queryType, handle);
-}
-
-void QueryHeapDX12::EndQuery(GPUContextDX12* context, ElementHandle& handle)
-{
-    AllocQuery(context, handle);
-
-    context->GetCommandList()->EndQuery(_queryHeap, _queryType, handle);
 }
 
 bool QueryHeapDX12::IsReady(ElementHandle& handle)
@@ -150,7 +140,7 @@ bool QueryHeapDX12::IsReady(ElementHandle& handle)
     return true;
 }
 
-void* QueryHeapDX12::ResolveQuery(ElementHandle& handle)
+void* QueryHeapDX12::Resolve(ElementHandle& handle, uint64* timestampFrequency)
 {
     // Prevent queries from the current batch
     ASSERT(!_currentBatch.ContainsElement(handle));
@@ -181,7 +171,7 @@ void* QueryHeapDX12::ResolveQuery(ElementHandle& handle)
             range.Begin = batch.Start * _resultSize;
             range.End = range.Begin + batch.Count * _resultSize;
             void* mapped = nullptr;
-            VALIDATE_DIRECTX_RESULT(_resultBuffer->Map(0, &range, &mapped));
+            VALIDATE_DIRECTX_CALL(_resultBuffer->Map(0, &range, &mapped));
 
             // Copy the results data
             Platform::MemoryCopy(_resultData.Get() + range.Begin, (byte*)mapped + range.Begin, batch.Count * _resultSize);
@@ -192,10 +182,15 @@ void* QueryHeapDX12::ResolveQuery(ElementHandle& handle)
             // All elements got its results so we can remove this batch
             _batches.RemoveAt(i);
 
+            // Cache timestamps frequency for later
+            _timestampFrequency = batch.TimestampFrequency;
+
             break;
         }
     }
 
+    if (timestampFrequency)
+        *timestampFrequency = _timestampFrequency;
     return _resultData.Get() + handle * _resultSize;
 }
 
@@ -204,7 +199,7 @@ void QueryHeapDX12::StartQueryBatch()
     ASSERT(!_currentBatch.Open);
 
     // Clear the current batch
-    _currentBatch.Clear();
+    _currentBatch = QueryBatch();
 
     // Loop active index on overflow
     if (_currentIndex >= GetQueryHeapCount())
@@ -215,6 +210,7 @@ void QueryHeapDX12::StartQueryBatch()
     // Start a new batch
     _currentBatch.Start = _currentIndex;
     _currentBatch.Open = true;
+    _currentBatch.TTL = 50; // Auto-destroy after some frames when user fails to call GetQueryResult
 }
 
 #endif

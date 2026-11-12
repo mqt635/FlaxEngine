@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Collections/Array.h"
+#include "Engine/Core/Memory/ArenaAllocation.h"
 #include "MTypes.h"
 
 /// <summary>
@@ -10,43 +11,49 @@
 /// </summary>
 class FLAXENGINE_API MClass
 {
+    friend MCore;
 private:
-
-#if USE_MONO
-    MonoClass* _monoClass;
-    void* _attrInfo;
+#if USE_NETCORE
+    void* _handle;
+    StringAnsiView _name;
+    StringAnsiView _namespace;
+    StringAnsiView _fullname;
+    uint32 _types = 0;
+    mutable uint32 _size = 0;
+#else
+    StringAnsiView _name;
+    StringAnsiView _namespace;
+    StringAnsiView _fullname;
 #endif
-    const MAssembly* _assembly;
+    MAssembly* _assembly;
 
-    MString _fullname;
-
-    Array<MMethod*> _methods;
-    Array<MField*> _fields;
-    Array<MProperty*> _properties;
-    Array<MonoObject*> _attributes;
-    Array<MEvent*> _events;
+    mutable Array<MMethod*, ArenaAllocation> _methods;
+    mutable Array<MField*, ArenaAllocation> _fields;
+    mutable Array<MProperty*, ArenaAllocation> _properties;
+    mutable Array<MObject*, ArenaAllocation> _attributes;
+    mutable Array<MEvent*, ArenaAllocation> _events;
+    mutable Array<MClass*, ArenaAllocation> _interfaces;
 
     MVisibility _visibility;
 
-    int32 _hasCachedProperties : 1;
-    int32 _hasCachedFields : 1;
-    int32 _hasCachedMethods : 1;
-    int32 _hasCachedAttributes : 1;
-    int32 _hasCachedEvents : 1;
+    mutable int32 _hasCachedProperties : 1;
+    mutable int32 _hasCachedFields : 1;
+    mutable int32 _hasCachedMethods : 1;
+    mutable int32 _hasCachedAttributes : 1;
+    mutable int32 _hasCachedEvents : 1;
+    mutable int32 _hasCachedInterfaces : 1;
     int32 _isStatic : 1;
     int32 _isSealed : 1;
     int32 _isAbstract : 1;
     int32 _isInterface : 1;
+    int32 _isValueType : 1;
+    int32 _isEnum : 1;
+    int32 _isGeneric : 1;
 
 public:
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="MClass"/> class.
-    /// </summary>
-    /// <param name="parentAssembly">The parent assembly.</param>
-    /// <param name="monoClass">The Mono class.</param>
-    /// <param name="fullname">The fullname.</param>
-    MClass(const MAssembly* parentAssembly, MonoClass* monoClass, const MString& fullname);
+#if USE_NETCORE
+    MClass(MAssembly* parentAssembly, void* handle, const char* name, const char* fullname, const char* namespace_, MTypeAttributes typeAttributes);
+#endif
 
     /// <summary>
     /// Finalizes an instance of the <see cref="MClass"/> class.
@@ -54,11 +61,10 @@ public:
     ~MClass();
 
 public:
-
     /// <summary>
     /// Gets the parent assembly.
     /// </summary>
-    const MAssembly* GetAssembly() const
+    FORCE_INLINE MAssembly* GetAssembly() const
     {
         return _assembly;
     }
@@ -66,18 +72,35 @@ public:
     /// <summary>
     /// Gets the full name of the class (namespace and typename).
     /// </summary>
-    FORCE_INLINE const MString& GetFullName() const
+    FORCE_INLINE StringAnsiView GetFullName() const
     {
         return _fullname;
     }
 
-#if USE_MONO
+    /// <summary>
+    /// Gets the name of the class.
+    /// </summary>
+    FORCE_INLINE StringAnsiView GetName() const
+    {
+        return _name;
+    }
 
     /// <summary>
-    /// Gets the Mono class handle.
+    /// Gets the namespace of the class.
     /// </summary>
-    MonoClass* GetNative() const;
+    FORCE_INLINE StringAnsiView GetNamespace() const
+    {
+        return _namespace;
+    }
 
+#if USE_NETCORE
+    /// <summary>
+    /// Gets the native class handle.
+    /// </summary>
+    FORCE_INLINE void* GetNative() const
+    {
+        return _handle;
+    }
 #endif
 
     /// <summary>
@@ -121,14 +144,33 @@ public:
     }
 
     /// <summary>
+    /// Gets if class is value type (eg. enum or structure) but not reference type (eg. class, string, array, interface)
+    /// </summary>
+    FORCE_INLINE bool IsValueType() const
+    {
+        return _isValueType != 0;
+    }
+
+    /// <summary>
+    /// Gets if class is enumeration
+    /// </summary>
+    FORCE_INLINE bool IsEnum() const
+    {
+        return _isEnum != 0;
+    }
+
+    /// <summary>
     /// Gets if class is generic
     /// </summary>
-    bool IsGeneric() const;
+    FORCE_INLINE bool IsGeneric() const
+    {
+        return _isGeneric != 0;
+    }
 
     /// <summary>
     /// Gets the class type.
     /// </summary>
-    MType GetType() const;
+    MType* GetType() const;
 
     /// <summary>
     /// Returns the base class of this class. Null if this class has no base.
@@ -136,33 +178,38 @@ public:
     MClass* GetBaseClass() const;
 
     /// <summary>
-    /// Checks if this class is a sub class of the specified class (including any derived types).
+    /// Checks if this class is a subclass of the specified class (including any derived types).
     /// </summary>
     /// <param name="klass">The class.</param>
-    /// <returns>True if this class is a sub class of the specified class.</returns>
-    bool IsSubClassOf(const MClass* klass) const;
+    /// <param name="checkInterfaces">True if check interfaces, otherwise just base class.</param>
+    /// <returns>True if this class is a subclass of the specified class.</returns>
+    bool IsSubClassOf(const MClass* klass, bool checkInterfaces = false) const;
 
     /// <summary>
-    /// Checks if this class is a sub class of the specified class (including any derived types).
+    /// Checks if this class implements the specified interface (including any base types).
     /// </summary>
-    /// <param name="monoClass">The Mono class.</param>
-    /// <returns>True if this class is a sub class of the specified class.</returns>
-    bool IsSubClassOf(MonoClass* monoClass) const;
+    /// <param name="klass">The interface class.</param>
+    /// <returns>True if this class implements the specified interface.</returns>
+    bool HasInterface(const MClass* klass) const;
 
     /// <summary>
     /// Checks is the provided object instance of this class' type.
     /// </summary>
     /// <param name="object">The object to check.</param>
-    /// <returns>True if object  is an instance the this class.</returns>
-    bool IsInstanceOfType(MonoObject* object) const;
+    /// <returns>True if object is an instance this class.</returns>
+    bool IsInstanceOfType(MObject* object) const;
 
     /// <summary>
     /// Returns the size of an instance of this class, in bytes.
     /// </summary>
     uint32 GetInstanceSize() const;
 
-public:
+    /// <summary>
+    /// Returns the class of the array type elements.
+    /// </summary>
+    MClass* GetElementClass() const;
 
+public:
     /// <summary>
     /// Returns an object referencing a method with the specified name and number of parameters. Optionally checks the base classes.
     /// </summary>
@@ -170,7 +217,7 @@ public:
     /// <param name="numParams">The method parameters count.</param>
     /// <param name="checkBaseClasses">True if check base classes when searching for the given method.</param>
     /// <returns>The method or null if failed to find it.</returns>
-    MMethod* FindMethod(const char* name, int32 numParams, bool checkBaseClasses);
+    MMethod* FindMethod(const char* name, int32 numParams, bool checkBaseClasses = true) const;
 
     /// <summary>
     /// Returns an object referencing a method with the specified name and number of parameters.
@@ -179,119 +226,103 @@ public:
     /// <param name="name">The method name.</param>
     /// <param name="numParams">The method parameters count.</param>
     /// <returns>The method or null if failed to get it.</returns>
-    MMethod* GetMethod(const char* name, int32 numParams = 0);
+    MMethod* GetMethod(const char* name, int32 numParams = 0) const;
+
+    /// <summary>
+    /// Returns an object referencing a method with the specified signature.
+    /// </summary>
+    /// <param name="signature">The method signature.</param>
+    /// <returns>The method or null if failed to get it.</returns>
+    MMethod* GetMethod(const struct ScriptingTypeMethodSignature& signature) const;
 
     /// <summary>
     /// Returns all methods belonging to this class.
     /// </summary>
-    /// <remarks>
-    /// Be aware this will not include the methods of any base classes.
-    /// </remarks>
+    /// <remarks>Be aware this will not include the methods of any base classes.</remarks>
     /// <returns>The list of methods.</returns>
-    const Array<MMethod*>& GetMethods();
+    const Array<MMethod*, ArenaAllocation>& GetMethods() const;
 
     /// <summary>
     /// Returns an object referencing a field with the specified name.
     /// </summary>
-    /// <remarks>
-    /// Does not query base class fields.
-    /// Returns null if field cannot be found.	
-    /// </remarks>
+    /// <remarks>Does not query base class fields. Returns null if field cannot be found.</remarks>
     /// <param name="name">The field name.</param>
     /// <returns>The field or null if failed.</returns>
-    MField* GetField(const char* name);
+    MField* GetField(const char* name) const;
 
     /// <summary>
     /// Returns all fields belonging to this class.
     /// </summary>
-    /// <remarks>
-    /// Be aware this will not include the fields of any base classes.
-    /// </remarks>
+    /// <remarks>Be aware this will not include the fields of any base classes.</remarks>
     /// <returns>The list of fields.</returns>
-    const Array<MField*>& GetFields();
+    const Array<MField*, ArenaAllocation>& GetFields() const;
 
     /// <summary>
-    /// Returns an object referencing a event with the specified name.
+    /// Returns an object referencing an event with the specified name.
     /// </summary>
     /// <param name="name">The event name.</param>
     /// <returns>The event object.</returns>
-    MEvent* GetEvent(const char* name);
-
-    /// <summary>
-    /// Adds event with the specified name to the cache.
-    /// </summary>
-    /// <param name="name">The event name.</param>
-    /// <param name="event">The event Mono object.</param>
-    /// <returns>The event.</returns>
-    MEvent* AddEvent(const char* name, MonoEvent* event);
+    MEvent* GetEvent(const char* name) const;
 
     /// <summary>
     /// Returns all events belonging to this class.
     /// </summary>
     /// <returns>The list of events.</returns>
-    const Array<MEvent*>& GetEvents();
+    const Array<MEvent*, ArenaAllocation>& GetEvents() const;
 
     /// <summary>
     /// Returns an object referencing a property with the specified name.
     /// </summary>
-    /// <remarks>
-    /// Does not query base class properties.
-    /// Returns null if property cannot be found.
-    /// </remarks>
+    /// <remarks>Does not query base class properties. Returns null if property cannot be found.</remarks>
     /// <param name="name">The property name.</param>
     /// <returns>The property.</returns>
-    MProperty* GetProperty(const char* name);
+    MProperty* GetProperty(const char* name) const;
 
     /// <summary>
     /// Returns all properties belonging to this class.
     /// </summary>
-    /// <remarks>
-    /// Be aware this will not include the properties of any base classes.
-    /// </remarks>
+    /// <remarks>Be aware this will not include the properties of any base classes.</remarks>
     /// <returns>The list of properties.</returns>
-    const Array<MProperty*>& GetProperties();
+    const Array<MProperty*, ArenaAllocation>& GetProperties() const;
+
+    /// <summary>
+    /// Returns all interfaces implemented by this class (excluding interfaces from base classes).
+    /// </summary>
+    /// <remarks>Be aware this will not include the interfaces of any base classes.</remarks>
+    /// <returns>The list of interfaces.</returns>
+    const Array<MClass*, ArenaAllocation>& GetInterfaces() const;
 
 public:
-
     /// <summary>
     /// Creates a new instance of this class and constructs it.
     /// </summary>
     /// <returns>The created managed object.</returns>
-    MonoObject* CreateInstance() const;
-
-    /// <summary>
-    /// Creates a new instance of this class and then constructs it using the constructor with the specified number of parameters.
-    /// </summary>
-    /// <param name="params">The array containing pointers to constructor parameters. Array length must be equal to number of parameters.</param>
-    /// <param name="numParams">The number of parameters the constructor accepts.</param>
-    /// <returns>The created managed object.</returns>
-    MonoObject* CreateInstance(void** params, uint32 numParams);
+    MObject* CreateInstance() const;
 
 public:
-
     /// <summary>
     /// Checks if class has an attribute of the specified type.
     /// </summary>
-    /// <param name="monoClass">The attribute class to check.</param>
+    /// <param name="klass">The attribute class to check.</param>
     /// <returns>True if has attribute of that class type, otherwise false.</returns>
-    bool HasAttribute(MClass* monoClass);
+    bool HasAttribute(const MClass* klass) const;
 
     /// <summary>
     /// Checks if class has an attribute of any type.
     /// </summary>
     /// <returns>True if has any custom attribute, otherwise false.</returns>
-    bool HasAttribute();
+    bool HasAttribute() const;
 
     /// <summary>
     /// Returns an instance of an attribute of the specified type. Returns null if the class doesn't have such an attribute.
     /// </summary>
-    /// <param name="monoClass">The attribute class to take.</param>
+    /// <param name="klass">The attribute class to take.</param>
     /// <returns>The attribute object.</returns>
-    MonoObject* GetAttribute(MClass* monoClass);
+    MObject* GetAttribute(const MClass* klass) const;
 
     /// <summary>
     /// Returns an instance of all attributes connected with given class. Returns null if the class doesn't have any attributes.
     /// </summary>
     /// <returns>The array of attribute objects.</returns>
-    const Array<MonoObject*>& GetAttributes();
+    const Array<MObject*, ArenaAllocation>& GetAttributes() const;
 };

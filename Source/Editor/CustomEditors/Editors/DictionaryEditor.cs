@@ -1,17 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.CustomEditors.GUI;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -45,8 +46,8 @@ namespace FlaxEditor.CustomEditors.Editors
 
             private void OnSetupContextMenu(PropertyNameLabel label, ContextMenu menu, CustomEditor linkedEditor)
             {
-                menu.AddSeparator();
-
+                if (menu.Items.Any())
+                    menu.AddSeparator();
                 menu.AddButton("Remove", OnRemoveClicked).Enabled = !_editor._readOnly;
                 menu.AddButton("Edit", OnEditClicked).Enabled = _editor._canEditKeys;
             }
@@ -61,6 +62,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 var keyType = _editor.Values.Type.GetGenericArguments()[0];
                 if (keyType == typeof(string) || keyType.IsPrimitive)
                 {
+                    // Edit as text
                     var popup = RenamePopup.Show(Parent, Rectangle.Margin(Bounds, Margin), Text, false);
                     popup.Validate += (renamePopup, value) =>
                     {
@@ -78,7 +80,6 @@ namespace FlaxEditor.CustomEditors.Editors
                             newKey = JsonSerializer.Deserialize(renamePopup.Text, keyType);
                         else
                             newKey = renamePopup.Text;
-
                         _editor.ChangeKey(_key, newKey);
                         _key = newKey;
                         Text = _key.ToString();
@@ -86,6 +87,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 }
                 else if (keyType.IsEnum)
                 {
+                    // Edit via enum picker
                     var popup = RenamePopup.Show(Parent, Rectangle.Margin(Bounds, Margin), Text, false);
                     var picker = new EnumComboBox(keyType)
                     {
@@ -108,14 +110,28 @@ namespace FlaxEditor.CustomEditors.Editors
                 }
                 else
                 {
-                    throw new NotImplementedException("Missing editing for dictionary key type " + keyType);
+                    // Generic editor
+                    var popup = ContextMenuBase.ShowEmptyMenu(Parent, Rectangle.Margin(Bounds, Margin));
+                    var presenter = new CustomEditorPresenter(null);
+                    presenter.Panel.AnchorPreset = AnchorPresets.StretchAll;
+                    presenter.Panel.IsScrollable = false;
+                    presenter.Panel.Parent = popup;
+                    presenter.Select(_key);
+                    presenter.Modified += () =>
+                    {
+                        popup.Hide();
+                        object newKey = presenter.Selection[0];
+                        _editor.ChangeKey(_key, newKey);
+                        _key = newKey;
+                        Text = _key?.ToString();
+                    };
                 }
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
-                if (button == MouseButton.Left)
+                if (button == MouseButton.Left && _editor._canEditKeys)
                 {
                     OnEditClicked(null);
                     return true;
@@ -134,29 +150,14 @@ namespace FlaxEditor.CustomEditors.Editors
             }
         }
 
-        private IntegerValueElement _size;
+        private IntValueBox _sizeBox;
         private Color _background;
         private int _elementsCount;
         private bool _readOnly;
         private bool _notNullItems;
         private bool _canEditKeys;
         private bool _keyEdited;
-
-        /// <summary>
-        /// Determines whether this editor[can edit the specified dictionary type.
-        /// </summary>
-        /// <param name="type">Type of the dictionary.</param>
-        /// <returns>True if can edit, otherwise false.</returns>
-        public static bool CanEditType(Type type)
-        {
-            // Ensure it's a generic dictionary type
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Dictionary<,>))
-            {
-                return true;
-            }
-
-            return false;
-        }
+        private CollectionAttribute.DisplayType _displayType;
 
         /// <summary>
         /// Gets the length of the collection.
@@ -175,10 +176,11 @@ namespace FlaxEditor.CustomEditors.Editors
             var argTypes = type.GetGenericArguments();
             var keyType = argTypes[0];
             var valueType = argTypes[1];
-            _canEditKeys = keyType == typeof(string) || keyType.IsPrimitive || keyType.IsEnum;
+            _canEditKeys = keyType == typeof(string) || keyType.IsPrimitive || keyType.IsEnum || keyType.IsValueType;
             _background = FlaxEngine.GUI.Style.Current.CollectionBackgroundColor;
             _readOnly = false;
             _notNullItems = false;
+            _displayType = CollectionAttribute.DisplayType.Header;
 
             // Try get CollectionAttribute for collection editor meta
             var attributes = Values.GetAttributes();
@@ -187,26 +189,52 @@ namespace FlaxEditor.CustomEditors.Editors
             var collection = (CollectionAttribute)attributes?.FirstOrDefault(x => x is CollectionAttribute);
             if (collection != null)
             {
+                _canEditKeys &= collection.CanReorderItems;
                 _readOnly = collection.ReadOnly;
                 _notNullItems = collection.NotNullItems;
                 if (collection.BackgroundColor.HasValue)
                     _background = collection.BackgroundColor.Value;
                 overrideEditorType = TypeUtils.GetType(collection.OverrideEditorTypeName).Type;
                 spacing = collection.Spacing;
+                _displayType = collection.Display;
+            }
+            if (attributes != null && attributes.Any(x => x is ReadOnlyAttribute))
+            {
+                _readOnly = true;
+                _canEditKeys = false;
             }
 
             // Size
-            if (_readOnly || !_canEditKeys)
+            if (layout.ContainerControl is DropPanel dropPanel)
             {
-                layout.Label("Size", size.ToString());
-            }
-            else
-            {
-                _size = layout.IntegerValue("Size");
-                _size.IntValue.MinValue = 0;
-                _size.IntValue.MaxValue = _notNullItems ? size : ushort.MaxValue;
-                _size.IntValue.Value = size;
-                _size.IntValue.ValueChanged += OnSizeChanged;
+                var height = dropPanel.HeaderHeight - dropPanel.HeaderTextMargin.Height;
+                var y = -dropPanel.HeaderHeight + dropPanel.HeaderTextMargin.Top;
+                _sizeBox = new IntValueBox(size)
+                {
+                    MinValue = 0,
+                    MaxValue = _notNullItems ? size : ushort.MaxValue,
+                    AnchorPreset = AnchorPresets.TopRight,
+                    Bounds = new Rectangle(-40 - dropPanel.ItemsMargin.Right, y, 40, height),
+                    Parent = dropPanel,
+                };
+
+                var label = new Label
+                {
+                    Text = "Size",
+                    AnchorPreset = AnchorPresets.TopRight,
+                    Bounds = new Rectangle(-_sizeBox.Width - 40 - dropPanel.ItemsMargin.Right - 2, y, 40, height),
+                    Parent = dropPanel
+                };
+
+                if (_readOnly || !_canEditKeys)
+                {
+                    _sizeBox.IsReadOnly = true;
+                    _sizeBox.Enabled = false;
+                }
+                else
+                {
+                    _sizeBox.EditEnd += OnSizeChanged;
+                }
             }
 
             // Elements
@@ -223,30 +251,18 @@ namespace FlaxEditor.CustomEditors.Editors
 
                 for (int i = 0; i < size; i++)
                 {
-                    if (i != 0 && spacing > 0f)
+                    if (i > 0 && i < size && spacing > 0)
                     {
-                        if (panel.Children.Count > 0 && panel.Children[panel.Children.Count - 1] is PropertiesListElement propertiesListElement)
-                        {
-                            if (propertiesListElement.Labels.Count > 0)
-                            {
-                                var label = propertiesListElement.Labels[propertiesListElement.Labels.Count - 1];
-                                var margin = label.Margin;
-                                margin.Bottom += spacing;
-                                label.Margin = margin;
-                            }
-                            propertiesListElement.Space(spacing);
-                        }
-                        else
-                        {
-                            panel.Space(spacing);
-                        }
+                        panel.Space(spacing);
                     }
 
                     var key = keys.ElementAt(i);
                     var overrideEditor = overrideEditorType != null ? (CustomEditor)Activator.CreateInstance(overrideEditorType) : null;
                     var property = panel.AddPropertyItem(new DictionaryItemLabel(this, key));
                     var itemLayout = useSharedLayout ? (LayoutElementsContainer)property : property.VerticalPanel();
-                    itemLayout.Object(new DictionaryValueContainer(valuesType, key, Values), overrideEditor);
+                    itemLayout.Object(new DictionaryValueContainer(valuesType, key, Values, attributes), overrideEditor);
+                    if (_readOnly && itemLayout.Children.Count > 0)
+                        GenericEditor.OnReadOnlyProperty(itemLayout);
                 }
             }
             _elementsCount = size;
@@ -311,7 +327,7 @@ namespace FlaxEditor.CustomEditors.Editors
             if (IsSetBlocked)
                 return;
 
-            Resize(_size.IntValue.Value);
+            Resize(_sizeBox.Value);
         }
 
         /// <summary>
@@ -333,7 +349,7 @@ namespace FlaxEditor.CustomEditors.Editors
             {
                 foreach (var e in dictionary.Keys)
                 {
-                    if (e == key)
+                    if (Equals(e, key))
                         continue;
                     newValues[e] = dictionary[e];
                 }
@@ -370,9 +386,9 @@ namespace FlaxEditor.CustomEditors.Editors
         {
             var dictionary = Values[0] as IDictionary;
             var oldSize = dictionary?.Count ?? 0;
-
             if (oldSize == newSize)
                 return;
+            Profiler.BeginEvent("DictionaryEditor.Resize");
 
             // Allocate new collection
             var type = Values.Type;
@@ -396,11 +412,21 @@ namespace FlaxEditor.CustomEditors.Editors
 
             // Insert new items (find unique keys)
             int newItemsLeft = newSize - oldSize;
+            long lastAddedKey = 0;
             while (newItemsLeft-- > 0)
             {
-                if (keyType.IsPrimitive)
+                object newKey = null;
+                if (keyType == typeof(int))
                 {
-                    long uniqueKey = 0;
+                    int uniqueKey = (int)lastAddedKey;
+                    while (newValues.Contains(uniqueKey))
+                        uniqueKey++;
+                    lastAddedKey = uniqueKey;
+                    newKey = Convert.ChangeType(uniqueKey, keyType);
+                }
+                else if (keyType.IsPrimitive)
+                {
+                    long uniqueKey = lastAddedKey;
                     bool isUnique;
                     do
                     {
@@ -408,7 +434,7 @@ namespace FlaxEditor.CustomEditors.Editors
                         foreach (var e in newValues.Keys)
                         {
                             var asLong = Convert.ToInt64(e);
-                            if (asLong == uniqueKey)
+                            if (asLong.Equals(uniqueKey))
                             {
                                 uniqueKey++;
                                 isUnique = false;
@@ -416,8 +442,8 @@ namespace FlaxEditor.CustomEditors.Editors
                             }
                         }
                     } while (!isUnique);
-
-                    newValues[Convert.ChangeType(uniqueKey, keyType)] = TypeUtils.GetDefaultValue(new ScriptType(valueType));
+                    lastAddedKey = uniqueKey;
+                    newKey = Convert.ChangeType(uniqueKey, keyType);
                 }
                 else if (keyType.IsEnum)
                 {
@@ -437,8 +463,7 @@ namespace FlaxEditor.CustomEditors.Editors
                             }
                         }
                     } while (!isUnique && uniqueKeyIndex < enumValues.Length);
-
-                    newValues[enumValues.GetValue(uniqueKeyIndex)] = TypeUtils.GetDefaultValue(new ScriptType(valueType));
+                    newKey = enumValues.GetValue(uniqueKeyIndex);
                 }
                 else if (keyType == typeof(string))
                 {
@@ -449,7 +474,7 @@ namespace FlaxEditor.CustomEditors.Editors
                         isUnique = true;
                         foreach (var e in newValues.Keys)
                         {
-                            if ((string)e == uniqueKey)
+                            if (string.Equals((string)e, uniqueKey, StringComparison.InvariantCulture))
                             {
                                 uniqueKey += "*";
                                 isUnique = false;
@@ -457,14 +482,16 @@ namespace FlaxEditor.CustomEditors.Editors
                             }
                         }
                     } while (!isUnique);
-
-                    newValues[uniqueKey] = TypeUtils.GetDefaultValue(new ScriptType(valueType));
+                    newKey = uniqueKey;
                 }
                 else
                 {
-                    throw new InvalidOperationException();
+                    newKey = TypeUtils.GetDefaultValue(new ScriptType(keyType));
                 }
+                newValues[newKey] = TypeUtils.GetDefaultValue(new ScriptType(valueType));
             }
+
+            Profiler.EndEvent();
 
             SetValue(newValues);
         }

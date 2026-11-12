@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,8 +9,21 @@
 #include "PixelFormat.h"
 #include "Config.h"
 
-struct Color;
-struct Vector4;
+#if PLATFORM_WIN32
+// Fix nasty Win32 define garbage
+#undef MemoryBarrier
+#endif
+
+#if REVERSE_Z
+#define GPU_DEPTH_RANGE_MIN 1.0f
+#define GPU_DEPTH_RANGE_MAX 0.0f
+#define GPU_DEPTH_RANGE_BOUNDS(min, max) max, min
+#else
+#define GPU_DEPTH_RANGE_MIN 0.0f
+#define GPU_DEPTH_RANGE_MAX 1.0f
+#define GPU_DEPTH_RANGE_BOUNDS(min, max) min, max
+#endif
+
 class GPUConstantBuffer;
 class GPUShaderProgramCS;
 class GPUBuffer;
@@ -22,6 +35,11 @@ class GPUResource;
 class GPUResourceView;
 class GPUTextureView;
 class GPUBufferView;
+class GPUVertexLayout;
+struct GPUPass;
+struct GPUDrawPass;
+enum class GPUResourceAccess;
+enum class GPUQueryType;
 
 // Gets the GPU texture view. Checks if pointer is not null and texture has one or more mip levels loaded.
 #define GET_TEXTURE_VIEW_SAFE(t) (t && t->ResidentMipLevels() > 0 ? t->View() : nullptr)
@@ -31,7 +49,7 @@ class GPUBufferView;
 /// </summary>
 API_STRUCT() struct GPUDispatchIndirectArgs
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDispatchIndirectArgs);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDispatchIndirectArgs);
 
     /// <summary>
     /// The X dimension of dispatch size.
@@ -54,7 +72,7 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDispatchIndirectArgs);
 /// </summary>
 API_STRUCT() struct GPUDrawIndirectArgs
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndirectArgs);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndirectArgs);
 
     /// <summary>
     /// The number of vertices to draw for each instance.
@@ -82,7 +100,7 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndirectArgs);
 /// </summary>
 API_STRUCT() struct GPUDrawIndexedIndirectArgs
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndexedIndirectArgs);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndexedIndirectArgs);
 
     /// <summary>
     /// The number of indices to draw for each instance.
@@ -113,20 +131,23 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDrawIndexedIndirectArgs);
 /// <summary>
 /// Interface for GPU device context that can record and send graphics commands to the GPU in a sequence.
 /// </summary>
-API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API GPUContext : public PersistentScriptingObject
+API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API GPUContext : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUContext);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUContext);
 private:
-
     GPUDevice* _device;
 
 protected:
-
     double _lastRenderTime = -1;
     GPUContext(GPUDevice* device);
 
-public:
+#if !BUILD_RELEASE
+    enum class InvalidBindPoint { SRV, UAV, DSV, RTV };
 
+    static void LogInvalidResourceUsage(int32 slot, const GPUResourceView* view, InvalidBindPoint bindPoint);
+#endif
+
+public:
     /// <summary>
     /// Gets the graphics device.
     /// </summary>
@@ -136,7 +157,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Begins new frame and enters commands collecting mode.
     /// </summary>
@@ -147,10 +167,13 @@ public:
     /// </summary>
     virtual void FrameEnd();
 
+    /// <summary>
+    /// Called after performing final swapchain presentation and submitting all GPU commands.
+    /// </summary>
+    virtual void OnPresent();
+
 public:
-
 #if GPU_ALLOW_PROFILE_EVENTS
-
     /// <summary>
     /// Begins the profile event.
     /// </summary>
@@ -165,11 +188,9 @@ public:
     virtual void EventEnd()
     {
     }
-
 #endif
 
 public:
-
     /// <summary>
     /// Gets the native pointer to the underlying graphics device context. It's a low-level platform-specific handle.
     /// </summary>
@@ -177,12 +198,13 @@ public:
 
     /// <summary>
     /// Determines whether depth buffer is binded to the pipeline.
+    /// [Deprecated in v1.10]
     /// </summary>
     /// <returns><c>true</c> if  depth buffer is binded; otherwise, <c>false</c>.</returns>
+    DEPRECATED("IsDepthBufferBinded has been deprecated and will be removed in future")
     virtual bool IsDepthBufferBinded() = 0;
 
 public:
-
     /// <summary>
     /// Clears texture surface with a color. Supports volumetric textures and texture arrays (including cube textures).
     /// </summary>
@@ -195,17 +217,38 @@ public:
     /// </summary>
     /// <param name="depthBuffer">The depth buffer to clear.</param>
     /// <param name="depthValue">The clear depth value.</param>
-    API_FUNCTION() virtual void ClearDepth(GPUTextureView* depthBuffer, float depthValue = 1.0f) = 0;
+    /// <param name="stencilValue">The clear stencil value.</param>
+    API_FUNCTION() virtual void ClearDepth(GPUTextureView* depthBuffer, float depthValue = GPU_DEPTH_RANGE_MAX, uint8 stencilValue = 0) = 0;
 
     /// <summary>
-    /// Clears an unordered access resource with a float value.
+    /// Clears an unordered access buffer with a float value.
     /// </summary>
     /// <param name="buf">The buffer to clear.</param>
     /// <param name="value">The clear value.</param>
-    API_FUNCTION() virtual void ClearUA(GPUBuffer* buf, const Vector4& value) = 0;
+    API_FUNCTION() virtual void ClearUA(GPUBuffer* buf, const Float4& value) = 0;
+
+    /// <summary>
+    /// Clears an unordered access buffer with an unsigned value.
+    /// </summary>
+    /// <param name="buf">The buffer to clear.</param>
+    /// <param name="value">The clear value.</param>
+    virtual void ClearUA(GPUBuffer* buf, const uint32 value[4]) = 0;
+
+    /// <summary>
+    /// Clears an unordered access texture with an unsigned value.
+    /// </summary>
+    /// <param name="texture">The texture to clear.</param>
+    /// <param name="value">The clear value.</param>
+    virtual void ClearUA(GPUTexture* texture, const uint32 value[4]) = 0;
+
+    /// <summary>
+    /// Clears an unordered access texture with a float value.
+    /// </summary>
+    /// <param name="texture">The texture to clear.</param>
+    /// <param name="value">The clear value.</param>
+    virtual void ClearUA(GPUTexture* texture, const Float4& value) = 0;
 
 public:
-
     /// <summary>
     /// Updates the buffer data.
     /// </summary>
@@ -279,7 +322,6 @@ public:
     API_FUNCTION() virtual void CopySubresource(GPUResource* dstResource, uint32 dstSubresource, GPUResource* srcResource, uint32 srcSubresource) = 0;
 
 public:
-
     /// <summary>
     /// Unbinds all the render targets and flushes the change with the driver (used to prevent driver detection of resource hazards, eg. when down-scaling the texture).
     /// </summary>
@@ -306,14 +348,18 @@ public:
     API_FUNCTION() virtual void SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts) = 0;
 
     /// <summary>
-    /// Sets the render target and unordered access output.
+    /// Sets the blend factor that modulate values for a pixel shader, render target, or both.
     /// </summary>
-    /// <param name="rt">The render target to bind to output.</param>
-    /// <param name="uaOutput">The unordered access buffer to bind to output.</param>
-    API_FUNCTION() virtual void SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput) = 0;
+    /// <param name="value">Blend factors, one for each RGBA component.</param>
+    API_FUNCTION() virtual void SetBlendFactor(const Float4& value) = 0;
+
+    /// <summary>
+    /// Sets the reference value for depth stencil tests.
+    /// </summary>
+    /// <param name="value">Reference value to perform against when doing a depth-stencil test.</param>
+    API_FUNCTION() virtual void SetStencilRef(uint32 value) = 0;
 
 public:
-
     /// <summary>
     /// Unbinds all shader resource slots and flushes the change with the driver (used to prevent driver detection of resource hazards, eg. when down-scaling the texture).
     /// </summary>
@@ -389,7 +435,8 @@ public:
     /// </summary>
     /// <param name="vertexBuffers">The array of vertex buffers to use.</param>
     /// <param name="vertexBuffersOffsets">The optional array of byte offsets from the vertex buffers begins. Can be used to offset the vertex data when reusing the same buffer allocation for multiple geometry objects.</param>
-    API_FUNCTION() virtual void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr) = 0;
+    /// <param name="vertexLayout">The optional vertex layout to use when passing data from vertex buffers to the vertex shader. If null, layout will be automatically extracted from vertex buffers combined.</param>
+    API_FUNCTION() virtual void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr, GPUVertexLayout* vertexLayout = nullptr) = 0;
 
     /// <summary>
     /// Binds the index buffer to the pipeline.
@@ -405,7 +452,6 @@ public:
     API_FUNCTION() virtual void BindSampler(int32 slot, GPUSampler* sampler) = 0;
 
 public:
-
     /// <summary>
     /// Updates the constant buffer data.
     /// </summary>
@@ -414,7 +460,6 @@ public:
     API_FUNCTION() virtual void UpdateCB(GPUConstantBuffer* cb, const void* data) = 0;
 
 public:
-
     /// <summary>
     /// Executes a command list from a thread group.
     /// </summary>
@@ -422,7 +467,7 @@ public:
     /// <param name="threadGroupCountX">The number of groups dispatched in the x direction.</param>
     /// <param name="threadGroupCountY">The number of groups dispatched in the y direction.</param>
     /// <param name="threadGroupCountZ">The number of groups dispatched in the z direction.</param>
-    API_FUNCTION() virtual void Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCountX, uint32 threadGroupCountY, uint32 threadGroupCountZ) = 0;
+    API_FUNCTION() virtual void Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCountX, uint32 threadGroupCountY = 1, uint32 threadGroupCountZ = 1) = 0;
 
     /// <summary>
     /// Executes a command list from a thread group. Buffer must contain GPUDispatchIndirectArgs.
@@ -456,6 +501,13 @@ public:
     API_FUNCTION() void Draw(GPUTexture* dst, GPUTexture* src);
 
     /// <summary>
+    /// Draws the specified source texture view to destination render target (using fullscreen triangle). Copies contents with resizing and format conversion support. Uses linear texture sampling.
+    /// </summary>
+    /// <param name="dst">The destination texture.</param>
+    /// <param name="src">The source texture view.</param>
+    API_FUNCTION() void Draw(GPUTexture* dst, GPUTextureView* src);
+
+    /// <summary>
     /// Draws the specified texture to render target (using fullscreen triangle). Copies contents with resizing and format conversion support. Uses linear texture sampling.
     /// </summary>
     /// <param name="rt">The texture.</param>
@@ -472,7 +524,7 @@ public:
     /// </summary>
     /// <param name="startVertex">A value added to each index before reading a vertex from the vertex buffer.</param>
     /// <param name="verticesCount">The vertices count.</param>
-    API_FUNCTION() FORCE_INLINE void Draw(uint32 startVertex, uint32 verticesCount)
+    API_FUNCTION() FORCE_INLINE void Draw(int32 startVertex, uint32 verticesCount)
     {
         DrawInstanced(verticesCount, 1, 0, startVertex);
     }
@@ -522,7 +574,20 @@ public:
     API_FUNCTION() virtual void DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs) = 0;
 
 public:
+    /// <summary>
+    /// Begins the GPU query that will measure commands until EndQuery.
+    /// </summary>
+    /// <param name="type">Query type.</param>
+    /// <returns>Unique identifier of the query used to EndQuery and then GetQueryResult to read the query result data.</returns>
+    virtual uint64 BeginQuery(GPUQueryType type) = 0;
 
+    /// <summary>
+    /// Ends the GPU query. Use GPUDevice::GetQueryResult to read the results back.
+    /// </summary>
+    /// <param name="queryID">Query identifier returned by BeginQuery.</param>
+    virtual void EndQuery(uint64 queryID) = 0;
+
+public:
     /// <summary>
     /// Sets the rendering viewport and scissor rectangle.
     /// </summary>
@@ -539,7 +604,7 @@ public:
     /// <summary>
     /// Sets the rendering viewport and scissor rectangle.
     /// </summary>
-    /// <param name="viewport">The viewport.</param>
+    /// <param name="viewport">The viewport (in pixels).</param>
     API_FUNCTION() FORCE_INLINE void SetViewportAndScissors(const Viewport& viewport)
     {
         SetViewport(viewport);
@@ -561,17 +626,24 @@ public:
     /// <summary>
     /// Sets the rendering viewport.
     /// </summary>
-    /// <param name="viewport">The viewport.</param>
+    /// <param name="viewport">The viewport (in pixels).</param>
     API_FUNCTION() virtual void SetViewport(API_PARAM(Ref) const Viewport& viewport) = 0;
 
     /// <summary>
     /// Sets the scissor rectangle.
     /// </summary>
-    /// <param name="scissorRect">The scissor rectangle.</param>
+    /// <param name="scissorRect">The scissor rectangle (in pixels).</param>
     API_FUNCTION() virtual void SetScissor(API_PARAM(Ref) const Rectangle& scissorRect) = 0;
 
-public:
+    /// <summary>
+    /// Sets the minimum and maximum depth values for depth bounds test.
+    /// </summary>
+    /// <remarks>Both values must be between 0.0 and 1.0, MinDepth must be less than or equal to MaxDepth.</remarks>
+    /// <param name="minDepth">The minimum value for depth bound test.</param>
+    /// <param name="maxDepth">The maximum value for depth bound test.</param>
+    API_FUNCTION() virtual void SetDepthBounds(float minDepth = 0.0f, float maxDepth = 1.0f) = 0;
 
+public:
     /// <summary>
     /// Sets the graphics pipeline state.
     /// </summary>
@@ -586,8 +658,17 @@ public:
 
     /// <summary>
     /// Clears the context state.
+    /// [Deprecated in v1.12]
     /// </summary>
-    API_FUNCTION() virtual void ClearState() = 0;
+    API_FUNCTION() DEPRECATED("Use ResetState instead") void ClearState()
+    {
+        ResetState();
+    }
+
+    /// <summary>
+    /// Resets the context state.
+    /// </summary>
+    API_FUNCTION() virtual void ResetState() = 0;
 
     /// <summary>
     /// Flushes the internal cached context state with a command buffer.
@@ -598,4 +679,42 @@ public:
     /// Flushes the command buffer (calls GPU execution).
     /// </summary>
     API_FUNCTION() virtual void Flush() = 0;
+
+    /// <summary>
+    /// Sets the state of the resource (or subresource).
+    /// </summary>
+    virtual void SetResourceState(GPUResource* resource, uint64 state, int32 subresource = -1);
+
+    /// <summary>
+    /// Forces graphics backend to rebind descriptors after command list was used by external graphics library.
+    /// </summary>
+    virtual void ForceRebindDescriptors();
+
+protected:
+    friend GPUPass;
+    int32 _pass = 0;
+
+public:
+    // Performs resource state transition into a specific access (mask).
+    virtual void Transition(GPUResource* resource, GPUResourceAccess access)
+    {
+    }
+
+    // Inserts a global memory barrier on data copies between resources.
+    virtual void MemoryBarrier()
+    {
+    }
+
+    // Begins or ends unordered access resource overlap region that allows running different compute shader dispatches simultaneously.
+    virtual void OverlapUA(bool end)
+    {
+    }
+
+    // Begins draw pass rendering. See GPUDrawPass.
+    virtual void BeginDrawPass(GPUDrawPass& pass);
+
+    // Ends draw pass rendering. See GPUDrawPass.
+    virtual void EndDrawPass()
+    {
+    }
 };

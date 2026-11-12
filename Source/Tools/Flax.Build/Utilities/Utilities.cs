@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Flax.Build
@@ -15,6 +16,40 @@ namespace Flax.Build
     /// </summary>
     public static class Utilities
     {
+        /// <summary>
+        /// Gets the .Net SDK path.
+        /// </summary>
+        /// <returns>The path.</returns>
+        public static string GetDotNetPath()
+        {
+            var buildPlatform = Platform.BuildTargetPlatform;
+            var dotnetSdk = DotNetSdk.Instance;
+            if (!dotnetSdk.IsValid)
+                throw new DotNetSdk.MissingException();
+            var dotnetPath = "dotnet";
+            switch (buildPlatform)
+            {
+            case TargetPlatform.Windows:
+                dotnetPath = Path.Combine(dotnetSdk.RootPath, "dotnet.exe");
+                break;
+            case TargetPlatform.Linux: break;
+            case TargetPlatform.Mac:
+                dotnetPath = Path.Combine(dotnetSdk.RootPath, "dotnet");
+                break;
+            default: throw new InvalidPlatformException(buildPlatform);
+            }
+            return dotnetPath;
+        }
+
+        /// <summary>
+        /// Gets the NuGet packages cache folder path.
+        /// </summary>
+        /// <returns>The path.</returns>
+        public static string GetNugetPackagesPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        }
+
         /// <summary>
         /// Gets the hash code for the string (the same for all platforms). Matches Engine algorithm for string hashing.
         /// </summary>
@@ -36,12 +71,14 @@ namespace Flax.Build
 
         /// <summary>
         /// Gets the empty array of the given type (shared one).
+        /// [Deprecated in v1.13]
         /// </summary>
         /// <typeparam name="T">The type.</typeparam>
         /// <returns>The empty array object.</returns>
+        [Obsolete("Use Array.Empty instead.")]
         public static T[] GetEmptyArray<T>()
         {
-            return Enumerable.Empty<T>() as T[];
+            return Array.Empty<T>();
         }
 
         /// <summary>
@@ -99,23 +136,50 @@ namespace Flax.Build
         }
 
         /// <summary>
+        /// File copy modes.
+        /// </summary>
+        public enum CopyMode
+        {
+            /// <summary>
+            /// Copies the file to the destination, fails if it already exists.
+            /// </summary>
+            New,
+
+            /// <summary>
+            /// If destination file exists, it will be overriden.
+            /// </summary>
+            OverrideIfExists,
+
+            /// <summary>
+            /// If destination file exists, has the same size and is newer than source file, it won't be overriden (avoids unnecessary copies).
+            /// </summary>
+            OverrideIfNewer,
+        }
+
+        /// <summary>
         /// Copies the file.
         /// </summary>
         /// <param name="srcFilePath">The source file path.</param>
         /// <param name="dstFilePath">The destination file path.</param>
-        /// <param name="overwrite"><see langword="true" /> if the destination file can be overwritten; otherwise, <see langword="false" />.</param>
-        public static void FileCopy(string srcFilePath, string dstFilePath, bool overwrite = true)
+        /// <param name="mode">Copy operation modes.</param>
+        public static void FileCopy(string srcFilePath, string dstFilePath, CopyMode mode = CopyMode.OverrideIfExists)
         {
             if (string.IsNullOrEmpty(srcFilePath))
                 throw new ArgumentNullException(nameof(srcFilePath));
             if (string.IsNullOrEmpty(dstFilePath))
                 throw new ArgumentNullException(nameof(dstFilePath));
 
+            if (mode == CopyMode.OverrideIfNewer &&
+                File.Exists(dstFilePath) &&
+                File.GetLastWriteTime(srcFilePath) <= File.GetLastWriteTime(dstFilePath) &&
+                new FileInfo(dstFilePath).Length == new FileInfo(srcFilePath).Length)
+                return;
+
             Log.Verbose(srcFilePath + " -> " + dstFilePath);
 
             try
             {
-                File.Copy(srcFilePath, dstFilePath, overwrite);
+                File.Copy(srcFilePath, dstFilePath, mode != CopyMode.New);
             }
             catch (Exception ex)
             {
@@ -125,6 +189,17 @@ namespace Flax.Build
                     Log.Error("Failed to copy file. " + ex.Message);
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Copies the file.
+        /// </summary>
+        /// <param name="srcFilePath">The source file path.</param>
+        /// <param name="dstFilePath">The destination file path.</param>
+        /// <param name="overwrite"><see langword="true" /> if the destination file can be overwritten; otherwise, <see langword="false" />.</param>
+        public static void FileCopy(string srcFilePath, string dstFilePath, bool overwrite)
+        {
+            FileCopy(srcFilePath, dstFilePath, overwrite ? CopyMode.OverrideIfExists : CopyMode.New);
         }
 
         /// <summary>
@@ -245,6 +320,26 @@ namespace Flax.Build
         }
 
         /// <summary>
+        /// Deletes the directories inside a directory.
+        /// </summary>
+        /// <param name="directoryPath">The directory path.</param>
+        /// <param name="searchPattern">The custom filter for the directories to delete. Can be used to select files to delete. Null if unused.</param>
+        /// <param name="withSubdirs">if set to <c>true</c> with sub-directories (recursive delete operation).</param>
+        public static void DirectoriesDelete(string directoryPath, string searchPattern = null, bool withSubdirs = true)
+        {
+            if (!Directory.Exists(directoryPath))
+                return;
+            if (searchPattern == null)
+                searchPattern = "*";
+
+            var directories = Directory.GetDirectories(directoryPath, searchPattern, withSubdirs ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+            for (int i = 0; i < directories.Length; i++)
+            {
+                DirectoryDelete(directories[i]);
+            }
+        }
+
+        /// <summary>
         /// The process run options.
         /// </summary>
         [Flags]
@@ -286,12 +381,48 @@ namespace Flax.Build
             NoLoggingOfRunDuration = 1 << 5,
 
             /// <summary>
+            /// Throws exception when app returns non-zero return code.
+            /// </summary>
+            ThrowExceptionOnError = 1 << 6,
+
+            /// <summary>
+            /// Logs program output to the console, otherwise only when using verbose log.
+            /// </summary>
+            ConsoleLogOutput = 1 << 7,
+
+            /// <summary>
+            /// Enables <see cref="ProcessStartInfo.UseShellExecute"/> to run process via Shell instead of standard process startup.
+            /// </summary>
+            Shell = 1 << 8,
+
+            /// <summary>
             /// The default options.
             /// </summary>
             Default = AppMustExist,
+
+            /// <summary>
+            /// The default options for tools execution in build tool.
+            /// </summary>
+            DefaultTool = ConsoleLogOutput | ThrowExceptionOnError,
         }
 
-        private static void StdOut(object sender, DataReceivedEventArgs e)
+        private static void StdLogInfo(object sender, DataReceivedEventArgs e)
+        {
+            if (e.Data != null)
+            {
+                Log.Info(e.Data);
+            }
+        }
+
+        private static void StdLogError(object sender, DataReceivedEventArgs e)
+        {
+            if (e.Data != null)
+            {
+                Log.Error(e.Data);
+            }
+        }
+
+        private static void StdLogVerbose(object sender, DataReceivedEventArgs e)
         {
             if (e.Data != null)
             {
@@ -299,12 +430,14 @@ namespace Flax.Build
             }
         }
 
-        private static void StdErr(object sender, DataReceivedEventArgs e)
+        /// <summary>
+        /// Calls <see cref="Type.GetType()"/> within Flax.Build context - can be used by build scripts to properly find a type by name. 
+        /// </summary>
+        /// <param name="name">The full name (namespace with class name).</param>
+        /// <returns>Type or null if not found.</returns>
+        public static Type GetType(string name)
         {
-            if (e.Data != null)
-            {
-                Log.Verbose(e.Data);
-            }
+            return Type.GetType(name);
         }
 
         /// <summary>
@@ -319,7 +452,10 @@ namespace Flax.Build
         /// <returns>The exit code of the program.</returns>
         public static int Run(string app, string commandLine = null, string input = null, string workspace = null, RunOptions options = RunOptions.Default, Dictionary<string, string> envVars = null)
         {
-            // Check if the application exists, including the PATH directories.
+            if (string.IsNullOrEmpty(app))
+                throw new ArgumentNullException(nameof(app), "Missing app to run.");
+
+            // Check if the application exists, including the PATH directories
             if (options.HasFlag(RunOptions.AppMustExist) && !File.Exists(app))
             {
                 bool existsInPath = false;
@@ -347,15 +483,20 @@ namespace Flax.Build
             Stopwatch stopwatch = Stopwatch.StartNew();
             if (!options.HasFlag(RunOptions.NoLoggingOfRunCommand))
             {
-                Log.Verbose("Running: " + app + " " + (string.IsNullOrEmpty(commandLine) ? "" : commandLine));
+                var msg = "Running: " + app + (string.IsNullOrEmpty(commandLine) ? "" : " " + commandLine);
+                if (options.HasFlag(RunOptions.ConsoleLogOutput))
+                    Log.Info(msg);
+                else
+                    Log.Verbose(msg);
             }
 
             bool redirectStdOut = (options & RunOptions.NoStdOutRedirect) != RunOptions.NoStdOutRedirect;
+            bool shell = options.HasFlag(RunOptions.Shell);
 
             Process proc = new Process();
             proc.StartInfo.FileName = app;
-            proc.StartInfo.Arguments = string.IsNullOrEmpty(commandLine) ? "" : commandLine;
-            proc.StartInfo.UseShellExecute = false;
+            proc.StartInfo.Arguments = commandLine != null ? commandLine : "";
+            proc.StartInfo.UseShellExecute = shell;
             proc.StartInfo.RedirectStandardInput = input != null;
             proc.StartInfo.CreateNoWindow = true;
 
@@ -364,24 +505,40 @@ namespace Flax.Build
                 proc.StartInfo.WorkingDirectory = workspace;
             }
 
-            if (redirectStdOut)
+            if (redirectStdOut && !shell)
             {
                 proc.StartInfo.RedirectStandardOutput = true;
                 proc.StartInfo.RedirectStandardError = true;
-                proc.OutputDataReceived += StdOut;
-                proc.ErrorDataReceived += StdErr;
+                if (options.HasFlag(RunOptions.ConsoleLogOutput))
+                {
+                    proc.OutputDataReceived += StdLogInfo;
+                    proc.ErrorDataReceived += StdLogError;
+                }
+                else
+                {
+                    proc.OutputDataReceived += StdLogVerbose;
+                    proc.ErrorDataReceived += StdLogVerbose;
+                }
             }
 
-            if (envVars != null)
+            if (envVars != null && !shell)
             {
                 foreach (var env in envVars)
                 {
                     if (env.Key == "PATH")
                     {
-                        proc.StartInfo.EnvironmentVariables[env.Key] = proc.StartInfo.EnvironmentVariables[env.Key] + ';' + env.Value;
+                        // Append to path
+                        proc.StartInfo.EnvironmentVariables[env.Key] = env.Value + ';' + proc.StartInfo.EnvironmentVariables[env.Key];
+                    }
+                    else if (env.Value == null)
+                    {
+                        // Remove variable
+                        if (proc.StartInfo.EnvironmentVariables.ContainsKey(env.Key))
+                            proc.StartInfo.EnvironmentVariables.Remove(env.Key);
                     }
                     else
                     {
+                        // Set variable
                         proc.StartInfo.EnvironmentVariables[env.Key] = env.Value;
                     }
                 }
@@ -421,9 +578,39 @@ namespace Flax.Build
                 {
                     Log.Info(string.Format("Took {0}s to run {1}, ExitCode={2}", stopwatch.Elapsed.TotalSeconds, Path.GetFileName(app), result));
                 }
+                if (result != 0 && options.HasFlag(RunOptions.ThrowExceptionOnError))
+                {
+                    var format = options.HasFlag(RunOptions.NoLoggingOfRunCommand) ? "App failed with exit code {2}." : "{0} {1} failed with exit code {2}";
+                    throw new Exception(string.Format(format, app, commandLine, result));
+                }
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Runs the process and reds its standard output as a string.
+        /// </summary>
+        /// <param name="filename">The executable file path.</param>
+        /// <param name="args">The custom arguments.</param>
+        /// <param name="workspace">The custom folder to run program in it.</param>
+        /// <returns>Returned process output.</returns>
+        public static string ReadProcessOutput(string filename, string args = null, string workspace = null)
+        {
+            Process p = new Process
+            {
+                StartInfo =
+                {
+                    FileName = filename,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    WorkingDirectory = workspace,
+                }
+            };
+            p.Start();
+            return p.StandardOutput.ReadToEnd().Trim();
         }
 
         /// <summary>
@@ -554,10 +741,15 @@ namespace Flax.Build
                     if (stack.Count != 0)
                     {
                         var popped = stack.Pop();
+                        var windowsDriveStart = popped.IndexOf('\\');
                         if (popped == "..")
                         {
                             stack.Push(popped);
                             stack.Push(bit);
+                        }
+                        else if (windowsDriveStart != -1)
+                        {
+                            stack.Push(popped.Substring(windowsDriveStart + 1));
                         }
                     }
                     else
@@ -663,6 +855,60 @@ namespace Flax.Build
             var text = File.ReadAllText(file);
             text = text.Replace(findWhat, replaceWith);
             File.WriteAllText(file, text);
+        }
+
+        /// <summary>
+        /// Returns back the exe ext for the current platform
+        /// </summary>
+        public static string GetPlatformExecutableExt()
+        {
+            var extEnding = ".exe";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX) || RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                extEnding = "";
+            }
+            return extEnding;
+        }
+
+        /// <summary>
+        /// Sorts the directories by name assuming they contain version text. Sorted from lowest to the highest version.
+        /// </summary>
+        /// <param name="paths">The paths array to sort.</param>
+        public static void SortVersionDirectories(string[] paths)
+        {
+            if (paths == null || paths.Length == 0)
+                return;
+            Array.Sort(paths, (a, b) =>
+            {
+                Version va, vb;
+                var fa = Path.GetFileName(a);
+                var fb = Path.GetFileName(b);
+                if (!string.IsNullOrEmpty(fa))
+                    a = fa;
+                if (!string.IsNullOrEmpty(fb))
+                    b = fb;
+                if (Version.TryParse(a, out va))
+                {
+                    if (Version.TryParse(b, out vb))
+                        return va.CompareTo(vb);
+                    return 1;
+                }
+                if (Version.TryParse(b, out vb))
+                    return -1;
+                return 0;
+            });
+        }
+
+        internal static bool ParseVersion(string text, out Version ver)
+        {
+            if (Version.TryParse(text, out ver))
+                return true;
+            if (int.TryParse(text, out var major))
+            {
+                ver = new Version(major, 0);
+                return true;
+            }
+            return false;
         }
     }
 }

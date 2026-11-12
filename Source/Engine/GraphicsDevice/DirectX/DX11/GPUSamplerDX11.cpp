@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX11
 
@@ -77,6 +77,9 @@ bool GPUSamplerDX11::OnInit()
     case GPUSamplerCompareFunction::Less:
         samplerDesc.ComparisonFunc = D3D11_COMPARISON_LESS;
         break;
+    case GPUSamplerCompareFunction::Greater:
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_GREATER;
+        break;
     default:
         return true;
     }
@@ -106,7 +109,7 @@ bool GPUSamplerDX11::OnInit()
     samplerDesc.MinLOD = _desc.MinMipLevel;
     samplerDesc.MaxLOD = _desc.MaxMipLevel;
     HRESULT result = _device->GetDevice()->CreateSamplerState(&samplerDesc, &SamplerState);
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
     ASSERT(SamplerState != nullptr);
     _memoryUsage = sizeof(D3D11_SAMPLER_DESC);
 

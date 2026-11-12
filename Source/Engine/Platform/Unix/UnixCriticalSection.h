@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,7 +15,6 @@ class UnixConditionVariable;
 class FLAXENGINE_API UnixCriticalSection
 {
     friend UnixConditionVariable;
-
 private:
 
     pthread_mutex_t _mutex;
@@ -23,8 +22,6 @@ private:
 #if BUILD_DEBUG
     pthread_t _owningThreadId;
 #endif
-
-private:
 
     UnixCriticalSection(const UnixCriticalSection&);
     UnixCriticalSection& operator=(const UnixCriticalSection&);
@@ -60,7 +57,7 @@ public:
     /// <summary>
     /// Locks the critical section.
     /// </summary>
-    void Lock() const
+    NO_SANITIZE_THREAD void Lock() const
     {
         pthread_mutex_lock(_mutexPtr);
 #if BUILD_DEBUG
@@ -72,7 +69,7 @@ public:
     /// Attempts to enter a critical section without blocking. If the call is successful, the calling thread takes ownership of the critical section.
     /// </summary>
     /// <returns>True if calling thread took ownership of the critical section.</returns>
-    bool TryLock() const
+    NO_SANITIZE_THREAD bool TryLock() const
     {
         return pthread_mutex_trylock(_mutexPtr) == 0;
     }
@@ -80,7 +77,7 @@ public:
     /// <summary>
     /// Releases the lock on the critical section.
     /// </summary>
-    void Unlock() const
+    NO_SANITIZE_THREAD void Unlock() const
     {
 #if BUILD_DEBUG
         ((UnixCriticalSection*)this)->_owningThreadId = 0;

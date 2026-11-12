@@ -1,13 +1,62 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using FlaxEditor.Content;
+using FlaxEngine;
+using FlaxEngine.TypeConverters;
+using FlaxEngine.Utilities;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.Design.Serialization;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
-using FlaxEditor.Content;
-using FlaxEngine;
+
+namespace FlaxEngine.TypeConverters
+{
+    /// <summary>
+    /// Internal ITypeDescriptorContext used to pass some context for custom TypeConvert implementations.
+    /// Allows passing CurrentType to TypeConverter.ConvertFrom method to support custom type conversion for FlaxEngine types (simpler than PropertyDescriptor.PropertyType).
+    /// </summary>
+    internal sealed class DummyTypeDescriptorContext : ITypeDescriptorContext
+    {
+        private static DummyTypeDescriptorContext _cached;
+
+        public Type CurrentType;
+
+        public static object ConvertFrom(TypeConverter converter, object value, Type type)
+        {
+            if (_cached == null)
+                _cached = new DummyTypeDescriptorContext();
+            _cached.CurrentType = type;
+            var result = converter.ConvertFrom(_cached, CultureInfo.CurrentUICulture, value);
+            _cached.CurrentType = null;
+            return result;
+        }
+
+        public object GetService(Type serviceType)
+        {
+            return null;
+        }
+
+        public void OnComponentChanged()
+        {
+        }
+
+        public bool OnComponentChanging()
+        {
+            return false;
+        }
+
+        public IContainer Container => null;
+
+        public object Instance => null;
+
+        public PropertyDescriptor PropertyDescriptor => null;
+    }
+}
 
 namespace FlaxEditor.Scripting
 {
@@ -38,7 +87,7 @@ namespace FlaxEditor.Scripting
         /// <summary>
         /// Gets a member name (eg. name of the field or method without leading class name nor namespace prefixes).
         /// </summary>
-        public string Name => _managed?.Name ?? _custom?.Name;
+        public string Name => _managed?.Name ?? _custom?.Name ?? string.Empty;
 
         /// <summary>
         /// Gets a metadata token for sorting so it may not be the actual token.
@@ -50,12 +99,12 @@ namespace FlaxEditor.Scripting
                 int standardToken = _managed?.MetadataToken ?? _custom?.MetadataToken ?? 0;
                 if (_managed is PropertyInfo && _managed.DeclaringType != null)
                 {
-                    var field = _managed.DeclaringType.GetField(string.Format("<{0}>k__BackingField", Name), BindingFlags.Instance | BindingFlags.NonPublic);
-                    if (field == null || field.MetadataToken == 0)
+                    var backingField = _managed.DeclaringType.GetField(string.Format("<{0}>k__BackingField", Name), BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (backingField == null || backingField.MetadataToken == 0)
                     {
                         return standardToken;
                     }
-                    return field.MetadataToken;
+                    return backingField.MetadataToken;
                 }
                 return standardToken;
             }
@@ -445,7 +494,7 @@ namespace FlaxEditor.Scripting
             {
                 var parameters = methodInfo.GetParameters();
                 if (parameters.Length == 0)
-                    return Utils.GetEmptyArray<Parameter>();
+                    return Array.Empty<Parameter>();
                 var result = new Parameter[parameters.Length];
                 for (int i = 0; i < result.Length; i++)
                 {
@@ -591,7 +640,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetAttributes(inherit);
-            return Utils.GetEmptyArray<object>();
+            return Array.Empty<object>();
         }
 
         /// <summary>
@@ -670,12 +719,41 @@ namespace FlaxEditor.Scripting
         /// <param name="value">The new member value.</param>
         public void SetValue(object obj, object value)
         {
+            // Perform automatic conversion if type supports it
+            var type = ValueType.Type;
+            var valueType = value?.GetType();
+            if (valueType != null && type != null && valueType != type)
+            {
+                var converter = TypeDescriptor.GetConverter(type);
+                if (converter.CanConvertTo(type))
+                    value = converter.ConvertTo(value, type);
+                else if (converter.CanConvertFrom(valueType))
+                    value = DummyTypeDescriptorContext.ConvertFrom(converter, value, type);
+            }
+
             if (_managed is PropertyInfo propertyInfo)
                 propertyInfo.SetValue(obj, value);
             else if (_managed is FieldInfo fieldInfo)
                 fieldInfo.SetValue(obj, value);
             else
                 _custom.SetValue(obj, value);
+        }
+
+        /// <summary>
+        /// Invokes the method on a specific object (null if static) using the provided parameters.
+        /// </summary>
+        /// <param name="obj">The instance of the object to invoke its method. Use null for static methods.</param>
+        /// <param name="parameters">List of parameters to provide.</param>
+        /// <returns>The value returned by the method.</returns>
+        public object Invoke(object obj = null, object[] parameters = null)
+        {
+            if (parameters == null)
+                parameters = Array.Empty<object>();
+            if (_managed is MethodInfo methodInfo)
+                return methodInfo.Invoke(obj, parameters);
+            if (_managed != null)
+                throw new NotSupportedException();
+            return _custom.Invoke(obj, parameters);
         }
     }
 
@@ -699,6 +777,16 @@ namespace FlaxEditor.Scripting
         public static readonly ScriptType Void = new ScriptType(typeof(void));
 
         /// <summary>
+        /// A <see cref="ScriptType" /> that is System.Object.
+        /// </summary>
+        public static readonly ScriptType Object = new ScriptType(typeof(object));
+
+        /// <summary>
+        /// A <see cref="ScriptType" /> that is FlaxEngine.Object.
+        /// </summary>
+        public static readonly ScriptType FlaxObject = new ScriptType(typeof(FlaxEngine.Object));
+
+        /// <summary>
         /// Gets the type of the script as <see cref="System.Type"/>.
         /// </summary>
         public Type Type => _managed;
@@ -709,7 +797,7 @@ namespace FlaxEditor.Scripting
         public IScriptType IScriptType => _custom;
 
         /// <summary>
-        /// Gets a type name (eg. name of the class or enum without leading namespace).
+        /// Gets a type display name (eg. name of the class or enum without leading namespace).
         /// </summary>
         public string Name
         {
@@ -719,19 +807,7 @@ namespace FlaxEditor.Scripting
                     return _custom.Name;
                 if (_managed == null)
                     return string.Empty;
-                if (_managed == typeof(float))
-                    return "Float";
-                if (_managed == typeof(int))
-                    return "Int";
-                if (_managed == typeof(uint))
-                    return "Uint";
-                if (_managed == typeof(short))
-                    return "Int16";
-                if (_managed == typeof(ushort))
-                    return "Uint16";
-                if (_managed == typeof(bool))
-                    return "Bool";
-                return _managed.Name;
+                return _managed.GetTypeDisplayName();
             }
         }
 
@@ -786,6 +862,11 @@ namespace FlaxEditor.Scripting
         public bool IsArray => _managed != null ? _managed.IsArray : _custom != null && _custom.IsArray;
 
         /// <summary>
+        /// Gets a value indicating whether the type is a dictionary.
+        /// </summary>
+        public bool IsDictionary => IsGenericType && GetGenericTypeDefinition() == typeof(Dictionary<,>);
+
+        /// <summary>
         /// Gets a value indicating whether the type is a value type (basic type, enumeration or a structure).
         /// </summary>
         public bool IsValueType => _managed != null ? _managed.IsValueType : _custom != null && _custom.IsValueType;
@@ -816,6 +897,11 @@ namespace FlaxEditor.Scripting
         public bool IsVoid => _managed == typeof(void);
 
         /// <summary>
+        /// Gets a value indicating whether this type is <see cref="FlaxEngine.Object"/> (eg. script or actor).
+        /// </summary>
+        public bool IsScriptingObject => FlaxObject.IsAssignableFrom(this);
+
+        /// <summary>
         /// Gets a value indicating whether the type is static.
         /// </summary>
         public bool IsStatic => _managed != null ? _managed.IsSealed && _managed.IsAbstract : _custom != null && _custom.IsStatic;
@@ -828,8 +914,8 @@ namespace FlaxEditor.Scripting
             get
             {
                 if (_managed != null)
-                    return _managed.GetConstructor(Type.EmptyTypes) != null;
-                return _custom.CanCreateInstance;
+                    return (_managed.IsValueType || _managed.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null) != null) && !_managed.IsByRefLike;
+                return _custom?.CanCreateInstance ?? false;
             }
         }
 
@@ -888,7 +974,19 @@ namespace FlaxEditor.Scripting
         public object CreateInstance()
         {
             if (_managed != null)
-                return Activator.CreateInstance(_managed);
+            {
+                object value = RuntimeHelpers.GetUninitializedObject(_managed);
+                if (!_managed.IsValueType)
+                {
+                    var ctor = _managed.GetConstructor(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null);
+#if !BUILD_RELEASE
+                    if (ctor == null)
+                        throw new Exception($"Missing empty constructor for type {_managed.FullName}.");
+#endif
+                    ctor.Invoke(value, null);
+                }
+                return value;
+            }
             return _custom.CreateInstance();
         }
 
@@ -976,7 +1074,7 @@ namespace FlaxEditor.Scripting
         public override string ToString()
         {
             if (_managed != null)
-                return _managed.FullName ?? string.Empty;
+                return _managed.GetTypeDisplayName() ?? string.Empty;
             if (_custom != null)
                 return _custom.TypeName;
             return "<null>";
@@ -1005,12 +1103,12 @@ namespace FlaxEditor.Scripting
         /// </summary>
         /// <param name="c">The type of the interface to check.</param>
         /// <returns>True if this type implements the given interface, otherwise false.</returns>
-        public bool ImplementInterface(ScriptType c)
+        public bool HasInterface(ScriptType c)
         {
             if (c._managed != null && _managed != null)
                 return c._managed.IsAssignableFrom(_managed);
             if (_custom != null)
-                return _custom.ImplementInterface(c);
+                return _custom.HasInterface(c);
             return false;
         }
 
@@ -1034,7 +1132,7 @@ namespace FlaxEditor.Scripting
         public bool IsAssignableFrom(ScriptType c)
         {
             if (IsInterface)
-                return c.ImplementInterface(this);
+                return c.HasInterface(this);
             while (c != Null)
             {
                 if (c == this)
@@ -1070,18 +1168,20 @@ namespace FlaxEditor.Scripting
                 return _managed.GetCustomAttributes(inherit);
             if (_custom != null)
                 return _custom.GetAttributes(inherit);
-            return Utils.GetEmptyArray<object>();
+            return Array.Empty<object>();
         }
 
         /// <summary>
         /// When overridden in a derived class, returns the type of the object encompassed or referred to by the current array, pointer or reference type.
         /// </summary>
         /// <returns>The type of the object encompassed or referred to by the current array, pointer, or reference type, or <see langword="null" /> if the current type is not an array or a pointer, or is not passed by reference, or represents a generic type or a type parameter in the definition of a generic type or generic method.</returns>
-        public Type GetElementType()
+        public ScriptType GetElementType()
         {
             if (_managed != null)
-                return _managed.GetElementType();
-            throw new NotImplementedException("TODO: Script.Type.GetElementType for custom types");
+                return new ScriptType(_managed.GetElementType());
+            if (_custom is ScriptTypeArray array)
+                return array.ElementType;
+            return Null;
         }
 
         /// <summary>
@@ -1107,6 +1207,30 @@ namespace FlaxEditor.Scripting
         }
 
         /// <summary>
+        /// Returns a type object that represents an array of the current type.
+        /// </summary>
+        /// <returns>A type object representing a one-dimensional array of the current type.</returns>
+        public ScriptType MakeArrayType()
+        {
+            if (_managed != null)
+                return new ScriptType(_managed.MakeArrayType());
+            if (_custom != null)
+                return new ScriptType(new ScriptTypeArray(this));
+            throw new ArgumentNullException();
+        }
+
+        /// <summary>
+        /// Returns a type object that represents a dictionary of the key and value types.
+        /// </summary>
+        /// <returns>A type object representing a dictionary of the key and value types.</returns>
+        public static ScriptType MakeDictionaryType(ScriptType keyType, ScriptType valueType)
+        {
+            if (keyType == Null || valueType == Null)
+                throw new ArgumentNullException();
+            return new ScriptType(typeof(Dictionary<,>).MakeGenericType(TypeUtils.GetType(keyType), TypeUtils.GetType(valueType)));
+        }
+
+        /// <summary>
         /// Searches for the specified members of the specified member type, using the specified binding constraints.
         /// </summary>
         /// <param name="name">The string containing the name of the members to get.</param>
@@ -1119,12 +1243,12 @@ namespace FlaxEditor.Scripting
             if (_managed != null)
             {
                 managedMembers = _managed.GetMember(name, type, bindingAttr);
-                return Utils.GetEmptyArray<ScriptMemberInfo>();
+                return Array.Empty<ScriptMemberInfo>();
             }
             managedMembers = null;
             if (_custom != null)
                 return _custom.GetMembers(name, type, bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1146,7 +1270,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetMembers(name, type, bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1210,12 +1334,12 @@ namespace FlaxEditor.Scripting
             if (_managed != null)
             {
                 managedMembers = _managed.GetMembers(bindingAttr);
-                return Utils.GetEmptyArray<ScriptMemberInfo>();
+                return Array.Empty<ScriptMemberInfo>();
             }
             managedMembers = null;
             if (_custom != null)
                 return _custom.GetMembers(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1235,7 +1359,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetMembers(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1255,7 +1379,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetFields(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1293,7 +1417,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetProperties(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1331,7 +1455,7 @@ namespace FlaxEditor.Scripting
             }
             if (_custom != null)
                 return _custom.GetMethods(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <summary>
@@ -1351,314 +1475,42 @@ namespace FlaxEditor.Scripting
                 return _custom.GetMembers(name, MemberTypes.Method, bindingAttr).FirstOrDefault();
             return ScriptMemberInfo.Null;
         }
-    }
-
-    /// <summary>
-    /// Interface for custom scripting languages type object with metadata.
-    /// </summary>
-    public interface IScriptType
-    {
-        /// <summary>
-        /// Gets a type name (eg. name of the class or enum without leading namespace).
-        /// </summary>
-        string Name { get; }
 
         /// <summary>
-        /// Gets a full namespace of the type.
+        /// Registers delegate to be invoked upon script type disposal (except hot-reload in Editor via <see cref="ScriptsBuilder.ScriptsReload"/>). For example, can happen when user deleted Visual Script asset.
         /// </summary>
-        string Namespace { get; }
+        /// <param name="disposing">Event to call when script type gets disposed (eg. removed asset).</param>
+        public void TrackLifetime(Action<ScriptType> disposing)
+        {
+            if (_custom != null)
+                _custom.TrackLifetime(disposing);
+        }
 
         /// <summary>
-        /// Gets a full name of the type including leading namespace and any nested types names. Uniquely identifies the type and can be used to find it via <see cref="TypeUtils.GetType(string)"/>.
+        /// Basic check to see if a type could be cast to another type
         /// </summary>
-        string TypeName { get; }
+        /// <param name="from">Source type</param>
+        /// <param name="to">Target type</param>
+        /// <returns>True if the type can be cast.</returns>
+        public static bool CanCast(ScriptType from, ScriptType to)
+        {
+            if (from == to)
+                return true;
+            if (from == Null || to == Null)
+                return false;
+            return (from.Type != typeof(void) && from.Type != typeof(FlaxEngine.Object)) &&
+                   (to.Type != typeof(void) && to.Type != typeof(FlaxEngine.Object)) &&
+                   from.IsAssignableFrom(to);
+        }
 
         /// <summary>
-        /// Gets a value indicating whether the type is declared public.
+        /// Basic check to see if this type could be cast to another type
         /// </summary>
-        bool IsPublic { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is abstract and must be overridden.
-        /// </summary>
-        bool IsAbstract { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is declared sealed and cannot be overridden.
-        /// </summary>
-        bool IsSealed { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type represents an enumeration.
-        /// </summary>
-        bool IsEnum { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is a class or a delegate; that is, not a value type or interface.
-        /// </summary>
-        bool IsClass { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is an interface.
-        /// </summary>
-        bool IsInterface { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is an array.
-        /// </summary>
-        bool IsArray { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is a value type (basic type, enumeration or a structure).
-        /// </summary>
-        bool IsValueType { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is generic type and is used as a template.
-        /// </summary>
-        bool IsGenericType { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is a reference and value is represented by the valid pointer to the data.
-        /// </summary>
-        bool IsReference { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is a pointer and value is represented by the pointer to the data.
-        /// </summary>
-        bool IsPointer { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is static.
-        /// </summary>
-        bool IsStatic { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether can create default instance of this type via <see cref="CreateInstance"/> method.
-        /// </summary>
-        bool CanCreateInstance { get; }
-
-        /// <summary>
-        /// Gets the type from which the current type directly inherits.
-        /// </summary>
-        ScriptType BaseType { get; }
-
-        /// <summary>
-        /// Gets the editor content item that corresponds to this script type. Can be null.
-        /// </summary>
-        ContentItem ContentItem { get; }
-
-        /// <summary>
-        /// Creates the instance of the object of this type (or throws exception in case of error).
-        /// </summary>
-        /// <returns>The created instance of the object.</returns>
-        object CreateInstance();
-
-        /// <summary>
-        /// Determines whether the current type implements the specified interface type. Checks this type, its base classes and implemented interfaces base interfaces too.
-        /// </summary>
-        /// <param name="c">The type of the interface to check.</param>
-        /// <returns>True if this type implements the given interface, otherwise false.</returns>
-        bool ImplementInterface(ScriptType c);
-
-        /// <summary>
-        /// Determines whether the specified attribute was defined for this type.
-        /// </summary>
-        /// <param name="attributeType">The attribute type.</param>
-        /// <param name="inherit"><c>true</c> to search this member's inheritance chain to find the attributes; otherwise, <c>false</c>.</param>
-        /// <returns><c>true</c> if the specified type has attribute; otherwise, <c>false</c>.</returns>
-        bool HasAttribute(Type attributeType, bool inherit);
-
-        /// <summary>
-        /// When overridden in a derived class, returns an array of all custom attributes applied to this member.
-        /// </summary>
-        /// <param name="inherit"><c>true</c> to search this member's inheritance chain to find the attributes; otherwise, <c>false</c>.</param>
-        /// <returns>An array that contains all the custom attributes applied to this member, or an array with zero elements if no attributes are defined.</returns>
-        object[] GetAttributes(bool inherit);
-
-        /// <summary>
-        /// Searches for the specified members of the specified member type, using the specified binding constraints.
-        /// </summary>
-        /// <param name="name">The string containing the name of the members to get.</param>
-        /// <param name="type">The value to search for.</param>
-        /// <param name="bindingAttr">A bitmask comprised of one or more <see cref="T:System.Reflection.BindingFlags" /> that specify how the search is conducted.-or- Zero, to return an empty array.</param>
-        /// <returns>An array of member objects representing the public members with the specified name, if found; otherwise, an empty array.</returns>
-        ScriptMemberInfo[] GetMembers(string name, MemberTypes type, BindingFlags bindingAttr);
-
-        /// <summary>
-        /// When overridden in a derived class, searches for the members defined for the current type using the specified binding constraints.
-        /// </summary>
-        /// <param name="bindingAttr">A bitmask comprised of one or more <see cref="T:System.Reflection.BindingFlags" /> that specify how the search is conducted.-or- Zero (<see cref="F:System.Reflection.BindingFlags.Default" />), to return an empty array.</param>
-        /// <returns>An array of member objects representing all members defined for the current type that match the specified binding constraints.-or- An empty array of type member, if no members are defined for the current type, or if none of the defined members match the binding constraints.</returns>
-        ScriptMemberInfo[] GetMembers(BindingFlags bindingAttr);
-
-        /// <summary>
-        /// When overridden in a derived class, searches for the fields defined for the current type using the specified binding constraints.
-        /// </summary>
-        /// <param name="bindingAttr">A bitmask comprised of one or more <see cref="T:System.Reflection.BindingFlags" /> that specify how the search is conducted.-or- Zero (<see cref="F:System.Reflection.BindingFlags.Default" />), to return an empty array.</param>
-        /// <returns>An array of member objects representing all fields defined for the current type that match the specified binding constraints.-or- An empty array of type member, if no fields are defined for the current type, or if none of the defined fields match the binding constraints.</returns>
-        ScriptMemberInfo[] GetFields(BindingFlags bindingAttr);
-
-        /// <summary>
-        /// When overridden in a derived class, searches for the properties defined for the current type using the specified binding constraints.
-        /// </summary>
-        /// <param name="bindingAttr">A bitmask comprised of one or more <see cref="T:System.Reflection.BindingFlags" /> that specify how the search is conducted.-or- Zero (<see cref="F:System.Reflection.BindingFlags.Default" />), to return an empty array.</param>
-        /// <returns>An array of member objects representing all properties defined for the current type that match the specified binding constraints.-or- An empty array of type member, if no properties are defined for the current type, or if none of the defined properties match the binding constraints.</returns>
-        ScriptMemberInfo[] GetProperties(BindingFlags bindingAttr);
-
-        /// <summary>
-        /// When overridden in a derived class, searches for the methods defined for the current type using the specified binding constraints.
-        /// </summary>
-        /// <param name="bindingAttr">A bitmask comprised of one or more <see cref="T:System.Reflection.BindingFlags" /> that specify how the search is conducted.-or- Zero (<see cref="F:System.Reflection.BindingFlags.Default" />), to return an empty array.</param>
-        /// <returns>An array of member objects representing all methods defined for the current type that match the specified binding constraints.-or- An empty array of type member, if no methods are defined for the current type, or if none of the defined methods match the binding constraints.</returns>
-        ScriptMemberInfo[] GetMethods(BindingFlags bindingAttr);
-    }
-
-    /// <summary>
-    /// Interface for custom scripting languages type object with metadata.
-    /// </summary>
-    public interface IScriptMemberInfo
-    {
-        /// <summary>
-        /// Gets a member name (eg. name of the field or method without leading class name nor namespace prefixes).
-        /// </summary>
-        string Name { get; }
-
-        /// <summary>
-        /// Gets a metadata token for sorting so it may not be the actual token.
-        /// </summary>
-        int MetadataToken { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is declared public.
-        /// </summary>
-        bool IsPublic { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether the type is declared in static scope.
-        /// </summary>
-        bool IsStatic { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this method is declared as virtual (can be overriden).
-        /// </summary>
-        bool IsVirtual { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this method is declared as abstract (has to be overriden).
-        /// </summary>
-        bool IsAbstract { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this method is declared as generic (needs to be inflated with type arguments).
-        /// </summary>
-        bool IsGeneric { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member is a field.
-        /// </summary>
-        bool IsField { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member is a property.
-        /// </summary>
-        bool IsProperty { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member is a method.
-        /// </summary>
-        bool IsMethod { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member is an event.
-        /// </summary>
-        bool IsEvent { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member value can be gathered (via getter method or directly from the field).
-        /// </summary>
-        bool HasGet { get; }
-
-        /// <summary>
-        /// Gets a value indicating whether this member value can be set (via setter method or directly to the field).
-        /// </summary>
-        bool HasSet { get; }
-
-        /// <summary>
-        /// Gets the method parameters count (valid for methods only).
-        /// </summary>
-        int ParametersCount { get; }
-
-        /// <summary>
-        /// Gets the type that declares this member.
-        /// </summary>
-        ScriptType DeclaringType { get; }
-
-        /// <summary>
-        /// Gets the type of the value (field type, property type or method return value).
-        /// </summary>
-        ScriptType ValueType { get; }
-
-        /// <summary>
-        /// Determines whether the specified attribute was defined for this member.
-        /// </summary>
-        /// <param name="attributeType">The attribute type.</param>
-        /// <param name="inherit"><c>true</c> to search this member's inheritance chain to find the attributes; otherwise, <c>false</c>.</param>
-        /// <returns><c>true</c> if the specified member has attribute; otherwise, <c>false</c>.</returns>
-        bool HasAttribute(Type attributeType, bool inherit);
-
-        /// <summary>
-        /// When overridden in a derived class, returns an array of all custom attributes applied to this member.
-        /// </summary>
-        /// <param name="inherit"><c>true</c> to search this member's inheritance chain to find the attributes; otherwise, <c>false</c>.</param>
-        /// <returns>An array that contains all the custom attributes applied to this member, or an array with zero elements if no attributes are defined.</returns>
-        object[] GetAttributes(bool inherit);
-
-        /// <summary>
-        /// Gets the method parameters metadata (or event delegate signature parameters).
-        /// </summary>
-        ScriptMemberInfo.Parameter[] GetParameters();
-
-        /// <summary>
-        /// Returns the member value of a specified object.
-        /// </summary>
-        /// <param name="obj">The object whose member value will be returned.</param>
-        /// <returns>The member value of the specified object.</returns>
-        object GetValue(object obj);
-
-        /// <summary>
-        /// Sets the member value of a specified object.
-        /// </summary>
-        /// <param name="obj">The object whose member value will be modified.</param>
-        /// <param name="value">The new member value.</param>
-        void SetValue(object obj, object value);
-    }
-
-    /// <summary>
-    /// Interface for custom scripting languages types information containers that can inject types metadata into Editor.
-    /// </summary>
-    public interface IScriptTypesContainer
-    {
-        /// <summary>
-        /// Tries to get the object type from the given full typename. Searches in-build Flax Engine/Editor assemblies and game assemblies.
-        /// </summary>
-        /// <param name="typeName">The full name of the type.</param>
-        /// <returns>The type or null if failed.</returns>
-        ScriptType GetType(string typeName);
-
-        /// <summary>
-        /// Gets all the types within all the loaded assemblies.
-        /// </summary>
-        /// <param name="result">The result collection. Elements will be added to it. Clear it before usage.</param>
-        /// <param name="checkFunc">Additional callback used to check if the given type is valid. Returns true if add type, otherwise false.</param>
-        void GetTypes(List<ScriptType> result, Func<ScriptType, bool> checkFunc);
-
-        /// <summary>
-        /// Gets all the derived types from the given base type (excluding that type) within all the loaded assemblies.
-        /// </summary>
-        /// <param name="baseType">The base type.</param>
-        /// <param name="result">The result collection. Elements will be added to it. Clear it before usage.</param>
-        /// <param name="checkFunc">Additional callback used to check if the given type is valid. Returns true if add type, otherwise false.</param>
-        void GetDerivedTypes(ScriptType baseType, List<ScriptType> result, Func<ScriptType, bool> checkFunc);
+        /// <param name="to">Target type</param>
+        /// <returns>True if the type can be cast.</returns>
+        public bool CanCastTo(ScriptType to)
+        {
+            return CanCast(this, to);
+        }
     }
 }

@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2019 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_TOOLS_UWP
 
 #include "UWPPlatformTools.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Platform/File.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Platform/UWP/UWPPlatformSettings.h"
 #include "Engine/Core/Config/GameSettings.h"
 #include "Engine/Core/Types/StringBuilder.h"
@@ -14,7 +15,7 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Content/JsonAsset.h"
 
-IMPLEMENT_SETTINGS_GETTER(UWPPlatformSettings, UWPPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(UWPPlatformSettings, UWPPlatform);
 
 const Char* UWPPlatformTools::GetDisplayName() const
 {
@@ -36,24 +37,9 @@ ArchitectureType UWPPlatformTools::GetArchitecture() const
     return _arch;
 }
 
-bool UWPPlatformTools::UseAOT() const
+DotNetAOTModes UWPPlatformTools::UseAOT() const
 {
-    return true;
-}
-
-bool UWPPlatformTools::OnScriptsStepDone(CookingData& data)
-{
-    // Override Newtonsoft.Json.dll for some platforms (that don't support runtime code generation)
-    const String customBinPath = data.GetPlatformBinariesRoot() / TEXT("Newtonsoft.Json.dll");
-    const String assembliesPath = data.ManagedCodeOutputPath;
-    if (FileSystem::CopyFile(assembliesPath / TEXT("Newtonsoft.Json.dll"), customBinPath))
-    {
-        data.Error(TEXT("Failed to copy deploy custom assembly."));
-        return true;
-    }
-    FileSystem::DeleteFile(assembliesPath / TEXT("Newtonsoft.Json.pdb"));
-
-    return false;
+    return DotNetAOTModes::MonoAOTDynamic;
 }
 
 bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
@@ -79,7 +65,7 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
     {
         if (!FileSystem::FileExists(files[i]))
         {
-            data.Error(TEXT("Missing source file {0}."), files[i]);
+            data.Error(String::Format(TEXT("Missing source file {0}."), files[i]));
             return true;
         }
 
@@ -137,7 +123,7 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
     const auto srcAssetsPath = uwpDataPath / TEXT("Assets");
     if (!FileSystem::DirectoryExists(dstAssetsPath))
     {
-        if (FileSystem::CopyDirectory(dstAssetsPath, srcAssetsPath, true))
+        if (FileSystem::CopyDirectory(dstAssetsPath, srcAssetsPath))
         {
             data.Error(TEXT("Failed to copy Assets directory."));
             return true;
@@ -179,12 +165,12 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         if (file)
         {
             auto now = DateTime::Now();
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , gameSettings->ProductName.ToStringAnsi()
                 , gameSettings->CompanyName.ToStringAnsi()
                 , now.GetYear()
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -210,10 +196,10 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         bool hasError = true;
         if (file)
         {
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , defaultNamespace.ToStringAnsi() // {0} Default Namespace
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -264,11 +250,11 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         bool hasError = true;
         if (file)
         {
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , autoRotationPreferences.Get()
                 , preferredLaunchWindowingMode.Get()
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -296,12 +282,12 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         bool hasError = true;
         if (file)
         {
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , projectName.ToStringAnsi() // {0} Project Name
                 , mode // {1} Platform Mode
                 , projectGuid.ToStringAnsi() // {2} Project ID
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -344,14 +330,14 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         bool hasError = true;
         if (file)
         {
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , projectName.ToStringAnsi() // {0} Project Name
                 , mode // {1} Platform Mode
                 , projectGuid.Get() // {2} Project ID
                 , filesInclude.ToString().ToStringAnsi() // {3} Files to include
                 , defaultNamespace.ToStringAnsi() // {4} Default Namespace
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -394,13 +380,13 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
         bool hasError = true;
         if (file)
         {
-            file->WriteTextFormatted(
+            file->WriteText(StringAnsi::Format(
                 fileTemplate.Get()
                 , projectName.ToStringAnsi() // {0} Display Name
                 , gameSettings->CompanyName.ToStringAnsi() // {1} Company Name
                 , productId.ToStringAnsi() // {2} Product ID
                 , defaultNamespace.ToStringAnsi() // {3} Default Namespace
-            );
+            ));
             hasError = file->HasError();
             Delete(file);
         }
@@ -414,89 +400,10 @@ bool UWPPlatformTools::OnDeployBinaries(CookingData& data)
     return false;
 }
 
-void UWPPlatformTools::OnConfigureAOT(CookingData& data, AotConfig& config)
-{
-    const auto platformDataPath = data.GetPlatformBinariesRoot();
-    const bool useInterpreter = true; // TODO: support using Full AOT instead of interpreter
-    const bool enableDebug = data.Configuration != BuildConfiguration::Release;
-    const Char* aotMode = useInterpreter ? TEXT("full,interp") : TEXT("full");
-    const Char* debugMode = enableDebug ? TEXT("soft-debug") : TEXT("nodebug");
-    config.AotCompilerArgs = String::Format(TEXT("--aot={0},verbose,stats,print-skipped,{1} -O=all"),
-                                            aotMode,
-                                            debugMode);
-    if (enableDebug)
-        config.AotCompilerArgs = TEXT("--debug ") + config.AotCompilerArgs;
-    config.AotCompilerPath = platformDataPath / TEXT("Tools/mono.exe");
-}
-
-bool UWPPlatformTools::OnPerformAOT(CookingData& data, AotConfig& config, const String& assemblyPath)
-{
-    // Skip .dll.dll which could be a false result from the previous AOT which could fail
-    if (assemblyPath.EndsWith(TEXT(".dll.dll")))
-    {
-        LOG(Warning, "Skip AOT for file '{0}' as it can be a result from the previous task", assemblyPath);
-        return false;
-    }
-
-    // Check if skip this assembly (could be already processed)
-    const String filename = StringUtils::GetFileName(assemblyPath);
-    const String outputPath = config.AotCachePath / filename + TEXT(".dll");
-    if (FileSystem::FileExists(outputPath) && FileSystem::GetFileLastEditTime(assemblyPath) < FileSystem::GetFileLastEditTime(outputPath))
-        return false;
-    LOG(Info, "Calling AOT tool for \"{0}\"", assemblyPath);
-
-    // Cleanup temporary results (fromm the previous AT that fail or sth)
-    const String resultPath = assemblyPath + TEXT(".dll");
-    const String resultPathExp = resultPath + TEXT(".exp");
-    const String resultPathLib = resultPath + TEXT(".lib");
-    const String resultPathPdb = resultPath + TEXT(".pdb");
-    if (FileSystem::FileExists(resultPath))
-        FileSystem::DeleteFile(resultPath);
-    if (FileSystem::FileExists(resultPathExp))
-        FileSystem::DeleteFile(resultPathExp);
-    if (FileSystem::FileExists(resultPathLib))
-        FileSystem::DeleteFile(resultPathLib);
-    if (FileSystem::FileExists(resultPathPdb))
-        FileSystem::DeleteFile(resultPathPdb);
-
-    // Call tool
-    String workingDir = StringUtils::GetDirectoryName(config.AotCompilerPath);
-    String command = String::Format(TEXT("\"{0}\" {1} \"{2}\""), config.AotCompilerPath, config.AotCompilerArgs, assemblyPath);
-    const int32 result = Platform::RunProcess(command, workingDir, config.EnvVars);
-    if (result != 0)
-    {
-        data.Error(TEXT("AOT tool execution failed with result code {1} for assembly \"{0}\". See log for more info."), assemblyPath, result);
-        return true;
-    }
-
-    // Copy result
-    if (FileSystem::CopyFile(outputPath, resultPath))
-    {
-        data.Error(TEXT("Failed to copy the AOT tool result file. It can be missing."));
-        return true;
-    }
-
-    // Copy pdb file if exists
-    if (data.Configuration != BuildConfiguration::Release && FileSystem::FileExists(resultPathPdb))
-    {
-        FileSystem::CopyFile(config.AotCachePath / StringUtils::GetFileName(resultPathPdb), resultPathPdb);
-    }
-
-    // Clean intermediate results
-    if (FileSystem::DeleteFile(resultPath)
-        || (FileSystem::FileExists(resultPathExp) && FileSystem::DeleteFile(resultPathExp))
-        || (FileSystem::FileExists(resultPathLib) && FileSystem::DeleteFile(resultPathLib))
-        || (FileSystem::FileExists(resultPathPdb) && FileSystem::DeleteFile(resultPathPdb))
-    )
-    {
-        LOG(Warning, "Failed to remove the AOT tool result file(s).");
-    }
-
-    return false;
-}
-
 bool UWPPlatformTools::OnPostProcess(CookingData& data)
 {
+    LOG(Error, "UWP (Windows Store) platform has been deprecated and is no longer supported");
+
     // Special case for UWP
     // FlaxEngine.dll cannot be added to the solution as `Content` item (due to conflicts with C++ /CX FlaxEngine.dll)
     // Use special directory for it (generated UWP project handles this case and copies lib to the output)

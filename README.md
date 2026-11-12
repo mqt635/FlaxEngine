@@ -4,9 +4,9 @@
 <a href="https://flaxengine.com/discord"><img src="https://discordapp.com/api/guilds/437989205315158016/widget.png"/></a>
 
 Flax Engine is a high quality modern 3D game engine written in C++ and C#.
-From stunning graphics to powerful scripts - Flax can give everything for your games. Designed for fast workflow with many ready to use features waiting for you right now. To learn more see the website ([www.flaxengine.com](https://flaxengine.com)).
+From stunning graphics to powerful scripts, it's designed for fast workflow with many ready-to-use features waiting for you right now. To learn more see the website ([www.flaxengine.com](https://flaxengine.com)).
 
-This repository contains full source code of the Flax Engine (excluding NDA-protected platforms support). Anyone is welcome to contribute or use the modified source in Flax-based games.
+This repository contains full source code of the Flax Engine (excluding NDA-protected platforms support). Documentation source is also available in a separate repository. Anyone is welcome to contribute or use the modified source in Flax-based games.
 
 # Development
 
@@ -18,51 +18,85 @@ This repository contains full source code of the Flax Engine (excluding NDA-prot
 
 # Screenshots
 
+![pbr-rendering](Development/Images/flax-pic-2.jpg "PBR Rendering and Global Illumination")
 ![rendering](Development/Images/flax-pic-1.jpg "Rendering")
 ![performance](Development/Images/flax-pic-3.jpg "High Performance")
-![pbr-rendering](Development/Images/flax-pic-2.jpg "PBR Rendering")
 
 # Getting started
 
 Follow the instructions below to compile and run the engine from source.
 
-## Flax plugin for Visual Studio
-
-Flax Visual Studio extension provides better programming workflow, C# scripts debugging functionality and allows to attach to running engine instance to debug C# source. This extension is available to download [here](https://marketplace.visualstudio.com/items?itemName=Flax.FlaxVS).
-
 ## Windows
 
-* Install Visual Studio 2015 or newer
-* Install Windows 8.1 SDK or newer
-* Install Microsoft Visual C++ 2015 v140 toolset or newer
+* Install Visual Studio 2026 or newer
+* Install Windows 10 SDK or newer (via Visual Studio Installer)
+* Install Microsoft Visual C++ 2015 v140 toolset or newer (via Visual Studio Installer)
+* Install .NET 10 SDK (or newer) for **Windows x64** (via Visual Studio Installer or [from web](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
+* Install Git with LFS
 * Clone repo (with LFS)
 * Run **GenerateProjectFiles.bat**
-* Open `Flax.sln` and set solution configuration to **Editor.Development** and solution platform to **Win64**
+* Open `Flax.slnx` and set solution configuration to **Editor.Development** and solution platform to **Win64**
 * Set Flax (C++) or FlaxEngine (C#) as startup project
 * Compile Flax project (hit F7 or CTRL+Shift+B)
+* Optionally set Debug Type to **Managed Only (.NET Core)** to debug C#-only, or **Mixed (.NET Core)** to debug both C++ and C#
 * Run Flax (hit F5 key)
-
----
-
-**Note**
-
-If building on Windows to support Vulkan rendering, first install the Vulkan SDK then  set an environment variable to provide the path to the SDK prior to running GenerateProjectFiles.bat:
-
-    set VULKAN_SDK=C:\VulkanSDK\version\
-
----
 
 ## Linux
 
 * Install Visual Studio Code
-* Install Mono ([https://www.mono-project.com/download/stable](https://www.mono-project.com/download/stable))
+* Install .NET 10 SDK (or newer) ([https://dotnet.microsoft.com/en-us/download/dotnet/10.0](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
+  * Ubuntu: `sudo apt install dotnet-sdk-10.0`
+  * Fedora: `sudo dnf install dotnet-sdk-10.0`
+  * Arch: `sudo pacman -S dotnet-sdk-10.0 dotnet-runtime-10.0 dotnet-targeting-pack-10.0 dotnet-host`
+* Install Vulkan SDK ([https://vulkan.lunarg.com/](https://vulkan.lunarg.com/))
+  * Ubuntu: `sudo apt install vulkan-sdk` (deprecated, follow official docs)
+  * Fedora: `sudo dnf install vulkan-headers vulkan-tools vulkan-validation-layers`
+  * Arch: `sudo pacman -S vulkan-headers vulkan-tools vulkan-validation-layers`
 * Install Git with LFS
-* Install requried packages: `sudo apt-get install libx11-dev libxcursor-dev libxinerama-dev nuget autoconf libogg-dev automake build-essential gettext cmake python libtool libtool-bin libpulse-dev libasound2-dev libjack-dev portaudio19-dev`
-* Install compiler `sudo apt-get install clang lldb lld` (Clang 6 or newer)
-* Clone repo (with LFS)
+  * Ubuntu: `sudo apt-get install git git-lfs`
+  * Arch: `sudo pacman -S git git-lfs`
+  * `git-lfs install`
+* Install the required packages:
+  * Ubuntu: `sudo apt-get install libx11-dev libxcursor-dev libxinerama-dev zlib1g-dev`
+  * Fedora: `sudo dnf install libX11-devel libXcursor-devel  libXinerama-devel ghc-zlib-devel`
+  * Arch: `sudo pacman -S base-devel libx11 libxcursor libxinerama zlib`
+* Install Clang compiler (version 14 or later):
+  * Ubuntu: `sudo apt-get install clang lldb lld`
+  * Fedora: `sudo dnf install clang llvm lldb lld`
+  * Arch: `sudo pacman -S clang lldb lld`
+* Clone the repository (with LFS)
+  * git-lfs clone https://github.com/FlaxEngine/FlaxEngine.git
 * Run `./GenerateProjectFiles.sh`
 * Open workspace with Visual Code
 * Build and run (configuration and task named `Flax|Editor.Linux.Development|x64`)
+
+## Mac
+
+* Install XCode 16.4 (or newer)
+* Install .NET 10 SDK (or newer) ([https://dotnet.microsoft.com/en-us/download/dotnet/10.0](https://dotnet.microsoft.com/en-us/download/dotnet/10.0))
+* Install Vulkan SDK ([https://vulkan.lunarg.com/](https://vulkan.lunarg.com/))
+* Clone repo (with LFS)
+* Run `GenerateProjectFiles.command`
+* Open workspace with XCode or Visual Studio Code
+* Build and run (configuration `Editor.Mac.Development`)
+
+## Troubleshooting
+
+* `Could not execute because the specified command or file was not found.`
+
+Restart PC - ensure DotNet is added to PATH for command line tools execution.
+
+* `Microsoft.NET.TargetFrameworkInference.targets(141,5): error NETSDK1045: The current .NET SDK does not support targeting .NET 10.0.  Either target .NET 5.0 or lower, or use a version of the .NET SDK that supports .NET 10.0`
+
+Use Visual Studio 2026 (or newer), old Visual Studio versions are not supported by .NET SDK 10.
+
+* `Building for Windows without Vulkan rendering backend (Vulkan SDK is missing)`
+
+Install the Vulkan SDK then set an environment variable to provide the path to the SDK prior to running GenerateProjectFiles.bat: `set VULKAN_SDK=%sdk_path%`.
+
+* `The NuGetSdkResolver did not resolve this SDK` / `Could not resolve SDK "Microsoft.NET.Sdk"`
+
+Install `.NET SDK` 10, `NuGet package manager` and `NuGet targets and build tasks` in Visual Studio components.
 
 ## Workspace directory
 
@@ -77,7 +111,6 @@ If building on Windows to support Vulkan rendering, first install the Vulkan SDK
 - **Content/** - assets and binary files used by the engine and editor
 - **Development/** - engine development files
   - **Scripts/** - utility scripts
-- **packages/** - NuGet packages cache location
 - **Source/** - source code location
   - **Editor/** - Flax Editor source code
   - **Engine/** - Flax Engine source code
@@ -87,7 +120,6 @@ If building on Windows to support Vulkan rendering, first install the Vulkan SDK
     - ***PlatformName*/** - per-platform files
       - **Binaries/** - per-platform binaries
         - **Game/** - Flax Game binaries
-        - **Mono/** - Mono runtime files and data
         - **ThirdParty/** - prebuilt 3rd Party binaries
   - **Shaders/** - shaders source code
   - **ThirdParty/** - 3rd Party source code
@@ -97,4 +129,8 @@ If building on Windows to support Vulkan rendering, first install the Vulkan SDK
 
 Using Flax source code is strictly governed by the Flax Engine End User License Agreement. If you don't agree to those terms, as amended from time to time, you are not permitted to access or use Flax Engine.
 
-We welcome any contributions to Flax Engine development through pull requests on GitHub. Most of our active development is in the master branch, so we prefer to take pull requests there (particularly for new features). We try to make sure that all new code adheres to the Flax coding standards. All contributions are governed by the terms of the EULA.
+We welcome any contributions to Flax Engine development through pull requests on GitHub. Most of our active development is in the master branch, so we prefer to take pull requests there (particularly for new features). We try to make sure that all new code adheres to the Flax coding standards. All contributions are governed by the terms of the [EULA](https://flaxengine.com/licensing/).
+
+## SAST Tools
+
+[PVS-Studio](https://pvs-studio.com/en/pvs-studio/?utm_source=website&utm_medium=github&utm_campaign=open_source) - static analyzer for C, C++, C#, and Java code.

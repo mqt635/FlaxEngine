@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 
@@ -58,12 +58,6 @@ namespace Flax.Build
         public static bool Rebuild = false;
 
         /// <summary>
-        /// Prints all SDKs found on system. Can be used to query Win10 SDK or any other platform-specific toolsets used by build tool.
-        /// </summary>
-        [CommandLine("printSDKs", "Prints all SDKs found on system. Can be used to query Win10 SDK or any other platform-specific toolsets used by build tool.")]
-        public static bool PrintSDKs = false;
-
-        /// <summary>
         /// Prints all build system plugins.
         /// </summary>
         [CommandLine("printPlugins", "Prints all build system plugins.")]
@@ -112,6 +106,12 @@ namespace Flax.Build
         public static bool ConsoleLog = false;
 
         /// <summary>
+        /// Enables logging only messages into console (general info logs will be ignored).
+        /// </summary>
+        [CommandLine("logMessagesOnly", "Enables logging only messages into console (general info logs will be ignored).")]
+        public static bool LogMessagesOnly = false;
+
+        /// <summary>
         /// Enables verbose logging and detailed diagnostics.
         /// </summary>
         [CommandLine("verbose", "Enables verbose logging and detailed diagnostics.")]
@@ -132,8 +132,14 @@ namespace Flax.Build
         /// <summary>
         /// The log file path relative to the working directory.
         /// </summary>
-        [CommandLine("logfile", "<path>", "The log file path relative to the working directory. Set to empty to disable it/")]
+        [CommandLine("logfile", "<path>", "The log file path relative to the working directory. Set to empty to disable it.")]
         public static string LogFile = "Cache/Intermediate/Log.txt";
+
+        /// <summary>
+        /// Enables logging only console output to the log file (instead whole output).
+        /// </summary>
+        [CommandLine("logFileWithConsole", "Enables logging only console output to the log file (instead whole output).")]
+        public static bool LogFileWithConsole = false;
 
         /// <summary>
         /// The maximum allowed concurrency for a build system (maximum active worker threads count).
@@ -190,10 +196,34 @@ namespace Flax.Build
         public static bool ProjectFormatVS2019 = false;
 
         /// <summary>
+        /// Generates Visual Studio 2022 project format files. Valid only with -genproject option.
+        /// </summary>
+        [CommandLine("vs2022", "Generates Visual Studio 2022 project format files. Valid only with -genproject option.")]
+        public static bool ProjectFormatVS2022 = false;
+
+        /// <summary>
+        /// Generates Visual Studio 2026 project format files. Valid only with -genproject option.
+        /// </summary>
+        [CommandLine("vs2026", "Generates Visual Studio 2026 project format files. Valid only with -genproject option.")]
+        public static bool ProjectFormatVS2026 = false;
+
+        /// <summary>
         /// Generates Visual Studio Code project format files. Valid only with -genproject option.
         /// </summary>
         [CommandLine("vscode", "Generates Visual Studio Code project format files. Valid only with -genproject option.")]
         public static bool ProjectFormatVSCode = false;
+
+        /// <summary>
+        /// Generates CMake facade project files for CLion. Valid only with -genproject option.
+        /// </summary>
+        [CommandLine("clion", "Generates CMake facade project files for CLion. Valid only with -genproject option.")]
+        public static bool ProjectFormatCLion = false;
+
+        /// <summary>
+        /// Generates Visual Studio 2026 project format files for Rider. Valid only with -genproject option.
+        /// </summary>
+        [CommandLine("rider", "Generates Visual Studio 2026 project format files for Rider. Valid only with -genproject option.")]
+        public static bool ProjectFormatRider = false;
 
         /// <summary>
         /// Generates code project files for a custom project format type. Valid only with -genproject option.
@@ -208,8 +238,137 @@ namespace Flax.Build
         public static string Compiler = null;
 
         /// <summary>
+        /// Selects a sanitizers to use (as flags). Options: Address, Thread.
+        /// </summary>
+        [CommandLine("sanitizers", "<name>", "Selects a sanitizers to use (as flags). Options: Address, Thread.")]
+        public static Flax.Build.NativeCpp.Sanitizer Sanitizers = Flax.Build.NativeCpp.Sanitizer.None;
+
+        /// <summary>
+        /// Specifies the dotnet SDK version to use for the build. Eg. set to '7' to use .NET 7 even if .NET 8 is installed.
+        /// </summary>
+        [CommandLine("dotnet", "<ver>", "Specifies the dotnet SDK version to use for the build. Eg. set to '7' to use .NET 7 even if .NET 8 is installed.")]
+        public static string Dotnet = null;
+
+        /// <summary>
         /// Custom configuration defines provided via command line for the build tool.
         /// </summary>
         public static List<string> CustomDefines = new List<string>();
+
+        internal static void PassArgs(ref string cmdLine)
+        {
+            if (!string.IsNullOrEmpty(Compiler))
+                cmdLine += " -compiler=" + Compiler;
+            if (!string.IsNullOrEmpty(Dotnet))
+                cmdLine += " -dotnet=" + Dotnet;
+            if (Sanitizers != Flax.Build.NativeCpp.Sanitizer.None)
+                cmdLine += " -sanitizers=" + Sanitizers.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Platform-specific configuration for Windows.
+    /// </summary>
+    public static partial class WindowsConfiguration
+    {
+        /// <summary>
+        /// [Windows] True if SDL support should be enabled.
+        /// </summary>
+        [CommandLine("useSdl", "1 to enable SDL support in build on Windows")]
+        public static bool UseSDL = false;
+    }
+
+    /// <summary>
+    /// Platform-specific configuration for Linux.
+    /// </summary>
+    public static partial class LinuxConfiguration
+    {
+        /// <summary>
+        /// [Linux] True if SDL support should be enabled.
+        /// </summary>
+        [CommandLine("useSdl", "1 to enable SDL support in build on Linux")]
+        public static bool UseSDL = false;
+    }
+
+    /// <summary>
+    /// Platform-specific configuration for Mac.
+    /// </summary>
+    public static partial class MacConfiguration
+    {
+        /// <summary>
+        /// [Mac] True if SDL support should be enabled.
+        /// </summary>
+        [CommandLine("useSdl", "1 to enable SDL support in build on Mac")]
+        public static bool UseSDL = false;
+    }
+
+    /// <summary>
+    /// The engine configuration options.
+    /// </summary>
+    public static partial class EngineConfiguration
+    {
+        /// <summary>
+        /// 1 to enable large worlds with 64-bit coordinates precision support in build (USE_LARGE_WORLDS=1).
+        /// </summary>
+        [CommandLine("useLargeWorlds", "1 to enable large worlds with 64-bit coordinates precision support in build (USE_LARGE_WORLDS=1)")]
+        public static bool UseLargeWorlds = false;
+
+        /// <summary>
+        /// 1 to use reversed Z Buffer, or traditional one.
+        /// </summary>
+        [CommandLine("useReverseZ", "1 to use reversed Z Buffer, or traditional one.")]
+        public static bool UseReverseZ = false;
+
+        /// <summary>
+        /// True if managed C# scripting should be enabled, otherwise false. Engine without C# is partially supported and can be used when porting to a new platform before implementing C# runtime on it.
+        /// </summary>
+        [CommandLine("useCSharp", "0 to disable C# support in build")]
+        public static bool UseCSharp = true;
+
+        /// <summary>
+        /// True if enable logging in Release game builds.
+        /// </summary>
+        [CommandLine("useLogInRelease", "Can be used to disable logging in Release game builds")]
+        public static bool UseLogInRelease = true;
+
+        /// <summary>
+        /// True if SDL support should be enabled.
+        /// </summary>
+        [CommandLine("useSdl", "1 to enable SDL support in build")]
+        public static bool UseSDL = true;
+
+        public static bool WithCSharp(NativeCpp.BuildOptions options)
+        {
+            if (options.Platform.Target == TargetPlatform.Web)
+                return false; // TODO: implement .NET for WebAssembly
+            return UseCSharp || options.Target.IsEditor;
+        }
+
+        public static bool WithLargeWorlds(NativeCpp.BuildOptions options)
+        {
+            // This can be used to selectively control 64-bit coordinates per-platform or build configuration
+            return UseLargeWorlds;
+        }
+
+        public static bool WithReverseZ(NativeCpp.BuildOptions options)
+        {
+            // Whether to use traditional z-buffer or reversed depth
+            return UseReverseZ;
+        }
+
+        public static bool WithSDL(NativeCpp.BuildOptions options)
+        {
+            switch (options.Platform.Target)
+            {
+            case TargetPlatform.Windows:
+                return UseSDL && WindowsConfiguration.UseSDL;
+            case TargetPlatform.Mac:
+                return UseSDL && MacConfiguration.UseSDL;
+            case TargetPlatform.Linux:
+                return UseSDL && LinuxConfiguration.UseSDL;
+            case TargetPlatform.Web:
+                return true;
+            default: return false;
+            }
+        }
     }
 }

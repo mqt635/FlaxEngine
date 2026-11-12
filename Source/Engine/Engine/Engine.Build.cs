@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -14,8 +14,10 @@ public class Engine : EngineModule
     {
         base.Setup(options);
 
+        options.PublicDependencies.Add("AI");
         options.PublicDependencies.Add("Animations");
         options.PublicDependencies.Add("Audio");
+        options.PublicDependencies.Add("Video");
         options.PublicDependencies.Add("Content");
         options.PublicDependencies.Add("Debug");
         options.PublicDependencies.Add("Foliage");
@@ -37,15 +39,22 @@ public class Engine : EngineModule
         options.PublicDependencies.Add("Utilities");
         options.PublicDependencies.Add("Visject");
         options.PublicDependencies.Add("Localization");
+        options.PublicDependencies.Add("Online");
 
         // Use source folder per platform group
         switch (options.Platform.Target)
         {
         case TargetPlatform.PS4:
             options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "PS4", "Engine", "Engine"));
+            options.PublicDependencies.Add("OnlinePlatformPS4");
+            break;
+        case TargetPlatform.PS5:
+            options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "PS5", "Engine", "Engine"));
+            options.PublicDependencies.Add("OnlinePlatformPS5");
             break;
         case TargetPlatform.Switch:
             options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "Switch", "Engine", "Engine"));
+            options.PublicDependencies.Add("OnlinePlatformSwitch");
             break;
         }
     }

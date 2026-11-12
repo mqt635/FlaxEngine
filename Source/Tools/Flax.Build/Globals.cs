@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace Flax.Build
 {
@@ -28,13 +28,16 @@ namespace Flax.Build
         public static readonly TargetPlatform[] AllPlatforms =
         {
             TargetPlatform.Windows,
-            TargetPlatform.UWP,
             TargetPlatform.XboxOne,
             TargetPlatform.Linux,
             TargetPlatform.PS4,
+            TargetPlatform.PS5,
             TargetPlatform.XboxScarlett,
             TargetPlatform.Android,
             TargetPlatform.Switch,
+            TargetPlatform.Mac,
+            TargetPlatform.iOS,
+            TargetPlatform.Web,
         };
 
         /// <summary>

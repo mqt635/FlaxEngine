@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
@@ -8,7 +8,13 @@
 #include "GPUAdapterVulkan.h"
 #include "GPUContextVulkan.h"
 #include "CmdBufferVulkan.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Engine/Engine.h"
 #include "Engine/Graphics/GPULimits.h"
+#include "Engine/Graphics/Graphics.h"
+#include "Engine/Scripting/Enums.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 void BackBufferVulkan::Setup(GPUSwapChainVulkan* window, VkImage backbuffer, PixelFormat format, VkExtent3D extent)
 {
@@ -16,21 +22,35 @@ void BackBufferVulkan::Setup(GPUSwapChainVulkan* window, VkImage backbuffer, Pix
     initResource(VK_IMAGE_LAYOUT_UNDEFINED);
 
     Device = window->GetDevice();
-    Handle.Init(window->GetDevice(), this, backbuffer, 1, format, MSAALevel::None, extent, VK_IMAGE_VIEW_TYPE_2D);
+    Handle.Init(Device, this, backbuffer, 1, format, MSAALevel::None, extent, VK_IMAGE_VIEW_TYPE_2D);
     RenderingDoneSemaphore = New<SemaphoreVulkan>(Device);
     ImageAcquiredSemaphore = New<SemaphoreVulkan>(Device);
 }
 
+void BackBufferVulkan::WaitForSubmit()
+{
+    if (SubmitCmdBuffer)
+    {
+        if (SubmitCmdBufferFenceCounter == SubmitCmdBuffer->GetFenceSignaledCounter())
+            SubmitCmdBuffer->Wait();
+        SubmitCmdBuffer = nullptr;
+        SubmitCmdBufferFenceCounter = 0;
+    }
+}
+
 void BackBufferVulkan::Release()
 {
+    WaitForSubmit();
     Handle.Release();
     Delete(RenderingDoneSemaphore);
     Delete(ImageAcquiredSemaphore);
+    Device = nullptr;
 }
 
 GPUSwapChainVulkan::GPUSwapChainVulkan(GPUDeviceVulkan* device, Window* window)
     : GPUResourceVulkan(device, StringView::Empty)
     , _surface(VK_NULL_HANDLE)
+    , _surfaceWindowHandle(nullptr)
     , _swapChain(VK_NULL_HANDLE)
     , _currentImageIndex(-1)
     , _semaphoreIndex(0)
@@ -49,15 +69,17 @@ void GPUSwapChainVulkan::ReleaseBackBuffer()
     _backBuffers.Clear();
 }
 
-void GPUSwapChainVulkan::OnReleaseGPU()
+void GPUSwapChainVulkan::ReleaseSwapChain(bool releaseSurface)
 {
-    GPUDeviceLock lock(_device);
-
-    _device->WaitForGPU();
+    // The caller must ensure GPU work using the current swapchain is complete before destroying it.
+    if (_memoryUsage != 0)
+    {
+        PROFILE_MEM_DEC(Graphics, _memoryUsage);
+        _memoryUsage = 0;
+    }
 
     ReleaseBackBuffer();
 
-    // Release data
     _currentImageIndex = -1;
     _semaphoreIndex = 0;
     _acquiredImageIndex = -1;
@@ -67,17 +89,28 @@ void GPUSwapChainVulkan::OnReleaseGPU()
         vkDestroySwapchainKHR(_device->Device, _swapChain, nullptr);
         _swapChain = VK_NULL_HANDLE;
     }
-    if (_surface != VK_NULL_HANDLE)
+    // Resize only invalidates the swapchain. Destroy the native surface only if it is no longer valid
+    // or when the whole GPU resource is being released.
+    if (releaseSurface && _surface != VK_NULL_HANDLE)
     {
         vkDestroySurfaceKHR(GPUDeviceVulkan::Instance, _surface, nullptr);
         _surface = VK_NULL_HANDLE;
+        _surfaceWindowHandle = nullptr;
     }
     _width = _height = 0;
 }
 
+void GPUSwapChainVulkan::OnReleaseGPU()
+{
+    GPUDeviceLock lock(_device);
+
+    _device->WaitForGPU();
+    ReleaseSwapChain(true);
+}
+
 bool GPUSwapChainVulkan::IsFullscreen()
 {
-#if PLATFORM_ANDROID || PLATFORM_SWITCH
+#if PLATFORM_ANDROID || PLATFORM_SWITCH || PLATFORM_IOS
     // Not supported
     return true;
 #else
@@ -87,7 +120,7 @@ bool GPUSwapChainVulkan::IsFullscreen()
 
 void GPUSwapChainVulkan::SetFullscreen(bool isFullscreen)
 {
-#if PLATFORM_ANDROID || PLATFORM_SWITCH
+#if PLATFORM_ANDROID || PLATFORM_SWITCH || PLATFORM_IOS
     // Not supported
 #else
     if (!_surface)
@@ -101,30 +134,64 @@ GPUTextureView* GPUSwapChainVulkan::GetBackBufferView()
 {
     if (_acquiredImageIndex == -1)
     {
+        PROFILE_CPU();
+        auto context = _device->MainContext;
+        auto cmdBufferManager = context->GetCmdBufferManager();
+
+        // Keep commands recorded before acquire independent from the image-acquired semaphore wait below.
+        if (cmdBufferManager->HasPendingActiveCmdBuffer())
+            context->Flush();
+
         if (TryPresent(DoAcquireImageIndex) < 0)
         {
             LOG(Fatal, "Swapchain acquire image index failed!");
         }
         ASSERT(_acquiredImageIndex != -1);
 
-        auto context = _device->MainContext;
-        const auto backBuffer = &_backBuffers[_acquiredImageIndex].Handle;
+        // Wait for prior GPU work that used this acquired image before recording
+        // commands against it again. Waiting before acquire can target a different image
+        // and unnecessarily serialize frames when the swapchain has multiple images.
+        auto& acquiredBackBuffer = _backBuffers[_acquiredImageIndex];
+        acquiredBackBuffer.WaitForSubmit();
 
-        auto cmdBufferManager = context->GetCmdBufferManager();
+        const auto backBuffer = &_backBuffers[_acquiredImageIndex].Handle;
         auto cmdBuffer = cmdBufferManager->GetCmdBuffer();
 
         // Transition to render target (typical usage in most cases when calling backbuffer getter)
         context->AddImageBarrier(backBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         context->FlushBarriers();
 
-        // Submit here so we can add a dependency with the acquired semaphore
-        cmdBuffer->AddWaitSemaphore(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, _acquiredSemaphore);
+        // Wait until the presentation engine releases the image before the first color-output work can use it.
+        cmdBuffer->AddWaitSemaphore(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, _acquiredSemaphore);
         cmdBufferManager->SubmitActiveCmdBuffer();
-        cmdBufferManager->PrepareForNewActiveCommandBuffer();
+        cmdBufferManager->GetNewActiveCommandBuffer();
         ASSERT(cmdBufferManager->HasPendingActiveCmdBuffer() && cmdBufferManager->GetActiveCmdBuffer()->GetState() == CmdBufferVulkan::State::IsInsideBegin);
     }
-
     return &_backBuffers[_acquiredImageIndex].Handle;
+}
+
+void GPUSwapChainVulkan::Begin(RenderTask* task)
+{
+    GPUSwapChain::Begin(task);
+
+    // Wait for the backbuffer to be available
+    if (_currentImageIndex != -1)
+    {
+        auto& backBuffer = _backBuffers[_currentImageIndex];
+        if (backBuffer.SubmitCmdBuffer)
+        {
+            backBuffer.SubmitCmdBuffer->Wait();
+            backBuffer.SubmitCmdBuffer = nullptr;
+        }
+    }
+
+    // Rebuild swapchain if need to
+    if (_vsyncPending != _vsyncCurrent)
+    {
+        LOG(Info, "Changing VSync mode to {}", _vsyncPending ? TEXT("on") : TEXT("off"));
+        _device->WaitForGPU();
+        CreateSwapChain(_width, _height);
+    }
 }
 
 bool GPUSwapChainVulkan::Resize(int32 width, int32 height)
@@ -133,8 +200,9 @@ bool GPUSwapChainVulkan::Resize(int32 width, int32 height)
     if (width == _width && height == _height)
         return false;
 
-    // Wait for GPU to flush commands
-    _device->WaitForGPU();
+    // Flush any pending commands referencing the previous backbuffer before waiting on the device.
+    if (_swapChain != VK_NULL_HANDLE)
+        _device->GetMainContext()->Flush();
 
     return CreateSwapChain(width, height);
 }
@@ -166,33 +234,54 @@ void GPUSwapChainVulkan::CopyBackbuffer(GPUContext* context, GPUTexture* dst)
     vkCmdCopyImage(contextVulkan->GetCmdBufferManager()->GetCmdBuffer()->GetHandle(), backBuffer->Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
-bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
+bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height, bool recreateSurface)
 {
     // Skip if window handle is missing (eg. Android window is not yet visible)
     auto windowHandle = _window->GetNativePtr();
     if (!windowHandle)
         return false;
-
+    PROFILE_CPU();
     GPUDeviceLock lock(_device);
     const auto device = _device->Device;
-
-    // Check if surface has been created before
-    if (_surface != VK_NULL_HANDLE)
+    const bool hasSwapChain = _swapChain != VK_NULL_HANDLE;
+    if (_surface != VK_NULL_HANDLE && _surfaceWindowHandle != windowHandle)
     {
-        // Release previous data
-        ReleaseGPU();
+        // Android can replace ANativeWindow during lifecycle changes; iOS can replace the UIView/CAMetalLayer.
+        // A VkSurfaceKHR must not outlive the native object it was created from.
+        recreateSurface = true;
+    }
 
-        // Flush removed resources
+    if (recreateSurface || hasSwapChain)
+    {
+        // Retire old swapchain resources before creating replacement images. On plain resize the VkSurfaceKHR
+        // is intentionally reused; recreate it only when Vulkan or the platform window lifetime requires it.
+        _device->WaitForGPU();
+        ReleaseSwapChain(recreateSurface);
         _device->DeferredDeletionQueue.ReleaseResources(true);
     }
+    if (_vsyncInit)
+    {
+        // Guess the VSync value for the 1st time (Present has not been called yet)
+        extern bool UseVSync();
+        _vsyncPending = UseVSync();
+        _vsyncPending &= _window == Engine::MainWindow; // Don't use VSync on new context menus or tooltips in Editor
+        _vsyncInit = false;
+    }
+    ASSERT(!recreateSurface || _surface == VK_NULL_HANDLE);
+    ASSERT_LOW_LAYER(_backBuffers.Count() == 0);
 
-    // Create platform-dependent surface
-    VulkanPlatform::CreateSurface(windowHandle, GPUDeviceVulkan::Instance, &_surface);
+    // Create platform-dependent surface if this is the first swapchain or if the previous surface was lost.
     if (_surface == VK_NULL_HANDLE)
     {
-        LOG(Warning, "Failed to create Vulkan surface.");
-        return true;
+        VulkanPlatform::CreateSurface(_window, _device, GPUDeviceVulkan::Instance, &_surface);
+        if (_surface == VK_NULL_HANDLE)
+        {
+            LOG(Warning, "Failed to create Vulkan surface.");
+            return true;
+        }
+        _surfaceWindowHandle = windowHandle;
     }
+    _memoryUsage = 1;
 
     const auto& gpu = _device->Adapter->Gpu;
 
@@ -201,18 +290,18 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
     VkSurfaceFormatKHR result;
     Platform::MemoryClear(&result, sizeof(result));
     {
-        uint32 surfaceFormatsCount;
-        VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, _surface, &surfaceFormatsCount, nullptr));
-        ASSERT(surfaceFormatsCount > 0);
-
-        Array<VkSurfaceFormatKHR> surfaceFormats;
+        uint32 surfaceFormatsCount = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, _surface, &surfaceFormatsCount, nullptr);
+        Array<VkSurfaceFormatKHR, InlinedAllocation<16>> surfaceFormats;
         surfaceFormats.AddZeroed(surfaceFormatsCount);
-        VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, _surface, &surfaceFormatsCount, surfaceFormats.Get()));
+        VkResult vkResult = vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, _surface, &surfaceFormatsCount, surfaceFormats.Get());
+        if (vkResult != VK_SUCCESS && vkResult != VK_INCOMPLETE)
+            RenderToolsVulkan::LogVkResult(vkResult, __FILE__, __LINE__);
 
         if (resultFormat != PixelFormat::Unknown)
         {
             bool found = false;
-            if (FORMAT_FEATURES_ARE_SUPPORTED(_device->FeaturesPerFormat[(int32)resultFormat].Support, FormatSupport::RenderTarget))
+            if (EnumHasAllFlags(_device->FeaturesPerFormat[(int32)resultFormat].Support, FormatSupport::RenderTarget))
             {
                 const VkFormat requested = RenderToolsVulkan::ToVulkanFormat(resultFormat);
                 for (int32 i = 0; i < surfaceFormats.Count(); i++)
@@ -224,16 +313,15 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
                         break;
                     }
                 }
-
                 if (!found)
                 {
-                    LOG(Warning, "Requested pixel format {0} not supported by this swapchain. Falling back to supported swapchain formats...", (uint32)resultFormat);
+                    LOG(Warning, "Requested pixel format {0} not supported by this swapchain. Falling back to supported swapchain formats...", ScriptingEnum::ToString(resultFormat));
                     resultFormat = PixelFormat::Unknown;
                 }
             }
             else
             {
-                LOG(Warning, "Requested pixel format {0} is not supported by this Vulkan implementation", (uint32)resultFormat);
+                LOG(Warning, "Requested pixel format {0} is not supported by this Vulkan implementation", ScriptingEnum::ToString(resultFormat));
                 resultFormat = PixelFormat::Unknown;
             }
         }
@@ -250,22 +338,18 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
                     {
                         resultFormat = static_cast<PixelFormat>(pixelFormat);
                         result = surfaceFormats[i];
-                        LOG(Info, "No swapchain format requested, picking up Vulkan format {0}", (uint32)result.format);
+                        LOG(Info, "No swapchain format requested, picking up format {} (vk={})", ScriptingEnum::ToString(resultFormat), (int32)result.format);
                         break;
                     }
                 }
-
                 if (resultFormat != PixelFormat::Unknown)
-                {
                     break;
-                }
             }
         }
 
         if (resultFormat == PixelFormat::Unknown)
         {
             LOG(Warning, "Can't find a proper pixel format for the swapchain, trying to pick up the first available");
-
             const VkFormat format = RenderToolsVulkan::ToVulkanFormat(resultFormat);
             bool supported = false;
             for (int32 i = 0; i < surfaceFormats.Count(); i++)
@@ -278,24 +362,14 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
                 }
             }
             ASSERT(supported);
-
             String msg;
             for (int32 index = 0; index < surfaceFormats.Count(); index++)
             {
-                if (index == 0)
-                {
-                    msg += TEXT("(");
-                }
-                else
-                {
-                    msg += TEXT(", ");
-                }
+                msg += index == 0 ? TEXT("(") : TEXT(", ");
                 msg += StringUtils::ToString((int32)surfaceFormats[index].format);
             }
             if (surfaceFormats.HasItems())
-            {
                 msg += TEXT(")");
-            }
             LOG(Error, "Unable to find a pixel format for the swapchain; swapchain returned {0} Vulkan formats {1}", surfaceFormats.Count(), *msg);
         }
     }
@@ -310,41 +384,18 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
     {
         uint32 presentModesCount = 0;
         VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfacePresentModesKHR(gpu, _surface, &presentModesCount, nullptr));
-        ASSERT(presentModesCount > 0);
-
-        Array<VkPresentModeKHR> presentModes;
+        Array<VkPresentModeKHR, InlinedAllocation<8>> presentModes;
         presentModes.Resize(presentModesCount);
         VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfacePresentModesKHR(gpu, _surface, &presentModesCount, presentModes.Get()));
-
-        bool foundPresentModeMailbox = false;
-        bool foundPresentModeImmediate = false;
-        bool foundPresentModeFifo = false;
-
-        for (size_t i = 0; i < presentModesCount; i++)
-        {
-            switch (presentModes[(int32)i])
-            {
-            case VK_PRESENT_MODE_MAILBOX_KHR:
-                foundPresentModeMailbox = true;
-                break;
-            case VK_PRESENT_MODE_IMMEDIATE_KHR:
-                foundPresentModeImmediate = true;
-                break;
-            case VK_PRESENT_MODE_FIFO_KHR:
-                foundPresentModeFifo = true;
-                break;
-            }
-        }
-
-        if (foundPresentModeMailbox)
-        {
-            presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
-        }
-        else if (foundPresentModeImmediate)
+        if (!_vsyncPending && presentModes.Contains(VK_PRESENT_MODE_IMMEDIATE_KHR))
         {
             presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
-        else if (foundPresentModeFifo)
+        else if (!_vsyncPending && presentModes.Contains(VK_PRESENT_MODE_MAILBOX_KHR))
+        {
+            presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+        else if (presentModes.Contains(VK_PRESENT_MODE_FIFO_KHR))
         {
             presentMode = VK_PRESENT_MODE_FIFO_KHR;
         }
@@ -360,16 +411,35 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
     VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, _surface, &surfProperties));
     width = Math::Clamp<int32>(width, surfProperties.minImageExtent.width, surfProperties.maxImageExtent.width);
     height = Math::Clamp<int32>(height, surfProperties.minImageExtent.height, surfProperties.maxImageExtent.height);
+    if (width <= 0 || height <= 0)
+    {
+        LOG(Error, "Vulkan swapchain dimensions are invalid {}x{} (minImageExtent={}x{}, maxImageExtent={}x{})", width, height, surfProperties.minImageExtent.width, surfProperties.minImageExtent.height, surfProperties.maxImageExtent.width, surfProperties.maxImageExtent.height);
+        return true;
+    }
+
+    uint32_t backbuffersCount = VULKAN_BACK_BUFFERS_COUNT;
+#if PLATFORM_SDL && PLATFORM_LINUX && USE_EDITOR
+    // Wayland compositor might block one of the backbuffers while the window is minimized or fully occluded,
+    // make sure we have at least 3 backbuffers available so double-buffering can be used while we are blocked.
+    if (Platform::UsesWayland())
+        backbuffersCount = Math::Max<uint32_t>(backbuffersCount, 3);
+#endif
+
+    ASSERT(surfProperties.minImageCount <= VULKAN_BACK_BUFFERS_COUNT_MAX);
     VkSwapchainCreateInfoKHR swapChainInfo;
     RenderToolsVulkan::ZeroStruct(swapChainInfo, VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
     swapChainInfo.surface = _surface;
-    swapChainInfo.minImageCount = Math::Clamp<uint32_t>(VULKAN_BACK_BUFFERS_COUNT, surfProperties.minImageCount, surfProperties.maxImageCount);
+    swapChainInfo.minImageCount = surfProperties.maxImageCount > 0 // A value of 0 means that there is no limit on the number of image
+                                      ? Math::Min<uint32_t>(backbuffersCount, surfProperties.maxImageCount)
+                                      : backbuffersCount;
+    swapChainInfo.minImageCount = Math::Max<uint32_t>(swapChainInfo.minImageCount, surfProperties.minImageCount);
+    swapChainInfo.minImageCount = Math::Min<uint32_t>(swapChainInfo.minImageCount, VULKAN_BACK_BUFFERS_COUNT_MAX);
     swapChainInfo.imageFormat = result.format;
     swapChainInfo.imageColorSpace = result.colorSpace;
     swapChainInfo.imageExtent.width = width;
     swapChainInfo.imageExtent.height = height;
     swapChainInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-#if GPU_USE_WINDOW_SRV
+#if GPU_ENABLE_WINDOW_SRV
     swapChainInfo.imageUsage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 #endif
     swapChainInfo.preTransform = surfProperties.currentTransform;
@@ -380,28 +450,41 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
     swapChainInfo.presentMode = presentMode;
     swapChainInfo.clipped = VK_TRUE;
     swapChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-    if (surfProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+    if (_window->GetSettings().SupportsTransparency && surfProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
+        swapChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    else if (surfProperties.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
         swapChainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 
     // Create swap chain
     VkBool32 supportsPresent;
     VALIDATE_VULKAN_RESULT(vkGetPhysicalDeviceSurfaceSupportKHR(gpu, _device->PresentQueue->GetFamilyIndex(), _surface, &supportsPresent));
     ASSERT(supportsPresent);
+#if PLATFORM_IOS
+    Function<void()> func = [this, &device, &swapChainInfo]()
+    {
+        VALIDATE_VULKAN_RESULT(vkCreateSwapchainKHR(device, &swapChainInfo, nullptr, &_swapChain));
+    };
+    iOSPlatform::RunOnUIThread(func, true);
+#else
     VALIDATE_VULKAN_RESULT(vkCreateSwapchainKHR(device, &swapChainInfo, nullptr, &_swapChain));
+#endif
 
     // Cache data
     _width = width;
     _height = height;
+    _vsyncCurrent = _vsyncPending;
 
     // Setup back buffers
     {
         uint32 imagesCount;
         VALIDATE_VULKAN_RESULT(vkGetSwapchainImagesKHR(device, _swapChain, &imagesCount, nullptr));
-        ASSERT(imagesCount >= VULKAN_BACK_BUFFERS_COUNT && imagesCount <= VULKAN_BACK_BUFFERS_COUNT_MAX);
-
-        Array<VkImage, FixedAllocation<VULKAN_BACK_BUFFERS_COUNT_MAX>> images;
-        images.Resize(imagesCount);
-        VALIDATE_VULKAN_RESULT(vkGetSwapchainImagesKHR(device, _swapChain, &imagesCount, images.Get()));
+        if (imagesCount < 1 || imagesCount > VULKAN_BACK_BUFFERS_COUNT_MAX)
+        {
+            LOG(Warning, "Vulkan swapchain got invalid amount of backbuffers {} instead of {} (min {})", imagesCount, VULKAN_BACK_BUFFERS_COUNT, swapChainInfo.minImageCount);
+            return true;
+        }
+        VkImage images[VULKAN_BACK_BUFFERS_COUNT_MAX];
+        VALIDATE_VULKAN_RESULT(vkGetSwapchainImagesKHR(device, _swapChain, &imagesCount, images));
 
         _backBuffers.Resize(imagesCount);
         VkExtent3D extent;
@@ -410,12 +493,13 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
         extent.depth = 1;
         for (uint32 i = 0; i < imagesCount; i++)
         {
-            _backBuffers[i].Setup(this, images[i], _format, extent);
+            _backBuffers.Get()[i].Setup(this, images[i], _format, extent);
         }
     }
 
-    // Calculate memory usage
-    _memoryUsage = RenderTools::CalculateTextureMemoryUsage(_format, _width, _height, 1) * _backBuffers.Count();
+    // Estimate memory usage
+    _memoryUsage = 1024 + RenderTools::CalculateTextureMemoryUsage(_format, _width, _height, 1) * _backBuffers.Count();
+    PROFILE_MEM_INC(Graphics, _memoryUsage);
 
     return false;
 }
@@ -423,9 +507,8 @@ bool GPUSwapChainVulkan::CreateSwapChain(int32 width, int32 height)
 GPUSwapChainVulkan::Status GPUSwapChainVulkan::Present(QueueVulkan* presentQueue, SemaphoreVulkan* backBufferRenderingDoneSemaphore)
 {
     if (_currentImageIndex == -1)
-    {
         return Status::Ok;
-    }
+    PROFILE_CPU_NAMED("vkQueuePresentKHR");
 
     VkPresentInfoKHR presentInfo;
     RenderToolsVulkan::ZeroStruct(presentInfo, VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
@@ -440,8 +523,13 @@ GPUSwapChainVulkan::Status GPUSwapChainVulkan::Present(QueueVulkan* presentQueue
     presentInfo.pSwapchains = &_swapChain;
     presentInfo.pImageIndices = (uint32*)&_currentImageIndex;
 
-    const VkResult presentResult = vkQueuePresentKHR(presentQueue->GetHandle(), &presentInfo);
+#if VULKAN_USE_PERF_SDK
+    // NvPerf Vulkan profiling workaround: drain the present queue before presenting so NvPerf's per-queue tracking stays in the state RangeProfiler BeginSession requires
+    if (GPUDeviceVulkan::UsePerfSDK)
+        vkQueueWaitIdle(presentQueue->GetHandle());
+#endif
 
+    const VkResult presentResult = vkQueuePresentKHR(presentQueue->GetHandle(), &presentInfo);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR)
     {
         return Status::Outdated;
@@ -450,17 +538,19 @@ GPUSwapChainVulkan::Status GPUSwapChainVulkan::Present(QueueVulkan* presentQueue
     {
         return Status::LostSurface;
     }
+#if GPU_ENABLE_ASSERTION
     if (presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR)
     {
         VALIDATE_VULKAN_RESULT(presentResult);
     }
+#endif
 
     return Status::Ok;
 }
 
 int32 GPUSwapChainVulkan::DoAcquireImageIndex(GPUSwapChainVulkan* viewport, void* customData)
 {
-    return viewport->_acquiredImageIndex = viewport->AcquireNextImage(&viewport->_acquiredSemaphore);
+    return viewport->_acquiredImageIndex = viewport->AcquireNextImage(viewport->_acquiredSemaphore);
 }
 
 int32 GPUSwapChainVulkan::DoPresent(GPUSwapChainVulkan* viewport, void* customData)
@@ -472,7 +562,6 @@ int32 GPUSwapChainVulkan::TryPresent(Function<int32(GPUSwapChainVulkan*, void*)>
 {
     int32 attemptsPending = 4;
     int32 status = job(this, customData);
-
     while (status < 0 && attemptsPending > 0)
     {
         if (status == (int32)Status::Outdated)
@@ -493,52 +582,41 @@ int32 GPUSwapChainVulkan::TryPresent(Function<int32(GPUSwapChainVulkan*, void*)>
         // Recreate swapchain
         ASSERT(_swapChain != VK_NULL_HANDLE);
         int32 width = _width, height = _height;
-        ReleaseGPU();
-        CreateSwapChain(width, height);
+        // Preserve the surface for regular out-of-date swaps; recreate it only when Vulkan reports loss.
+        CreateSwapChain(width, height, status == (int32)Status::LostSurface);
 
         // Flush commands
         _device->GetMainContext()->Flush();
         _device->WaitForGPU();
 
         status = job(this, customData);
-
         attemptsPending--;
     }
-
     return status;
 }
 
-int32 GPUSwapChainVulkan::AcquireNextImage(SemaphoreVulkan** outSemaphore)
+int32 GPUSwapChainVulkan::AcquireNextImage(SemaphoreVulkan*& outSemaphore)
 {
+    PROFILE_CPU_NAMED("vkAcquireNextImageKHR");
     ASSERT(_swapChain && _backBuffers.HasItems());
 
-    uint32 imageIndex = 0;
+    uint32 imageIndex = _currentImageIndex;
     const int32 prevSemaphoreIndex = _semaphoreIndex;
     _semaphoreIndex = (_semaphoreIndex + 1) % _backBuffers.Count();
     const auto semaphore = _backBuffers[_semaphoreIndex].ImageAcquiredSemaphore;
 
-    const VkResult result = vkAcquireNextImageKHR(
-        _device->Device,
-        _swapChain,
-        UINT64_MAX,
-        semaphore->GetHandle(),
-        VK_NULL_HANDLE,
-        &imageIndex);
-
+    const VkResult result = vkAcquireNextImageKHR(_device->Device, _swapChain, UINT64_MAX, semaphore->GetHandle(), VK_NULL_HANDLE, &imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
         _semaphoreIndex = prevSemaphoreIndex;
         return (int32)Status::Outdated;
     }
-
     if (result == VK_ERROR_SURFACE_LOST_KHR)
     {
         _semaphoreIndex = prevSemaphoreIndex;
         return (int32)Status::LostSurface;
     }
-
-    *outSemaphore = semaphore;
-
+    outSemaphore = semaphore;
     if (result == VK_ERROR_VALIDATION_FAILED_EXT)
     {
         LOG(Fatal, "vkAcquireNextImageKHR failed with validation error");
@@ -559,6 +637,11 @@ void GPUSwapChainVulkan::Present(bool vsync)
     // Skip if there was no rendering to the backbuffer
     if (_acquiredImageIndex == -1)
         return;
+    PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
+
+    // Update pending VSync value based on the present mode
+    _vsyncPending = vsync;
 
     // Ensure that backbuffer has been acquired before presenting it to the window
     const auto backBuffer = (GPUTextureViewVulkan*)GetBackBufferView();
@@ -568,7 +651,14 @@ void GPUSwapChainVulkan::Present(bool vsync)
     context->AddImageBarrier(backBuffer, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     context->FlushBarriers();
 
+    // Cache a command buffer to wait on its fence before drawing to this backbuffer again
+    auto& acquiredBackBuffer = _backBuffers[_acquiredImageIndex];
+    // TODO: fix rare issues with the assert below
+    //ASSERT(acquiredBackBuffer.SubmitCmdBuffer == nullptr || acquiredBackBuffer.SubmitCmdBuffer->IsSubmitted());
+    acquiredBackBuffer.SubmitCmdBuffer = context->GetCmdBufferManager()->GetActiveCmdBuffer();
+
     context->GetCmdBufferManager()->SubmitActiveCmdBuffer(_backBuffers[_acquiredImageIndex].RenderingDoneSemaphore);
+    acquiredBackBuffer.SubmitCmdBufferFenceCounter = acquiredBackBuffer.SubmitCmdBuffer->GetSubmittedFenceCounter();
 
     // Present the back buffer to the viewport window
     const auto result = TryPresent(DoPresent, _device->PresentQueue, true);
@@ -582,7 +672,6 @@ void GPUSwapChainVulkan::Present(bool vsync)
 
         // Rebuild swapchain for the next present
         int32 width = _width, height = _height;
-        ReleaseGPU();
         CreateSwapChain(width, height);
         _device->GetMainContext()->Flush();
         _device->WaitForGPU();

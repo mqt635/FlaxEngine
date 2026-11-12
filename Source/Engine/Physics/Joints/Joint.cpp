@@ -1,16 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Joint.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Core/Log.h"
-#include "Engine/Physics/Utilities.h"
 #include "Engine/Physics/Physics.h"
+#include "Engine/Physics/PhysicsBackend.h"
+#include "Engine/Physics/PhysicsScene.h"
 #include "Engine/Physics/Actors/IPhysicsActor.h"
 #if USE_EDITOR
 #include "Engine/Level/Scene/SceneRendering.h"
 #endif
-#include "Engine/Scripting/Script.h"
-#include <ThirdParty/PhysX/extensions/PxJoint.h>
 
 Joint::Joint(const SpawnParams& params)
     : Actor(params)
@@ -19,86 +18,108 @@ Joint::Joint(const SpawnParams& params)
     , _breakTorque(MAX_float)
     , _targetAnchor(Vector3::Zero)
     , _targetAnchorRotation(Quaternion::Identity)
-    , _enableCollision(true)
 {
     Target.Changed.Bind<Joint, &Joint::OnTargetChanged>(this);
 }
 
 void Joint::SetBreakForce(float value)
 {
-    if (Math::NearEqual(value, _breakForce))
+    if (value == _breakForce)
         return;
-
     _breakForce = value;
-
     if (_joint)
-    {
-        _joint->setBreakForce(_breakForce, _breakTorque);
-    }
+        PhysicsBackend::SetJointBreakForce(_joint, _breakForce, _breakTorque);
 }
 
 void Joint::SetBreakTorque(float value)
 {
-    if (Math::NearEqual(value, _breakTorque))
+    if (value == _breakTorque)
         return;
-
     _breakTorque = value;
-
     if (_joint)
-    {
-        _joint->setBreakForce(_breakForce, _breakTorque);
-    }
+        PhysicsBackend::SetJointBreakForce(_joint, _breakForce, _breakTorque);
 }
 
 void Joint::SetEnableCollision(bool value)
 {
     if (value == GetEnableCollision())
         return;
-
     _enableCollision = value;
-
     if (_joint)
-    {
-        _joint->setConstraintFlag(PxConstraintFlag::eCOLLISION_ENABLED, value);
-    }
+        PhysicsBackend::SetJointFlags(_joint, _enableCollision ? PhysicsBackend::JointFlags::Collision : PhysicsBackend::JointFlags::None);
+}
+
+bool Joint::GetEnableAutoAnchor() const
+{
+    return _enableAutoAnchor;
+}
+
+void Joint::SetEnableAutoAnchor(bool value)
+{
+    _enableAutoAnchor = value;
 }
 
 void Joint::SetTargetAnchor(const Vector3& value)
 {
-    if (Vector3::NearEqual(value, _targetAnchor))
+    if (value == _targetAnchor)
         return;
-
     _targetAnchor = value;
-
-    if (_joint)
-    {
-        _joint->setLocalPose(PxJointActorIndex::eACTOR1, PxTransform(C2P(_targetAnchor), C2P(_targetAnchorRotation)));
-    }
+    if (_joint && !_enableAutoAnchor)
+        PhysicsBackend::SetJointActorPose(_joint, _targetAnchor, _targetAnchorRotation, 1);
 }
 
 void Joint::SetTargetAnchorRotation(const Quaternion& value)
 {
     if (Quaternion::NearEqual(value, _targetAnchorRotation))
         return;
-
     _targetAnchorRotation = value;
+    if (_joint && !_enableAutoAnchor)
+        PhysicsBackend::SetJointActorPose(_joint, _targetAnchor, _targetAnchorRotation, 1);
+}
 
-    if (_joint)
+void* Joint::GetPhysicsImpl() const
+{
+    return _joint;
+}
+
+void Joint::SetJointLocation(const Vector3& location)
+{
+    if (GetParent())
     {
-        _joint->setLocalPose(PxJointActorIndex::eACTOR1, PxTransform(C2P(_targetAnchor), C2P(_targetAnchorRotation)));
+        SetLocalPosition(GetParent()->GetTransform().WorldToLocal(location));
+    }
+    if (Target)
+    {
+        SetTargetAnchor(Target->GetTransform().WorldToLocal(location));
+    }
+}
+
+FORCE_INLINE Quaternion WorldToLocal(const Quaternion& world, const Quaternion& orientation)
+{
+    Quaternion rot;
+    const Quaternion invRotation = world.Conjugated();
+    Quaternion::Multiply(invRotation, orientation, rot);
+    rot.Normalize();
+    return rot;
+}
+
+void Joint::SetJointOrientation(const Quaternion& orientation)
+{
+    if (GetParent())
+    {
+        SetLocalOrientation(WorldToLocal(GetParent()->GetOrientation(), orientation));
+    }
+    if (Target)
+    {
+        SetTargetAnchorRotation(WorldToLocal(Target->GetOrientation(), orientation));
     }
 }
 
 void Joint::GetCurrentForce(Vector3& linear, Vector3& angular) const
 {
-    if (_joint && _joint->getConstraint())
-    {
-        _joint->getConstraint()->getForce(*(PxVec3*)&linear, *(PxVec3*)&angular);
-    }
-    else
-    {
-        linear = angular = Vector3::Zero;
-    }
+    linear = angular = Vector3::Zero;
+    if (_joint)
+        PhysicsBackend::GetJointForce(_joint, linear, angular);
 }
 
 void Joint::Create()
@@ -114,20 +135,25 @@ void Joint::Create()
     }
 
     // Create joint object
-    JointData data;
-    data.Physics = Physics::GetPhysics();
-    data.Actor0 = parent->GetRigidActor();
-    data.Actor1 = target ? target->GetRigidActor() : nullptr;
-    data.Pos0 = _localTransform.Translation;
-    data.Rot0 = _localTransform.Orientation;
-    data.Pos1 = _targetAnchor;
-    data.Rot1 = _targetAnchorRotation;
-    _joint = CreateJoint(data);
-    _joint->userData = this;
+    PhysicsJointDesc desc;
+    desc.Joint = this;
+    desc.Actor0 = parent->GetPhysicsActor();
+    desc.Actor1 = target ? target->GetPhysicsActor() : nullptr;
+    desc.Pos0 = _localTransform.Translation;
+    desc.Rot0 = _localTransform.Orientation;
+    desc.Pos1 = _targetAnchor;
+    desc.Rot1 = _targetAnchorRotation;
+    if (_enableAutoAnchor && target)
+    {
+        // Place target anchor at the joint location
+        desc.Pos1 = Target->GetTransform().WorldToLocal(GetPosition());
+        desc.Rot1 = WorldToLocal(Target->GetOrientation(), GetOrientation());
+    }
+    _joint = CreateJoint(desc);
 
     // Setup joint properties
-    _joint->setBreakForce(_breakForce, _breakTorque);
-    _joint->setConstraintFlag(PxConstraintFlag::eCOLLISION_ENABLED, _enableCollision);
+    PhysicsBackend::SetJointBreakForce(_joint, _breakForce, _breakTorque);
+    PhysicsBackend::SetJointFlags(_joint, _enableCollision ? PhysicsBackend::JointFlags::Collision : PhysicsBackend::JointFlags::None);
 }
 
 void Joint::OnJointBreak()
@@ -137,10 +163,8 @@ void Joint::OnJointBreak()
 
 void Joint::Delete()
 {
-    // Remove the joint
-    Physics::RemoveJoint(this);
-    _joint->userData = nullptr;
-    _joint->release();
+    PhysicsBackend::RemoveJoint(this);
+    PhysicsBackend::DestroyJoint(_joint);
     _joint = nullptr;
 }
 
@@ -149,8 +173,7 @@ void Joint::SetActors()
     auto parent = dynamic_cast<IPhysicsActor*>(GetParent());
     auto target = dynamic_cast<IPhysicsActor*>(Target.Get());
     ASSERT(parent != nullptr);
-
-    _joint->setActors(parent ? parent->GetRigidActor() : nullptr, target ? target->GetRigidActor() : nullptr);
+    PhysicsBackend::SetJointActors(_joint, parent->GetPhysicsActor(), target ? target->GetPhysicsActor() : nullptr);
 }
 
 void Joint::OnTargetChanged()
@@ -173,6 +196,8 @@ Vector3 Joint::GetTargetPosition() const
     Vector3 position = _targetAnchor;
     if (Target)
     {
+        if (_enableAutoAnchor)
+            position = Target->GetTransform().WorldToLocal(GetPosition());
         position = Target->GetOrientation() * position + Target->GetPosition();
     }
     return position;
@@ -183,6 +208,8 @@ Quaternion Joint::GetTargetOrientation() const
     Quaternion rotation = _targetAnchorRotation;
     if (Target)
     {
+        if (_enableAutoAnchor)
+            rotation = WorldToLocal(Target->GetOrientation(), GetOrientation());
         rotation = Target->GetOrientation() * rotation;
     }
     return rotation;
@@ -226,6 +253,7 @@ void Joint::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE_MEMBER(TargetAnchor, _targetAnchor);
     SERIALIZE_MEMBER(TargetAnchorRotation, _targetAnchorRotation);
     SERIALIZE_MEMBER(EnableCollision, _enableCollision);
+    SERIALIZE_MEMBER(EnableAutoAnchor, _enableAutoAnchor);
 }
 
 void Joint::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
@@ -239,6 +267,7 @@ void Joint::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
     DESERIALIZE_MEMBER(TargetAnchor, _targetAnchor);
     DESERIALIZE_MEMBER(TargetAnchorRotation, _targetAnchorRotation);
     DESERIALIZE_MEMBER(EnableCollision, _enableCollision);
+    DESERIALIZE_MEMBER(EnableAutoAnchor, _enableAutoAnchor);
 }
 
 void Joint::BeginPlay(SceneBeginData* data)
@@ -269,7 +298,7 @@ void Joint::EndPlay()
 
 void Joint::OnEnable()
 {
-    GetSceneRendering()->AddPhysicsDebug<Joint, &Joint::DrawPhysicsDebug>(this);
+    GetSceneRendering()->AddPhysicsDebug(this);
 
     // Base
     Actor::OnEnable();
@@ -277,7 +306,7 @@ void Joint::OnEnable()
 
 void Joint::OnDisable()
 {
-    GetSceneRendering()->RemovePhysicsDebug<Joint, &Joint::DrawPhysicsDebug>(this);
+    GetSceneRendering()->RemovePhysicsDebug(this);
 
     // Base
     Actor::OnDisable();
@@ -298,7 +327,7 @@ void Joint::OnActiveInTreeChanged()
         else
             Delete();
     }
-        // Joint object may not be created if actor is disabled on play mode begin (late init feature)
+    // Joint object may not be created if actor is disabled on play mode begin (late init feature)
     else if (IsDuringPlay())
     {
         Create();
@@ -344,9 +373,6 @@ void Joint::OnTransformChanged()
 
     _box = BoundingBox(_transform.Translation);
     _sphere = BoundingSphere(_transform.Translation, 0.0f);
-
     if (_joint)
-    {
-        _joint->setLocalPose(PxJointActorIndex::eACTOR0, PxTransform(C2P(_localTransform.Translation), C2P(_localTransform.Orientation)));
-    }
+        PhysicsBackend::SetJointActorPose(_joint, _localTransform.Translation, _localTransform.Orientation, 0);
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CreateJson.h"
 
@@ -30,7 +30,7 @@ bool CreateJson::Create(const StringView& path, rapidjson_flax::StringBuffer& da
     return Create(path, data1, data2);
 }
 
-bool CreateJson::Create(const StringView& path, StringAnsiView& data, StringAnsiView& dataTypename)
+bool CreateJson::Create(const StringView& path, const StringAnsiView& data, const StringAnsiView& dataTypename)
 {
     Guid id = Guid::New();
 
@@ -53,7 +53,7 @@ bool CreateJson::Create(const StringView& path, StringAnsiView& data, StringAnsi
         {
             if (FileSystem::CreateDirectory(directory))
             {
-                LOG(Warning, "Failed to create directory");
+                LOG(Warning, "Failed to create directory '{}'", directory);
                 return true;
             }
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -11,6 +11,8 @@ using Flax.Build.NativeCpp;
 /// </summary>
 public sealed class VulkanSdk : Sdk
 {
+    private bool _missingMoltenVkError;
+
     /// <summary>
     /// The singleton instance.
     /// </summary>
@@ -25,6 +27,7 @@ public sealed class VulkanSdk : Sdk
             {
                 TargetPlatform.Windows,
                 TargetPlatform.Linux,
+                TargetPlatform.Mac,
             };
         }
     }
@@ -34,18 +37,67 @@ public sealed class VulkanSdk : Sdk
     /// </summary>
     public VulkanSdk()
     {
-        if (!Platforms.Contains(Flax.Build.Platform.BuildTargetPlatform))
+        var platform = Flax.Build.Platform.BuildTargetPlatform;
+        if (!Platforms.Contains(platform))
             return;
 
         var vulkanSdk = Environment.GetEnvironmentVariable("VULKAN_SDK");
+        if (vulkanSdk == null || !Directory.Exists(vulkanSdk))
+        {
+            if (platform == TargetPlatform.Mac)
+            {
+                // Try to guess install location for the current user
+                var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "VulkanSDK");
+                if (Directory.Exists(path))
+                {
+                    var subDirs = Directory.GetDirectories(path);
+                    if (subDirs.Length != 0)
+                    {
+                        Flax.Build.Utilities.SortVersionDirectories(subDirs);
+                        path = Path.Combine(subDirs.Last(), "macOS");
+                        if (Directory.Exists(path))
+                            vulkanSdk = path;
+                    }
+                }
+            }
+            else if (platform == TargetPlatform.Linux)
+            {
+                // Try to use system-installed Vulkan SDK
+                if (File.Exists("/usr/include/vulkan/vulkan.h"))
+                    vulkanSdk = "/usr/include";
+            }
+        }
         if (vulkanSdk != null)
         {
             if (Directory.Exists(vulkanSdk))
             {
+                // Detect version (read core header beginning to find a specific line)
+                Version = new Version(1, 0);
+                try
+                {
+                    using (var stream = File.OpenRead(Path.Combine(vulkanSdk, "Include/vulkan/vulkan_core.h")))
+                    using (var reader = new StreamReader(stream, System.Text.Encoding.UTF8, true, 1024))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            if (line.StartsWith("#define VK_HEADER_VERSION_COMPLETE"))
+                            {
+                                var parts = line.Split(',');
+                                Version = new Version(int.Parse(parts[1]), int.Parse(parts[2]));
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    // Ignore errors
+                }
+
                 // Found
                 RootPath = vulkanSdk;
                 IsValid = true;
-                Version = new Version(1, 0); // TODO: detecting Vulkan SDK version
                 Log.Verbose("Found VulkanSDK at: " + vulkanSdk);
             }
             else
@@ -62,21 +114,35 @@ public sealed class VulkanSdk : Sdk
     /// <summary>
     /// Tries the get includes folder path (header files). This handles uppercase and lowercase installations for all platforms.
     /// </summary>
+    /// <param name="platform">Target platform hint.</param>
     /// <param name="includesFolderPath">The includes folder path.</param>
     /// <returns>True if got valid folder, otherwise false.</returns>
-    public bool TryGetIncludePath(out string includesFolderPath)
+    public bool TryGetIncludePath(TargetPlatform platform, out string includesFolderPath)
     {
+        includesFolderPath = string.Empty;
         if (IsValid)
         {
             var vulkanSdk = RootPath;
 
+            // Use system-installed headers
+            if (vulkanSdk.EndsWith("/include") && Directory.Exists(vulkanSdk))
+            {
+                if (platform != Flax.Build.Platform.BuildTargetPlatform)
+                {
+                    Log.Warning(string.Format("Cannot use system-installed VulkanSDK at {0} when building for platform {1}", vulkanSdk, platform));
+                    return false;
+                }
+                includesFolderPath = vulkanSdk;
+                return true;
+            }
+
+            // Check potential location with headers
             var includes = new[]
             {
                 Path.Combine(vulkanSdk, "include"),
                 Path.Combine(vulkanSdk, "Include"),
                 Path.Combine(vulkanSdk, "x86_64", "include"),
             };
-
             foreach (var include in includes)
             {
                 if (Directory.Exists(include))
@@ -90,9 +156,60 @@ public sealed class VulkanSdk : Sdk
             foreach (var include in includes)
                 Log.Warning(string.Format("No Vulkan header files in {0}", include));
         }
-
-        includesFolderPath = string.Empty;
         return false;
+    }
+
+    /// <summary>
+    /// Adds any runtime dependency files to the build that uses Vulkan SDK.
+    /// </summary>
+    /// <param name="options">Build options.</param>
+    public void AddDependencyFiles(BuildOptions options)
+    {
+        switch (options.Platform.Target)
+        {
+        case TargetPlatform.Mac:
+        case TargetPlatform.iOS:
+        {
+            // MoltenVK
+            var platformName = options.Platform.Target == TargetPlatform.iOS ? "iOS" : "macOS";
+            var location1 = Path.Combine(RootPath, "../MoltenVK/dylib/" + platformName);
+            if (Directory.Exists(location1))
+            {
+                // Initial location
+                options.DependencyFiles.Add(Path.Combine(location1, "libMoltenVK.dylib"));
+                options.DependencyFiles.Add(Path.Combine(location1, "MoltenVK_icd.json"));
+                return;
+            }
+
+            // New location from SDK 1.3.275
+            if (options.Platform.Target == TargetPlatform.iOS)
+            {
+                var location2 = Path.Combine(RootPath, "../iOS/lib/MoltenVK.xcframework/ios-arm64/MoltenVK.framework");
+                var location3 = Path.Combine(RootPath, "../iOS/share/vulkan/icd.d");
+                if (Directory.Exists(location2) && Directory.Exists(location3))
+                {
+                    // iOS
+                    options.DependencyFiles.Add(Path.Combine(location2, "MoltenVK"));
+                    options.DependencyFiles.Add(Path.Combine(location3, "MoltenVK_icd.json"));
+                    return;
+                }
+            }
+            else
+            {
+                var location2 = Path.Combine(RootPath, "lib");
+                var location3 = Path.Combine(RootPath, "share/vulkan/icd.d");
+                if (Directory.Exists(location2) && Directory.Exists(location3))
+                {
+                    // macOS
+                    options.DependencyFiles.Add(Path.Combine(location2, "libMoltenVK.dylib"));
+                    options.DependencyFiles.Add(Path.Combine(location3, "MoltenVK_icd.json"));
+                    return;
+                }
+            }
+            Log.ErrorOnce($"Missing MoltenVK files for {platformName} in VulkanSDK '{RootPath}'", ref _missingMoltenVkError);
+            break;
+        }
+        }
     }
 }
 
@@ -110,13 +227,14 @@ public class GraphicsDeviceVulkan : GraphicsDeviceBaseModule
 
         options.PrivateDependencies.Add("VulkanMemoryAllocator");
 
-        if (options.Platform.Target == TargetPlatform.Switch)
+        switch (options.Platform.Target)
         {
+        case TargetPlatform.Switch:
             options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "Switch", "Engine", "GraphicsDevice", "Vulkan"));
-        }
-        else
-        {
+            break;
+        default:
             options.PrivateDependencies.Add("volk");
+            break;
         }
     }
 }

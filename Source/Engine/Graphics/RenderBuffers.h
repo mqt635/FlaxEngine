@@ -1,14 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Math/Viewport.h"
 #include "Engine/Core/Collections/Array.h"
+#include "Engine/Core/Collections/HashSet.h"
+#include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
-
-// Default motion vectors buffer pixel format (can fallback to other format if not supported)
-#define MOTION_VECTORS_PIXEL_FORMAT PixelFormat::R16G16_Float
+#include "Engine/Level/Scene/SceneRendering.h"
+#include "Engine/Renderer/DrawCall.h"
 
 // GBuffer render targets formats
 #define GBUFFER0_FORMAT PixelFormat::R8G8B8A8_UNorm
@@ -16,38 +17,95 @@
 #define GBUFFER2_FORMAT PixelFormat::R8G8B8A8_UNorm
 #define GBUFFER3_FORMAT PixelFormat::R8G8B8A8_UNorm
 
+// Stencil bits usage (must match GBuffer.hlsl)
+// [0] | Object Layer
+// [1] | Object Layer
+// [2] | Object Layer
+// [3] | Object Layer
+// [4] | Object Layer
+// [5] | <unsued>
+// [6] | <unsued>
+// [7] | <unsued>
+#define STENCIL_BUFFER_OBJECT_LAYER(value) uint8(value & 0x1f)
+
+class Actor;
+class SceneRendering;
+class IOcclusionCulling;
+
 /// <summary>
 /// The scene rendering buffers container.
 /// </summary>
-API_CLASS() class FLAXENGINE_API RenderBuffers : public PersistentScriptingObject
+API_CLASS() class FLAXENGINE_API RenderBuffers : public ScriptingObject, private ISceneRenderingListener
 {
-DECLARE_SCRIPTING_TYPE(RenderBuffers);
-protected:
+    DECLARE_SCRIPTING_TYPE(RenderBuffers);
 
+    /// <summary>
+    /// The custom rendering state.
+    /// </summary>
+    class FLAXENGINE_API CustomBuffer : public Object
+    {
+    public:
+        String Name;
+        uint64 LastFrameUsed = 0;
+
+        String ToString() const override;
+    };
+
+    /// <summary>
+    /// Helper container for depth buffer binding as read-only as both shader resource and render target.
+    /// </summary>
+    struct ReadOnlyDepthBuffer
+    {
+        GPUTextureView* RTV;
+        GPUTextureView* SRV;
+    };
+
+private:
+    GPUTexture* HalfResDepth = nullptr;
+    GPUTexture* HiZ[2] = {};
+    uint64 LastFrameHalfResDepth = 0;
+    uint64 LastFrameHiZ[2] = {};
+
+    // Scene drawing cache with the per-object state (eg. LOD transitions, motion-vectors movement)
+    struct SceneData
+    {
+        // Per-object drawing state (eg. LOD transition). Indexing matches actor/object key of object registered in SceneRendering.
+        Array<GeometryDrawState> Geo[SceneRendering::DrawCategory::MAX];
+        // Scene culling cache with per-object (pair of actor and subobject) CullingId used by the IOcclusionCulling. Allows for stable visibility testing of custom non-actor objects (eg. terrain chunks or foliage patches).
+        Dictionary<Pair<const Actor*, const void*>, uint32> CullingIds;
+    };
+    Dictionary<SceneRendering*, SceneData> Scenes;
+
+protected:
     int32 _width = 0;
     int32 _height = 0;
     float _aspectRatio = 0.0f;
+    bool _useAlpha = false;
+    bool _useNull = false;
+    bool _usedCulling = false;
+    bool _statelessCulling = true;
     Viewport _viewport;
-
     Array<GPUTexture*, FixedAllocation<32>> _resources;
+    CriticalSection _cullingLocker;
+    mutable HashSet<ScriptingTypeHandle> _cullingIdsOwnerTypes;
 
 public:
-
     union
     {
         struct
         {
-            GPUTexture* GBuffer0;
-            GPUTexture* GBuffer1;
-            GPUTexture* GBuffer2;
-            GPUTexture* GBuffer3;
+            /// <summary>Gets the GBuffer texture 0. RGB: Color, A: AO</summary>
+            API_FIELD(ReadOnly) GPUTexture* GBuffer0;
+            /// <summary>Gets the GBuffer texture 1. RGB: Normal, A: ShadingModel</summary>
+            API_FIELD(ReadOnly) GPUTexture* GBuffer1;
+            /// <summary>Gets the GBuffer texture 2. R: Roughness, G: Metalness, B:Specular</summary>
+            API_FIELD(ReadOnly) GPUTexture* GBuffer2;
+            /// <summary>Gets the GBuffer texture 3. RGBA: Custom Data</summary>
+            API_FIELD(ReadOnly) GPUTexture* GBuffer3;
         };
 
         GPUTexture* GBuffer[4];
     };
-
-    GPUTexture* RT1_FloatRGB;
-    GPUTexture* RT2_FloatRGB;
 
     // Helper target for the eye adaptation
     float LastEyeAdaptationTime = 0.0f;
@@ -60,17 +118,10 @@ public:
     GPUTexture* LocalShadowedLightScattering = nullptr;
     uint64 LastFrameVolumetricFog = 0;
 
-    struct VolumetricFogData
+    struct
     {
         float MaxDistance;
-    };
-
-    VolumetricFogData VolumetricFogData;
-
-    // Helper buffer with half-resolution depth buffer shared by effects (eg. SSR, Motion Blur). Valid only during frame rendering and on request (see RequestHalfResDepth).
-    // Should be released if not used for a few frames.
-    GPUTexture* HalfResDepth = nullptr;
-    uint64 LastFrameHalfResDepth = 0;
+    } VolumetricFogData;
 
     // Helper target for the temporal SSR.
     // Should be released if not used for a few frames.
@@ -82,19 +133,20 @@ public:
     GPUTexture* TemporalAA = nullptr;
     uint64 LastFrameTemporalAA = 0;
 
-public:
+    // Maps the custom buffer type into the object that holds the state.
+    Array<CustomBuffer*, HeapAllocation> CustomBuffers;
 
+public:
     /// <summary>
     /// Finalizes an instance of the <see cref="RenderBuffers"/> class.
     /// </summary>
     ~RenderBuffers();
 
 public:
-
     /// <summary>
-    /// Prepares buffers for rendering a scene. Called before rendering so other parts can reuse calculated value.
+    /// Frees unused buffers to reduce memory usage for certain drawing effects that are state-dependant but unused for multiple frames.
     /// </summary>
-    void Prepare();
+    void ReleaseUnusedMemory();
 
     /// <summary>
     /// Requests the half-resolution depth to be prepared for the current frame.
@@ -103,8 +155,18 @@ public:
     /// <returns>The half-res depth buffer.</returns>
     GPUTexture* RequestHalfResDepth(GPUContext* context);
 
-public:
+    /// <summary>
+    /// Requests the Hierarchical Z-Buffer (closest or furthest) to be prepared for the current frame.
+    /// </summary>
+    /// <param name="context">The context.</param>
+    /// <param name="fullRes">Generates the full-resolution buffer, otherwise HiZ starts at half-res of the original Depth Buffer.</param>
+    /// <param name="mipLevels">Maximum amount of mip levels to generate. Value 0 generates a full mip chain down to 1x1.</param>
+    /// <param name="closest">True if generate the closest depth values, otherwise will use the furthest depths filter.</param>
+    /// <param name="powerOfTwo">True if the buffer dimensions should be powers of two.</param>
+    /// <returns>The HiZ depth buffer.</returns>
+    GPUTexture* RequestHiZ(GPUContext* context, bool fullRes = false, int32 mipLevels = 0, bool closest = true, bool powerOfTwo = false);
 
+public:
     /// <summary>
     /// Gets the buffers width (in pixels).
     /// </summary>
@@ -124,9 +186,9 @@ public:
     /// <summary>
     /// Gets the buffers width and height (in pixels).
     /// </summary>
-    API_PROPERTY() FORCE_INLINE Vector2 GetSize() const
+    API_PROPERTY() FORCE_INLINE Float2 GetSize() const
     {
-        return Vector2((float)_width, (float)_height);
+        return Float2((float)_width, (float)_height);
     }
 
     /// <summary>
@@ -143,6 +205,50 @@ public:
     API_PROPERTY() FORCE_INLINE Viewport GetViewport() const
     {
         return _viewport;
+    }
+
+    /// <summary>
+    /// Gets the output buffers format (R11G11B10 or R16G16B16A16 depending on UseAlpha property).
+    /// </summary>
+    API_PROPERTY() PixelFormat GetOutputFormat() const;
+
+    /// <summary>
+    /// True if support alpha output in the rendering buffers and pass-though alpha mask of the scene during rendering (at cost of reduced performance).
+    /// </summary>
+    API_PROPERTY() bool GetUseAlpha() const;
+
+    /// <summary>
+    /// True if support alpha output in the rendering buffers and pass-though alpha mask of the scene during rendering (at cost of reduced performance).
+    /// </summary>
+    API_PROPERTY() void SetUseAlpha(bool value);
+
+    const CustomBuffer* FindCustomBuffer(const StringView& name, bool withLinked = true) const;
+
+    template<class T>
+    const T* FindCustomBuffer(const StringView& name, bool withLinked = true) const
+    {
+        return (const T*)FindCustomBuffer(name, withLinked);
+    }
+
+    template<class T>
+    const T* FindLinkedBuffer(const StringView& name) const
+    {
+        return LinkedCustomBuffers ? (const T*)LinkedCustomBuffers->FindCustomBuffer(name, true) : nullptr;
+    }
+
+    template<class T>
+    T* GetCustomBuffer(const StringView& name, bool withLinked = true)
+    {
+        if (LinkedCustomBuffers && withLinked)
+            return LinkedCustomBuffers->GetCustomBuffer<T>(name, withLinked);
+        CustomBuffer* result = (CustomBuffer*)FindCustomBuffer(name, withLinked);
+        if (!result)
+        {
+            result = New<T>();
+            result->Name = name;
+            CustomBuffers.Add(result);
+        }
+        return (T*)result;
     }
 
     /// <summary>
@@ -163,8 +269,17 @@ public:
     /// </remarks>
     API_FIELD(ReadOnly) GPUTexture* MotionVectors;
 
-public:
+    /// <summary>
+    /// External Render Buffers used to redirect FindCustomBuffer/GetCustomBuffer calls. Can be linked to other rendering task (eg. main game viewport) to reuse graphics effect state from it (eg. use GI from main game view in in-game camera renderer).
+    /// </summary>
+    API_FIELD() RenderBuffers* LinkedCustomBuffers = nullptr;
 
+    /// <summary>
+    /// Occlusion culling implementation (optional). Can skip drawing occluded objects. Maintains a state synchronized with scene rendering with container RenderBuffers.
+    /// </summary>
+    API_FIELD(ReadOnly) IOcclusionCulling* OcclusionCulling = nullptr;
+
+public:
     /// <summary>
     /// Allocates the buffers.
     /// </summary>
@@ -178,8 +293,44 @@ public:
     /// </summary>
     API_FUNCTION() void Release();
 
-public:
+    /// <summary>
+    /// Gets the depth buffer binding for rendering as read-only (both shader resource and render target).
+    /// </summary>
+    ReadOnlyDepthBuffer GetReadOnlyDepthBuffer() const;
 
-    // [PersistentScriptingObject]
-    String ToString() const override;
+    // Internal event called by Renderer to initiate drawing.
+    void OnRendering(const RenderContext& renderContext);
+    // Internal event called by SceneRendering to initiate drawing.
+    void OnSceneRendering(SceneRendering* scene);
+
+    /// <summary>
+    /// Gets the geometry drawing state container for a specific actor/object. Returns null for invalid object (-1) or when view is not using LOD transitions (single-shot frame).
+    /// </summary>
+    GeometryDrawState* GetGeometryDrawState(SceneRendering* scene, int32 key, const Actor* actor) const;
+
+    /// <summary>
+    /// Performs the occlusion culling test for a specific sub-object of the actor (eg. terrain chunk or foliage patch) and returns the assigned CullingId (for draw call).
+    /// </summary>
+    /// <param name="actor">The owning actor.</param>
+    /// <param name="cullingId">Result CullingId to use for drawing this actor.</param>
+    /// <returns>True if actor can be rendered (is visible or visibility will be calculated on GPU), otherwise false.</returns>
+    bool TestOcclusionCulling(const Actor* actor, uint32& cullingId) const;
+
+    /// <summary>
+    /// Performs the occlusion culling test for a specific sub-object of the actor (eg. terrain chunk or foliage patch) and returns the assigned CullingId (for draw call).
+    /// </summary>
+    /// <param name="scene">The scene owning this actor.</param>
+    /// <param name="actor">The owning actor.</param>
+    /// <param name="objectBounds">The world-space bounds of the actor (or sub-object).</param>
+    /// <param name="cullingId">Result CullingId to use for drawing this actor (or sub-object).</param>
+    /// <param name="object">The pointer to the sub-actor object. Null for actor-only culling.</param>
+    /// <returns>True if object can be rendered (is visible or visibility will be calculated on GPU), otherwise false.</returns>
+    bool TestOcclusionCulling(SceneRendering* scene, const Actor* actor, const BoundingBox& objectBounds, uint32& cullingId, const void* object = nullptr) const;
+
+public:
+    // [ISceneRenderingListener]
+    void OnSceneRenderingAddActor(SceneRendering* scene, int32 key, Actor* a) override;
+    void OnSceneRenderingUpdateActor(SceneRendering* scene, int32 key, Actor* a, const BoundingSphere& prevBounds, UpdateFlags flags) override;
+    void OnSceneRenderingRemoveActor(SceneRendering* scene, int32 key, Actor* a) override;
+    void OnSceneRenderingClear(SceneRendering* scene) override;
 };

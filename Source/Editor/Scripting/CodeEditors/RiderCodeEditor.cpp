@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "RiderCodeEditor.h"
 #include "Engine/Platform/FileSystem.h"
@@ -7,13 +7,17 @@
 #include "Editor/ProjectInfo.h"
 #include "Editor/Scripting/ScriptsBuilder.h"
 #include "Engine/Engine/Globals.h"
-
-#if PLATFORM_WINDOWS
-
 #include "Engine/Core/Collections/Sorting.h"
 #include "Engine/Platform/File.h"
-#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Serialization/Json.h"
+
+#if PLATFORM_WINDOWS
+#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
+#elif PLATFORM_MAC
+#include "Engine/Platform/Apple/AppleUtils.h"
+#include <AppKit/AppKit.h>
+#endif
 
 namespace
 {
@@ -23,27 +27,13 @@ namespace
         String version;
 
         RiderInstallation(const String& path_, const String& version_)
-            : path(path_), version(version_)
+            : path(path_)
+            , version(version_)
         {
         }
     };
 
-    bool FindRegistryKeyItems(HKEY hKey, Array<String>& results)
-    {
-        Char nameBuffer[256];
-        for (int32 i = 0;; i++)
-        {
-            const LONG result = RegEnumKeyW(hKey, i, nameBuffer, ARRAY_COUNT(nameBuffer));
-            if (result == ERROR_NO_MORE_ITEMS)
-                break;
-            if (result != ERROR_SUCCESS)
-                return false;
-            results.Add(nameBuffer);
-        }
-        return true;
-    }
-
-    void SearchDirectory(Array<RiderInstallation*>* installations, const String& directory)
+    void SearchDirectory(Array<RiderInstallation*>* installations, const String& directory, String launchOverridePath = String::Empty)
     {
         if (!FileSystem::DirectoryExists(directory))
             return;
@@ -51,11 +41,15 @@ namespace
         // Load product info
         Array<byte> productInfoData;
         const String productInfoPath = directory / TEXT("product-info.json");
-        if (File::ReadAllBytes(productInfoPath, productInfoData))
+        if (!FileSystem::FileExists(productInfoPath) || File::ReadAllBytes(productInfoPath, productInfoData))
             return;
         rapidjson_flax::Document document;
         document.Parse((char*)productInfoData.Get(), productInfoData.Count());
         if (document.HasParseError())
+            return;
+
+        // Check if this is actually rider and not another jetbrains product
+        if (document.FindMember("name")->value != "JetBrains Rider")
             return;
 
         // Find version
@@ -77,7 +71,30 @@ namespace
         if (!launcherPath.HasChars() || !FileSystem::FileExists(exePath))
             return;
 
-        installations->Add(New<RiderInstallation>(exePath, versionMember->value.GetText()));
+        String installPath = launchOverridePath != String::Empty ? launchOverridePath : exePath;
+        StringUtils::PathRemoveRelativeParts(installPath);
+        for (RiderInstallation* installation : *installations)
+        {
+            if (installation->path == installPath)
+                return;
+        }
+        installations->Add(New<RiderInstallation>(installPath, versionMember->value.GetText()));
+    }
+
+#if PLATFORM_WINDOWS
+    bool FindRegistryKeyItems(HKEY hKey, Array<String>& results)
+    {
+        Char nameBuffer[256];
+        for (int32 i = 0;; i++)
+        {
+            const LONG result = RegEnumKeyW(hKey, i, nameBuffer, ARRAY_COUNT(nameBuffer));
+            if (result == ERROR_NO_MORE_ITEMS)
+                break;
+            if (result != ERROR_SUCCESS)
+                return false;
+            results.Add(nameBuffer);
+        }
+        return true;
     }
 
     void SearchRegistry(Array<RiderInstallation*>* installations, HKEY root, const Char* key, const Char* valueName = TEXT(""))
@@ -123,6 +140,7 @@ namespace
 
         RegCloseKey(keyH);
     }
+#endif
 }
 
 bool sortInstallations(RiderInstallation* const& i1, RiderInstallation* const& i2)
@@ -135,14 +153,14 @@ bool sortInstallations(RiderInstallation* const& i1, RiderInstallation* const& i
     int32 version2[3] = { 0 };
     StringUtils::Parse(values1[0].Get(), &version1[0]);
     StringUtils::Parse(values1[1].Get(), &version1[1]);
-    
-    if(values1.Count() > 2)
+
+    if (values1.Count() > 2)
         StringUtils::Parse(values1[2].Get(), &version1[2]);
-    
+
     StringUtils::Parse(values2[0].Get(), &version2[0]);
     StringUtils::Parse(values2[1].Get(), &version2[1]);
-    
-    if(values2.Count() > 2)
+
+    if (values2.Count() > 2)
         StringUtils::Parse(values2[2].Get(), &version2[2]);
 
     // Compare by MAJOR.MINOR.BUILD
@@ -155,36 +173,88 @@ bool sortInstallations(RiderInstallation* const& i1, RiderInstallation* const& i
     return version1[0] > version2[0];
 }
 
-#endif
-
 RiderCodeEditor::RiderCodeEditor(const String& execPath)
     : _execPath(execPath)
-    , _solutionPath(Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln"))
+    , _solutionPath(Globals::ProjectFolder / Editor::Project->Name + TEXT(".slnx"))
 {
 }
 
 void RiderCodeEditor::FindEditors(Array<CodeEditor*>* output)
 {
-#if PLATFORM_WINDOWS
     Array<RiderInstallation*> installations;
-
-    // Versions installed via JetBrains Toolbox
-    String localAppDataPath;
     Array<String> subDirectories;
+
+    String localAppDataPath;
     FileSystem::GetSpecialFolderPath(SpecialFolder::LocalAppData, localAppDataPath);
-    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("JetBrains\\Toolbox\\apps\\Rider\\ch-0\\"));
-    for (auto directory : subDirectories)
-        SearchDirectory(&installations, directory);
 
-    // Rider for Unreal Engine
+#if PLATFORM_WINDOWS
+    // Lookup from all known registry locations
+    SearchRegistry(&installations, HKEY_CURRENT_USER, TEXT("SOFTWARE\\WOW6432Node\\JetBrains\\Rider for Unreal Engine"));
     SearchRegistry(&installations, HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\WOW6432Node\\JetBrains\\Rider for Unreal Engine"));
-
-    // Versions 2021 or later
+    SearchRegistry(&installations, HKEY_CURRENT_USER, TEXT("SOFTWARE\\JetBrains\\JetBrains Rider"));
+    SearchRegistry(&installations, HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\JetBrains\\JetBrains Rider"));
     SearchRegistry(&installations, HKEY_CURRENT_USER, TEXT("SOFTWARE\\JetBrains\\Rider"), TEXT("InstallDir"));
-
-    // Versions 2020 or earlier
+    SearchRegistry(&installations, HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\JetBrains\\Rider"), TEXT("InstallDir"));
     SearchRegistry(&installations, HKEY_CURRENT_USER, TEXT("SOFTWARE\\WOW6432Node\\JetBrains\\JetBrains Rider"));
     SearchRegistry(&installations, HKEY_LOCAL_MACHINE, TEXT("SOFTWARE\\WOW6432Node\\JetBrains\\JetBrains Rider"));
+
+    // Versions installed via JetBrains Toolbox
+    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("Programs"));
+    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("JetBrains\\Toolbox\\apps\\Rider\\ch-0\\"));
+    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("JetBrains\\Toolbox\\apps\\Rider\\ch-1\\")); // Beta versions
+#endif
+#if PLATFORM_LINUX
+    // TODO: detect Snap installations
+    // TODO: detect by reading the jetbrains-rider.desktop file from ~/.local/share/applications and /usr/share/applications?
+
+    SearchDirectory(&installations, TEXT("/usr/share/rider/"));
+    FileSystem::GetChildDirectories(subDirectories, TEXT("/usr/share/rider"));
+
+    // Default suggested location for standalone installations
+    FileSystem::GetChildDirectories(subDirectories, TEXT("/opt/"));
+    
+    // Versions installed via JetBrains Toolbox
+    SearchDirectory(&installations, localAppDataPath / TEXT("JetBrains/Toolbox/apps/rider/"));
+    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("JetBrains/Toolbox/apps/Rider/ch-0"));
+    FileSystem::GetChildDirectories(subDirectories, localAppDataPath / TEXT("JetBrains/Toolbox/apps/Rider/ch-1")); // Beta versions
+
+    // Detect Flatpak installations
+    SearchDirectory(&installations,
+        TEXT("/var/lib/flatpak/app/com.jetbrains.Rider/current/active/files/extra/rider/"),
+        TEXT("flatpak run com.jetbrains.Rider"));
+#endif
+
+#if PLATFORM_MAC
+    String applicationSupportFolder;
+    FileSystem::GetSpecialFolderPath(SpecialFolder::ProgramData, applicationSupportFolder);
+
+    NSURL* appURL = [[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:@"com.jetbrains.rider"];
+    if (appURL != nullptr)
+    {
+        const String appPath = AppleUtils::ToString((CFStringRef)[appURL path]);
+        SearchDirectory(&installations, appPath / TEXT("Contents/Resources"), appPath);
+    }
+
+    Array<String> subMacDirectories;
+    FileSystem::GetChildDirectories(subMacDirectories, applicationSupportFolder / TEXT("JetBrains/Toolbox/apps/Rider/ch-0/"));
+    FileSystem::GetChildDirectories(subMacDirectories, applicationSupportFolder / TEXT("JetBrains/Toolbox/apps/Rider/ch-1/"));
+    for (const String& directory : subMacDirectories)
+    {
+        String riderAppPath = directory / TEXT("Rider.app");
+        SearchDirectory(&installations, riderAppPath / TEXT("Contents/Resources"), riderAppPath);
+    }
+
+    // Check the local installer version
+    SearchDirectory(&installations, TEXT("/Applications/Rider.app/Contents/Resources"), TEXT("/Applications/Rider.app"));
+
+    String userFolder;
+    FileSystem::GetSpecialFolderPath(SpecialFolder::Documents, userFolder);
+    String riderAppPath = userFolder / TEXT("../Applications/Rider.app");
+    SearchDirectory(&installations, riderAppPath / TEXT("Contents/Resources"), riderAppPath);
+#endif
+
+    for (const String& directory : subDirectories)
+        SearchDirectory(&installations, directory);
 
     // Sort found installations by version number
     Sorting::QuickSort(installations.Get(), installations.Count(), &sortInstallations);
@@ -194,7 +264,6 @@ void RiderCodeEditor::FindEditors(Array<CodeEditor*>* output)
         output->Add(New<RiderCodeEditor>(installation->path));
         Delete(installation);
     }
-#endif
 }
 
 CodeEditorTypes RiderCodeEditor::GetType() const
@@ -207,34 +276,81 @@ String RiderCodeEditor::GetName() const
     return TEXT("Rider");
 }
 
+String RiderCodeEditor::GetGenerateProjectCustomArgs() const
+{
+    return TEXT("-vs2026");
+}
+
+String RiderCodeEditor::GetSolutionPath() const
+{
+    // Rider prefers .slnx; fall back to .sln if only that exists
+    String slnxPath = Globals::ProjectFolder / Editor::Project->Name + TEXT(".slnx");
+    if (FileSystem::FileExists(slnxPath))
+        return slnxPath;
+    String slnPath = Globals::ProjectFolder / Editor::Project->Name + TEXT(".sln");
+    if (FileSystem::FileExists(slnPath))
+        return slnPath;
+    return slnxPath; // Neither exists yet; target .slnx for generation
+}
+
 void RiderCodeEditor::OpenFile(const String& path, int32 line)
 {
     // Generate project files if solution is missing
-    if (!FileSystem::FileExists(_solutionPath))
+    String solutionPath = GetSolutionPath();
+    if (!FileSystem::FileExists(solutionPath))
     {
-        ScriptsBuilder::GenerateProject(TEXT("-vs2019"));
+        ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
+        solutionPath = GetSolutionPath();
     }
 
     // Open file
     line = line > 0 ? line : 1;
-    const String args = String::Format(TEXT("\"{0}\" --line {2} \"{1}\""), _solutionPath, path, line);
-    Platform::StartProcess(_execPath, args, StringView::Empty);
+    CreateProcessSettings procSettings;
+
+#if !PLATFORM_MAC
+    procSettings.FileName = _execPath;
+    procSettings.Arguments = String::Format(TEXT("\"{0}\" --line {2} \"{1}\""), solutionPath, path, line);
+#else
+    // This follows pretty much how all the other engines open rider which deals with cross architecture issues
+    procSettings.FileName = "/usr/bin/open";
+    procSettings.Arguments = String::Format(TEXT("-n -a \"{0}\" --args \"{1}\" --line {3} \"{2}\""), _execPath, solutionPath, path, line);
+#endif
+
+    procSettings.HiddenWindow = false;
+    procSettings.WaitForEnd = false;
+    procSettings.LogOutput = false;
+    procSettings.ShellExecute = true;
+    Platform::CreateProcess(procSettings);
 }
 
 void RiderCodeEditor::OpenSolution()
 {
     // Generate project files if solution is missing
-    if (!FileSystem::FileExists(_solutionPath))
+    String solutionPath = GetSolutionPath();
+    if (!FileSystem::FileExists(solutionPath))
     {
-        ScriptsBuilder::GenerateProject(TEXT("-vs2019"));
+        ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
+        solutionPath = GetSolutionPath();
     }
 
     // Open solution
-    const String args = String::Format(TEXT("\"{0}\""), _solutionPath);
-    Platform::StartProcess(_execPath, args, StringView::Empty);
+    CreateProcessSettings procSettings;
+#if !PLATFORM_MAC
+    procSettings.FileName = _execPath;
+    procSettings.Arguments = String::Format(TEXT("\"{0}\""), solutionPath);
+#else
+    // This follows pretty much how all the other engines open rider which deals with cross architecture issues
+    procSettings.FileName = "/usr/bin/open";
+    procSettings.Arguments = String::Format(TEXT("-n -a \"{0}\" \"{1}\""), _execPath, solutionPath);
+#endif
+    procSettings.HiddenWindow = false;
+    procSettings.WaitForEnd = false;
+    procSettings.LogOutput = false;
+    procSettings.ShellExecute = true;
+    Platform::CreateProcess(procSettings);
 }
 
 void RiderCodeEditor::OnFileAdded(const String& path)
 {
-    ScriptsBuilder::GenerateProject();
+    ScriptsBuilder::GenerateProject(GetGenerateProjectCustomArgs());
 }

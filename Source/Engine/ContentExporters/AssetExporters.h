@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,7 +9,6 @@
 class AssetExporters
 {
 public:
-
     static ExportAssetResult ExportTexture(ExportAssetContext& context);
     static ExportAssetResult ExportCubeTexture(ExportAssetContext& context);
     static ExportAssetResult ExportAudioClip(ExportAssetContext& context);

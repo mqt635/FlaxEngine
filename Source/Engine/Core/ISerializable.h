@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -29,12 +29,28 @@ public:
     /// </summary>
     typedef JsonWriter SerializeStream;
 
+    /// <summary>
+    /// Serialization callback context container. Used by OnSerializing, OnSerialized, OnDeserializing, OnDeserialized methods.
+    /// </summary>
+    struct FLAXENGINE_API CallbackContext
+    {
+        // The deserialization modifier object.
+        ISerializeModifier* Modifier = nullptr;
+    };
+
 public:
 
     /// <summary>
     /// Finalizes an instance of the <see cref="ISerializable"/> class.
     /// </summary>
     virtual ~ISerializable() = default;
+
+    /// <summary>
+    /// Compares with other instance to decide whether serialize this instance (eg. any field orp property is modified). Used to skip object serialization if not needed.
+    /// </summary>
+    /// <param name="otherObj">The instance of the object (always valid) to compare with to decide whether serialize this instance.</param>
+    /// <returns>True if any field or property is modified compared to the other object instance, otherwise false.</returns>
+    virtual bool ShouldSerialize(const void* otherObj) const { return true; }
 
     /// <summary>
     /// Serializes object to the output stream compared to the values of the other object instance (eg. default class object). If other object is null then serialize all properties.

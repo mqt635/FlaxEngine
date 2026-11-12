@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Windows;
@@ -11,6 +11,7 @@ namespace FlaxEditor.Content
     /// A <see cref="SkeletonMask"/> asset proxy object.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.BinaryAssetProxy" />
+    [ContentContextMenu("New/Animation/Skeleton Mask")]
     public class SkeletonMaskProxy : BinaryAssetProxy
     {
         /// <inheritdoc />
@@ -37,7 +38,7 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public override void Create(string outputPath, object arg)
         {
-            if (Editor.CreateAsset(Editor.NewAssetType.SkeletonMask, outputPath))
+            if (Editor.CreateAsset("SkeletonMask", outputPath))
                 throw new Exception("Failed to create new asset.");
         }
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,18 +7,12 @@
 /// <summary>
 /// The empty actor that is useful to create hierarchy and/or hold scripts. See <see cref="Script"/>.
 /// </summary>
-API_CLASS() class FLAXENGINE_API EmptyActor : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/Actor\"), ActorToolbox(\"Other\")")
+class FLAXENGINE_API EmptyActor : public Actor
 {
-DECLARE_SCENE_OBJECT(EmptyActor);
-public:
-
-    // [Actor]
-#if USE_EDITOR
-    BoundingBox GetEditorBox() const override;
-#endif
+    DECLARE_SCENE_OBJECT(EmptyActor);
 
 protected:
-
     // [Actor]
     void OnTransformChanged() override;
 };

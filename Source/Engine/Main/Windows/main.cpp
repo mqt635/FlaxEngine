@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS
 
@@ -25,10 +25,17 @@ extern "C" {
 __declspec(dllexport) int32 AmdPowerXpressRequestHighPerformance = 1;
 }
 
-extern LONG CALLBACK SehExceptionHandler(EXCEPTION_POINTERS* ep);
-
+#if PLAIN_MAIN
+int main(int argc, char* argv[])
+#else
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
+#endif
 {
+#if PLAIN_MAIN
+    HINSTANCE hInstance = GetModuleHandle(NULL);
+    LPTSTR lpCmdLine = GetCommandLineW();
+#endif
+
 #ifdef USE_VS_MEM_LEAKS_CHECK
     // Memory leaks detect inside VS
     int flag = _CrtSetDbgFlag(_CRTDBG_REPORT_FLAG);
@@ -45,7 +52,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmd
     {
         return Engine::Main(lpCmdLine);
     }
-    __except (SehExceptionHandler(GetExceptionInformation()))
+    __except (Platform::SehExceptionHandler(GetExceptionInformation()))
     {
         return -1;
     }

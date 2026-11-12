@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ProjectInfo.h"
 #include "Engine/Platform/FileSystem.h"
@@ -6,12 +6,44 @@
 #include "Engine/Core/Log.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Core/Math/Quaternion.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Serialization/JsonWriters.h"
 #include "Engine/Serialization/JsonTools.h"
 #include <ThirdParty/pugixml/pugixml.hpp>
 using namespace pugi;
 
 Array<ProjectInfo*> ProjectInfo::ProjectsCache;
+
+struct XmlCharAsChar
+{
+#if PLATFORM_TEXT_IS_CHAR16
+    Char* Str = nullptr;
+    
+    XmlCharAsChar(const pugi::char_t* str)
+    {
+        if (!str)
+            return;
+        int32 length = 0;
+        while (str[length])
+            length++;
+        Str = (Char*)Platform::Allocate(length * sizeof(Char), sizeof(Char));
+        for (int32 i = 0; i <= length; i++)
+            Str[i] = (Char)str[i];
+    }
+
+    ~XmlCharAsChar()
+    {
+        Platform::Free(Str);
+    }
+#else
+    const Char* Str;
+
+    XmlCharAsChar(const pugi::char_t* str)
+        : Str(str)
+    {
+    }
+#endif
+};
 
 void ShowProjectLoadError(const Char* errorMsg, const String& projectRootFolder)
 {
@@ -28,14 +60,14 @@ Vector3 GetVector3FromXml(const xml_node& parent, const PUGIXML_CHAR* name, cons
         const auto z = node.child_value(PUGIXML_TEXT("Z"));
         if (x && y && z)
         {
-            Vector3 v;
-            if (!StringUtils::Parse(x, &v.X) && !StringUtils::Parse(y, &v.Y) && !StringUtils::Parse(z, &v.Z))
+            XmlCharAsChar xs(x), ys(y), zs(z);
+            Float3 v;
+            if (!StringUtils::Parse(xs.Str, &v.X) && !StringUtils::Parse(ys.Str, &v.Y) && !StringUtils::Parse(zs.Str, &v.Z))
             {
-                return v;
+                return (Vector3)v;
             }
         }
     }
-
     return defaultValue;
 }
 
@@ -44,8 +76,9 @@ int32 GetIntFromXml(const xml_node& parent, const PUGIXML_CHAR* name, const int3
     const auto node = parent.child_value(name);
     if (node)
     {
+        XmlCharAsChar s(node);
         int32 v;
-        if (!StringUtils::Parse(node, &v))
+        if (!StringUtils::Parse(s.Str, &v))
         {
             return v;
         }
@@ -154,7 +187,8 @@ bool ProjectInfo::LoadProject(const String& projectPath)
             Version = ::Version(
                 JsonTools::GetInt(version, "Major", 0),
                 JsonTools::GetInt(version, "Minor", 0),
-                JsonTools::GetInt(version, "Build", 0));
+                JsonTools::GetInt(version, "Build", -1),
+                JsonTools::GetInt(version, "Revision", -1));
         }
     }
     if (Version.Revision() == 0)
@@ -294,6 +328,7 @@ ProjectInfo* ProjectInfo::Load(const String& path)
     }
 
     // Load
+    PROFILE_MEM(Editor);
     auto project = New<ProjectInfo>();
     if (project->LoadProject(path))
     {

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,7 +12,6 @@
 class FLAXENGINE_API IAssetUpgrader
 {
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="IAssetUpgrader"/> class.
     /// </summary>
@@ -21,7 +20,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Checks if given asset version should be converted.
     /// </summary>

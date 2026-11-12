@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -41,7 +41,7 @@ namespace FlaxEditor.Utilities
 
                     // Special case for collections
                     if (Index != null)
-                        result = new ScriptType(result.GetElementType());
+                        result = result.GetElementType();
 
                     return result;
                 }

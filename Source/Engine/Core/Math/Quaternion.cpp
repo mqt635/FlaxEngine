@@ -1,17 +1,19 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Quaternion.h"
 #include "Vector3.h"
 #include "Vector4.h"
 #include "Matrix.h"
+#include "Matrix3x3.h"
 #include "Math.h"
 #include "../Types/String.h"
+#include "Engine/Core/Math/Transform.h"
 
-Quaternion Quaternion::Zero(0);
-Quaternion Quaternion::One(1);
+Quaternion Quaternion::Zero(0, 0, 0, 0);
+Quaternion Quaternion::One(1, 1, 1, 1);
 Quaternion Quaternion::Identity(0, 0, 0, 1);
 
-Quaternion::Quaternion(const Vector4& value)
+Quaternion::Quaternion(const Float4& value)
     : X(value.X)
     , Y(value.Y)
     , Z(value.Z)
@@ -24,18 +26,26 @@ String Quaternion::ToString() const
     return String::Format(TEXT("{}"), *this);
 }
 
-Vector3 Quaternion::GetAxis() const
+float Quaternion::GetAngle() const
 {
     const float length = X * X + Y * Y + Z * Z;
     if (Math::IsZero(length))
-        return Vector3::UnitX;
-    const float inv = 1.0f / Math::Sqrt(length);
-    return Vector3(X * inv, Y * inv, Z * inv);
+        return 0.0f;
+    return 2.0f * acosf(Math::Clamp(W, -1.0f, 1.0f));
 }
 
-Vector3 Quaternion::GetEuler() const
+Float3 Quaternion::GetAxis() const
 {
-    Vector3 result;
+    const float length = X * X + Y * Y + Z * Z;
+    if (Math::IsZero(length))
+        return Float3::UnitX;
+    const float inv = 1.0f / Math::Sqrt(length);
+    return Float3(X * inv, Y * inv, Z * inv);
+}
+
+Float3 Quaternion::GetEuler() const
+{
+    Float3 result;
     const float sqw = W * W;
     const float sqx = X * X;
     const float sqy = Y * Y;
@@ -70,9 +80,7 @@ Vector3 Quaternion::GetEuler() const
         result.Z = Math::Atan2(2.0f * q.X * q.Y + 2.0f * q.Z * q.W, 1 - 2.0f * (q.Y * q.Y + q.Z * q.Z));
     }
 
-    result *= RadiansToDegrees;
-    result.UnwindEuler();
-    return result;
+    return Math::UnwindDegrees(result * RadiansToDegrees);
 }
 
 void Quaternion::Multiply(const Quaternion& other)
@@ -87,9 +95,25 @@ void Quaternion::Multiply(const Quaternion& other)
     W = W * other.W - d;
 }
 
-Vector3 Quaternion::operator*(const Vector3& vector) const
+Float3 Quaternion::operator*(const Float3& vector) const
 {
-    return Vector3::Transform(vector, *this);
+    return Float3::Transform(vector, *this);
+}
+
+void Quaternion::Add(const Quaternion& left, const Quaternion& right, Quaternion& result)
+{
+    result.X = left.X + right.X;
+    result.Y = left.Y + right.Y;
+    result.Z = left.Z + right.Z;
+    result.W = left.W + right.W;
+}
+
+void Quaternion::Subtract(const Quaternion& left, const Quaternion& right, Quaternion& result)
+{
+    result.X = left.X - right.X;
+    result.Y = left.Y - right.Y;
+    result.Z = left.Z - right.Z;
+    result.W = left.W - right.W;
 }
 
 void Quaternion::Multiply(const Quaternion& left, const Quaternion& right, Quaternion& result)
@@ -102,6 +126,14 @@ void Quaternion::Multiply(const Quaternion& left, const Quaternion& right, Quate
     result.Y = left.Y * right.W + right.Y * left.W + b;
     result.Z = left.Z * right.W + right.Z * left.W + c;
     result.W = left.W * right.W - d;
+}
+
+void Quaternion::Negate(const Quaternion& value, Quaternion& result)
+{
+    result.X = -value.X;
+    result.Y = -value.Y;
+    result.Z = -value.Z;
+    result.W = -value.W;
 }
 
 void Quaternion::Lerp(const Quaternion& start, const Quaternion& end, float amount, Quaternion& result)
@@ -124,10 +156,10 @@ void Quaternion::Lerp(const Quaternion& start, const Quaternion& end, float amou
     result.Normalize();
 }
 
-void Quaternion::RotationAxis(const Vector3& axis, float angle, Quaternion& result)
+void Quaternion::RotationAxis(const Float3& axis, float angle, Quaternion& result)
 {
-    Vector3 normalized;
-    Vector3::Normalize(axis, normalized);
+    Float3 normalized;
+    Float3::Normalize(axis, normalized);
 
     const float half = angle * 0.5f;
     const float sinHalf = Math::Sin(half);
@@ -139,10 +171,10 @@ void Quaternion::RotationAxis(const Vector3& axis, float angle, Quaternion& resu
     result.W = cosHalf;
 }
 
-void Quaternion::RotationCosAxis(const Vector3& axis, float cos, Quaternion& result)
+void Quaternion::RotationCosAxis(const Float3& axis, float cos, Quaternion& result)
 {
-    Vector3 normalized;
-    Vector3::Normalize(axis, normalized);
+    Float3 normalized;
+    Float3::Normalize(axis, normalized);
 
     const float cosHalf2 = (1.0f + cos) * 0.5f;
     const float sinHalf2 = 1.0f - cosHalf2;
@@ -208,34 +240,109 @@ void Quaternion::RotationMatrix(const Matrix& matrix, Quaternion& result)
     result.Normalize();
 }
 
-void Quaternion::LookAt(const Vector3& eye, const Vector3& target, const Vector3& up, Quaternion& result)
+void Quaternion::RotationMatrix(const Matrix3x3& matrix, Quaternion& result)
+{
+    float sqrtV;
+    float half;
+    const float scale = matrix.M11 + matrix.M22 + matrix.M33;
+
+    if (scale > 0.0f)
+    {
+        sqrtV = Math::Sqrt(scale + 1.0f);
+        result.W = sqrtV * 0.5f;
+        sqrtV = 0.5f / sqrtV;
+
+        result.X = (matrix.M23 - matrix.M32) * sqrtV;
+        result.Y = (matrix.M31 - matrix.M13) * sqrtV;
+        result.Z = (matrix.M12 - matrix.M21) * sqrtV;
+    }
+    else if (matrix.M11 >= matrix.M22 && matrix.M11 >= matrix.M33)
+    {
+        sqrtV = Math::Sqrt(1.0f + matrix.M11 - matrix.M22 - matrix.M33);
+        half = 0.5f / sqrtV;
+
+        result = Quaternion(
+            0.5f * sqrtV,
+            (matrix.M12 + matrix.M21) * half,
+            (matrix.M13 + matrix.M31) * half,
+            (matrix.M23 - matrix.M32) * half);
+    }
+    else if (matrix.M22 > matrix.M33)
+    {
+        sqrtV = Math::Sqrt(1.0f + matrix.M22 - matrix.M11 - matrix.M33);
+        half = 0.5f / sqrtV;
+
+        result = Quaternion(
+            (matrix.M21 + matrix.M12) * half,
+            0.5f * sqrtV,
+            (matrix.M32 + matrix.M23) * half,
+            (matrix.M31 - matrix.M13) * half);
+    }
+    else
+    {
+        sqrtV = Math::Sqrt(1.0f + matrix.M33 - matrix.M11 - matrix.M22);
+        half = 0.5f / sqrtV;
+
+        result = Quaternion(
+            (matrix.M31 + matrix.M13) * half,
+            (matrix.M32 + matrix.M23) * half,
+            0.5f * sqrtV,
+            (matrix.M12 - matrix.M21) * half);
+    }
+
+    result.Normalize();
+}
+
+void Quaternion::LookAt(const Float3& eye, const Float3& target, const Float3& up, Quaternion& result)
 {
     Matrix matrix;
     Matrix::LookAt(eye, target, up, matrix);
     RotationMatrix(matrix, result);
 }
 
-void Quaternion::RotationLookAt(const Vector3& forward, const Vector3& up, Quaternion& result)
+void Quaternion::RotationLookAt(const Float3& forward, const Float3& up, Quaternion& result)
 {
-    LookAt(Vector3::Zero, forward, up, result);
+    LookAt(Float3::Zero, forward, up, result);
 }
 
-void Quaternion::Billboard(const Vector3& objectPosition, const Vector3& cameraPosition, const Vector3& cameraUpVector, const Vector3& cameraForwardVector, Quaternion& result)
+void Quaternion::Billboard(const Float3& objectPosition, const Float3& cameraPosition, const Float3& cameraUpVector, const Float3& cameraForwardVector, Quaternion& result)
 {
     Matrix matrix;
     Matrix::Billboard(objectPosition, cameraPosition, cameraUpVector, cameraForwardVector, matrix);
     RotationMatrix(matrix, result);
 }
 
-void Quaternion::LookRotation(const Vector3& forward, const Vector3& up, Quaternion& result)
+Quaternion Quaternion::FromDirection(const Float3& direction)
 {
-    Vector3 forwardNorm = forward;
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), Quaternion::Identity);
+    Quaternion orientation;
+    if (Float3::Dot(direction, Float3::Up) >= 0.999f)
+    {
+        RotationAxis(Float3::Left, PI_OVER_2, orientation);
+    }
+    else if (Float3::Dot(direction, Float3::Down) >= 0.999f)
+    {
+        RotationAxis(Float3::Right, PI_OVER_2, orientation);
+    }
+    else
+    {
+        Float3 right, up;
+        Float3::Cross(direction, Float3::Up, right);
+        Float3::Cross(right, direction, up);
+        LookRotation(direction, up, orientation);
+    }
+    return orientation;
+}
+
+void Quaternion::LookRotation(const Float3& forward, const Float3& up, Quaternion& result)
+{
+    Float3 forwardNorm = forward;
     forwardNorm.Normalize();
-    Vector3 rightNorm;
-    Vector3::Cross(up, forwardNorm, rightNorm);
+    Float3 rightNorm;
+    Float3::Cross(up, forwardNorm, rightNorm);
     rightNorm.Normalize();
-    Vector3 upNorm;
-    Vector3::Cross(forwardNorm, rightNorm, upNorm);
+    Float3 upNorm;
+    Float3::Cross(forwardNorm, rightNorm, upNorm);
 
 #define m00 rightNorm.X
 #define m01 rightNorm.Y
@@ -296,18 +403,17 @@ void Quaternion::LookRotation(const Vector3& forward, const Vector3& up, Quatern
 #undef m22
 }
 
-void Quaternion::GetRotationFromTo(const Vector3& from, const Vector3& to, Quaternion& result, const Vector3& fallbackAxis)
+void Quaternion::GetRotationFromTo(const Float3& from, const Float3& to, Quaternion& result, const Float3& fallbackAxis)
 {
     // Based on Stan Melax's article in Game Programming Gems
 
-    Vector3 v0 = from;
-    Vector3 v1 = to;
+    Float3 v0 = from;
+    Float3 v1 = to;
     v0.Normalize();
     v1.Normalize();
 
-    const float d = Vector3::Dot(v0, v1);
-
     // If dot == 1, vectors are the same
+    const float d = Float3::Dot(v0, v1);
     if (d >= 1.0f)
     {
         result = Identity;
@@ -316,7 +422,7 @@ void Quaternion::GetRotationFromTo(const Vector3& from, const Vector3& to, Quate
 
     if (d < 1e-6f - 1.0f)
     {
-        if (fallbackAxis != Vector3::Zero)
+        if (fallbackAxis != Float3::Zero)
         {
             // Rotate 180 degrees about the fallback axis
             RotationAxis(fallbackAxis, PI, result);
@@ -324,9 +430,9 @@ void Quaternion::GetRotationFromTo(const Vector3& from, const Vector3& to, Quate
         else
         {
             // Generate an axis
-            Vector3 axis = Vector3::Cross(Vector3::UnitX, from);
+            Float3 axis = Float3::Cross(Float3::UnitX, from);
             if (axis.LengthSquared() < ZeroTolerance) // Pick another if colinear
-                axis = Vector3::Cross(Vector3::UnitY, from);
+                axis = Float3::Cross(Float3::UnitY, from);
             axis.Normalize();
             RotationAxis(axis, PI, result);
         }
@@ -336,8 +442,8 @@ void Quaternion::GetRotationFromTo(const Vector3& from, const Vector3& to, Quate
         const float s = Math::Sqrt((1 + d) * 2);
         const float invS = 1 / s;
 
-        Vector3 c;
-        Vector3::Cross(v0, v1, c);
+        Float3 c;
+        Float3::Cross(v0, v1, c);
 
         result.X = c.X * invS;
         result.Y = c.Y * invS;
@@ -347,7 +453,7 @@ void Quaternion::GetRotationFromTo(const Vector3& from, const Vector3& to, Quate
     }
 }
 
-void Quaternion::FindBetween(const Vector3& from, const Vector3& to, Quaternion& result)
+void Quaternion::FindBetween(const Float3& from, const Float3& to, Quaternion& result)
 {
     // http://lolengine.net/blog/2014/02/24/quaternion-from-two-vectors-final
     const float normFromNormTo = Math::Sqrt(from.LengthSquared() * to.LengthSquared());
@@ -356,7 +462,7 @@ void Quaternion::FindBetween(const Vector3& from, const Vector3& to, Quaternion&
         result = Identity;
         return;
     }
-    const float w = normFromNormTo + Vector3::Dot(from, to);
+    const float w = normFromNormTo + Float3::Dot(from, to);
     if (w < 1.e-6f * normFromNormTo)
     {
         result = Math::Abs(from.X) > Math::Abs(from.Z)
@@ -365,7 +471,7 @@ void Quaternion::FindBetween(const Vector3& from, const Vector3& to, Quaternion&
     }
     else
     {
-        const Vector3 cross = Vector3::Cross(from, to);
+        const Float3 cross = Float3::Cross(from, to);
         result = Quaternion(cross.X, cross.Y, cross.Z, w);
     }
     result.Normalize();
@@ -417,7 +523,7 @@ Quaternion Quaternion::Euler(float x, float y, float z)
     );
 }
 
-Quaternion Quaternion::Euler(const Vector3& euler)
+Quaternion Quaternion::Euler(const Float3& euler)
 {
     const float halfRoll = euler.Z * (DegreesToRadians * 0.5f);
     const float halfPitch = euler.X * (DegreesToRadians * 0.5f);
@@ -455,4 +561,13 @@ void Quaternion::RotationYawPitchRoll(float yaw, float pitch, float roll, Quater
     result.X = cosYawOver2 * sinPitchOver2 * cosRollOver2 + sinYawOver2 * cosPitchOver2 * sinRollOver2;
     result.Y = sinYawOver2 * cosPitchOver2 * cosRollOver2 - cosYawOver2 * sinPitchOver2 * sinRollOver2;
     result.Z = cosYawOver2 * cosPitchOver2 * sinRollOver2 - sinYawOver2 * sinPitchOver2 * cosRollOver2;
+}
+
+Quaternion Quaternion::GetRotationFromNormal(const Vector3& normal, const Transform& reference)
+{
+    Float3 up = reference.GetUp();
+    const Real dot = Vector3::Dot(normal, up);
+    if (Math::NearEqual(Math::Abs(dot), 1))
+        up = reference.GetRight();
+    return Quaternion::LookRotation(normal, up);
 }

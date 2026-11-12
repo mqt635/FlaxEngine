@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,12 +9,40 @@ class GPUTexture;
 class Task;
 
 /// <summary>
+/// Enumeration of different image formats.
+/// </summary>
+API_ENUM() enum class ImageFormat
+{
+    // .dds
+    DDS,
+    // .tga
+    TGA,
+    // .png
+    PNG,
+    // .bmp
+    BMP,
+    // .gif
+    GIF,
+    // .tiff
+    TIFF,
+    // .jpg/.jpeg
+    JPEG,
+    // .hdr
+    HDR,
+    // .raw
+    RAW,
+    // .exr
+    EXR,
+    // Custom
+    Internal,
+};
+
+/// <summary>
 /// Interface for objects that can manage streamable texture
 /// </summary>
 class FLAXENGINE_API ITextureOwner
 {
 public:
-
     /// <summary>
     /// Gets the texture owner mutex used to synchronize texture logic.
     /// </summary>

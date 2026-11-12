@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,14 +14,12 @@ class MemoryWriteStream;
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API SkeletonMask : public BinaryAsset
 {
-DECLARE_BINARY_ASSET_HEADER(SkeletonMask, 2);
+    DECLARE_BINARY_ASSET_HEADER(SkeletonMask, 2);
 private:
-
     Array<String> _maskedNodes;
     BitArray<> _mask;
 
 public:
-
     /// <summary>
     /// The referenced skinned model skeleton that defines the masked nodes hierarchy.
     /// </summary>
@@ -47,43 +45,27 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the per-skeleton-node boolean mask (read-only).
     /// </summary>
     /// <returns>The constant reference to the skeleton nodes mask.</returns>
     API_PROPERTY() const BitArray<>& GetNodesMask();
 
-#if USE_EDITOR
-
-    /// <summary>
-    /// Saves this asset to the file. Supported only in Editor.
-    /// </summary>
-    /// <param name="path">The custom asset path to use for the saving. Use empty value to save this asset to its own storage location. Can be used to duplicate asset. Must be specified when saving virtual asset.</param>
-    /// <returns>True if cannot save data, otherwise false.</returns>
-    API_FUNCTION() bool Save(const StringView& path = StringView::Empty);
-
-#endif
-
 private:
-
     void OnSkeletonUnload();
 
 public:
-
     // [BinaryAsset]
 #if USE_EDITOR
-    void GetReferences(Array<Guid>& output) const override
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override
     {
-        // Base
-        BinaryAsset::GetReferences(output);
-
-        output.Add(Skeleton.GetID());
+        BinaryAsset::GetReferences(assets, files);
+        assets.Add(Skeleton.GetID());
     }
+    bool Save(const StringView& path = StringView::Empty) override;
 #endif
 
 protected:
-
     // [BinaryAsset]
     LoadResult load() override;
     void unload(bool isReloading) override;

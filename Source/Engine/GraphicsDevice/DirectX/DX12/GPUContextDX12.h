@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,6 +6,7 @@
 #include "IShaderResourceDX12.h"
 #include "DescriptorHeapDX12.h"
 #include "../IncludeDirectXHeaders.h"
+#include <ThirdParty/tracy/tracy/TracyD3D12.hpp>
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -15,11 +16,12 @@ class GPUBufferDX12;
 class GPUSamplerDX12;
 class GPUConstantBufferDX12;
 class GPUTextureViewDX12;
+class GPUVertexLayoutDX12;
 
 /// <summary>
 /// Size of the resource barriers buffer size (will be flushed on overflow)
 /// </summary>
-#define DX12_RB_BUFFER_SIZE 16
+#define DX12_RB_BUFFER_SIZE 64
 
 /// <summary>
 /// GPU Commands Context implementation for DirectX 12
@@ -36,28 +38,34 @@ private:
 
     GPUDeviceDX12* _device;
     ID3D12GraphicsCommandList* _commandList;
+#ifdef __ID3D12GraphicsCommandList1_FWD_DEFINED__
+    ID3D12GraphicsCommandList1* _commandList1;
+#endif
     ID3D12CommandAllocator* _currentAllocator;
     GPUPipelineStateDX12* _currentState;
     GPUShaderProgramCS* _currentCompute;
 
-    int32 _swapChainsUsed;
     int32 _vbCount;
     int32 _rtCount;
     int32 _rbBufferSize;
 
     uint32 _srMaskDirtyGraphics;
     uint32 _srMaskDirtyCompute;
+    uint32 _stencilRef;
+    D3D_PRIMITIVE_TOPOLOGY _primitiveTopology;
 
     int32 _isCompute : 1;
     int32 _rtDirtyFlag : 1;
     int32 _psDirtyFlag : 1;
-    int32 _cbDirtyFlag : 1;
+    int32 _cbGraphicsDirtyFlag : 1;
+    int32 _cbComputeDirtyFlag : 1;
     int32 _samplersDirtyFlag : 1;
 
     GPUTextureViewDX12* _rtDepth;
     GPUTextureViewDX12* _rtHandles[GPU_MAX_RT_BINDED];
     IShaderResourceDX12* _srHandles[GPU_MAX_SR_BINDED];
     IShaderResourceDX12* _uaHandles[GPU_MAX_UA_BINDED];
+    GPUVertexLayoutDX12* _vertexLayout;
     GPUBufferDX12* _ibHandle;
     GPUBufferDX12* _vbHandles[GPU_MAX_VB_BINDED];
     D3D12_INDEX_BUFFER_VIEW _ibView;
@@ -65,6 +73,13 @@ private:
     D3D12_RESOURCE_BARRIER _rbBuffer[DX12_RB_BUFFER_SIZE];
     GPUConstantBufferDX12* _cbHandles[GPU_MAX_CB_BINDED];
     GPUSamplerDX12* _samplers[GPU_MAX_SAMPLER_BINDED - GPU_STATIC_SAMPLERS_COUNT];
+    Array<ResourceOwnerDX12*, InlinedAllocation<USE_EDITOR ? 32 : 2>> _swapChains;
+
+#if COMPILE_WITH_PROFILER
+    void* _tracyContext;
+    struct TracyZone { byte Data[TracyD3D12ZoneSize]; };
+    Array<TracyZone, InlinedAllocation<32>> _tracyZones;
+#endif
 
 public:
 
@@ -77,6 +92,9 @@ public:
     {
         return _commandList;
     }
+
+    // Flag for command list state.
+    bool IsOpen = false;
 
     uint64 FrameFenceValues[2];
 
@@ -117,9 +135,9 @@ public:
     uint64 Execute(bool waitForCompletion = false);
 
     /// <summary>
-    /// External event called by swap chain after using context end
+    /// External event called by swap chain after using context ends.
     /// </summary>
-    void OnSwapChainFlush();
+    void OnSwapChainFlush(ResourceOwnerDX12* backBuffer);
 
     /// <summary>
     /// Flush pending resource barriers
@@ -134,7 +152,7 @@ protected:
     void GetActiveHeapDescriptor(const D3D12_CPU_DESCRIPTOR_HANDLE& cpuHandle, Descriptor& descriptor);
 
 private:
-
+    void flushSwapChains();
     void flushSRVs();
     void flushRTVs();
     void flushUAVs();
@@ -149,6 +167,7 @@ public:
     // [GPUContext]
     void FrameBegin() override;
     void FrameEnd() override;
+    void OnPresent() override;
 #if GPU_ALLOW_PROFILE_EVENTS
     void EventBegin(const Char* name) override;
     void EventEnd() override;
@@ -156,20 +175,24 @@ public:
     void* GetNativePtr() const override;
     bool IsDepthBufferBinded() override;
     void Clear(GPUTextureView* rt, const Color& color) override;
-    void ClearDepth(GPUTextureView* depthBuffer, float depthValue) override;
-    void ClearUA(GPUBuffer* buf, const Vector4& value) override;
+    void ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue) override;
+    void ClearUA(GPUBuffer* buf, const Float4& value) override;
+    void ClearUA(GPUBuffer* buf, const uint32 value[4]) override;
+    void ClearUA(GPUTexture* texture, const uint32 value[4]) override;
+    void ClearUA(GPUTexture* texture, const Float4& value) override;
     void ResetRenderTarget() override;
     void SetRenderTarget(GPUTextureView* rt) override;
     void SetRenderTarget(GPUTextureView* depthBuffer, GPUTextureView* rt) override;
     void SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts) override;
-    void SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput) override;
+    void SetBlendFactor(const Float4& value) override;
+    void SetStencilRef(uint32 value) override;
     void ResetSR() override;
     void ResetUA() override;
     void ResetCB() override;
     void BindCB(int32 slot, GPUConstantBuffer* cb) override;
     void BindSR(int32 slot, GPUResourceView* view) override;
     void BindUA(int32 slot, GPUResourceView* view) override;
-    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr) override;
+    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr, GPUVertexLayout* vertexLayout = nullptr) override;
     void BindIB(GPUBuffer* indexBuffer) override;
     void BindSampler(int32 slot, GPUSampler* sampler) override;
     void UpdateCB(GPUConstantBuffer* cb, const void* data) override;
@@ -180,11 +203,14 @@ public:
     void DrawIndexedInstanced(uint32 indicesCount, uint32 instanceCount, int32 startInstance, int32 startVertex, int32 startIndex) override;
     void DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs) override;
     void DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs) override;
+    uint64 BeginQuery(GPUQueryType type) override;
+    void EndQuery(uint64 queryID) override;
     void SetViewport(const Viewport& viewport) override;
     void SetScissor(const Rectangle& scissorRect) override;
+    void SetDepthBounds(float minDepth, float maxDepth) override;
     GPUPipelineState* GetState() const override;
     void SetState(GPUPipelineState* state) override;
-    void ClearState() override;
+    void ResetState() override;
     void FlushState() override;
     void Flush() override;
     void UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 size, uint32 offset) override;
@@ -195,6 +221,10 @@ public:
     void CopyCounter(GPUBuffer* dstBuffer, uint32 dstOffset, GPUBuffer* srcBuffer) override;
     void CopyResource(GPUResource* dstResource, GPUResource* srcResource) override;
     void CopySubresource(GPUResource* dstResource, uint32 dstSubresource, GPUResource* srcResource, uint32 srcSubresource) override;
+    void SetResourceState(GPUResource* resource, uint64 state, int32 subresource) override;
+    void ForceRebindDescriptors() override;
+    void Transition(GPUResource* resource, GPUResourceAccess access) override;
+    void OverlapUA(bool end) override;
 };
 
 #endif

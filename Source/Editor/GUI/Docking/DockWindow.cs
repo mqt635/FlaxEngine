@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Xml;
+using System.Globalization;
 using FlaxEngine;
 using FlaxEngine.Assertions;
 using FlaxEngine.GUI;
@@ -15,7 +16,7 @@ namespace FlaxEditor.GUI.Docking
     public class DockWindow : Panel
     {
         private string _title;
-        private Vector2 _titleSize;
+        private Float2 _titleSize;
 
         /// <summary>
         /// The master panel.
@@ -49,7 +50,7 @@ namespace FlaxEditor.GUI.Docking
         /// <summary>
         /// Gets a value indicating whether this window is docked.
         /// </summary>
-        public bool IsDocked => _dockedTo != null;
+        public bool IsDocked => _dockedTo != null && _dockedTo.TabsCount > 1;
 
         /// <summary>
         /// Gets a value indicating whether this window is selected.
@@ -57,12 +58,14 @@ namespace FlaxEditor.GUI.Docking
         public bool IsSelected => _dockedTo?.SelectedTab == this;
 
         /// <summary>
-        /// Gets the default window size.
+        /// Gets a value indicating whether this window is hidden from the user (eg. not shown or hidden on closed).
         /// </summary>
-        /// <remarks>
-        /// Scaled by the DPI, because the window should be large enough for its content on every monitor
-        /// </remarks>
-        public virtual Vector2 DefaultSize => new Vector2(900, 580) * DpiScale;
+        public bool IsHidden => !Visible || _dockedTo == null;
+
+        /// <summary>
+        /// Gets the default window size (in UI units, unscaled by DPI which is handled by windowing system).
+        /// </summary>
+        public virtual Float2 DefaultSize => new Float2(1200, 740);
 
         /// <summary>
         /// Gets the serialization typename.
@@ -80,13 +83,13 @@ namespace FlaxEditor.GUI.Docking
                 _title = value;
 
                 // Invalidate cached title size
-                _titleSize = new Vector2(-1);
+                _titleSize = new Float2(-1);
                 PerformLayoutBeforeChildren();
 
                 // Check if is docked to the floating window and is selected so update window title
                 if (IsSelected && _dockedTo is FloatWindowDockPanel floatPanel)
                 {
-                    floatPanel.Window.Title = Title;
+                    floatPanel.UpdateTitle(_title);
                 }
             }
         }
@@ -99,7 +102,7 @@ namespace FlaxEditor.GUI.Docking
         /// <summary>
         /// Gets the size of the title.
         /// </summary>
-        public Vector2 TitleSize => _titleSize;
+        public Float2 TitleSize => _titleSize;
 
         /// <summary>
         /// The input actions collection to processed during user input.
@@ -150,7 +153,7 @@ namespace FlaxEditor.GUI.Docking
         /// </summary>
         public void ShowFloating()
         {
-            ShowFloating(Vector2.Zero);
+            ShowFloating(Float2.Zero);
         }
 
         /// <summary>
@@ -159,42 +162,74 @@ namespace FlaxEditor.GUI.Docking
         /// <param name="position">Window location.</param>
         public void ShowFloating(WindowStartPosition position)
         {
-            ShowFloating(Vector2.Zero, position);
+            ShowFloating(Float2.Zero, position);
         }
 
         /// <summary>
         /// Shows the window in a floating state.
         /// </summary>
-        /// <param name="size">Window size, set Vector2.Zero to use default.</param>
+        /// <param name="size">Window size, set <see cref="Float2.Zero"/> to use default.</param>
         /// <param name="position">Window location.</param>
-        public void ShowFloating(Vector2 size, WindowStartPosition position = WindowStartPosition.CenterParent)
+        public void ShowFloating(Float2 size, WindowStartPosition position = WindowStartPosition.CenterParent)
         {
-            // Undock
+            ShowFloating(new Float2(200, 200), size, position);
+        }
+
+        /// <summary>
+        /// Shows the window in a floating state.
+        /// </summary>
+        /// <param name="location">Window location.</param>
+        /// <param name="size">Window size, set <see cref="Float2.Zero"/> to use default.</param>
+        /// <param name="position">Window location.</param>
+        public void ShowFloating(Float2 location, Float2 size, WindowStartPosition position = WindowStartPosition.CenterParent)
+        {
+            CreateFloating(location, size, position, true);
+        }
+
+        /// <summary>
+        /// Creates the window in a floating state.
+        /// </summary>
+        public void CreateFloating()
+        {
+            CreateFloating(Float2.Zero, Float2.Zero);
+        }
+
+        /// <summary>
+        /// Creates the window in a floating state.
+        /// </summary>
+        /// <param name="location">Window location.</param>
+        /// <param name="size">Window size, set <see cref="Float2.Zero"/> to use default.</param>
+        /// <param name="position">Window location.</param>
+        /// <param name="showWindow">Window visibility.</param>
+        public void CreateFloating(Float2 location, Float2 size, WindowStartPosition position = WindowStartPosition.CenterParent, bool showWindow = false)
+        {
             Undock();
 
             // Create window
             var winSize = size.LengthSquared > 4 ? size : DefaultSize;
-            var window = FloatWindowDockPanel.CreateFloatWindow(_masterPanel.Root, new Vector2(200, 200), winSize, position, _title);
+            var window = FloatWindowDockPanel.CreateFloatWindow(_masterPanel.Root, location, winSize, position, _title);
             var windowGUI = window.GUI;
 
             // Create dock panel for the window
             var dockPanel = new FloatWindowDockPanel(_masterPanel, windowGUI);
             dockPanel.DockWindowInternal(DockState.DockFill, this);
 
-            Visible = true;
-
             // Perform layout
+            Visible = true;
             windowGUI.UnlockChildrenRecursive();
             windowGUI.PerformLayout();
 
-            // Show
-            window.Show();
-            window.BringToFront();
-            window.Focus();
-            OnShow();
+            if (showWindow)
+            {
+                // Show
+                window.Show();
+                window.BringToFront();
+                window.Focus();
+                OnShow();
 
-            // Perform layout again
-            windowGUI.PerformLayout();
+                // Perform layout again
+                windowGUI.PerformLayout();
+            }
         }
 
         /// <summary>
@@ -202,7 +237,9 @@ namespace FlaxEditor.GUI.Docking
         /// </summary>
         /// <param name="state">Initial window state.</param>
         /// <param name="toDock">Panel to dock to it.</param>
-        public void Show(DockState state = DockState.Float, DockPanel toDock = null)
+        /// <param name="autoSelect">Only used if <paramref name="toDock"/> is set. If true the window will be selected after docking it.</param>
+        /// <param name="splitterValue">Only used if <paramref name="toDock"/> is set. The splitter value to use. If not specified, a default value will be used.</param>
+        public void Show(DockState state = DockState.Float, DockPanel toDock = null, bool autoSelect = true, float? splitterValue = null)
         {
             if (state == DockState.Hidden)
             {
@@ -220,7 +257,7 @@ namespace FlaxEditor.GUI.Docking
                 Undock();
 
                 // Then dock
-                (toDock ?? _masterPanel).DockWindowInternal(state, this);
+                (toDock ?? _masterPanel).DockWindowInternal(state, this, autoSelect, splitterValue);
                 OnShow();
                 PerformLayout();
             }
@@ -409,6 +446,29 @@ namespace FlaxEditor.GUI.Docking
         {
         }
 
+        /// <summary>
+        /// Serializes splitter panel value into the saved layout.
+        /// </summary>
+        /// <param name="writer">The Xml writer.</param>
+        /// <param name="name">The Xml attribute name to use for value.</param>
+        /// <param name="splitter">The splitter panel.</param>
+        protected void LayoutSerializeSplitter(XmlWriter writer, string name, SplitPanel splitter)
+        {
+            writer.WriteAttributeString(name, splitter.SplitterValue.ToString(CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Deserializes splitter panel value from the saved layout.
+        /// </summary>
+        /// <param name="node">The Xml document node.</param>
+        /// <param name="name">The Xml attribute name to use for value.</param>
+        /// <param name="splitter">The splitter panel.</param>
+        protected void LayoutDeserializeSplitter(XmlElement node, string name, SplitPanel splitter)
+        {
+            if (float.TryParse(node.GetAttribute(name), CultureInfo.InvariantCulture, out float value) && value > 0.01f && value < 0.99f)
+                splitter.SplitterValue = value;
+        }
+
         /// <inheritdoc />
         public override void OnDestroy()
         {
@@ -427,8 +487,8 @@ namespace FlaxEditor.GUI.Docking
         {
             base.Focus();
 
-            SelectTab();
-            BringToFront();
+            SelectTab(false);
+            _dockedTo?.RootWindow?.Focus();
         }
 
         /// <inheritdoc />

@@ -1,11 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Object.h"
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Collections/Array.h"
-#include "Engine/Serialization/ISerializable.h"
+#include "Engine/Core/ISerializable.h"
 #include "Engine/Renderer/Lightmaps.h"
 
 /// <summary>
@@ -14,7 +14,6 @@
 class SceneInfo : public Object, public ISerializable
 {
 public:
-
     /// <summary>
     /// Scene title
     /// </summary>
@@ -31,7 +30,6 @@ public:
     String Copyright;
 
 public:
-
     /// <summary>
     /// Array with cached lightmaps ID for the scene
     /// </summary>
@@ -43,7 +41,6 @@ public:
     LightmapSettings LightmapSettings;
 
 public:
-
     // [Object]
     String ToString() const override;
 

@@ -1,7 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using FlaxEditor.GUI;
+using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.GUI.Input;
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -14,16 +14,15 @@ namespace FlaxEditor.Surface
     /// </summary>
     /// <seealso cref="SurfaceNode" />
     [HideInEditor]
-    public class SurfaceComment : SurfaceNode
+    public class SurfaceComment : ResizableSurfaceNode
     {
         private Rectangle _colorButtonRect;
-        private Rectangle _resizeButtonRect;
-        private Vector2 _startResizingSize;
+        private readonly TextBox _renameTextBox;
 
         /// <summary>
-        /// True if sizing tool is in use.
+        /// True if rename textbox is active in order to rename comment
         /// </summary>
-        protected bool _isResizing;
+        protected bool _isRenaming;
 
         /// <summary>
         /// Gets or sets the color of the comment.
@@ -46,36 +45,64 @@ namespace FlaxEditor.Surface
             set => SetValue(1, value, false);
         }
 
-        private Vector2 SizeValue
+        private int OrderValue
         {
-            get => (Vector2)Values[2];
-            set => SetValue(2, value, false);
+            get => (int)Values[3];
+            set => SetValue(3, value, false);
         }
 
         /// <inheritdoc />
         public SurfaceComment(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
         : base(id, context, nodeArch, groupArch)
         {
+            _sizeValueIndex = 2; // Index of the Size stored in Values array
+            _sizeMin = new Float2(140.0f, Constants.NodeHeaderHeight);
+            _renameTextBox = new TextBox(false, 0, 0, Width)
+            {
+                Height = Constants.NodeHeaderHeight,
+                Visible = false,
+                Parent = this,
+                EndEditOnClick = false, // We have to handle this ourselves, otherwise the textbox instantly loses focus when double-clicking the header
+                HorizontalAlignment = TextAlignment.Center,
+            };
+
+            ResizeBorderControl.IgnoreSurfaceIndex = false;
         }
 
         /// <inheritdoc />
-        public override void OnSurfaceLoaded()
+        public override void OnSurfaceLoaded(SurfaceNodeActions action)
         {
-            base.OnSurfaceLoaded();
+            base.OnSurfaceLoaded(action);
 
             // Read node data
             Title = TitleValue;
             Color = ColorValue;
-            Size = SizeValue;
+
+            // Order
+            // Backwards compatibility - When opening with an older version send the old comments to the back
+            if (Values.Length < 4)
+            {
+                if (IndexInParent > 0)
+                    IndexInParent = 0;
+                OrderValue = IndexInParent;
+            }
+            else if (OrderValue != -1)
+            {
+                ResizeBorderControl.IndexInParent = OrderValue;
+            }
         }
 
         /// <inheritdoc />
-        public override void OnSpawned()
+        public override void OnSpawned(SurfaceNodeActions action)
         {
-            base.OnSpawned();
+            base.OnSpawned(action);
 
             // Randomize color
             Color = ColorValue = Color.FromHSV(new Random().NextFloat(0, 360), 0.7f, 0.25f, 0.8f);
+
+            if (OrderValue == -1)
+                OrderValue = Context.CommentCount;
+            ResizeBorderControl.IndexInParent = OrderValue;
         }
 
         /// <inheritdoc />
@@ -86,27 +113,6 @@ namespace FlaxEditor.Surface
             // Read node data
             Title = TitleValue;
             Color = ColorValue;
-            Size = SizeValue;
-        }
-
-        private void EndResizing()
-        {
-            // Clear state
-            _isResizing = false;
-
-            if (_startResizingSize != Size)
-            {
-                SizeValue = Size;
-                Surface.MarkAsEdited(false);
-            }
-
-            EndMouseCapture();
-        }
-
-        /// <inheritdoc />
-        public override bool CanSelect(ref Vector2 location)
-        {
-            return _headerRect.MakeOffsetted(Location).Contains(ref location) && !_resizeButtonRect.MakeOffsetted(Location).Contains(ref location);
         }
 
         /// <inheritdoc />
@@ -118,13 +124,40 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         protected override void UpdateRectangles()
         {
-            const float headerSize = Constants.NodeHeaderSize;
+            base.UpdateRectangles();
+
+            const float headerSize = Constants.NodeHeaderHeight;
             const float buttonMargin = Constants.NodeCloseButtonMargin;
             const float buttonSize = Constants.NodeCloseButtonSize;
             _headerRect = new Rectangle(0, 0, Width, headerSize);
-            _closeButtonRect = new Rectangle(Width - buttonSize - buttonMargin, buttonMargin, buttonSize, buttonSize);
+            _closeButtonRect = new Rectangle(Width - buttonSize * 0.75f - buttonMargin, buttonMargin, buttonSize * 0.75f, buttonSize * 0.75f);
             _colorButtonRect = new Rectangle(_closeButtonRect.Left - buttonSize - buttonMargin, buttonMargin, buttonSize, buttonSize);
-            _resizeButtonRect = new Rectangle(_closeButtonRect.Left, Height - buttonSize - buttonMargin, buttonSize, buttonSize);
+            _renameTextBox.Width = Width;
+            _renameTextBox.Height = headerSize;
+        }
+
+        /// <inheritdoc />
+        public override void Update(float deltaTime)
+        {
+            if (_isRenaming)
+            {
+                // Stop renaming when clicking anywhere else
+                if (!_renameTextBox.IsFocused || !RootWindow.IsFocused)
+                {
+                    Rename(_renameTextBox.Text);
+                    StopRenaming();
+                }
+            }
+            else
+            {
+                // Rename on F2
+                if (IsSelected && Editor.Instance.Options.Options.Input.Rename.Process(this))
+                {
+                    StartRenaming();
+                }
+            }
+
+            base.Update(deltaTime);
         }
 
         /// <inheritdoc />
@@ -132,36 +165,34 @@ namespace FlaxEditor.Surface
         {
             var style = Style.Current;
             var color = Color;
-            var backgroundRect = new Rectangle(Vector2.Zero, Size);
+            var backgroundRect = new Rectangle(Float2.Zero, Size);
             var headerColor = new Color(Mathf.Clamp(color.R, 0.1f, 0.3f), Mathf.Clamp(color.G, 0.1f, 0.3f), Mathf.Clamp(color.B, 0.1f, 0.3f), 0.4f);
-            if (IsSelected)
+            if (IsSelected && !_isRenaming)
                 headerColor *= 2.0f;
 
             // Paint background
-            Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), BackgroundColor);
+            Render2D.FillRectangle(new Rectangle(Float2.Zero, Size), BackgroundColor);
 
             // Draw child controls
             DrawChildren();
 
             // Header
             Render2D.FillRectangle(_headerRect, headerColor);
-            Render2D.DrawText(style.FontLarge, Title, _headerRect, style.Foreground, TextAlignment.Center, TextAlignment.Center);
+            if (!_isRenaming)
+                Render2D.DrawText(style.FontLarge, Title, _headerRect, style.Foreground, TextAlignment.Center, TextAlignment.Center);
 
-            // Close button
-            Render2D.DrawSprite(style.Cross, _closeButtonRect, _closeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
-
-            // Color button
-            Render2D.DrawSprite(style.Settings, _colorButtonRect, _colorButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
-
-            // Check if is resizing
-            if (_isResizing)
+            if (Surface.CanEdit)
             {
-                // Draw overlay
-                Render2D.FillRectangle(_resizeButtonRect, Color.Orange * 0.3f);
-            }
+                // Close button
+                DrawCloseButton(_closeButtonRect, _closeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
 
-            // Resize button
-            Render2D.DrawSprite(style.Scale, _resizeButtonRect, _resizeButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
+                // Color button
+                Render2D.DrawSprite(style.Settings, _colorButtonRect, _colorButtonRect.Contains(_mousePosition) && Surface.CanEdit ? style.Foreground : style.ForegroundGrey);
+
+                // Resize 
+                if ((ResizeBorderControl.IsResizing || ResizeBorderControl.IsMouseOverResizeBorder) && !Surface.IsConnecting)
+                    Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), Style.Current.Foreground, 0.5f);
+            }
 
             // Selection outline
             if (_isSelected)
@@ -174,88 +205,38 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        protected override Vector2 CalculateNodeSize(float width, float height)
+        protected override Float2 CalculateNodeSize(float width, float height)
         {
-            return Size;
+            // No margins or headers
+            return new Float2(width, height);
         }
 
         /// <inheritdoc />
         public override void OnLostFocus()
         {
-            // Check if was resizing
-            if (_isResizing)
+            if (_isRenaming)
             {
-                EndResizing();
+                Rename(_renameTextBox.Text);
+                StopRenaming();
             }
 
-            // Base
             base.OnLostFocus();
         }
 
         /// <inheritdoc />
-        public override void OnEndMouseCapture()
+        public override bool ContainsPoint(ref Float2 location, bool precise)
         {
-            // Check if was resizing
-            if (_isResizing)
-            {
-                EndResizing();
-            }
-            else
-            {
-                base.OnEndMouseCapture();
-            }
+            return _headerRect.Contains(ref location);
         }
 
         /// <inheritdoc />
-        public override bool ContainsPoint(ref Vector2 location)
-        {
-            return _headerRect.Contains(ref location) || _resizeButtonRect.Contains(ref location);
-        }
-
-        /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
-        {
-            if (base.OnMouseDown(location, button))
-                return true;
-
-            // Check if can start resizing
-            if (button == MouseButton.Left && _resizeButtonRect.Contains(ref location) && Surface.CanEdit)
-            {
-                // Start sliding
-                _isResizing = true;
-                _startResizingSize = Size;
-                StartMouseCapture();
-
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
-        {
-            // Check if is resizing
-            if (_isResizing)
-            {
-                // Update size
-                Size = Vector2.Max(location, new Vector2(140.0f, _headerRect.Bottom));
-            }
-            else
-            {
-                // Base
-                base.OnMouseMove(location);
-            }
-        }
-
-        /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
             if (base.OnMouseDoubleClick(location, button))
                 return true;
 
             // Rename
-            if (_headerRect.Contains(ref location) && Surface.CanEdit)
+            if (button == MouseButton.Left && _headerRect.Contains(ref location) && Surface.CanEdit)
             {
                 StartRenaming();
                 return true;
@@ -269,26 +250,50 @@ namespace FlaxEditor.Surface
         /// </summary>
         public void StartRenaming()
         {
-            Surface.Select(this);
-            var dialog = RenamePopup.Show(this, _headerRect, Title, false);
-            dialog.Renamed += OnRenamed;
+            _isRenaming = true;
+            _renameTextBox.Visible = true;
+            _renameTextBox.SetText(Title);
+            _renameTextBox.Focus();
+            _renameTextBox.SelectAll();
         }
 
-        private void OnRenamed(RenamePopup renamePopup)
+        private void StopRenaming()
         {
-            Title = TitleValue = renamePopup.Text;
+            _isRenaming = false;
+            _renameTextBox.Visible = false;
+        }
+
+        private void Rename(string newTitle)
+        {
+            if (string.Equals(Title, newTitle, StringComparison.Ordinal))
+                return;
+
+            Title = TitleValue = newTitle;
             Surface.MarkAsEdited(false);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnKeyDown(KeyboardKeys key)
         {
-            if (button == MouseButton.Left && _isResizing)
+            if (key == KeyboardKeys.Return)
             {
-                EndResizing();
+                Rename(_renameTextBox.Text);
+                StopRenaming();
                 return true;
             }
 
+            if (key == KeyboardKeys.Escape)
+            {
+                StopRenaming();
+                return true;
+            }
+
+            return base.OnKeyDown(key);
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
             if (base.OnMouseUp(location, button))
                 return true;
 
@@ -313,6 +318,40 @@ namespace FlaxEditor.Surface
         {
             Color = ColorValue = color;
             Surface.MarkAsEdited(false);
+        }
+
+        /// <inheritdoc />
+        public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
+        {
+            base.OnShowSecondaryContextMenu(menu, location);
+
+            menu.AddSeparator();
+            menu.AddButton("Rename", StartRenaming);
+            ContextMenuChildMenu cmOrder = menu.AddChildMenu("Order");
+            {
+                cmOrder.ContextMenu.AddButton("Bring Forward", () =>
+                {
+                    if (ResizeBorderControl.IndexInParent < Context.CommentCount - 1)
+                        ResizeBorderControl.IndexInParent++;
+                    OrderValue = ResizeBorderControl.IndexInParent;
+                });
+                cmOrder.ContextMenu.AddButton("Bring to Front", () =>
+                {
+                    ResizeBorderControl.IndexInParent = Context.CommentCount - 1;
+                    OrderValue = ResizeBorderControl.IndexInParent;
+                });
+                cmOrder.ContextMenu.AddButton("Send Backward", () =>
+                {
+                    if (ResizeBorderControl.IndexInParent > 0)
+                        ResizeBorderControl.IndexInParent--;
+                    OrderValue = ResizeBorderControl.IndexInParent;
+                });
+                cmOrder.ContextMenu.AddButton("Send to Back", () =>
+                {
+                    ResizeBorderControl.IndexInParent = 0;
+                    OrderValue = ResizeBorderControl.IndexInParent;
+                });
+            }
         }
     }
 }

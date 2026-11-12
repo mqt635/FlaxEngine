@@ -1,15 +1,65 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GPUContext.h"
 #include "GPUDevice.h"
+#include "GPUPass.h"
 #include "RenderTask.h"
 #include "Textures/GPUTexture.h"
 
 GPUContext::GPUContext(GPUDevice* device)
-    : PersistentScriptingObject(ScriptingObjectSpawnParams(Guid::New(), TypeInitializer))
+    : ScriptingObject(ScriptingObjectSpawnParams(Guid::New(), TypeInitializer))
     , _device(device)
 {
 }
+
+#if !BUILD_RELEASE
+
+#include "Engine/Core/Log.h"
+
+void GPUContext::LogInvalidResourceUsage(int32 slot, const GPUResourceView* view, InvalidBindPoint bindPoint)
+{
+    GPUResource* resource = view ? view->GetParent() : nullptr;
+    const Char* resourceType = TEXT("resource");
+    const Char* flagType = TEXT("flags");
+    StringView resourceName;
+    if (resource)
+    {
+        switch (resource->GetResourceType())
+        {
+        case GPUResourceType::RenderTarget:
+        case GPUResourceType::Texture:
+        case GPUResourceType::CubeTexture:
+        case GPUResourceType::VolumeTexture:
+            resourceType = TEXT("texture");
+            flagType = TEXT("GPUTextureFlags");
+            break;
+        case GPUResourceType::Buffer:
+            resourceType = TEXT("buffer");
+            flagType = TEXT("GPUBufferFlags");
+            break;
+        }
+        resourceName = resource->GetName();
+    }
+    const Char* usage = TEXT("-");
+    switch (bindPoint)
+    {
+    case InvalidBindPoint::SRV:
+        usage = TEXT("shader resource");
+        break;
+    case InvalidBindPoint::UAV:
+        usage = TEXT("unordered access");
+        break;
+    case InvalidBindPoint::DSV:
+        usage = TEXT("depth stencil");
+        break;
+    case InvalidBindPoint::RTV:
+        usage = TEXT("render target");
+        break;
+    }
+    LOG(Error, "Incorrect {} '{}' bind at slot {} as {} (ensure to setup correct {} when creating that resource)", resourceType, resourceName, slot, usage, flagType);
+}
+
+#endif
 
 void GPUContext::FrameBegin()
 {
@@ -18,13 +68,17 @@ void GPUContext::FrameBegin()
 
 void GPUContext::FrameEnd()
 {
-    ClearState();
+    ResetState();
     FlushState();
+}
+
+void GPUContext::OnPresent()
+{
 }
 
 void GPUContext::BindSR(int32 slot, GPUTexture* t)
 {
-    ASSERT_LOW_LAYER(t == nullptr || t->ResidentMipLevels() == 0 || t->IsShaderResource());
+    CHECK_DEBUG(t == nullptr || t->ResidentMipLevels() == 0 || t->IsShaderResource());
     BindSR(slot, GET_TEXTURE_VIEW_SAFE(t));
 }
 
@@ -41,9 +95,26 @@ void GPUContext::Draw(GPUTexture* dst, GPUTexture* src)
     ResetRenderTarget();
     const float width = (float)dst->Width();
     const float height = (float)dst->Height();
+    auto rt = dst->View();
+    auto rtAction = GPUDrawPassAction::Store;
+    GPUDrawPass drawPass(this, ToSpan(&rt, 1), ToSpan(&rtAction, 1));
     SetViewport(width, height);
-    SetRenderTarget(dst->View());
     BindSR(0, src->View());
+    SetState(_device->GetCopyLinearPS());
+    DrawFullscreenTriangle();
+}
+
+void GPUContext::Draw(GPUTexture* dst, GPUTextureView* src)
+{
+    ASSERT_LOW_LAYER(dst && src);
+    ResetRenderTarget();
+    const float width = (float)dst->Width();
+    const float height = (float)dst->Height();
+    auto rt = dst->View();
+    auto rtAction = GPUDrawPassAction::Store;
+    GPUDrawPass drawPass(this, ToSpan(&rt, 1), ToSpan(&rtAction, 1));
+    SetViewport(width, height);
+    BindSR(0, src);
     SetState(_device->GetCopyLinearPS());
     DrawFullscreenTriangle();
 }
@@ -62,4 +133,17 @@ void GPUContext::Draw(GPUTextureView* rt)
     BindSR(0, rt);
     SetState(_device->GetCopyLinearPS());
     DrawFullscreenTriangle();
+}
+
+void GPUContext::SetResourceState(GPUResource* resource, uint64 state, int32 subresource)
+{
+}
+
+void GPUContext::ForceRebindDescriptors()
+{
+}
+
+void GPUContext::BeginDrawPass(GPUDrawPass& pass)
+{
+    SetRenderTarget(pass.DepthBuffer, ToSpan(pass.RenderTargets, pass.RenderTargetsCount));
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI;
@@ -86,7 +86,7 @@ namespace FlaxEditor.Tools.Terrain
             // Chunk Properties
             _chunkProperties = new Panel(ScrollBars.None)
             {
-                Location = new Vector2(_selectionInfoLabel.X, _selectionInfoLabel.Bottom + 4),
+                Location = new Float2(_selectionInfoLabel.X, _selectionInfoLabel.Bottom + 4),
                 Parent = panel,
             };
             var chunkOverrideMaterialLabel = new Label(0, 0, 90, 64)
@@ -95,13 +95,13 @@ namespace FlaxEditor.Tools.Terrain
                 Text = "Override Material",
                 Parent = _chunkProperties,
             };
-            _chunkOverrideMaterial = new AssetPicker(new ScriptType(typeof(MaterialBase)), new Vector2(chunkOverrideMaterialLabel.Right + 4, 0))
+            _chunkOverrideMaterial = new AssetPicker(new ScriptType(typeof(MaterialBase)), new Float2(chunkOverrideMaterialLabel.Right + 4, 0))
             {
                 Width = 300.0f,
                 Parent = _chunkProperties,
             };
             _chunkOverrideMaterial.SelectedItemChanged += OnSelectedChunkOverrideMaterialChanged;
-            _chunkProperties.Size = new Vector2(_chunkOverrideMaterial.Right + 4, _chunkOverrideMaterial.Bottom + 4);
+            _chunkProperties.Size = new Float2(_chunkOverrideMaterial.Right + 4, _chunkOverrideMaterial.Bottom + 4);
 
             // Delete patch
             _deletePatchButton = new Button(_selectionInfoLabel.X, _selectionInfoLabel.Bottom + 4)
@@ -192,7 +192,7 @@ namespace FlaxEditor.Tools.Terrain
                 {
                     if (terrain.Scene && terrain.HasStaticFlag(StaticFlags.Navigation))
                     {
-                        Navigation.BuildNavMesh(terrain.Scene, patchBounds, editorOptions.General.AutoRebuildNavMeshTimeoutMs);
+                        Navigation.BuildNavMesh(patchBounds, editorOptions.General.AutoRebuildNavMeshTimeoutMs);
                     }
                 }
             }
@@ -290,7 +290,7 @@ namespace FlaxEditor.Tools.Terrain
 
             var patchCoord = Gizmo.SelectedPatchCoord;
             var chunkCoord = Gizmo.SelectedChunkCoord;
-            var action = new EditChunkMaterialAction(CarveTab.SelectedTerrain, ref patchCoord, ref chunkCoord, _chunkOverrideMaterial.SelectedAsset as MaterialBase);
+            var action = new EditChunkMaterialAction(CarveTab.SelectedTerrain, ref patchCoord, ref chunkCoord, _chunkOverrideMaterial.Validator.SelectedAsset as MaterialBase);
             action.Do();
             CarveTab.Editor.Undo.AddAction(action);
         }
@@ -336,12 +336,12 @@ namespace FlaxEditor.Tools.Terrain
                     _isUpdatingUI = true;
                     if (terrain.HasPatch(ref patchCoord))
                     {
-                        _chunkOverrideMaterial.SelectedAsset = terrain.GetChunkOverrideMaterial(ref patchCoord, ref chunkCoord);
+                        _chunkOverrideMaterial.Validator.SelectedAsset = terrain.GetChunkOverrideMaterial(ref patchCoord, ref chunkCoord);
                         _chunkOverrideMaterial.Enabled = true;
                     }
                     else
                     {
-                        _chunkOverrideMaterial.SelectedAsset = null;
+                        _chunkOverrideMaterial.Validator.SelectedAsset = null;
                         _chunkOverrideMaterial.Enabled = false;
                     }
                     _isUpdatingUI = false;

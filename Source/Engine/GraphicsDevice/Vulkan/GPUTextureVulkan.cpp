@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
@@ -6,10 +6,12 @@
 #include "GPUBufferVulkan.h"
 #include "GPUContextVulkan.h"
 #include "RenderToolsVulkan.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Graphics/Textures/TextureData.h"
+#include "Engine/Scripting/Enums.h"
 
-void GPUTextureViewVulkan::Init(GPUDeviceVulkan* device, ResourceOwnerVulkan* owner, VkImage image, int32 totalMipLevels, PixelFormat format, MSAALevel msaa, VkExtent3D extent, VkImageViewType viewType, int32 mipLevels, int32 firstMipIndex, int32 arraySize, int32 firstArraySlice, bool readOnlyDepth)
+void GPUTextureViewVulkan::Init(GPUDeviceVulkan* device, ResourceOwnerVulkan* owner, VkImage image, int32 totalMipLevels, PixelFormat format, MSAALevel msaa, VkExtent3D extent, VkImageViewType viewType, int32 mipLevels, int32 firstMipIndex, int32 arraySize, int32 firstArraySlice, bool readOnlyDepth, bool stencilView)
 {
     ASSERT(View == VK_NULL_HANDLE);
 
@@ -22,6 +24,10 @@ void GPUTextureViewVulkan::Init(GPUDeviceVulkan* device, ResourceOwnerVulkan* ow
     Extent.height = Math::Max<uint32_t>(1, extent.height >> firstMipIndex);
     Extent.depth = Math::Max<uint32_t>(1, extent.depth >> firstMipIndex);
     Layers = arraySize;
+#if VULKAN_USE_DEBUG_DATA
+    Format = format;
+    ReadOnlyDepth = readOnlyDepth;
+#endif
 
     RenderToolsVulkan::ZeroStruct(Info, VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
     Info.image = image;
@@ -51,15 +57,35 @@ void GPUTextureViewVulkan::Init(GPUDeviceVulkan* device, ResourceOwnerVulkan* ow
         SubresourceIndex = RenderTools::CalcSubresourceIndex(firstMipIndex, firstArraySlice, totalMipLevels);
     }
 
-    if (PixelFormatExtensions::IsDepthStencil(format))
+    if (stencilView)
+    {
+        range.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+        LayoutRTV = readOnlyDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        LayoutSRV = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    else if (PixelFormatExtensions::IsDepthStencil(format))
     {
         range.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+#if 0
+        // TODO: enable extension and use separateDepthStencilLayouts from Vulkan 1.2
         if (PixelFormatExtensions::HasStencil(format))
         {
             range.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            LayoutRTV = readOnlyDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            LayoutSRV = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         }
+        else
+        {
+            LayoutRTV = readOnlyDepth ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            LayoutSRV = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        }
+#else
+
+        if (PixelFormatExtensions::HasStencil(format))
+            range.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
         LayoutRTV = readOnlyDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        LayoutSRV = readOnlyDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        LayoutSRV = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+#endif
     }
     else
     {
@@ -68,6 +94,11 @@ void GPUTextureViewVulkan::Init(GPUDeviceVulkan* device, ResourceOwnerVulkan* ow
     }
 
     VALIDATE_VULKAN_RESULT(vkCreateImageView(device->Device, &Info, nullptr, &View));
+
+#if VK_KHR_maintenance1
+    if (arraySize == 1 && extent.depth > 1)
+        range.layerCount = VK_REMAINING_ARRAY_LAYERS; // without maintenance9 for per-layer masking all layers need to be enabled with a special value
+#endif
 }
 
 VkImageView GPUTextureViewVulkan::GetFramebufferView()
@@ -93,6 +124,7 @@ VkImageView GPUTextureViewVulkan::GetFramebufferView()
         // Use an additional view for that case with modified level count to 1.
         VkImageViewCreateInfo createInfo = Info;
         createInfo.subresourceRange.levelCount = 1;
+        createInfo.subresourceRange.layerCount = 1;
         VALIDATE_VULKAN_RESULT(vkCreateImageView(Device->Device, &createInfo, nullptr, &ViewFramebuffer));
     }
     else
@@ -112,12 +144,17 @@ void GPUTextureViewVulkan::Release()
             Device->OnImageViewDestroy(ViewFramebuffer);
             Device->DeferredDeletionQueue.EnqueueResource(DeferredDeletionQueueVulkan::Type::ImageView, ViewFramebuffer);
         }
+        ViewFramebuffer = VK_NULL_HANDLE;
+        if (ViewSRV != View && ViewSRV != VK_NULL_HANDLE)
+        {
+            Device->OnImageViewDestroy(ViewSRV);
+            Device->DeferredDeletionQueue.EnqueueResource(DeferredDeletionQueueVulkan::Type::ImageView, ViewSRV);
+        }
+        ViewSRV = VK_NULL_HANDLE;
 
         Device->OnImageViewDestroy(View);
         Device->DeferredDeletionQueue.EnqueueResource(DeferredDeletionQueueVulkan::Type::ImageView, View);
-
         View = VK_NULL_HANDLE;
-        ViewFramebuffer = VK_NULL_HANDLE;
 
 #if BUILD_DEBUG
         Device = nullptr;
@@ -129,37 +166,59 @@ void GPUTextureViewVulkan::Release()
 
 void GPUTextureViewVulkan::DescriptorAsImage(GPUContextVulkan* context, VkImageView& imageView, VkImageLayout& layout)
 {
+    // Texture SRV
     imageView = View;
     layout = LayoutSRV;
-
+    const VkImageAspectFlags aspectMask = Info.subresourceRange.aspectMask;
+    if (aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+    {
+        // Transition depth-only when binding depth buffer with stencil (or stencil-only without depth)
+        if (ViewSRV == VK_NULL_HANDLE)
+        {
+            VkImageViewCreateInfo createInfo = Info;
+            if (aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT)
+            {
+                // Stencil
+                createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                createInfo.components.g = VK_COMPONENT_SWIZZLE_R; // Map .g component in shader to .r of stencil plane
+            }
+            else
+            {
+                // Depth
+                createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            }
+            VALIDATE_VULKAN_RESULT(vkCreateImageView(Device->Device, &createInfo, nullptr, &ViewSRV));
+        }
+        imageView = ViewSRV;
+    }
     context->AddImageBarrier(this, LayoutSRV);
+    Info.subresourceRange.aspectMask = aspectMask;
 }
 
 void GPUTextureViewVulkan::DescriptorAsStorageImage(GPUContextVulkan* context, VkImageView& imageView, VkImageLayout& layout)
 {
+    // Texture UAV
     imageView = View;
     layout = VK_IMAGE_LAYOUT_GENERAL;
-
     context->AddImageBarrier(this, VK_IMAGE_LAYOUT_GENERAL);
 }
 
-bool GPUTextureVulkan::GetData(int32 arrayOrDepthSliceIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch)
+bool GPUTextureVulkan::GetData(int32 arrayIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch)
 {
     if (!IsStaging())
     {
         LOG(Warning, "Texture::GetData is valid only for staging resources.");
         return true;
     }
-
     GPUDeviceLock lock(_device);
 
     // Internally it's a buffer, so adapt resource index and offset
-    const uint32 subresource = mipMapIndex + arrayOrDepthSliceIndex * MipLevels();
+    const uint32 subresource = mipMapIndex + arrayIndex * MipLevels();
     // TODO: rowAlign/sliceAlign on Vulkan texture ???
     int32 offsetInBytes = ComputeBufferOffset(subresource, 1, 1);
     int32 lengthInBytes = ComputeSubresourceSize(subresource, 1, 1);
     int32 rowPitch = ComputeRowPitch(mipMapIndex, 1);
-    int32 depthPicth = ComputeSlicePitch(mipMapIndex, 1);
+    int32 depthPitch = ComputeSlicePitch(mipMapIndex, 1);
 
     // Map the staging resource mip map for reading
     auto allocation = StagingBuffer->GetAllocation();
@@ -170,31 +229,7 @@ bool GPUTextureVulkan::GetData(int32 arrayOrDepthSliceIndex, int32 mipMapIndex, 
     // Shift mapped buffer to the beginning of the mip data start
     mapped = (void*)((byte*)mapped + offsetInBytes);
 
-    // Check if target row pitch is the same
-    if (mipRowPitch == rowPitch || mipRowPitch == 0)
-    {
-        // Init mip info
-        data.Lines = depthPicth / rowPitch;
-        data.DepthPitch = depthPicth;
-        data.RowPitch = rowPitch;
-
-        // Copy data
-        data.Data.Copy((byte*)mapped, depthPicth);
-    }
-    else
-    {
-        // Init mip info
-        data.Lines = depthPicth / rowPitch;
-        data.DepthPitch = mipRowPitch * data.Lines;
-        data.RowPitch = mipRowPitch;
-
-        // Copy data
-        data.Data.Allocate(data.DepthPitch);
-        for (uint32 i = 0; i < data.Lines; i++)
-        {
-            Platform::MemoryCopy(data.Data.Get() + data.RowPitch * i, ((byte*)mapped) + rowPitch * i, data.RowPitch);
-        }
-    }
+    data.Copy(mapped, rowPitch, depthPitch, Depth(), mipRowPitch);
 
     // Unmap resource
     vmaUnmapMemory(_device->Allocator, allocation);
@@ -207,7 +242,6 @@ void GPUTextureVulkan::DescriptorAsStorageImage(GPUContextVulkan* context, VkIma
     ASSERT(_handleUAV.Owner == this);
     imageView = _handleUAV.View;
     layout = VK_IMAGE_LAYOUT_GENERAL;
-
     context->AddImageBarrier(this, VK_IMAGE_LAYOUT_GENERAL);
 }
 
@@ -225,6 +259,7 @@ bool GPUTextureVulkan::OnInit()
             return true;
         }
         _memoryUsage = 1;
+        initResource(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, _desc.MipLevels, _desc.ArraySize, false);
         return false;
     }
 
@@ -238,6 +273,11 @@ bool GPUTextureVulkan::OnInit()
     if (useDSV)
         format = PixelFormatExtensions::FindDepthStencilFormat(format);
     _desc.Format = _device->GetClosestSupportedPixelFormat(format, _desc.Flags, optimalTiling);
+    if (_desc.Format == PixelFormat::Unknown)
+    {
+        LOG(Error, "Unsupported texture format {0}.", ScriptingEnum::ToString(format));
+        return true;
+    }
 
     // Setup texture description
     VkImageCreateInfo imageInfo;
@@ -265,6 +305,11 @@ bool GPUTextureVulkan::OnInit()
         imageInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (useUAV)
         imageInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+#if PLATFORM_MAC || PLATFORM_IOS
+    // MoltenVK: VK_ERROR_FEATURE_NOT_PRESENT: vkCreateImageView(): 2D views on 3D images can only be used as color attachments.
+    if (IsVolume() && _desc.HasPerSliceViews())
+        imageInfo.usage &= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+#endif
     imageInfo.tiling = optimalTiling ? VK_IMAGE_TILING_OPTIMAL : VK_IMAGE_TILING_LINEAR;
     imageInfo.samples = (VkSampleCountFlagBits)MultiSampleLevel();
     // TODO: set initialLayout to VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL for IsRegularTexture() ???
@@ -273,7 +318,16 @@ bool GPUTextureVulkan::OnInit()
     VmaAllocationCreateInfo allocInfo = {};
     allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     const VkResult result = vmaCreateImage(_device->Allocator, &imageInfo, &allocInfo, &_image, &_allocation, nullptr);
-    LOG_VULKAN_RESULT_WITH_RETURN(result);
+    if (result != VK_SUCCESS)
+    {
+        LOG(Error, "vmaCreateImage failed");
+        LOG_STR(Error, _desc.ToString());
+#if GPU_ENABLE_RESOURCE_NAMING
+        LOG_STR(Error, GetName());
+#endif
+        RenderToolsVulkan::LogVkResult(result, __FILE__, __LINE__);
+        return true;
+    }
 #if GPU_ENABLE_RESOURCE_NAMING
     VK_SET_DEBUG_NAME(_device, _image, VK_OBJECT_TYPE_IMAGE, GetName());
 #endif
@@ -409,35 +463,45 @@ void GPUTextureVulkan::initHandles()
     }
 
     // Read-only depth-stencil
-    if (_desc.Flags & GPUTextureFlags::ReadOnlyDepthView)
+    if (EnumHasAnyFlags(_desc.Flags, GPUTextureFlags::ReadOnlyDepthView))
     {
         _handleReadOnlyDepth.Init(_device, this, _image, mipLevels, format, msaa, extent, VK_IMAGE_VIEW_TYPE_2D, mipLevels, 0, 1, 0, true);
     }
+
+    // Stencil view
+    if (IsDepthStencil() && IsShaderResource() && PixelFormatExtensions::HasStencil(format))
+    {
+        PixelFormat stencilFormat;
+        switch (format)
+        {
+        case PixelFormat::D24_UNorm_S8_UInt:
+        case PixelFormat::R24_UNorm_X8_Typeless:
+        case PixelFormat::R24G8_Typeless:
+            stencilFormat = PixelFormat::X24_Typeless_G8_UInt;
+            break;
+        case PixelFormat::D32_Float_S8X24_UInt:
+        case PixelFormat::R32_Float_X8X24_Typeless:
+        case PixelFormat::R32G8X24_Typeless:
+            stencilFormat = PixelFormat::X32_Typeless_G8X24_UInt;
+            break;
+        }
+        _handleStencil.Init(_device, this, _image, mipLevels, stencilFormat, msaa, extent, VK_IMAGE_VIEW_TYPE_2D, mipLevels, 0, 1, 0, true, true);
+    }
 }
 
-void GPUTextureVulkan::onResidentMipsChanged()
+void GPUTextureVulkan::OnResidentMipsChanged()
 {
-    // We support changing resident mip maps only for regular textures (render targets and depth buffers don't use that feature at all)
-    ASSERT(IsRegularTexture() && _handlesPerSlice.Count() == 1);
-    ASSERT(!IsVolume());
-
-    // Change view
-    auto& handle = _handlesPerSlice[0];
-    handle.Release();
+    // Update view
     VkExtent3D extent;
     extent.width = Width();
     extent.height = Height();
     extent.depth = Depth();
     const int32 firstMipIndex = MipLevels() - ResidentMipLevels();
     const int32 mipLevels = ResidentMipLevels();
-    if (IsCubeMap())
-    {
-        handle.Init(_device, this, _image, mipLevels, Format(), MultiSampleLevel(), extent, VK_IMAGE_VIEW_TYPE_CUBE, mipLevels, firstMipIndex, ArraySize());
-    }
-    else
-    {
-        handle.Init(_device, this, _image, mipLevels, Format(), MultiSampleLevel(), extent, VK_IMAGE_VIEW_TYPE_2D, mipLevels, firstMipIndex, ArraySize());
-    }
+    const VkImageViewType viewType = IsVolume() ? VK_IMAGE_VIEW_TYPE_3D : (IsCubeMap() ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D);
+    GPUTextureViewVulkan& view = IsVolume() ? _handleVolume : _handlesPerSlice[0];
+    view.Release();
+    view.Init(_device, this, _image, mipLevels, Format(), MultiSampleLevel(), extent, viewType, mipLevels, firstMipIndex, ArraySize());
 }
 
 void GPUTextureVulkan::OnReleaseGPU()
@@ -446,6 +510,7 @@ void GPUTextureVulkan::OnReleaseGPU()
     _handleVolume.Release();
     _handleUAV.Release();
     _handleReadOnlyDepth.Release();
+    _handleStencil.Release();
     for (int32 i = 0; i < _handlesPerMip.Count(); i++)
     {
         for (int32 j = 0; j < _handlesPerMip[i].Count(); j++)
@@ -471,5 +536,17 @@ void GPUTextureVulkan::OnReleaseGPU()
     // Base
     GPUTexture::OnReleaseGPU();
 }
+
+#if GPU_ENABLE_RESOURCE_NAMING
+
+void GPUTextureVulkan::OnRenamed()
+{
+    if (_image)
+    {
+        VK_SET_DEBUG_NAME(_device, _image, VK_OBJECT_TYPE_IMAGE, GetName());
+    }
+}
+
+#endif
 
 #endif

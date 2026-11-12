@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Globalization;
@@ -54,11 +54,9 @@ namespace FlaxEditor.GUI.Input
                 set
                 {
                     value = Mathf.Clamp(value, Minimum, Maximum);
-                    if (!Mathf.NearEqual(value, _value))
+                    if (value != _value)
                     {
                         _value = value;
-
-                        // Update
                         UpdateThumb();
                         ValueChanged?.Invoke();
                     }
@@ -71,19 +69,24 @@ namespace FlaxEditor.GUI.Input
             public Action ValueChanged;
 
             /// <summary>
-            /// The color of the slider track line
+            /// The color of the slider track line.
             /// </summary>
             public Color TrackLineColor { get; set; }
 
             /// <summary>
-            /// The color of the slider thumb when it's not selected
+            /// The color of the slider thumb when it's not selected.
             /// </summary>
             public Color ThumbColor { get; set; }
 
             /// <summary>
-            /// The color of the slider thumb when it's selected
+            /// The color of the slider thumb when it's selected.
             /// </summary>
             public Color ThumbColorSelected { get; set; }
+
+            /// <summary>
+            /// The color of the slider thumb when it's hovered.
+            /// </summary>
+            public Color ThumbColorHovered { get; set; }
 
             /// <summary>
             /// Gets a value indicating whether user is using a slider.
@@ -112,11 +115,11 @@ namespace FlaxEditor.GUI.Input
                 TrackLineColor = style.BackgroundHighlighted;
                 ThumbColor = style.BackgroundNormal;
                 ThumbColorSelected = style.BackgroundSelected;
+                ThumbColorHovered = style.BackgroundHighlighted;
             }
 
             private void UpdateThumb()
             {
-                // Cache data
                 float trackSize = TrackSize;
                 float range = Maximum - Minimum;
                 _thumbSize = Mathf.Min(trackSize, Mathf.Max(trackSize / range * 10.0f, 30.0f));
@@ -132,6 +135,8 @@ namespace FlaxEditor.GUI.Input
                 _isSliding = false;
                 EndMouseCapture();
                 SlidingEnd?.Invoke();
+                Defocus();
+                Parent?.Focus();
             }
 
             /// <summary>
@@ -149,7 +154,8 @@ namespace FlaxEditor.GUI.Input
                 Render2D.FillRectangle(lineRect, TrackLineColor);
 
                 // Draw thumb
-                Render2D.FillRectangle(_thumbRect, _isSliding ? ThumbColorSelected : ThumbColor);
+                bool mouseOverThumb = _thumbRect.Contains(PointFromWindow(Root.MousePosition));
+                Render2D.FillRectangle(_thumbRect, _isSliding ? ThumbColorSelected : mouseOverThumb ? ThumbColorHovered : ThumbColor);
             }
 
             /// <inheritdoc />
@@ -164,7 +170,7 @@ namespace FlaxEditor.GUI.Input
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDown(Vector2 location, MouseButton button)
+            public override bool OnMouseDown(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left)
                 {
@@ -183,6 +189,8 @@ namespace FlaxEditor.GUI.Input
                     {
                         // Click change
                         Value += (mousePosition < _thumbCenter ? -1 : 1) * 10;
+                        Defocus();
+                        Parent?.Focus();
                     }
                 }
 
@@ -190,13 +198,17 @@ namespace FlaxEditor.GUI.Input
             }
 
             /// <inheritdoc />
-            public override void OnMouseMove(Vector2 location)
+            public override void OnMouseMove(Float2 location)
             {
                 if (_isSliding)
                 {
                     // Update sliding
-                    Vector2 slidePosition = location + Root.TrackingMouseOffset;
-                    Value = Mathf.Map(slidePosition.X, 4, TrackSize - 4, Minimum, Maximum);
+                    var slidePosition = location + Root.TrackingMouseOffset;
+                    Value = Mathf.Remap(slidePosition.X, 4, TrackSize - 4, Minimum, Maximum);
+                    if (Mathf.NearEqual(Value, Maximum))
+                        Value = Maximum;
+                    else if (Mathf.NearEqual(Value, Minimum))
+                        Value = Minimum;
                 }
                 else
                 {
@@ -205,7 +217,7 @@ namespace FlaxEditor.GUI.Input
             }
 
             /// <inheritdoc />
-            public override bool OnMouseUp(Vector2 location, MouseButton button)
+            public override bool OnMouseUp(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left && _isSliding)
                 {
@@ -275,10 +287,7 @@ namespace FlaxEditor.GUI.Input
                 value = Mathf.Clamp(value, _min, _max);
                 if (Math.Abs(_value - value) > Mathf.Epsilon)
                 {
-                    // Set value
                     _value = value;
-
-                    // Update
                     _valueIsChanging = true;
                     UpdateText();
                     UpdateSlider();
@@ -296,11 +305,10 @@ namespace FlaxEditor.GUI.Input
             get => _min;
             set
             {
-                if (!Mathf.NearEqual(_min, value))
+                if (_min != value)
                 {
                     if (value > _max)
                         throw new ArgumentException();
-
                     _min = value;
                     Value = Value;
                 }
@@ -315,11 +323,10 @@ namespace FlaxEditor.GUI.Input
             get => _max;
             set
             {
-                if (!Mathf.NearEqual(_max, value))
+                if (_max != value)
                 {
                     if (value < _min)
                         throw new ArgumentException();
-
                     _max = value;
                     Value = Value;
                 }
@@ -353,6 +360,8 @@ namespace FlaxEditor.GUI.Input
         public SliderControl(float value, float x = 0, float y = 0, float width = 120, float min = float.MinValue, float max = float.MaxValue)
         : base(x, y, width, TextBox.DefaultHeight)
         {
+            AutoFocus = true;
+
             _min = min;
             _max = max;
             _value = Mathf.Clamp(value, min, max);
@@ -364,15 +373,22 @@ namespace FlaxEditor.GUI.Input
             };
             _slider.ValueChanged += SliderOnValueChanged;
             _slider.SlidingStart += SlidingStart;
-            _slider.SlidingEnd += SlidingEnd;
+            _slider.SlidingEnd += SliderOnSliderEnd;
             _textBox = new TextBox(false, split, 0)
             {
                 Text = _value.ToString(CultureInfo.InvariantCulture),
                 Parent = this,
-                Location = new Vector2(split, 0),
-                Size = new Vector2(Height, TextBoxSize),
+                Location = new Float2(split, 0),
+                Size = new Float2(Height, TextBoxSize),
             };
             _textBox.EditEnd += OnTextBoxEditEnd;
+        }
+
+        private void SliderOnSliderEnd()
+        {
+            SlidingEnd?.Invoke();
+            Defocus();
+            Parent?.Focus();
         }
 
         private void SliderOnValueChanged()
@@ -380,7 +396,7 @@ namespace FlaxEditor.GUI.Input
             if (_valueIsChanging)
                 return;
 
-            Value = Mathf.Map(_slider.Value, Slider.Minimum, Slider.Maximum, MinValue, MaxValue);
+            Value = Mathf.Remap(_slider.Value, Slider.Minimum, Slider.Maximum, MinValue, MaxValue);
         }
 
         private void OnTextBoxEditEnd()
@@ -397,6 +413,8 @@ namespace FlaxEditor.GUI.Input
             {
                 UpdateText();
             }
+            Defocus();
+            Parent?.Focus();
         }
 
         /// <summary>
@@ -408,6 +426,7 @@ namespace FlaxEditor.GUI.Input
             _min = limits.Min;
             _max = Mathf.Max(_min, limits.Max);
             Value = Value;
+            UpdateSlider();
         }
 
         /// <summary>
@@ -419,6 +438,7 @@ namespace FlaxEditor.GUI.Input
             _min = limits.Min;
             _max = Mathf.Max(_min, limits.Max);
             Value = Value;
+            UpdateSlider();
         }
 
         /// <summary>
@@ -434,7 +454,7 @@ namespace FlaxEditor.GUI.Input
         /// </summary>
         protected virtual void UpdateSlider()
         {
-            _slider.Value = Mathf.Map(_value, MinValue, MaxValue, Slider.Minimum, Slider.Maximum);
+            _slider.Value = Mathf.Remap(_value, MinValue, MaxValue, Slider.Minimum, Slider.Maximum);
         }
 
         /// <summary>

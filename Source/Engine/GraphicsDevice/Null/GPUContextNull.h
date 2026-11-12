@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -48,11 +48,23 @@ public:
     {
     }
 
-    void ClearDepth(GPUTextureView* depthBuffer, float depthValue) override
+    void ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue) override
     {
     }
 
-    void ClearUA(GPUBuffer* buf, const Vector4& value) override
+    void ClearUA(GPUBuffer* buf, const Float4& value) override
+    {
+    }
+
+    void ClearUA(GPUBuffer* buf, const uint32 value[4]) override
+    {
+    }
+
+    void ClearUA(GPUTexture* texture, const uint32 value[4]) override
+    {
+    }
+
+    void ClearUA(GPUTexture* texture, const Float4& value) override
     {
     }
 
@@ -72,7 +84,11 @@ public:
     {
     }
 
-    void SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput) override
+    void SetBlendFactor(const Float4& value) override
+    {
+    }
+
+    void SetStencilRef(uint32 value) override
     {
     }
 
@@ -100,7 +116,7 @@ public:
     {
     }
 
-    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr) override
+    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr, GPUVertexLayout* vertexLayout = nullptr) override
     {
     }
 
@@ -144,11 +160,24 @@ public:
     {
     }
 
+    uint64 BeginQuery(GPUQueryType type) override
+    {
+        return 0;
+    }
+
+    void EndQuery(uint64 queryID) override
+    {
+    }
+
     void SetViewport(const Viewport& viewport) override
     {
     }
 
     void SetScissor(const Rectangle& scissorRect) override
+    {
+    }
+
+    void SetDepthBounds(float minDepth, float maxDepth) override
     {
     }
 
@@ -161,7 +190,7 @@ public:
     {
     }
 
-    void ClearState() override
+    void ResetState() override
     {
     }
 

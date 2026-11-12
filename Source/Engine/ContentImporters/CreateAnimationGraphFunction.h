@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,7 +15,6 @@
 class CreateAnimationGraphFunction
 {
 public:
-
     /// <summary>
     /// Creates the asset.
     /// </summary>
@@ -45,7 +44,7 @@ public:
             return CreateAssetResult::Error;
         if (context.AllocateChunk(0))
             return CreateAssetResult::CannotAllocateChunk;
-        context.Data.Header.Chunks[0]->Data.Copy(stream.GetHandle(), stream.GetPosition());
+        context.Data.Header.Chunks[0]->Data.Copy(ToSpan(stream));
 
         return CreateAssetResult::Ok;
     }

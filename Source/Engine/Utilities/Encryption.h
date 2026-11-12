@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,6 @@
 class FLAXENGINE_API Encryption
 {
 public:
-
     /// <summary>
     /// Encrypt bytes with custom data
     /// </summary>
@@ -26,7 +25,6 @@ public:
     static void DecryptBytes(byte* data, uint64 size);
 
 public:
-
     static int32 Base64EncodeLength(int32 size);
     static int32 Base64DecodeLength(const char* encoded, int32 length);
     static void Base64Encode(const byte* bytes, int32 size, Array<char>& encoded);

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -6,6 +6,7 @@
 #include "GPUDeviceDX12.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 
 FenceDX12::FenceDX12(GPUDeviceDX12* device)
     : _currentValue(1)
@@ -23,7 +24,11 @@ bool FenceDX12::Init()
 #endif
 
     _event = CreateEvent(nullptr, false, false, nullptr);
-    ASSERT(_event != INVALID_HANDLE_VALUE);
+    if (_event == nullptr) // CreateEvent returns null on failure (not INVALID_HANDLE_VALUE)
+    {
+        LOG(Error, "Cannot create the fence event.");
+        return true;
+    }
     return false;
 }
 
@@ -64,12 +69,12 @@ void FenceDX12::WaitCPU(uint64 value)
 {
     if (IsFenceComplete(value))
         return;
-
+    PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
     ScopeLock lock(_locker);
 
     _fence->SetEventOnCompletion(value, _event);
     WaitForSingleObject(_event, INFINITE);
-
     _lastCompletedValue = _fence->GetCompletedValue();
 }
 
@@ -111,7 +116,7 @@ bool CommandQueueDX12::Init()
     desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
     desc.NodeMask = 0;
     HRESULT result = _device->GetDevice()->CreateCommandQueue(&desc, IID_PPV_ARGS(&_commandQueue));
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
 #if GPU_ENABLE_RESOURCE_NAMING
     _commandQueue->SetName(TEXT("CommandQueueDX12::CommandQueue"));
 #endif
@@ -142,13 +147,15 @@ void CommandQueueDX12::WaitForFence(uint64 fenceValue)
 
 void CommandQueueDX12::WaitForGPU()
 {
+    PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
     const uint64 value = _fence.Signal(this);
     _fence.WaitCPU(value);
 }
 
 uint64 CommandQueueDX12::ExecuteCommandList(ID3D12CommandList* list)
 {
-    VALIDATE_DIRECTX_RESULT((static_cast<ID3D12GraphicsCommandList*>(list))->Close());
+    VALIDATE_DIRECTX_CALL((static_cast<ID3D12GraphicsCommandList*>(list))->Close());
 
     _commandQueue->ExecuteCommandLists(1, &list);
 

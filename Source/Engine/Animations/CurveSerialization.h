@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -163,7 +163,10 @@ namespace Serialization
         {
             const auto& keyframesArray = mKeyframes->value.GetArray();
             auto& keyframes = v.GetKeyframes();
+            const int32 newCount = keyframesArray.Size() - keyframes.Count();
             keyframes.Resize(keyframesArray.Size());
+            for (int32 i = 0; i < newCount; i++)
+                keyframes[keyframes.Count() + i - newCount] = KeyFrame(0.0f, AnimationUtils::GetZero<T>());
             for (rapidjson::SizeType i = 0; i < keyframesArray.Size(); i++)
                 Deserialize(keyframesArray[i], keyframes[i], modifier);
         }
@@ -186,6 +189,7 @@ namespace Serialization
 
         // Raw keyframes data
         stream.WriteInt32(keyframes.Count());
+        static_assert(TIsPODType<T>::Value, "Raw bytes serialization only for raw POD types.");
         stream.WriteBytes(keyframes.Get(), keyframes.Count() * sizeof(KeyFrame));
     }
 
@@ -209,6 +213,7 @@ namespace Serialization
         int32 keyframesCount;
         stream.ReadInt32(&keyframesCount);
         keyframes.Resize(keyframesCount, false);
+        static_assert(TIsPODType<T>::Value, "Raw bytes serialization only for raw POD types.");
         stream.ReadBytes(keyframes.Get(), keyframes.Count() * sizeof(KeyFrame));
 
         return false;

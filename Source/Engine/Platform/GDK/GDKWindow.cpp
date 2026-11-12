@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_GDK
 
@@ -23,7 +23,7 @@ GDKWindow::GDKWindow(const CreateWindowSettings& settings)
     int32 clientHeight = Math::TruncToInt(settings.Size.Y);
     int32 windowWidth = clientWidth;
     int32 windowHeight = clientHeight;
-    _clientSize = Vector2((float)clientWidth, (float)clientHeight);
+    _clientSize = Float2((float)clientWidth, (float)clientHeight);
 
     // Setup window style
     uint32 style = WS_POPUP, exStyle = 0;
@@ -71,7 +71,7 @@ GDKWindow::GDKWindow(const CreateWindowSettings& settings)
     // Creating the window
     _handle = CreateWindowExW(
         exStyle,
-        Platform::ApplicationWindowClass,
+        Platform::ApplicationClassName,
         settings.Title.GetText(),
         style,
         x,
@@ -213,7 +213,7 @@ void GDKWindow::CheckForWindowResize()
     GetClientRect(_handle, &rect);
     const int32 width = Math::Max(rect.right - rect.left, 0L);
     const int32 height = Math::Max(rect.bottom - rect.top, 0L);
-    _clientSize = Vector2(static_cast<float>(width), static_cast<float>(height));
+    _clientSize = Float2(static_cast<float>(width), static_cast<float>(height));
 
     // Check if window size has been changed
     if (width > 0 && height > 0 && (_swapChain == nullptr || width != _swapChain->GetWidth() || height != _swapChain->GetHeight()))
@@ -230,64 +230,32 @@ void GDKWindow::UpdateCursor() const
         return;
     }
 
-    int32 index = 0;
-    switch (_cursor)
+    const LPCWSTR cursors[] =
     {
-    case CursorType::Default:
-        break;
-    case CursorType::Cross:
-        index = 1;
-        break;
-    case CursorType::Hand:
-        index = 2;
-        break;
-    case CursorType::Help:
-        index = 3;
-        break;
-    case CursorType::IBeam:
-        index = 4;
-        break;
-    case CursorType::No:
-        index = 5;
-        break;
-    case CursorType::Wait:
-        index = 11;
-        break;
-    case CursorType::SizeAll:
-        index = 6;
-        break;
-    case CursorType::SizeNESW:
-        index = 7;
-        break;
-    case CursorType::SizeNS:
-        index = 8;
-        break;
-    case CursorType::SizeNWSE:
-        index = 9;
-        break;
-    case CursorType::SizeWE:
-        index = 10;
-        break;
-    }
-
-    static const LPCWSTR cursors[] =
-    {
-        IDC_ARROW,
-        IDC_CROSS,
-        IDC_HAND,
-        IDC_HELP,
-        IDC_IBEAM,
-        IDC_NO,
-        IDC_SIZEALL,
-        IDC_SIZENESW,
-        IDC_SIZENS,
-        IDC_SIZENWSE,
-        IDC_SIZEWE,
-        IDC_WAIT,
+        IDC_ARROW, // Default
+        IDC_CROSS, // Cross
+        IDC_HAND, // Hand
+        IDC_HELP, // Help
+        IDC_IBEAM, // IBeam
+        IDC_NO, // No
+        IDC_WAIT, // Wait
+        IDC_SIZEALL, // SizeAll
+        IDC_SIZENESW, // SizeNESW
+        IDC_SIZENS, // SizeNS
+        IDC_SIZENWSE, // SizeNWSE
+        IDC_SIZEWE, // SizeWE
     };
+    static_assert(ARRAY_COUNT(cursors) + 2 == (int32)CursorType::MAX, "Invalid cursors count.");
 
-    ASSERT(index >= 0 && index < ARRAY_COUNT(cursors));
-    const HCURSOR cursor = LoadCursorW(nullptr, cursors[index]);
+    HCURSOR cursor;
+    if (_cursor == CursorType::Image)
+    {
+        LOG(Error, "GDK doesn't support hardware image cursors");
+        cursor = NULL;
+    }
+    else
+        cursor = LoadCursorW(nullptr, cursors[(int32)_cursor]);
+
     ::SetCursor(cursor);
 }
 

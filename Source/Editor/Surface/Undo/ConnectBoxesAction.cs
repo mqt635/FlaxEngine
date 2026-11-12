@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using FlaxEditor.Surface.Elements;
@@ -24,6 +24,8 @@ namespace FlaxEditor.Surface.Undo
 
         public ConnectBoxesAction(InputBox iB, OutputBox oB, bool connect)
         {
+            if (iB == null || oB == null || iB.ParentNode == null || oB.ParentNode == null)
+                throw new System.ArgumentNullException();
             _surface = iB.Surface;
             _context = new ContextHandle(iB.ParentNode.Context);
             _connect = connect;
@@ -33,6 +35,14 @@ namespace FlaxEditor.Surface.Undo
 
             CaptureConnections(iB, out _inputBefore);
             CaptureConnections(oB, out _outputBefore);
+
+#if BUILD_DEBUG
+            // Validate handles
+            if (_context.Get(_surface) != iB.ParentNode.Context)
+                throw new System.Exception("Invalid ContextHandle");
+            if (_input.Get(iB.ParentNode.Context) != iB || _output.Get(oB.ParentNode.Context) != oB)
+                throw new System.Exception("Invalid BoxHandle");
+#endif
         }
 
         public void End()

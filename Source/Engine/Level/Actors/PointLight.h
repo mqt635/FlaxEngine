@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,17 +9,15 @@
 /// <summary>
 /// Point light emits light from point in all directions.
 /// </summary>
-API_CLASS() class FLAXENGINE_API PointLight : public LightWithShadow
+API_CLASS(Attributes="ActorContextMenu(\"New/Lights/Point Light\"), ActorToolbox(\"Lights\")")
+class FLAXENGINE_API PointLight : public LightWithShadow
 {
-DECLARE_SCENE_OBJECT(PointLight);
+    DECLARE_SCENE_OBJECT(PointLight);
 private:
-
-    Vector3 _direction;
+    Float3 _direction;
     float _radius;
-    int32 _sceneRenderingKey = -1;
 
 public:
-
     /// <summary>
     /// Light source bulb radius
     /// </summary>
@@ -33,16 +31,16 @@ public:
     float SourceLength = 0.0f;
 
     /// <summary>
-    /// Controls the radial falloff of light when UseInverseSquaredFalloff is disabled.
-    /// </summary>
-    API_FIELD(Attributes="EditorOrder(13), DefaultValue(8.0f), EditorDisplay(\"Light\"), Limit(2, 16, 0.01f)")
-    float FallOffExponent = 8.0f;
-
-    /// <summary>
     /// Whether to use physically based inverse squared distance falloff, where Radius is only clamping the light's contribution.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(14), DefaultValue(false), EditorDisplay(\"Light\")")
+    API_FIELD(Attributes="EditorOrder(13), DefaultValue(false), EditorDisplay(\"Light\")")
     bool UseInverseSquaredFalloff = false;
+
+    /// <summary>
+    /// Controls the radial falloff of light when UseInverseSquaredFalloff is disabled.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(14), DefaultValue(8.0f), EditorDisplay(\"Light\"), Limit(2, 16, 0.01f), VisibleIf(nameof(UseInverseSquaredFalloff), true)")
+    float FallOffExponent = 8.0f;
 
     /// <summary>
     /// IES texture (light profiles from real world measured data)
@@ -63,11 +61,9 @@ public:
     float IESBrightnessScale = 1.0f;
 
 public:
-
     /// <summary>
-    /// Computes light brightness value
+    /// Computes light brightness value.
     /// </summary>
-    /// <returns>Brightness</returns>
     float ComputeBrightness() const;
 
     /// <summary>
@@ -78,7 +74,7 @@ public:
     /// <summary>
     /// Gets light radius
     /// </summary>
-    API_PROPERTY(Attributes="EditorOrder(1), DefaultValue(1000.0f), EditorDisplay(\"Light\"), Limit(0, 100000, 0.1f)")
+    API_PROPERTY(Attributes="EditorOrder(1), DefaultValue(1000.0f), EditorDisplay(\"Light\"), Limit(0, 1000000, 0.1f)")
     FORCE_INLINE float GetRadius() const
     {
         return _radius;
@@ -91,26 +87,22 @@ public:
     API_PROPERTY() void SetRadius(float value);
 
 private:
-
     void UpdateBounds();
 
 public:
-
     // [LightWithShadow]
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
 #if USE_EDITOR
     void OnDebugDraw() override;
     void OnDebugDrawSelected() override;
+    void DrawLightsDebug(RenderView& view) override;
 #endif
     void OnLayerChanged() override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
 protected:
-
     // [LightWithShadow]
-    void OnEnable() override;
-    void OnDisable() override;
     void OnTransformChanged() override;
 };

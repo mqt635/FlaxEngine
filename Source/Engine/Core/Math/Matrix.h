@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,9 +13,8 @@ struct Transform;
 /// </summary>
 API_STRUCT() struct FLAXENGINE_API Matrix
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(Matrix);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(Matrix);
 public:
-
     union
     {
         struct
@@ -74,7 +73,6 @@ public:
     };
 
 public:
-
     /// <summary>A matrix with all of its components set to zero.</summary>
     static const Matrix Zero;
 
@@ -82,13 +80,10 @@ public:
     static const Matrix Identity;
 
 public:
-
     /// <summary>
     /// Empty constructor.
     /// </summary>
-    Matrix()
-    {
-    }
+    Matrix() = default;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Matrix"/> struct.
@@ -150,104 +145,105 @@ public:
         Platform::MemoryCopy(Raw, values, sizeof(float) * 16);
     }
 
-public:
+    explicit Matrix(const Matrix3x3& matrix);
+    explicit Matrix(const Double4x4& matrix);
 
+public:
     String ToString() const;
 
 public:
-
-    // Gets the up Vector3 of the matrix; that is M21, M22, and M23.
-    Vector3 GetUp() const
+    // Gets the up Float3 of the matrix; that is M21, M22, and M23.
+    Float3 GetUp() const
     {
-        return Vector3(M21, M22, M23);
+        return Float3(M21, M22, M23);
     }
 
-    // Sets Vector3 of the matrix; that is M21, M22, and M23.
-    void SetUp(const Vector3& value)
+    // Sets Float3 of the matrix; that is M21, M22, and M23.
+    void SetUp(const Float3& value)
     {
         M21 = value.X;
         M22 = value.Y;
         M23 = value.Z;
     }
 
-    // Gets the down Vector3 of the matrix; that is -M21, -M22, and -M23.
-    Vector3 GetDown() const
+    // Gets the down Float3 of the matrix; that is -M21, -M22, and -M23.
+    Float3 GetDown() const
     {
-        return -Vector3(M21, M22, M23);
+        return -Float3(M21, M22, M23);
     }
 
-    // Sets the down Vector3 of the matrix; that is -M21, -M22, and -M23.
-    void SetDown(const Vector3& value)
+    // Sets the down Float3 of the matrix; that is -M21, -M22, and -M23.
+    void SetDown(const Float3& value)
     {
         M21 = -value.X;
         M22 = -value.Y;
         M23 = -value.Z;
     }
 
-    // Gets the right Vector3 of the matrix; that is M11, M12, and M13.
-    Vector3 GetRight() const
+    // Gets the right Float3 of the matrix; that is M11, M12, and M13.
+    Float3 GetRight() const
     {
-        return Vector3(M11, M12, M13);
+        return Float3(M11, M12, M13);
     }
 
-    // Sets the right Vector3 of the matrix; that is M11, M12, and M13.
-    void SetRight(const Vector3& value)
+    // Sets the right Float3 of the matrix; that is M11, M12, and M13.
+    void SetRight(const Float3& value)
     {
         M11 = value.X;
         M12 = value.Y;
         M13 = value.Z;
     }
 
-    // Gets the left Vector3 of the matrix; that is -M11, -M12, and -M13.
-    Vector3 GetLeft() const
+    // Gets the left Float3 of the matrix; that is -M11, -M12, and -M13.
+    Float3 GetLeft() const
     {
-        return -Vector3(M11, M12, M13);
+        return -Float3(M11, M12, M13);
     }
 
-    // Sets the left Vector3 of the matrix; that is -M11, -M12, and -M13.
-    void SetLeft(const Vector3& value)
+    // Sets the left Float3 of the matrix; that is -M11, -M12, and -M13.
+    void SetLeft(const Float3& value)
     {
         M11 = -value.X;
         M12 = -value.Y;
         M13 = -value.Z;
     }
 
-    // Gets the forward Vector3 of the matrix; that is -M31, -M32, and -M33.
-    Vector3 GetForward() const
+    // Gets the forward Float3 of the matrix; that is -M31, -M32, and -M33.
+    Float3 GetForward() const
     {
-        return -Vector3(M31, M32, M33);
+        return Float3(M31, M32, M33);
     }
 
-    // Sets the forward Vector3 of the matrix; that is -M31, -M32, and -M33.
-    void SetForward(const Vector3& value)
-    {
-        M31 = -value.X;
-        M32 = -value.Y;
-        M33 = -value.Z;
-    }
-
-    // Gets the backward Vector3 of the matrix; that is M31, M32, and M33.
-    Vector3 GetBackward() const
-    {
-        return Vector3(M31, M32, M33);
-    }
-
-    // Sets the backward Vector3 of the matrix; that is M31, M32, and M33.
-    void SetBackward(const Vector3& value)
+    // Sets the forward Float3 of the matrix; that is -M31, -M32, and -M33.
+    void SetForward(const Float3& value)
     {
         M31 = value.X;
         M32 = value.Y;
         M33 = value.Z;
     }
 
-    // Gets the first row in the matrix; that is M11, M12, M13, and M14.
-    Vector4 GetRow1() const
+    // Gets the backward Float3 of the matrix; that is -M31, -M32, and -M33.
+    Float3 GetBackward() const
     {
-        return Vector4(M11, M12, M13, M14);
+        return Float3(-M31, -M32, -M33);
+    }
+
+    // Sets the backward Float3 of the matrix; that is -M31, -M32, and -M33.
+    void SetBackward(const Float3& value)
+    {
+        M31 = -value.X;
+        M32 = -value.Y;
+        M33 = -value.Z;
+    }
+
+    // Gets the first row in the matrix; that is M11, M12, M13, and M14.
+    Float4 GetRow1() const
+    {
+        return Float4(M11, M12, M13, M14);
     }
 
     // Sets the first row in the matrix; that is M11, M12, M13, and M14.
-    void SetRow1(const Vector4& value)
+    void SetRow1(const Float4& value)
     {
         M11 = value.X;
         M12 = value.Y;
@@ -256,13 +252,13 @@ public:
     }
 
     // Gets the second row in the matrix; that is M21, M22, M23, and M24.
-    Vector4 GetRow2() const
+    Float4 GetRow2() const
     {
-        return Vector4(M21, M22, M23, M24);
+        return Float4(M21, M22, M23, M24);
     }
 
     // Sets the second row in the matrix; that is M21, M22, M23, and M24.
-    void SetRow2(const Vector4& value)
+    void SetRow2(const Float4& value)
     {
         M21 = value.X;
         M22 = value.Y;
@@ -271,13 +267,13 @@ public:
     }
 
     // Gets the third row in the matrix; that is M31, M32, M33, and M34.
-    Vector4 GetRow3() const
+    Float4 GetRow3() const
     {
-        return Vector4(M31, M32, M33, M34);
+        return Float4(M31, M32, M33, M34);
     }
 
     // Sets the third row in the matrix; that is M31, M32, M33, and M34.
-    void SetRow3(const Vector4& value)
+    void SetRow3(const Float4& value)
     {
         M31 = value.X;
         M32 = value.Y;
@@ -286,13 +282,13 @@ public:
     }
 
     // Gets the fourth row in the matrix; that is M41, M42, M43, and M44.
-    Vector4 GetRow4() const
+    Float4 GetRow4() const
     {
-        return Vector4(M41, M42, M43, M44);
+        return Float4(M41, M42, M43, M44);
     }
 
     // Sets the fourth row in the matrix; that is M41, M42, M43, and M44.
-    void SetRow4(const Vector4& value)
+    void SetRow4(const Float4& value)
     {
         M41 = value.X;
         M42 = value.Y;
@@ -301,13 +297,13 @@ public:
     }
 
     // Gets the first column in the matrix; that is M11, M21, M31, and M41.
-    Vector4 GetColumn1() const
+    Float4 GetColumn1() const
     {
-        return Vector4(M11, M21, M31, M41);
+        return Float4(M11, M21, M31, M41);
     }
 
     // Sets the first column in the matrix; that is M11, M21, M31, and M41.
-    void SetColumn1(const Vector4& value)
+    void SetColumn1(const Float4& value)
     {
         M11 = value.X;
         M21 = value.Y;
@@ -316,13 +312,13 @@ public:
     }
 
     // Gets the second column in the matrix; that is M12, M22, M32, and M42.
-    Vector4 GetColumn2() const
+    Float4 GetColumn2() const
     {
-        return Vector4(M12, M22, M32, M42);
+        return Float4(M12, M22, M32, M42);
     }
 
     // Sets the second column in the matrix; that is M12, M22, M32, and M42.
-    void SetColumn2(const Vector4& value)
+    void SetColumn2(const Float4& value)
     {
         M12 = value.X;
         M22 = value.Y;
@@ -331,13 +327,13 @@ public:
     }
 
     // Gets the third column in the matrix; that is M13, M23, M33, and M43.
-    Vector4 GetColumn3() const
+    Float4 GetColumn3() const
     {
-        return Vector4(M13, M23, M33, M43);
+        return Float4(M13, M23, M33, M43);
     }
 
     // Sets the third column in the matrix; that is M13, M23, M33, and M43.
-    void SetColumn3(const Vector4& value)
+    void SetColumn3(const Float4& value)
     {
         M13 = value.X;
         M23 = value.Y;
@@ -346,13 +342,13 @@ public:
     }
 
     // Gets the fourth column in the matrix; that is M14, M24, M34, and M44.
-    Vector4 GetColumn4() const
+    Float4 GetColumn4() const
     {
-        return Vector4(M14, M24, M34, M44);
+        return Float4(M14, M24, M34, M44);
     }
 
     // Sets the fourth column in the matrix; that is M14, M24, M34, and M44.
-    void SetColumn4(const Vector4& value)
+    void SetColumn4(const Float4& value)
     {
         M14 = value.X;
         M24 = value.Y;
@@ -361,7 +357,7 @@ public:
     }
 
     // Sets part of the first row in the matrix; that is M11, M12, M13.
-    void SetX(const Vector3& value)
+    void SetX(const Float3& value)
     {
         M11 = value.X;
         M12 = value.Y;
@@ -369,7 +365,7 @@ public:
     }
 
     // Sets part of the second row in the matrix; that is M21, M22, M23.
-    void SetY(const Vector3& value)
+    void SetY(const Float3& value)
     {
         M21 = value.X;
         M22 = value.Y;
@@ -377,7 +373,7 @@ public:
     }
 
     // Sets part of the third row in the matrix; that is M31, M32, M33.
-    void SetZ(const Vector3& value)
+    void SetZ(const Float3& value)
     {
         M31 = value.X;
         M32 = value.Y;
@@ -385,13 +381,13 @@ public:
     }
 
     // Gets the translation of the matrix; that is M41, M42, and M43.
-    Vector3 GetTranslation() const
+    Float3 GetTranslation() const
     {
-        return Vector3(M41, M42, M43);
+        return Float3(M41, M42, M43);
     }
 
     // Sets the translation of the matrix; that is M41, M42, and M43.
-    void SetTranslation(const Vector3& value)
+    void SetTranslation(const Float3& value)
     {
         M41 = value.X;
         M42 = value.Y;
@@ -399,13 +395,13 @@ public:
     }
 
     // Gets the scale of the matrix; that is M11, M22, and M33.
-    Vector3 GetScaleVector() const
+    Float3 GetScaleVector() const
     {
-        return Vector3(M11, M22, M33);
+        return Float3(M11, M22, M33);
     }
 
     // Sets the scale of the matrix; that is M11, M22, and M33.
-    void SetScaleVector(const Vector3& value)
+    void SetScaleVector(const Float3& value)
     {
         M11 = value.X;
         M22 = value.Y;
@@ -428,7 +424,6 @@ public:
     float RotDeterminant() const;
 
 public:
-
     // Inverts the matrix.
     void Invert()
     {
@@ -447,7 +442,6 @@ public:
     void NormalizeScale();
 
 public:
-
     /// <summary>
     /// Decomposes a rotation matrix with the specified yaw, pitch, roll.
     /// </summary>
@@ -462,7 +456,7 @@ public:
     /// <param name="scale">When the method completes, contains the scaling component of the decomposed matrix.</param>
     /// <param name="translation">When the method completes, contains the translation component of the decomposed matrix.</param>
     /// <remarks>This method is designed to decompose an SRT transformation matrix only.</remarks>
-    void Decompose(Vector3& scale, Vector3& translation) const;
+    void Decompose(Float3& scale, Float3& translation) const;
 
     /// <summary>
     /// Decomposes a matrix into a scale, rotation, and translation.
@@ -478,7 +472,7 @@ public:
     /// <param name="rotation">When the method completes, contains the rotation component of the decomposed matrix.</param>
     /// <param name="translation">When the method completes, contains the translation component of the decomposed matrix.</param>
     /// <remarks>This method is designed to decompose an SRT transformation matrix only.</remarks>
-    void Decompose(Vector3& scale, Quaternion& rotation, Vector3& translation) const;
+    void Decompose(Float3& scale, Quaternion& rotation, Float3& translation) const;
 
     /// <summary>
     /// Decomposes a matrix into a scale, rotation, and translation.
@@ -487,10 +481,10 @@ public:
     /// <param name="rotation">When the method completes, contains the rotation component of the decomposed matrix.</param>
     /// <param name="translation">When the method completes, contains the translation component of the decomposed matrix.</param>
     /// <remarks>This method is designed to decompose an SRT transformation matrix only.</remarks>
-    void Decompose(Vector3& scale, Matrix& rotation, Vector3& translation) const;
+    void Decompose(Float3& scale, Matrix3x3& rotation, Float3& translation) const;
+    DEPRECATED("Use Decompose with 'Matrix3x3& rotation' parameter instead") void Decompose(Float3& scale, Matrix& rotation, Float3& translation) const;
 
 public:
-
     Matrix operator*(const float scale) const
     {
         Matrix result;
@@ -530,104 +524,23 @@ public:
         return *this;
     }
 
-    bool operator==(const Matrix& other) const
-    {
-        for (int32 i = 0; i < 16; i++)
-        {
-            if (Math::NotNearEqual(other.Raw[i], Raw[i]))
-                return false;
-        }
-        return true;
-    }
-
+    bool operator==(const Matrix& other) const;
     bool operator!=(const Matrix& other) const
     {
-        for (int32 i = 0; i < 16; i++)
-        {
-            if (Math::NotNearEqual(other.Raw[i], Raw[i]))
-                return true;
-        }
-        return false;
+        return !operator==(other);
     }
 
 public:
-
     // Calculates the sum of two matrices.
-    // @param left The first matrix to add.
-    // @param right The second matrix to add.
-    // @param result When the method completes, contains the sum of the two matrices.
-    static void Add(const Matrix& left, const Matrix& right, Matrix& result)
-    {
-        result.M11 = left.M11 + right.M11;
-        result.M12 = left.M12 + right.M12;
-        result.M13 = left.M13 + right.M13;
-        result.M14 = left.M14 + right.M14;
-        result.M21 = left.M21 + right.M21;
-        result.M22 = left.M22 + right.M22;
-        result.M23 = left.M23 + right.M23;
-        result.M24 = left.M24 + right.M24;
-        result.M31 = left.M31 + right.M31;
-        result.M32 = left.M32 + right.M32;
-        result.M33 = left.M33 + right.M33;
-        result.M34 = left.M34 + right.M34;
-        result.M41 = left.M41 + right.M41;
-        result.M42 = left.M42 + right.M42;
-        result.M43 = left.M43 + right.M43;
-        result.M44 = left.M44 + right.M44;
-    }
+    static void Add(const Matrix& left, const Matrix& right, Matrix& result);
 
     // Calculates the difference between two matrices.
-    // @param left The first matrix to subtract.
-    // @param right The second matrix to subtract.
-    // @param result When the method completes, contains the difference between the two matrices.
-    static void Subtract(const Matrix& left, const Matrix& right, Matrix& result)
-    {
-        result.M11 = left.M11 - right.M11;
-        result.M12 = left.M12 - right.M12;
-        result.M13 = left.M13 - right.M13;
-        result.M14 = left.M14 - right.M14;
-        result.M21 = left.M21 - right.M21;
-        result.M22 = left.M22 - right.M22;
-        result.M23 = left.M23 - right.M23;
-        result.M24 = left.M24 - right.M24;
-        result.M31 = left.M31 - right.M31;
-        result.M32 = left.M32 - right.M32;
-        result.M33 = left.M33 - right.M33;
-        result.M34 = left.M34 - right.M34;
-        result.M41 = left.M41 - right.M41;
-        result.M42 = left.M42 - right.M42;
-        result.M43 = left.M43 - right.M43;
-        result.M44 = left.M44 - right.M44;
-    }
+    static void Subtract(const Matrix& left, const Matrix& right, Matrix& result);
 
     // Scales a matrix by the given value.
-    // @param left The matrix to scale.
-    // @param right The amount by which to scale.
-    // @param result When the method completes, contains the scaled matrix.
-    static void Multiply(const Matrix& left, float right, Matrix& result)
-    {
-        result.M11 = left.M11 * right;
-        result.M12 = left.M12 * right;
-        result.M13 = left.M13 * right;
-        result.M14 = left.M14 * right;
-        result.M21 = left.M21 * right;
-        result.M22 = left.M22 * right;
-        result.M23 = left.M23 * right;
-        result.M24 = left.M24 * right;
-        result.M31 = left.M31 * right;
-        result.M32 = left.M32 * right;
-        result.M33 = left.M33 * right;
-        result.M34 = left.M34 * right;
-        result.M41 = left.M41 * right;
-        result.M42 = left.M42 * right;
-        result.M43 = left.M43 * right;
-        result.M44 = left.M44 * right;
-    }
+    static void Multiply(const Matrix& left, float right, Matrix& result);
 
     // Calculates the product of two matrices.
-    // @param left The first matrix to multiply.
-    // @param right The second matrix to multiply.
-    // @returns The product of the two matrices.
     static Matrix Multiply(const Matrix& left, const Matrix& right)
     {
         Matrix result;
@@ -636,133 +549,21 @@ public:
     }
 
     // Calculates the product of two matrices.
-    // @param left The first matrix to multiply.
-    // @param right The second matrix to multiply.
-    // @param result The product of the two matrices.
-    static void Multiply(const Matrix& left, const Matrix& right, Matrix& result)
-    {
-        result.M11 = left.M11 * right.M11 + left.M12 * right.M21 + left.M13 * right.M31 + left.M14 * right.M41;
-        result.M12 = left.M11 * right.M12 + left.M12 * right.M22 + left.M13 * right.M32 + left.M14 * right.M42;
-        result.M13 = left.M11 * right.M13 + left.M12 * right.M23 + left.M13 * right.M33 + left.M14 * right.M43;
-        result.M14 = left.M11 * right.M14 + left.M12 * right.M24 + left.M13 * right.M34 + left.M14 * right.M44;
-        result.M21 = left.M21 * right.M11 + left.M22 * right.M21 + left.M23 * right.M31 + left.M24 * right.M41;
-        result.M22 = left.M21 * right.M12 + left.M22 * right.M22 + left.M23 * right.M32 + left.M24 * right.M42;
-        result.M23 = left.M21 * right.M13 + left.M22 * right.M23 + left.M23 * right.M33 + left.M24 * right.M43;
-        result.M24 = left.M21 * right.M14 + left.M22 * right.M24 + left.M23 * right.M34 + left.M24 * right.M44;
-        result.M31 = left.M31 * right.M11 + left.M32 * right.M21 + left.M33 * right.M31 + left.M34 * right.M41;
-        result.M32 = left.M31 * right.M12 + left.M32 * right.M22 + left.M33 * right.M32 + left.M34 * right.M42;
-        result.M33 = left.M31 * right.M13 + left.M32 * right.M23 + left.M33 * right.M33 + left.M34 * right.M43;
-        result.M34 = left.M31 * right.M14 + left.M32 * right.M24 + left.M33 * right.M34 + left.M34 * right.M44;
-        result.M41 = left.M41 * right.M11 + left.M42 * right.M21 + left.M43 * right.M31 + left.M44 * right.M41;
-        result.M42 = left.M41 * right.M12 + left.M42 * right.M22 + left.M43 * right.M32 + left.M44 * right.M42;
-        result.M43 = left.M41 * right.M13 + left.M42 * right.M23 + left.M43 * right.M33 + left.M44 * right.M43;
-        result.M44 = left.M41 * right.M14 + left.M42 * right.M24 + left.M43 * right.M34 + left.M44 * right.M44;
-    }
+    static void Multiply(const Matrix& left, const Matrix& right, Matrix& result);
 
     // Scales a matrix by the given value.
-    // @param left The matrix to scale.
-    // @param right The amount by which to scale.
-    // @param result When the method completes, contains the scaled matrix.
-    static void Divide(const Matrix& left, float right, Matrix& result)
-    {
-        ASSERT(!Math::IsZero(right));
-        const float inv = 1.0f / right;
-
-        result.M11 = left.M11 * inv;
-        result.M12 = left.M12 * inv;
-        result.M13 = left.M13 * inv;
-        result.M14 = left.M14 * inv;
-        result.M21 = left.M21 * inv;
-        result.M22 = left.M22 * inv;
-        result.M23 = left.M23 * inv;
-        result.M24 = left.M24 * inv;
-        result.M31 = left.M31 * inv;
-        result.M32 = left.M32 * inv;
-        result.M33 = left.M33 * inv;
-        result.M34 = left.M34 * inv;
-        result.M41 = left.M41 * inv;
-        result.M42 = left.M42 * inv;
-        result.M43 = left.M43 * inv;
-        result.M44 = left.M44 * inv;
-    }
+    static void Divide(const Matrix& left, float right, Matrix& result);
 
     // Calculates the quotient of two matrices.
-    // @param left The first matrix to divide.
-    // @param right The second matrix to divide.
-    // @param result When the method completes, contains the quotient of the two matrices.
-    static void Divide(const Matrix& left, const Matrix& right, Matrix& result)
-    {
-        result.M11 = left.M11 / right.M11;
-        result.M12 = left.M12 / right.M12;
-        result.M13 = left.M13 / right.M13;
-        result.M14 = left.M14 / right.M14;
-        result.M21 = left.M21 / right.M21;
-        result.M22 = left.M22 / right.M22;
-        result.M23 = left.M23 / right.M23;
-        result.M24 = left.M24 / right.M24;
-        result.M31 = left.M31 / right.M31;
-        result.M32 = left.M32 / right.M32;
-        result.M33 = left.M33 / right.M33;
-        result.M34 = left.M34 / right.M34;
-        result.M41 = left.M41 / right.M41;
-        result.M42 = left.M42 / right.M42;
-        result.M43 = left.M43 / right.M43;
-        result.M44 = left.M44 / right.M44;
-    }
+    static void Divide(const Matrix& left, const Matrix& right, Matrix& result);
 
     // Negates a matrix.
-    // @param value The matrix to be negated.
-    // @param result When the method completes, contains the negated matrix.
-    static void Negate(const Matrix& value, Matrix& result)
-    {
-        result.M11 = -value.M11;
-        result.M12 = -value.M12;
-        result.M13 = -value.M13;
-        result.M14 = -value.M14;
-        result.M21 = -value.M21;
-        result.M22 = -value.M22;
-        result.M23 = -value.M23;
-        result.M24 = -value.M24;
-        result.M31 = -value.M31;
-        result.M32 = -value.M32;
-        result.M33 = -value.M33;
-        result.M34 = -value.M34;
-        result.M41 = -value.M41;
-        result.M42 = -value.M42;
-        result.M43 = -value.M43;
-        result.M44 = -value.M44;
-    }
+    static void Negate(const Matrix& value, Matrix& result);
 
     // Performs a linear interpolation between two matrices.
-    // @param start Start matrix.
-    // @param end End matrix.
-    // @param amount Value between 0 and 1 indicating the weight of end.
-    // @param result When the method completes, contains the linear interpolation of the two matrices.
-    static void Lerp(const Matrix& start, const Matrix& end, float amount, Matrix& result)
-    {
-        result.M11 = Math::Lerp(start.M11, end.M11, amount);
-        result.M12 = Math::Lerp(start.M12, end.M12, amount);
-        result.M13 = Math::Lerp(start.M13, end.M13, amount);
-        result.M14 = Math::Lerp(start.M14, end.M14, amount);
-        result.M21 = Math::Lerp(start.M21, end.M21, amount);
-        result.M22 = Math::Lerp(start.M22, end.M22, amount);
-        result.M23 = Math::Lerp(start.M23, end.M23, amount);
-        result.M24 = Math::Lerp(start.M24, end.M24, amount);
-        result.M31 = Math::Lerp(start.M31, end.M31, amount);
-        result.M32 = Math::Lerp(start.M32, end.M32, amount);
-        result.M33 = Math::Lerp(start.M33, end.M33, amount);
-        result.M34 = Math::Lerp(start.M34, end.M34, amount);
-        result.M41 = Math::Lerp(start.M41, end.M41, amount);
-        result.M42 = Math::Lerp(start.M42, end.M42, amount);
-        result.M43 = Math::Lerp(start.M43, end.M43, amount);
-        result.M44 = Math::Lerp(start.M44, end.M44, amount);
-    }
+    static void Lerp(const Matrix& start, const Matrix& end, float amount, Matrix& result);
 
     // Performs a cubic interpolation between two matrices.
-    // @param start Start matrix.
-    // @param end End matrix.
-    // @param amount Value between 0 and 1 indicating the weight of end.
-    // @param result When the method completes, contains the cubic interpolation of the two matrices.
     static void SmoothStep(const Matrix& start, const Matrix& end, float amount, Matrix& result)
     {
         amount = Math::SmoothStep(amount);
@@ -770,13 +571,9 @@ public:
     }
 
     // Calculates the transpose of the specified matrix.
-    // @param value The matrix whose transpose is to be calculated.
-    // @returns The transpose of the specified matrix.
     static Matrix Transpose(const Matrix& value);
 
     // Calculates the transpose of the specified matrix.
-    // @param value The matrix whose transpose is to be calculated.
-    // @param result When the method completes, contains the transpose of the specified matrix.
     static void Transpose(const Matrix& value, Matrix& result);
 
     /// <summary>
@@ -799,26 +596,12 @@ public:
     static void Invert(const Matrix& value, Matrix& result);
 
     // Creates a left-handed spherical billboard that rotates around a specified object position.
-    // @param objectPosition The position of the object around which the billboard will rotate.
-    // @param cameraPosition The position of the camera.
-    // @param cameraUpVector The up vector of the camera.
-    // @param cameraForwardVector The forward vector of the camera.
-    // @param result When the method completes, contains the created billboard matrix.
-    static void Billboard(const Vector3& objectPosition, const Vector3& cameraPosition, const Vector3& cameraUpVector, const Vector3& cameraForwardVector, Matrix& result);
+    static void Billboard(const Float3& objectPosition, const Float3& cameraPosition, const Float3& cameraUpFloat, const Float3& cameraForwardFloat, Matrix& result);
 
     // Creates a left-handed, look-at matrix.
-    // @param eye The position of the viewer's eye.
-    // @param target The camera look-at target.
-    // @param up The camera's up vector.
-    // @param result When the method completes, contains the created look-at matrix.
-    static void LookAt(const Vector3& eye, const Vector3& target, const Vector3& up, Matrix& result);
+    static void LookAt(const Float3& eye, const Float3& target, const Float3& up, Matrix& result);
 
     // Creates a left-handed, orthographic projection matrix.
-    // @param width Width of the viewing volume.
-    // @param height Height of the viewing volume.
-    // @param zNear Minimum z-value of the viewing volume.
-    // @param zFar Maximum z-value of the viewing volume.
-    // @param result When the method completes, contains the created projection matrix.
     static void Ortho(float width, float height, float zNear, float zFar, Matrix& result)
     {
         const float halfWidth = width * 0.5f;
@@ -827,21 +610,9 @@ public:
     }
 
     // Creates a left-handed, customized orthographic projection matrix.
-    // @param left Minimum x-value of the viewing volume.
-    // @param right Maximum x-value of the viewing volume.
-    // @param bottom Minimum y-value of the viewing volume.
-    // @param top Maximum y-value of the viewing volume.
-    // @param zNear Minimum z-value of the viewing volume.
-    // @param zFar Maximum z-value of the viewing volume.
-    // @param result When the method completes, contains the created projection matrix.
     static void OrthoOffCenter(float left, float right, float bottom, float top, float zNear, float zFar, Matrix& result);
 
     // Creates a left-handed, perspective projection matrix.
-    // @param width Width of the viewing volume.
-    // @param height Height of the viewing volume.
-    // @param zNear Minimum z-value of the viewing volume.
-    // @param zFar Maximum z-value of the viewing volume.
-    // @param result When the method completes, contains the created projection matrix.
     static void Perspective(float width, float height, float zNear, float zFar, Matrix& result)
     {
         const float halfWidth = width * 0.5f;
@@ -850,44 +621,24 @@ public:
     }
 
     // Creates a left-handed, perspective projection matrix based on a field of view.
-    // @param fov Field of view in the y direction, in radians.
-    // @param aspect Aspect ratio, defined as view space width divided by height.
-    // @param zNear Minimum z-value of the viewing volume.
-    // @param zFar Maximum z-value of the viewing volume.
-    // @param result When the method completes, contains the created projection matrix.
     static void PerspectiveFov(float fov, float aspect, float zNear, float zFar, Matrix& result);
 
     // Creates a left-handed, customized perspective projection matrix.
-    // @param left Minimum x-value of the viewing volume.
-    // @param right Maximum x-value of the viewing volume.
-    // @param bottom Minimum y-value of the viewing volume.
-    // @param top Maximum y-value of the viewing volume.
-    // @param zNear Minimum z-value of the viewing volume.
-    // @param zFar Maximum z-value of the viewing volume.
-    // @param result When the method completes, contains the created projection matrix.
     static void PerspectiveOffCenter(float left, float right, float bottom, float top, float zNear, float zFar, Matrix& result);
 
     // Creates a matrix that scales along the x-axis, y-axis, and y-axis.
-    // @param scale Scaling factor for all three axes.
-    // @param result The created scaling matrix.
-    static Matrix Scaling(const Vector3& scale)
+    static Matrix Scaling(const Float3& scale)
     {
         return Scaling(scale.X, scale.Y, scale.Z);
     }
 
     // Creates a matrix that scales along the x-axis, y-axis, and y-axis.
-    // @param scale Scaling factor for all three axes.
-    // @param result When the method completes, contains the created scaling matrix.
-    static void Scaling(const Vector3& scale, Matrix& result)
+    static void Scaling(const Float3& scale, Matrix& result)
     {
         Scaling(scale.X, scale.Y, scale.Z, result);
     }
 
     // Creates a matrix that scales along the x-axis, y-axis, and y-axis.
-    // @param x Scaling factor that is applied along the x-axis.
-    // @param y Scaling factor that is applied along the y-axis.
-    // @param z Scaling factor that is applied along the z-axis.
-    // @returns The created scaling matrix.
     static Matrix Scaling(float x, float y, float z)
     {
         Matrix result = Identity;
@@ -898,10 +649,6 @@ public:
     }
 
     // Creates a matrix that scales along the x-axis, y-axis, and y-axis.
-    // @param x Scaling factor that is applied along the x-axis.
-    // @param y Scaling factor that is applied along the y-axis.
-    // @param z Scaling factor that is applied along the z-axis.
-    // @param result When the method completes, contains the created scaling matrix.
     static void Scaling(float x, float y, float z, Matrix& result)
     {
         result = Identity;
@@ -911,8 +658,6 @@ public:
     }
 
     // Creates a matrix that uniformly scales along all three axis.
-    // @param scale The uniform scale that is applied along all axis.
-    // @returns The created scaling matrix.
     static Matrix Scaling(float scale)
     {
         Matrix result = Identity;
@@ -921,17 +666,13 @@ public:
     }
 
     // Creates a matrix that uniformly scales along all three axis.
-    // @param scale The uniform scale that is applied along all axis.
-    // @param result When the method completes, contains the created scaling matrix.
     static void Scaling(float scale, Matrix& result)
     {
         result = Identity;
         result.M11 = result.M22 = result.M33 = scale;
     }
 
-    // Creates a matrix that rotates around the x-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @returns The created rotation matrix.
+    // Creates a matrix that rotates around the x-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static Matrix RotationX(float angle)
     {
         Matrix result;
@@ -939,14 +680,10 @@ public:
         return result;
     }
 
-    // Creates a matrix that rotates around the x-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @param result When the method completes, contains the created rotation matrix.
+    // Creates a matrix that rotates around the x-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static void RotationX(float angle, Matrix& result);
 
-    // Creates a matrix that rotates around the y-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @returns The created rotation matrix.
+    // Creates a matrix that rotates around the y-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static Matrix RotationY(float angle)
     {
         Matrix result;
@@ -954,14 +691,10 @@ public:
         return result;
     }
 
-    // Creates a matrix that rotates around the y-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @param result When the method completes, contains the created rotation matrix.
+    // Creates a matrix that rotates around the y-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static void RotationY(float angle, Matrix& result);
 
-    // Creates a matrix that rotates around the z-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @returns The created rotation matrix.
+    // Creates a matrix that rotates around the z-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static Matrix RotationZ(float angle)
     {
         Matrix result;
@@ -969,27 +702,19 @@ public:
         return result;
     }
 
-    // Creates a matrix that rotates around the z-axis.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @param result When the method completes, contains the created rotation matrix.
+    // Creates a matrix that rotates around the z-axis. Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
     static void RotationZ(float angle, Matrix& result);
 
-    // Creates a matrix that rotates around an arbitrary axis.
-    // @param axis The axis around which to rotate. This parameter is assumed to be normalized.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @returns The created rotation matrix
-    static Matrix RotationAxis(const Vector3& axis, float angle)
+    // Creates a matrix that rotates around an arbitrary axis (normalized). Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
+    static Matrix RotationAxis(const Float3& axis, float angle)
     {
         Matrix result;
         RotationAxis(axis, angle, result);
         return result;
     }
 
-    // Creates a matrix that rotates around an arbitrary axis.
-    // @param axis The axis around which to rotate. This parameter is assumed to be normalized.
-    // @param angle Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
-    // @param result When the method completes, contains the created rotation matrix.
-    static void RotationAxis(const Vector3& axis, float angle, Matrix& result);
+    // Creates a matrix that rotates around an arbitrary axis (normalized). Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.
+    static void RotationAxis(const Float3& axis, float angle, Matrix& result);
 
     /// <summary>
     /// Creates a rotation matrix from a quaternion
@@ -1011,10 +736,6 @@ public:
     static void RotationQuaternion(const Quaternion& rotation, Matrix& result);
 
     // Creates a rotation matrix with a specified yaw, pitch, and roll.
-    // @param yaw Yaw around the y-axis, in radians.
-    // @param pitch Pitch around the x-axis, in radians.
-    // @param roll Roll around the z-axis, in radians.
-    // @returns The created rotation matrix.
     static Matrix RotationYawPitchRoll(float yaw, float pitch, float roll)
     {
         Matrix result;
@@ -1023,35 +744,19 @@ public:
     }
 
     // Creates a rotation matrix with a specified yaw, pitch, and roll.
-    // @param yaw Yaw around the y-axis, in radians.
-    // @param pitch Pitch around the x-axis, in radians.
-    // @param roll Roll around the z-axis, in radians.
-    // @param result When the method completes, contains the created rotation matrix.
     static void RotationYawPitchRoll(float yaw, float pitch, float roll, Matrix& result);
 
     // Creates a translation matrix using the specified offsets.
-    // @param value The offset for all three coordinate planes.
-    // @returns The created translation matrix.
-    static Matrix Translation(const Vector3& value);
+    static Matrix Translation(const Float3& value);
 
     // Creates a translation matrix using the specified offsets.
-    // @param value The offset for all three coordinate planes.
-    // @param result When the method completes, contains the created translation matrix.
-    static void Translation(const Vector3& value, Matrix& result);
+    static void Translation(const Float3& value, Matrix& result);
 
     // Creates a translation matrix using the specified offsets.
-    // @param x X-coordinate offset.
-    // @param y Y-coordinate offset.
-    // @param z Z-coordinate offset.
-    // @param result When the method completes, contains the created translation matrix.
     static void Translation(float x, float y, float z, Matrix& result);
 
     // Creates a skew/shear matrix by means of a translation vector, a rotation vector, and a rotation angle.
-    // @param angle The rotation angle.
-    // @param rotationVec The rotation vector.
-    // @param transVec The translation vector.
-    // @param matrix Contains the created skew/shear matrix.
-    static void Skew(float angle, const Vector3& rotationVec, const Vector3& transVec, Matrix& matrix);
+    static void Skew(float angle, const Float3& rotationVec, const Float3& transVec, Matrix& matrix);
 
     /// <summary>
     /// Creates a matrix that contains both the X, Y and Z rotation, as well as scaling and translation.
@@ -1059,89 +764,65 @@ public:
     /// <param name="translation">The translation.</param>
     /// <param name="rotation">Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.</param>
     /// <param name="scaling">The scaling.</param>
-    /// <param name="result">When the method completes, contains the created rotation matrix.</param>
-    static void Transformation(const Vector3& scaling, const Quaternion& rotation, const Vector3& translation, Matrix& result);
+    /// <param name="result">When the method completes, contains the created transformation matrix.</param>
+    static void Transformation(const Float3& scaling, const Quaternion& rotation, const Float3& translation, Matrix& result);
 
     // Creates a 3D affine transformation matrix.
-    // @param scaling Scaling factor.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created affine transformation matrix.
-    static void AffineTransformation(float scaling, const Quaternion& rotation, const Vector3& translation, Matrix& result);
+    static void AffineTransformation(float scaling, const Quaternion& rotation, const Float3& translation, Matrix& result);
 
     // Creates a 3D affine transformation matrix.
-    // @param scaling Scaling factor.
-    // @param rotationCenter The center of the rotation.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created affine transformation matrix.
-    static void AffineTransformation(float scaling, const Vector3& rotationCenter, const Quaternion& rotation, const Vector3& translation, Matrix& result);
+    static void AffineTransformation(float scaling, const Float3& rotationCenter, const Quaternion& rotation, const Float3& translation, Matrix& result);
 
     // Creates a 2D affine transformation matrix.
-    // @param scaling Scaling factor.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created affine transformation matrix.
-    static void AffineTransformation2D(float scaling, float rotation, const Vector2& translation, Matrix& result);
+    static void AffineTransformation2D(float scaling, float rotation, const Float2& translation, Matrix& result);
 
     // Creates a 2D affine transformation matrix.
-    // @param scaling Scaling factor.
-    // @param rotationCenter The center of the rotation.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created affine transformation matrix.
-    static void AffineTransformation2D(float scaling, const Vector2& rotationCenter, float rotation, const Vector2& translation, Matrix& result);
+    static void AffineTransformation2D(float scaling, const Float2& rotationCenter, float rotation, const Float2& translation, Matrix& result);
 
     // Creates a transformation matrix.
-    // @param scalingCenter Center point of the scaling operation.
-    // @param scalingRotation Scaling rotation amount.
-    // @param scaling Scaling factor.
-    // @param rotationCenter The center of the rotation.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created transformation matrix.
-    static void Transformation(const Vector3& scalingCenter, const Quaternion& scalingRotation, const Vector3& scaling, const Vector3& rotationCenter, const Quaternion& rotation, const Vector3& translation, Matrix& result);
+    static void Transformation(const Float3& scalingCenter, const Quaternion& scalingRotation, const Float3& scaling, const Float3& rotationCenter, const Quaternion& rotation, const Float3& translation, Matrix& result);
 
     // Creates a 2D transformation matrix.
-    // @param scalingCenter Center point of the scaling operation.
-    // @param scalingRotation Scaling rotation amount.
-    // @param scaling Scaling factor.
-    // @param rotationCenter The center of the rotation.
-    // @param rotation The rotation of the transformation.
-    // @param translation The translation factor of the transformation.
-    // @param result When the method completes, contains the created transformation matrix.
-    static void Transformation2D(Vector2& scalingCenter, float scalingRotation, const Vector2& scaling, const Vector2& rotationCenter, float rotation, const Vector2& translation, Matrix& result);
+    static void Transformation2D(const Float2& scalingCenter, float scalingRotation, const Float2& scaling, const Float2& rotationCenter, float rotation, const Float2& translation, Matrix& result);
 
-    // Creates a world matrix with the specified parameters.
-    // @param position Position of the object. This value is used in translation operations.
-    // @param forward Forward direction of the object.
-    // @param up Upward direction of the object; usually [0, 1, 0].
-    // @returns Created world matrix of given transformation world.
-    static Matrix CreateWorld(const Vector3& position, const Vector3& forward, const Vector3& up);
+    /// <summary>
+    /// Creates a world matrix with the specified parameters.
+    /// </summary>
+    /// <param name="position">Position of the object. This value is used in translation operations.</param>
+    /// <param name="forward">Forward direction of the object.</param>
+    /// <param name="up">Upward direction of the object; usually [0, 1, 0].</param>
+    /// <returns>Created world matrix of given transformation world.</returns>
+    static Matrix CreateWorld(const Float3& position, const Float3& forward, const Float3& up);
 
-    // Creates a world matrix with the specified parameters.
-    // @param position Position of the object. This value is used in translation operations.
-    // @param forward Forward direction of the object.
-    // @param up Upward direction of the object; usually [0, 1, 0].
-    // @param result Created world matrix of given transformation world.
-    static void CreateWorld(const Vector3& position, const Vector3& forward, const Vector3& up, Matrix& result);
+    /// <summary>
+    /// Creates a world matrix with the specified parameters.
+    /// </summary>
+    /// <param name="position">Position of the object. This value is used in translation operations.</param>
+    /// <param name="forward">Forward direction of the object.</param>
+    /// <param name="up">Upward direction of the object; usually [0, 1, 0].</param>
+    /// <param name="result">Created world matrix of given transformation world.</param>
+    static void CreateWorld(const Float3& position, const Float3& forward, const Float3& up, Matrix& result);
 
-    // Creates a new Matrix that rotates around an arbitrary vector.
-    // @param axis The axis to rotate around.
-    // @param angle The angle to rotate around the vector.
-    // @returns Result matrix.
-    static Matrix CreateFromAxisAngle(const Vector3& axis, float angle);
+    /// <summary>
+    /// Creates a new Matrix that rotates around an arbitrary vector.
+    /// </summary>
+    /// <param name="axis">The axis to rotate around.</param>
+    /// <param name="angle">The angle to rotate around the vector.</param>
+    /// <returns>Result matrix.</returns>
+    static Matrix CreateFromAxisAngle(const Float3& axis, float angle);
 
-    // Creates a new Matrix that rotates around an arbitrary vector.
-    // @param axis The axis to rotate around.
-    // @param angle The angle to rotate around the vector.
-    // @param result Result matrix.
-    static void CreateFromAxisAngle(const Vector3& axis, float angle, Matrix& result);
+    /// <summary>
+    /// Creates a new Matrix that rotates around an arbitrary vector.
+    /// </summary>
+    /// <param name="axis"The axis to rotate around.></param>
+    /// <param name="angle">The angle to rotate around the vector.</param>
+    /// <param name="result">Result matrix.</param>
+    static void CreateFromAxisAngle(const Float3& axis, float angle, Matrix& result);
 
 public:
-
-    static Vector4 TransformPosition(const Matrix& m, const Vector3& v);
-    static Vector4 TransformPosition(const Matrix& m, const Vector4& v);
+    static Vector3 TransformVector(const Matrix& m, const Vector3& v);
+    static Float4 TransformPosition(const Matrix& m, const Float3& v);
+    static Float4 TransformPosition(const Matrix& m, const Float4& v);
 };
 
 template<>

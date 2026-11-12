@@ -1,9 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "PostFxVolume.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Level/Scene/SceneRendering.h"
 
 PostFxVolume::PostFxVolume(const SpawnParams& params)
@@ -21,11 +22,11 @@ void PostFxVolume::Collect(RenderContext& renderContext)
     float weight = _blendWeight;
     if (_isBounded)
     {
-        float distance;
-        if (_bounds.Contains(renderContext.View.Position, &distance) == ContainmentType::Contains)
+        Real distance;
+        if (_bounds.Contains(renderContext.View.WorldPosition, &distance) == ContainmentType::Contains)
         {
             if (_blendRadius > 0.0f)
-                weight = Math::Saturate(distance / _blendRadius) * weight;
+                weight = Math::Saturate((float)distance / _blendRadius) * weight;
         }
         else
         {
@@ -33,7 +34,7 @@ void PostFxVolume::Collect(RenderContext& renderContext)
         }
     }
 
-    if (weight > ZeroTolerance)
+    if (weight > ZeroTolerance && renderContext.View.RenderLayersMask.HasLayer(GetLayer()))
     {
         const float totalSizeSqrt = (_transform.Scale * _size).LengthSquared();
         renderContext.List->AddSettingsBlend((IPostFxSettingsProvider*)this, weight, _priority, totalSizeSqrt);
@@ -43,6 +44,7 @@ void PostFxVolume::Collect(RenderContext& renderContext)
 void PostFxVolume::Blend(PostProcessSettings& other, float weight)
 {
     other.AmbientOcclusion.BlendWith(AmbientOcclusion, weight);
+    other.GlobalIllumination.BlendWith(GlobalIllumination, weight);
     other.Bloom.BlendWith(Bloom, weight);
     other.ToneMapping.BlendWith(ToneMapping, weight);
     other.ColorGrading.BlendWith(ColorGrading, weight);
@@ -118,6 +120,9 @@ void PostFxVolume::Serialize(SerializeStream& stream, const void* otherObj)
         stream.JKEY("AO");
         stream.Object(&AmbientOcclusion, other ? &other->AmbientOcclusion : nullptr);
 
+        stream.JKEY("GI");
+        stream.Object(&GlobalIllumination, other ? &other->GlobalIllumination : nullptr);
+
         stream.JKEY("Bloom");
         stream.Object(&Bloom, other ? &other->Bloom : nullptr);
 
@@ -169,6 +174,7 @@ void PostFxVolume::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     {
         auto& settingsStream = settingsMember->value;
         AmbientOcclusion.DeserializeIfExists(settingsStream, "AO", modifier);
+        GlobalIllumination.DeserializeIfExists(settingsStream, "GI", modifier);
         Bloom.DeserializeIfExists(settingsStream, "Bloom", modifier);
         ToneMapping.DeserializeIfExists(settingsStream, "ToneMapping", modifier);
         ColorGrading.DeserializeIfExists(settingsStream, "ColorGrading", modifier);

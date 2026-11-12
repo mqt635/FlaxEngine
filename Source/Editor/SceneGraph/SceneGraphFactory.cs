@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -44,12 +44,14 @@ namespace FlaxEditor.SceneGraph
             CustomNodesTypes.Add(typeof(SkyLight), typeof(SkyLightNode));
             CustomNodesTypes.Add(typeof(PostFxVolume), typeof(PostFxVolumeNode));
             CustomNodesTypes.Add(typeof(StaticModel), typeof(StaticModelNode));
+            CustomNodesTypes.Add(typeof(AnimatedModel), typeof(AnimatedModelNode));
             CustomNodesTypes.Add(typeof(BoxBrush), typeof(BoxBrushNode));
             CustomNodesTypes.Add(typeof(TextRender), typeof(TextRenderNode));
             CustomNodesTypes.Add(typeof(AudioListener), typeof(AudioListenerNode));
             CustomNodesTypes.Add(typeof(AudioSource), typeof(AudioSourceNode));
             CustomNodesTypes.Add(typeof(BoneSocket), typeof(BoneSocketNode));
             CustomNodesTypes.Add(typeof(Decal), typeof(DecalNode));
+            CustomNodesTypes.Add(typeof(Cloth), typeof(ClothNode));
             CustomNodesTypes.Add(typeof(BoxCollider), typeof(BoxColliderNode));
             CustomNodesTypes.Add(typeof(SphereCollider), typeof(ColliderNode));
             CustomNodesTypes.Add(typeof(CapsuleCollider), typeof(ColliderNode));
@@ -71,6 +73,8 @@ namespace FlaxEditor.SceneGraph
             CustomNodesTypes.Add(typeof(SplineRopeBody), typeof(ActorNode));
             CustomNodesTypes.Add(typeof(NavMesh), typeof(ActorNode));
             CustomNodesTypes.Add(typeof(SpriteRender), typeof(SpriteRenderNode));
+            CustomNodesTypes.Add(typeof(Joint), typeof(JointNode));
+            CustomNodesTypes.Add(typeof(RigidBody), typeof(RigidBodyNode));
         }
 
         /// <summary>

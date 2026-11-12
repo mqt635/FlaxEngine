@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -17,34 +17,6 @@ namespace Flax.Deps.Dependencies
     /// <seealso cref="Flax.Deps.Dependency" />
     class PhysX : Dependency
     {
-        /// <inheritdoc />
-        public override TargetPlatform[] Platforms
-        {
-            get
-            {
-                switch (BuildPlatform)
-                {
-                case TargetPlatform.Windows:
-                    return new[]
-                    {
-                        TargetPlatform.Windows,
-                        TargetPlatform.UWP,
-                        TargetPlatform.XboxOne,
-                        TargetPlatform.PS4,
-                        TargetPlatform.XboxScarlett,
-                        TargetPlatform.Android,
-                        TargetPlatform.Switch,
-                    };
-                case TargetPlatform.Linux:
-                    return new[]
-                    {
-                        TargetPlatform.Linux,
-                    };
-                default: return new TargetPlatform[0];
-                }
-            }
-        }
-
         private string root;
         private string projectGenDir;
         private string projectGenPath;
@@ -59,8 +31,13 @@ namespace Flax.Deps.Dependencies
                 if (cmakeSwitch.HasAttribute("name") && cmakeSwitch.Attributes["name"].Value == name)
                 {
                     cmakeSwitch.Attributes["value"].Value = value;
+                    return;
                 }
             }
+            var child = cmakeSwitches.OwnerDocument.CreateElement(cmakeSwitches.ChildNodes[0].Name);
+            child.SetAttribute("name", name);
+            child.SetAttribute("value", value);
+            cmakeSwitches.AppendChild(child);
         }
 
         private void Build(BuildOptions options, string preset, TargetPlatform targetPlatform, TargetArchitecture architecture)
@@ -71,23 +48,52 @@ namespace Flax.Deps.Dependencies
                 throw new Exception(string.Format("Missing PhysX preset {0} (file: {1})", preset, presetPath));
             var presetXml = new XmlDocument();
             presetXml.Load(presetPath);
+            var usePVD = false;
 
             // Configure preset
             var cmakeSwitches = presetXml["preset"]["CMakeSwitches"];
             ConfigureCmakeSwitch(cmakeSwitches, "PX_BUILDSNIPPETS", "False");
+            ConfigureCmakeSwitch(cmakeSwitches, "PX_BUILDPVDRUNTIME", "False");
             ConfigureCmakeSwitch(cmakeSwitches, "PX_BUILDSAMPLES", "False");
             ConfigureCmakeSwitch(cmakeSwitches, "PX_BUILDPUBLICSAMPLES", "False");
             ConfigureCmakeSwitch(cmakeSwitches, "PX_GENERATE_STATIC_LIBRARIES", "True");
             ConfigureCmakeSwitch(cmakeSwitches, "NV_USE_STATIC_WINCRT", "False");
             ConfigureCmakeSwitch(cmakeSwitches, "NV_USE_DEBUG_WINCRT", "False");
             ConfigureCmakeSwitch(cmakeSwitches, "PX_FLOAT_POINT_PRECISE_MATH", "False");
+            if (usePVD)
+            {
+                // PVD depends on metadata and serialization code striped from shipping builds
+                ConfigureCmakeSwitch(cmakeSwitches, "PX_SERIALIZATION", "True");
+            }
             var cmakeParams = presetXml["preset"]["CMakeParams"];
             switch (targetPlatform)
             {
+            case TargetPlatform.Windows:
+                if (architecture == TargetArchitecture.ARM64)
+                {
+                    // Windows ARM64 doesn't have precompiled files for GPU support, so avoid copying those DLLs around
+                    ConfigureCmakeSwitch(cmakeSwitches, "PX_COPY_EXTERNAL_DLL", "OFF");
+                    ConfigureCmakeSwitch(cmakeParams, "PX_COPY_EXTERNAL_DLL", "OFF");
+                }
+                break;
+            case TargetPlatform.Linux:
+                ConfigureCmakeSwitch(cmakeParams, "PHYSX_CXX_FLAGS", "\"-Wno-error=format -Wno-error=unused-but-set-variable -Wno-error=switch-default -Wno-error=invalid-offsetof -Wno-error=unsafe-buffer-usage -Wno-error=unsafe-buffer-usage-in-libc-call -Wno-error=missing-include-dirs\"");
+                break;
             case TargetPlatform.Android:
-                ConfigureCmakeSwitch(cmakeParams, "CMAKE_INSTALL_PREFIX", $"install/android-{Configuration.AndroidPlatformApi}/PhysX");
-                ConfigureCmakeSwitch(cmakeParams, "ANDROID_NATIVE_API_LEVEL", $"android-{Configuration.AndroidPlatformApi}");
+                ConfigureCmakeSwitch(cmakeParams, "CMAKE_INSTALL_PREFIX", $"install/android-{AndroidConfiguration.PlatformApi}/PhysX");
+                ConfigureCmakeSwitch(cmakeParams, "ANDROID_NATIVE_API_LEVEL", $"android-{AndroidConfiguration.PlatformApi}");
                 ConfigureCmakeSwitch(cmakeParams, "ANDROID_ABI", AndroidToolchain.GetAbiName(architecture));
+                break;
+            case TargetPlatform.Mac:
+                ConfigureCmakeSwitch(cmakeParams, "CMAKE_OSX_DEPLOYMENT_TARGET", MacConfiguration.MacOSXMinVer);
+                ConfigureCmakeSwitch(cmakeParams, "PHYSX_CXX_FLAGS", "\"-Wno-error=format -Wno-error=unused-but-set-variable -Wno-error=switch-default -Wno-error=invalid-offsetof -Wno-error=unsafe-buffer-usage -Wno-error=unsafe-buffer-usage-in-libc-call -Wno-error=missing-include-dirs\"");
+                break;
+            case TargetPlatform.iOS:
+                ConfigureCmakeSwitch(cmakeParams, "CMAKE_OSX_DEPLOYMENT_TARGET", iOSConfiguration.MinVer);
+                ConfigureCmakeSwitch(cmakeParams, "CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET", iOSConfiguration.MinVer);
+                break;
+            case TargetPlatform.Web:
+                ConfigureCmakeSwitch(cmakeParams, "PHYSX_CXX_FLAGS", WebConfiguration.Threads ? "\"-pthread\"" : "");
                 break;
             }
 
@@ -100,9 +106,11 @@ namespace Flax.Deps.Dependencies
             string bits;
             string arch;
             string binariesSubDir;
-            string buildPlatform;
+            string buildPlatform = architecture == TargetArchitecture.x86 ? "Win32" : architecture.ToString();
             bool suppressBitsPostfix = false;
             string binariesPrefix = string.Empty;
+            var envVars = new Dictionary<string, string>();
+            envVars.Add("CMAKE_BUILD_PARALLEL_LEVEL", CmakeBuildParallel);
             switch (architecture)
             {
             case TargetArchitecture.x86:
@@ -123,24 +131,11 @@ namespace Flax.Deps.Dependencies
                 break;
             default: throw new InvalidArchitectureException(architecture);
             }
-
-            switch (architecture)
-            {
-            case TargetArchitecture.x86:
-                buildPlatform = "Win32";
-                break;
-            default:
-                buildPlatform = architecture.ToString();
-                break;
-            }
-
+            var msBuildProps = new Dictionary<string, string>();
             switch (targetPlatform)
             {
             case TargetPlatform.Windows:
-                binariesSubDir = string.Format("win.{0}_{1}.vc140.md", arch, bits);
-                break;
-            case TargetPlatform.UWP:
-                binariesSubDir = string.Format("uwp.{0}_{1}.vc141", arch, bits);
+                binariesSubDir = string.Format("win.{0}_{1}.vc143.md", arch, bits);
                 break;
             case TargetPlatform.Linux:
                 binariesSubDir = "linux.clang";
@@ -152,6 +147,12 @@ namespace Flax.Deps.Dependencies
                 suppressBitsPostfix = true;
                 binariesPrefix = "lib";
                 break;
+            case TargetPlatform.PS5:
+                binariesSubDir = "ps5";
+                buildPlatform = "PROSPERO";
+                suppressBitsPostfix = true;
+                binariesPrefix = "lib";
+                break;
             case TargetPlatform.XboxOne:
             case TargetPlatform.XboxScarlett:
                 binariesSubDir = "win.x86_64.vc142.md";
@@ -160,29 +161,55 @@ namespace Flax.Deps.Dependencies
                 switch (architecture)
                 {
                 case TargetArchitecture.ARM64:
-                    binariesSubDir = "android.arm64-v8a.fp-soft";
+                    binariesSubDir = "android.arm64-v8a";
                     break;
                 default: throw new InvalidArchitectureException(architecture);
                 }
                 binariesPrefix = "lib";
-                suppressBitsPostfix = true;
                 break;
             case TargetPlatform.Switch:
                 binariesSubDir = "switch64";
                 buildPlatform = "NX64";
                 suppressBitsPostfix = true;
                 binariesPrefix = "lib";
+                envVars.Add("NintendoSdkRoot", Sdk.Get("SwitchSdk").RootPath + '\\');
+                msBuildProps.Add("NintendoSdkRoot", envVars["NintendoSdkRoot"]);
+                break;
+            case TargetPlatform.Mac:
+                switch (architecture)
+                {
+                case TargetArchitecture.x64:
+                    binariesSubDir = "mac.x86_64";
+                    break;
+                case TargetArchitecture.ARM64:
+                    binariesSubDir = "mac.arm64";
+                    break;
+                default: throw new InvalidArchitectureException(architecture);
+                }
+                binariesPrefix = "lib";
+                envVars.Add("MACOSX_DEPLOYMENT_TARGET", MacConfiguration.MacOSXMinVer);
+                break;
+            case TargetPlatform.iOS:
+                binariesSubDir = "ios.arm_64";
+                binariesPrefix = "lib";
+                envVars.Add("IPHONEOS_DEPLOYMENT_TARGET", iOSConfiguration.MinVer);
+                break;
+            case TargetPlatform.Web:
+                binariesSubDir = "web32";
+                binariesPrefix = "lib";
+                envVars.Add("CMAKE_TOOLCHAIN_FILE", EmscriptenSdk.Instance.CMakeToolchainPath);
                 break;
             default: throw new InvalidPlatformException(targetPlatform);
             }
 
             // Setup build environment variables for PhysX build system
-            var envVars = new Dictionary<string, string>();
+            string msBuild = null;
             switch (BuildPlatform)
             {
             case TargetPlatform.Windows:
             {
-                var msBuild = VCEnvironment.MSBuildPath;
+                GetMsBuildForPlatform(targetPlatform, out var vsVersion, out msBuild);
+                // TODO: override VS version in cmake_generate_projects.py too
                 if (File.Exists(msBuild))
                 {
                     envVars.Add("PATH", Path.GetDirectoryName(msBuild));
@@ -190,51 +217,43 @@ namespace Flax.Deps.Dependencies
                 break;
             }
             case TargetPlatform.Linux:
-            {
-                envVars.Add("CC", "clang-7");
-                envVars.Add("CC_FOR_BUILD", "clang-7");
+                envVars.Add("CC", "clang-" + LinuxConfiguration.ClangMinVer);
+                envVars.Add("CC_FOR_BUILD", "clang-" + LinuxConfiguration.ClangMinVer);
+                envVars.Add("CXX", "clang++-" + LinuxConfiguration.ClangMinVer);
                 break;
-            }
+            case TargetPlatform.Mac: break;
             default: throw new InvalidPlatformException(BuildPlatform);
             }
             if (AndroidNdk.Instance.IsValid)
+            {
+                envVars.Add("ANDROID_NDK_HOME", AndroidNdk.Instance.RootPath);
                 envVars.Add("PM_ANDROIDNDK_PATH", AndroidNdk.Instance.RootPath);
+            }
+
+            // Update packman for old PhysX version (https://github.com/NVIDIA-Omniverse/PhysX/issues/229)
+            if (BuildPlatform == TargetPlatform.Windows)
+                Utilities.Run(Path.Combine(projectGenDir, "buildtools", "packman", "packman.cmd"), "update -y");
+            else
+                Utilities.Run(Path.Combine(projectGenDir, "buildtools", "packman", "packman"), "update -y");
 
             // Print the PhysX version
             Log.Info("Building PhysX version " + File.ReadAllText(Path.Combine(root, "physx", "version.txt")) + " to " + binariesSubDir);
 
             // Generate project files
-            Utilities.Run(projectGenPath, preset, null, projectGenDir, Utilities.RunOptions.Default, envVars);
+            Utilities.Run(projectGenPath, preset, null, projectGenDir, Utilities.RunOptions.DefaultTool, envVars);
 
             switch (targetPlatform)
             {
             case TargetPlatform.PS4:
-                // Hack: PS4 uses .o extension for compiler output files but CMake uses .obj even if CMAKE_CXX_OUTPUT_EXTENSION/CMAKE_C_OUTPUT_EXTENSION are specified
-                Utilities.ReplaceInFiles(Path.Combine(root, "physx\\compiler\\ps4"), "*.vcxproj", SearchOption.AllDirectories, ".obj", ".o");
+            case TargetPlatform.PS5:
+            case TargetPlatform.Switch:
+                // Hack: Platform compiler uses .o extension for compiler output files but CMake uses .obj even if CMAKE_CXX_OUTPUT_EXTENSION/CMAKE_C_OUTPUT_EXTENSION are specified
+                Utilities.ReplaceInFiles(Path.Combine(root, "physx\\compiler\\" + binariesSubDir), "*.vcxproj", SearchOption.AllDirectories, ".obj", ".o");
                 break;
             case TargetPlatform.XboxOne:
             case TargetPlatform.XboxScarlett:
                 // Hack: force to use proper Win10 SDK
-                Utilities.ReplaceInFiles(Path.Combine(root, "physx\\compiler\\vc16win64"), "*.vcxproj", SearchOption.AllDirectories, "10.0.18362.0", "10.0.19041.0");
-
-                // Hack: fix STL include
-                Utilities.ReplaceInFile(Path.Combine(root, "physx\\source\\foundation\\include\\PsAllocator.h"), "#include <typeinfo.h>", "#include <typeinfo>");
-                break;
-            case TargetPlatform.Android:
-                // Hack: fix compilation errors
-                if (!File.ReadAllText(Path.Combine(root, "physx\\source\\foundation\\include\\PsUtilities.h")).Contains("#if PX_GCC_FAMILY && !PX_EMSCRIPTEN  && !PX_LINUX && !PX_ANDROID"))
-                    Utilities.ReplaceInFile(Path.Combine(root, "physx\\source\\foundation\\include\\PsUtilities.h"), "#if PX_GCC_FAMILY && !PX_EMSCRIPTEN  && !PX_LINUX", "#if PX_GCC_FAMILY && !PX_EMSCRIPTEN  && !PX_LINUX && !PX_ANDROID");
-                Utilities.ReplaceInFile(Path.Combine(root, "physx\\source\\compiler\\cmake\\android\\CMakeLists.txt"), "-Wno-maybe-uninitialized", "-Wno-unused-local-typedef -Wno-unused-private-field");
-
-                // PhysX build system for Android is old and doesn't support new NDK with clang so invoke cmake manually
-                if (!Directory.Exists(Path.Combine(root, "physx\\compiler\\android")))
-                    Directory.CreateDirectory(Path.Combine(root, "physx\\compiler\\android"));
-                envVars.Add("PHYSX_ROOT_DIR", Path.Combine(root, "physx"));
-                envVars.Add("PM_CMAKEMODULES_PATH", Path.Combine(root, "externals/CMakeModules"));
-                envVars.Add("PM_PXSHARED_PATH", Path.Combine(root, "pxshared"));
-                envVars.Add("PM_TARGA_PATH", Path.Combine(root, "externals/targa"));
-                envVars.Add("PM_PATHS", Path.Combine(root, "externals/CMakeModules") + ';' + Path.Combine(root, "externals/targa"));
-                RunCmake(Path.Combine(root, "physx\\compiler\\android"), targetPlatform, architecture, string.Format("\"{0}/physx/compiler/public\" -Wno-dev -DANDROID_NATIVE_API_LEVEL=android-{1} -DTARGET_BUILD_PLATFORM=android --no-warn-unused-cli -DCMAKE_BUILD_TYPE={2} -DCMAKE_PREFIX_PATH=\"{0}/externals/CMakeModules;{0}/externals/targa\" -DPHYSX_ROOT_DIR=\"{0}/physx\" -DPX_OUTPUT_LIB_DIR=\"{0}/physx\" -DPX_OUTPUT_BIN_DIR=\"{0}/physx\" -DPX_BUILDSNIPPETS=FALSE -DPX_GENERATE_STATIC_LIBRARIES=TRUE -DCMAKE_INSTALL_PREFIX=\"{0}/physx/install/android-{1}/PhysX\"", root, Configuration.AndroidPlatformApi, configuration), envVars);
+                Utilities.ReplaceInFiles(Path.Combine(root, "physx\\compiler", preset), "*.vcxproj", SearchOption.AllDirectories, "10.0.18362.0", "10.0.19041.0");
                 break;
             }
 
@@ -249,24 +268,33 @@ namespace Flax.Deps.Dependencies
                 "PhysXFoundation",
                 "PhysXPvdSDK",
                 "PhysXVehicle",
+                "PhysXVehicle2",
             };
             var dstBinaries = GetThirdPartyFolder(options, targetPlatform, architecture);
             var srcBinaries = Path.Combine(root, "physx", "bin", binariesSubDir, configuration);
+            if (targetPlatform == TargetPlatform.Web)
+                srcBinaries = Path.Combine(root, "physx", "compiler", binariesSubDir, "sdk_source_bin");
             switch (BuildPlatform)
             {
             case TargetPlatform.Windows:
                 switch (targetPlatform)
                 {
                 case TargetPlatform.Android:
-                    Utilities.Run("cmake", "--build .", null, Path.Combine(root, "physx\\compiler\\android"), Utilities.RunOptions.None, envVars);
+                    Utilities.Run("cmake", "--build .", null, Path.Combine(root, "physx\\compiler\\android-" + configuration), Utilities.RunOptions.ConsoleLogOutput, envVars);
+                    break;
+                case TargetPlatform.Web:
+                    Utilities.Run("cmake", "--build .", null, Path.Combine(root, "physx\\compiler\\" + preset), Utilities.RunOptions.DefaultTool, envVars);
                     break;
                 default:
-                    VCEnvironment.BuildSolution(Path.Combine(solutionFilesRoot, preset, "PhysXSDK.sln"), configuration, buildPlatform);
+                    VCEnvironment.BuildSolution(Path.Combine(solutionFilesRoot, preset, "PhysXSDK.sln"), configuration, buildPlatform, msBuildProps, msBuild);
                     break;
                 }
                 break;
             case TargetPlatform.Linux:
-                Utilities.Run("make", null, null, Path.Combine(projectGenDir, "compiler", "linux-" + configuration), Utilities.RunOptions.None);
+                Utilities.Run("make", null, null, Path.Combine(projectGenDir, "compiler", "linux-" + configuration), Utilities.RunOptions.ConsoleLogOutput, envVars);
+                break;
+            case TargetPlatform.Mac:
+                Utilities.Run("xcodebuild", "-project PhysXSDK.xcodeproj -alltargets -configuration " + configuration, null, Path.Combine(projectGenDir, "compiler", preset), Utilities.RunOptions.ConsoleLogOutput, envVars);
                 break;
             default: throw new InvalidPlatformException(BuildPlatform);
             }
@@ -276,13 +304,36 @@ namespace Flax.Deps.Dependencies
             Log.Verbose("Copy PhysX binaries from " + srcBinaries);
             foreach (var physXLib in defaultPhysXLibs)
             {
+                var remove = !usePVD && physXLib.Contains("Pvd");
                 var filename = suppressBitsPostfix ? string.Format("{0}{1}_static", binariesPrefix, physXLib) : string.Format("{0}{1}_static_{2}", binariesPrefix, physXLib, bits);
+                if (targetPlatform == TargetPlatform.Web)
+                    filename = binariesPrefix + physXLib;
                 filename += binariesExtension;
-                Utilities.FileCopy(Path.Combine(srcBinaries, filename), Path.Combine(dstBinaries, filename));
+                if (remove)
+                    Utilities.FileDelete(Path.Combine(dstBinaries, filename));
+                else
+                    Utilities.FileCopy(Path.Combine(srcBinaries, filename), Path.Combine(dstBinaries, filename));
 
                 var filenamePdb = Path.ChangeExtension(filename, "pdb");
-                if (File.Exists(Path.Combine(srcBinaries, filenamePdb)))
+                if (remove)
+                    Utilities.FileDelete(Path.Combine(dstBinaries, filenamePdb));
+                else if (File.Exists(Path.Combine(srcBinaries, filenamePdb)))
                     Utilities.FileCopy(Path.Combine(srcBinaries, filenamePdb), Path.Combine(dstBinaries, filenamePdb));
+
+                // Strip debug symbols to reduce binaries size
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Linux:
+                case TargetPlatform.Mac:
+                    switch (targetPlatform)
+                    {
+                    case TargetPlatform.Mac:
+                    case TargetPlatform.Android:
+                        Utilities.Run("strip", "\"" + filename + "\"", null, dstBinaries, Utilities.RunOptions.ConsoleLogOutput);
+                        break;
+                    }
+                    break;
+                }
             }
             srcBinaries = Path.Combine(root, "physx", "compiler", preset, "sdk_source_bin", configuration);
             var additionalPhysXLibs = new[]
@@ -310,79 +361,114 @@ namespace Flax.Deps.Dependencies
             root = options.IntermediateFolder;
             projectGenDir = Path.Combine(root, "physx");
             solutionFilesRoot = Path.Combine(root, "physx", "compiler");
-            if (BuildPlatform == TargetPlatform.Windows)
+            switch (BuildPlatform)
             {
+            case TargetPlatform.Windows:
                 projectGenPath = Path.Combine(projectGenDir, "generate_projects.bat");
-            }
-            else if (BuildPlatform == TargetPlatform.Linux)
-            {
+                break;
+            case TargetPlatform.Linux:
+            case TargetPlatform.Mac:
                 projectGenPath = Path.Combine(projectGenDir, "generate_projects.sh");
+                break;
+            default: throw new InvalidPlatformException(BuildPlatform);
             }
 
             // Get the source
-            CloneGitRepoSingleBranch(root, "https://github.com/NVIDIAGameWorks/PhysX.git", "4.1");
+            CloneGitRepoSingleBranch(root, "https://github.com/FlaxEngine/PhysX-5.git", "flax-master");
 
             foreach (var platform in options.Platforms)
             {
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-                {
-                    Build(options, "vc14win64", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.UWP:
-                {
-                    Build(options, "vc15uwp64", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.Linux:
-                {
-                    Build(options, "linux", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.PS4:
-                {
-                    Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "PhysX"), root, true, true);
-                    Build(options, "ps4", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.XboxScarlett:
-                {
-                    Build(options, "vc16win64", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.XboxOne:
-                {
-                    Build(options, "vc16win64", platform, TargetArchitecture.x64);
-                    break;
-                }
-                case TargetPlatform.Android:
-                {
-                    Build(options, "android", platform, TargetArchitecture.ARM64);
-                    break;
-                }
-                case TargetPlatform.Switch:
-                {
-                    Utilities.DirectoryCopy(Path.Combine(options.PlatformsFolder, "Switch", "Data", "PhysX"), root, true, true);
-                    Build(options, "switch64", platform, TargetArchitecture.ARM64);
-                    break;
-                }
+                    BuildStarted(platform, architecture);
+                    switch (platform)
+                    {
+                    case TargetPlatform.Windows:
+                    {
+                        if (architecture == TargetArchitecture.x64 || architecture == TargetArchitecture.ARM64)
+                        {
+                            if (WindowsPlatform.GetToolsets().Any(x => x.Key == WindowsPlatformToolset.v145))
+                            {
+                                try
+                                {
+                                    Build(options, architecture == TargetArchitecture.x64 ? "vc18win64" : "vc18win-arm64", platform, architecture);
+                                }
+                                catch (Exception e)
+                                {
+                                    Log.Warning($"Failed to generate VS2026 solution for PhysX, fallback to VS2022: {e.Message}");
+                                    Build(options, architecture == TargetArchitecture.x64 ? "vc17win64" : "vc17win-arm64", platform, architecture);
+                                }
+                            }
+                            else
+                                Build(options, architecture == TargetArchitecture.x64 ? "vc17win64" : "vc17win-arm64", platform, architecture);
+                        }
+                        else
+                            throw new InvalidArchitectureException(architecture);
+                        break;
+                    }
+                    case TargetPlatform.Linux:
+                    {
+                        Build(options, "linux", platform, architecture);
+                        break;
+                    }
+                    case TargetPlatform.PS4:
+                    {
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "PhysX"), root, true, true);
+                        Build(options, "ps4", platform, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.PS5:
+                    {
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "PhysX"), root, true, true);
+                        Build(options, "ps5", platform, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.XboxScarlett:
+                    case TargetPlatform.XboxOne:
+                    {
+                        Build(options, "vc16win64", platform, TargetArchitecture.x64);
+                        break;
+                    }
+                    case TargetPlatform.Android:
+                    {
+                        Build(options, "android", platform, TargetArchitecture.ARM64);
+                        break;
+                    }
+                    case TargetPlatform.Switch:
+                    {
+                        Utilities.DirectoryCopy(Path.Combine(GetBinariesFolder(options, platform), "Data", "PhysX"), root, true, true);
+                        Build(options, "switch64", platform, TargetArchitecture.ARM64);
+                        break;
+                    }
+                    case TargetPlatform.Mac:
+                    {
+                        if (architecture == TargetArchitecture.x64)
+                            Build(options, "mac64", platform, architecture);
+                        else if (architecture == TargetArchitecture.ARM64)
+                            Build(options, "mac-arm64", platform, architecture);
+                        else
+                            throw new InvalidArchitectureException(architecture);
+                        break;
+                    }
+                    case TargetPlatform.iOS:
+                    {
+                        Build(options, "ios64", platform, TargetArchitecture.ARM64);
+                        break;
+                    }
+                    case TargetPlatform.Web:
+                    {
+                        Build(options, "web32", platform, TargetArchitecture.x86);
+                        break;
+                    }
+                    }
                 }
             }
 
             // Copy header files
             var dstIncludePath = Path.Combine(options.ThirdPartyFolder, "PhysX");
             Directory.GetFiles(dstIncludePath, "*.h", SearchOption.AllDirectories).ToList().ForEach(File.Delete);
-            Utilities.DirectoryCopy(Path.Combine(root, "physx", "include"), dstIncludePath);
-            Utilities.DirectoryCopy(Path.Combine(root, "pxshared", "include"), dstIncludePath);
-            foreach (var filename in new[]
-            {
-                "Ps.h",
-                "PsAllocator.h",
-                "PsSync.h",
-            })
-                Utilities.FileCopy(Path.Combine(root, "physx", "source", "foundation", "include", filename), Path.Combine(dstIncludePath, "foundation", filename));
+            Utilities.FileCopy(Path.Combine(root, "LICENSE.md"), Path.Combine(dstIncludePath, "License.txt"));
+            Utilities.DirectoryCopy(Path.Combine(root, "physx", "include"), dstIncludePath, true, true);
         }
     }
 }

@@ -1,20 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ForwardPass.h"
-#include "RenderList.h"
+#include "Engine/Renderer/RenderList.h"
 #include "Engine/Core/Collections/Sorting.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Assets/Shader.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/RenderTargetPool.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 
 ForwardPass::ForwardPass()
-    : _shader(nullptr)
-    , _psApplyDistortion(nullptr)
+    : _psApplyDistortion(nullptr)
 {
 }
 
@@ -29,24 +29,17 @@ bool ForwardPass::Init()
     _psApplyDistortion = GPUDevice::Instance->CreatePipelineState();
     _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Forward"));
     if (_shader == nullptr)
-    {
         return true;
-    }
-#if COMPILE_WITH_DEV_ENV
-    _shader.Get()->OnReloading.Bind<ForwardPass, &ForwardPass::OnShaderReloading>(this);
-#endif
+    BIND_SHADER_RELOADING(_shader, ForwardPass, OnShaderReloading);
 
     return false;
 }
 
 bool ForwardPass::setupResources()
 {
-    // Check shader
     if (!_shader->IsLoaded())
-    {
         return true;
-    }
-    const auto shader = _shader->GetShader();
+    const auto shader = _shader->GPU;
 
     // Create pipeline stages
     GPUPipelineState::Description psDesc;
@@ -71,13 +64,10 @@ void ForwardPass::Dispose()
     _shader = nullptr;
 }
 
-void ForwardPass::Render(RenderContext& renderContext, GPUTexture* input, GPUTexture* output)
+void ForwardPass::Render(RenderContext& renderContext, GPUTexture*& input, GPUTexture*& output)
 {
     PROFILE_GPU_CPU("Forward");
-
-    // Cache data
-    auto device = GPUDevice::Instance;
-    auto context = device->GetMainContext();
+    auto context = GPUDevice::Instance->GetMainContext();
     auto& view = renderContext.View;
     auto mainCache = renderContext.List;
 
@@ -87,12 +77,22 @@ void ForwardPass::Render(RenderContext& renderContext, GPUTexture* input, GPUTex
     // Try to use read-only depth if supported
     GPUTexture* depthBuffer = renderContext.Buffers->DepthBuffer;
     GPUTextureView* depthBufferHandle = depthBuffer->View();
-    if (depthBuffer->GetDescription().Flags & GPUTextureFlags::ReadOnlyDepthView)
+    if (EnumHasAnyFlags(depthBuffer->Flags(), GPUTextureFlags::ReadOnlyDepthView))
         depthBufferHandle = depthBuffer->ViewReadOnlyDepth();
 
     // Check if there is no objects to render or no resources ready
     auto& forwardList = mainCache->DrawCallsLists[(int32)DrawCallsListType::Forward];
     auto& distortionList = mainCache->DrawCallsLists[(int32)DrawCallsListType::Distortion];
+    if ((forwardList.IsEmpty() && distortionList.IsEmpty())
+#if USE_EDITOR
+        || renderContext.View.Mode == ViewMode::PhysicsColliders
+#endif
+        )
+    {
+        // Skip rendering
+        Swap(input, output);
+        return;
+    }
     if (distortionList.IsEmpty() || checkIfSkipPass())
     {
         // Copy frame
@@ -109,8 +109,9 @@ void ForwardPass::Render(RenderContext& renderContext, GPUTexture* input, GPUTex
         const int32 height = renderContext.Buffers->GetHeight();
         const int32 distortionWidth = width;
         const int32 distortionHeight = height;
-        const auto tempDesc = GPUTextureDescription::New2D(distortionWidth, distortionHeight, Distortion_Pass_Output_Format);
+        const auto tempDesc = GPUTextureDescription::New2D(distortionWidth, distortionHeight, PixelFormat::R8G8B8A8_UNorm);
         auto distortionRT = RenderTargetPool::Get(tempDesc);
+        RENDER_TARGET_POOL_SET_NAME(distortionRT, "Forward.Distortion");
 
         // Clear distortion vectors
         context->Clear(distortionRT->View(), Color::Transparent);
@@ -120,15 +121,13 @@ void ForwardPass::Render(RenderContext& renderContext, GPUTexture* input, GPUTex
         // Render distortion pass
         view.Pass = DrawPass::Distortion;
         mainCache->ExecuteDrawCalls(renderContext, distortionList);
+
+        // Copy combined frame with distortion from transparent materials
         context->SetViewportAndScissors((float)width, (float)height);
         context->ResetRenderTarget();
         context->ResetSR();
-
-        // Bind inputs
         context->BindSR(0, input);
         context->BindSR(1, distortionRT);
-
-        // Copy combined frame with distortion from transparent materials
         context->SetRenderTarget(output->View());
         context->SetState(_psApplyDistortion);
         context->DrawFullscreenTriangle();
@@ -141,6 +140,6 @@ void ForwardPass::Render(RenderContext& renderContext, GPUTexture* input, GPUTex
         // Run forward pass
         view.Pass = DrawPass::Forward;
         context->SetRenderTarget(depthBufferHandle, output->View());
-        mainCache->ExecuteDrawCalls(renderContext, forwardList);
+        mainCache->ExecuteDrawCalls(renderContext, forwardList, input->View());
     }
 }

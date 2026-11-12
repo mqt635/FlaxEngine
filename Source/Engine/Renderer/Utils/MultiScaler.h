@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "../RendererPass.h"
+#include "Engine/Renderer/RendererPass.h"
+#include "Engine/Core/Collections/Dictionary.h"
+#include "Engine/Core/Math/Viewport.h"
 #include "Engine/Graphics/GPUPipelineStatePermutations.h"
 
 /// <summary>
@@ -11,16 +13,15 @@
 class MultiScaler : public RendererPass<MultiScaler>
 {
 private:
-
     AssetReference<Shader> _shader;
-    GPUPipelineState* _psHalfDepth = nullptr;
     GPUPipelineStatePermutationsPs<2> _psBlur5;
     GPUPipelineStatePermutationsPs<2> _psBlur9;
     GPUPipelineStatePermutationsPs<2> _psBlur13;
+    GPUPipelineStatePermutationsPs<3> _psHalfDepth;
     GPUPipelineState* _psUpscale = nullptr;
+    Dictionary<BlendingMode, GPUPipelineState*> _psBilateralUpscale;
 
 public:
-
     /// <summary>
     /// Filter mode
     /// </summary>
@@ -52,7 +53,7 @@ public:
     /// <param name="src">The source texture.</param>
     /// <param name="dst">The destination texture.</param>
     /// <param name="tmp">The temporary texture (should have the same size as destination texture).</param>
-    void Filter(const FilterMode mode, GPUContext* context, const int32 width, const int32 height, GPUTextureView* src, GPUTextureView* dst, GPUTextureView* tmp);
+    void Filter(FilterMode mode, GPUContext* context, int32 width, int32 height, GPUTextureView* src, GPUTextureView* dst, GPUTextureView* tmp);
 
     /// <summary>
     /// Performs texture filtering.
@@ -63,20 +64,29 @@ public:
     /// <param name="height">The output height.</param>
     /// <param name="srcDst">The source and destination texture.</param>
     /// <param name="tmp">The temporary texture (should have the same size as destination texture).</param>
-    void Filter(const FilterMode mode, GPUContext* context, const int32 width, const int32 height, GPUTextureView* srcDst, GPUTextureView* tmp);
+    void Filter(FilterMode mode, GPUContext* context, int32 width, int32 height, GPUTextureView* srcDst, GPUTextureView* tmp);
 
     /// <summary>
-    /// Downscales the depth buffer (to half resolution).
+    /// Downscales the depth buffer (to half resolution). Uses `max` operator (`min` for inverted depth) to output the furthest depths for conservative usage.
     /// </summary>
     /// <param name="context">The context.</param>
     /// <param name="dstWidth">The width of the destination texture (in pixels).</param>
     /// <param name="dstHeight">The height of the destination texture (in pixels).</param>
-    /// <param name="src">The source texture.</param>
-    /// <param name="dst">The destination texture.</param>
+    /// <param name="src">The source texture (has to have ShaderResource flag).</param>
+    /// <param name="dst">The destination texture (has to have DepthStencil or RenderTarget flag).</param>
     void DownscaleDepth(GPUContext* context, int32 dstWidth, int32 dstHeight, GPUTexture* src, GPUTextureView* dst);
 
     /// <summary>
-    /// Upscales the texture.
+    /// Generates the Hierarchical Z-Buffer (HiZ) for a given depth buffer with a mip chain.
+    /// </summary>
+    /// <param name="context">The context.</param>
+    /// <param name="srcDepth">The source depth buffer texture (has to have ShaderResource flag).</param>
+    /// <param name="dstHiZ">The destination HiZ texture (has to have DepthStencil or RenderTarget flag).</param>
+    /// <param name="closest">True if generate the closest depth values, otherwise will use the furthest depths filter.</param>
+    void BuildHiZ(GPUContext* context, GPUTexture* srcDepth, GPUTexture* dstHiZ, bool closest = true);
+
+    /// <summary>
+    /// Upscales the texture using Catmull-Rom filtering with 9-taps.
     /// </summary>
     /// <param name="context">The context.</param>
     /// <param name="viewport">The viewport of the destination texture.</param>
@@ -84,26 +94,28 @@ public:
     /// <param name="dst">The destination texture.</param>
     void Upscale(GPUContext* context, const Viewport& viewport, GPUTexture* src, GPUTextureView* dst);
 
-public:
+    /// <summary>
+    /// Upscales the texture using bilateral filtering (depth+normal weighting).
+    /// </summary>
+    /// <param name="context">The context.</param>
+    /// <param name="viewport">The viewport of the destination texture.</param>
+    /// <param name="src">The source texture.</param>
+    /// <param name="dst">The destination texture.</param>
+    /// <param name="depth">The depth buffer (hardware depth).</param>
+    /// <param name="normal">The normal buffer (RGB encoded for GBuffer).</param>
+    /// <param name="blendMode">The blending mode to use when drawing the image. Can be used to composite upscaled image in additive mode (eg. into lighting/reflections buffer).</param>
+    void BilateralUpscale(GPUContext* context, const Viewport& viewport, GPUTexture* src, GPUTextureView* dst, GPUTexture* depth, GPUTexture* normal, const BlendingMode& blendMode = BlendingMode::Opaque);
 
+public:
     // [RendererPass]
     String ToString() const override;
     bool Init() override;
     void Dispose() override;
 #if COMPILE_WITH_DEV_ENV
-    void OnShaderReloading(Asset* obj)
-    {
-        _psHalfDepth->ReleaseGPU();
-        _psUpscale->ReleaseGPU();
-        _psBlur5.Release();
-        _psBlur9.Release();
-        _psBlur13.Release();
-        invalidateResources();
-    }
+    void OnShaderReloading(Asset* obj);
 #endif
 
 protected:
-
     // [RendererPass]
     bool setupResources() override;
 };

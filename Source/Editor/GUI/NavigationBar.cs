@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -11,6 +11,9 @@ namespace FlaxEditor.GUI
     /// <seealso cref="FlaxEngine.GUI.Panel" />
     public class NavigationBar : Panel
     {
+        private float _toolstripHeight = 0;
+        private Margin _toolstripMargin;
+
         /// <summary>
         /// The default buttons margin.
         /// </summary>
@@ -51,13 +54,55 @@ namespace FlaxEditor.GUI
             if (toolstrip == null)
                 return;
 
-            var lastToolstripButton = toolstrip.LastButton;
+            if (_toolstripHeight <= 0.0f)
+            {
+                // Cache initial toolstrip state
+                _toolstripHeight = toolstrip.Height;
+                _toolstripMargin = toolstrip.ItemsMargin;
+            }
+
+            // Control toolstrip bottom margin to prevent navigation bar scroll going over the buttons
+            var toolstripLocked = toolstrip.IsLayoutLocked;
+            toolstrip.IsLayoutLocked = true;
+            var toolstripHeight = _toolstripHeight;
+            var toolstripMargin = _toolstripMargin;
+            if (HScrollBar.Visible)
+            {
+                float scrollMargin = 8;
+                toolstripHeight += scrollMargin;
+                toolstripMargin.Bottom += scrollMargin;
+            }
+            toolstrip.Height = toolstripHeight;
+            toolstrip.IsLayoutLocked = toolstripLocked;
+            toolstrip.ItemsMargin = toolstripMargin;
+
+            var margin = toolstrip.ItemsMargin;
+            float xOffset = margin.Left;
+            bool hadChild = false;
+            for (int i = 0; i < toolstrip.ChildrenCount; i++)
+            {
+                var child = toolstrip.GetChild(i);
+                if (child == this || !child.Visible)
+                    continue;
+                hadChild = true;
+                xOffset += child.Width + margin.Width;
+            }
+
+            var right = hadChild ? xOffset - margin.Width : margin.Left;
             var parentSize = Parent.Size;
-            Bounds = new Rectangle
-            (
-             new Vector2(lastToolstripButton.Right + 8.0f, 0),
-             new Vector2(parentSize.X - X - 8.0f, toolstrip.Height)
-            );
+            var x = right + 8.0f;
+            var width = Mathf.Max(parentSize.X - x - 8.0f, 0.0f);
+            Bounds = new Rectangle(x, 0, width, toolstrip.Height);
+        }
+
+        /// <inheritdoc />
+        public override void PerformLayout(bool force = false)
+        {
+            base.PerformLayout(force);
+
+            // Stretch excluding toolstrip margin to fill the space
+            if (Parent is ToolStrip toolStrip)
+                Height = toolStrip.Height;
         }
     }
 }

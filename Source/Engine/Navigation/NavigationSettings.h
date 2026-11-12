@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,11 +9,11 @@
 /// <summary>
 /// The navigation system settings container.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings", NoConstructor) class FLAXENGINE_API NavigationSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings", NoConstructor) class FLAXENGINE_API NavigationSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(NavigationSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(NavigationSettings);
 
+public:
     /// <summary>
     /// If checked, enables automatic navmesh actors spawning on a scenes that are using it during navigation building.
     /// </summary>
@@ -27,7 +27,6 @@ public:
     bool AutoRemoveMissingNavMeshes = true;
 
 public:
-
     /// <summary>
     /// The height of a grid cell in the navigation mesh building steps using heightfields. A lower number means higher precision on the vertical axis but longer build times.
     /// </summary>
@@ -83,7 +82,6 @@ public:
     float MaxDetailSamplingError = 1.0f;
 
 public:
-
     /// <summary>
     /// The configuration for navmeshes.
     /// </summary>
@@ -97,7 +95,6 @@ public:
     Array<NavAreaProperties> NavAreas;
 
 public:
-
     NavigationSettings();
 
     /// <summary>
@@ -107,5 +104,8 @@ public:
 
     // [SettingsBase]
     void Apply() override;
+#if USE_EDITOR
+    void Serialize(SerializeStream& stream, const void* otherObj) override;
+#endif
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override;
 };

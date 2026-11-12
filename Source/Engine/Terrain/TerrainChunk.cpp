@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "TerrainChunk.h"
 #include "Engine/Serialization/Serialization.h"
@@ -9,9 +9,18 @@
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Graphics/RenderTools.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Core/Math/OrientedBoundingBox.h"
 #include "Engine/Level/Scene/Scene.h"
+#if USE_EDITOR
 #include "Engine/Level/Prefabs/PrefabManager.h"
+#endif
+
+TerrainChunk::TerrainChunk(const SpawnParams& params)
+    : ScriptingObject(params)
+{
+}
 
 void TerrainChunk::Init(TerrainPatch* patch, uint16 x, uint16 z)
 {
@@ -21,7 +30,7 @@ void TerrainChunk::Init(TerrainPatch* patch, uint16 x, uint16 z)
     _z = z;
     _yOffset = 0;
     _yHeight = 1;
-    _heightmapUVScaleBias = Vector4(1.0f, 1.0f, _x, _z) * (1.0f / TerrainPatch::CHUNKS_COUNT_EDGE);
+    _heightmapUVScaleBias = Float4(1.0f, 1.0f, _x, _z) * (1.0f / Terrain::ChunksCountEdge);
     _perInstanceRandom = (_patch->_terrain->_id.C ^ _x ^ _z) * (1.0f / (float)MAX_uint32);
     OverrideMaterial = nullptr;
 }
@@ -45,14 +54,14 @@ bool TerrainChunk::PrepareDraw(const RenderContext& renderContext)
 
         // Calculate chunk distance to view
         const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
-        const float distance = Vector3::Distance(_boundsCenter, lodView->Position);
+        const float distance = Float3::Distance(_sphere.Center - lodView->Origin, lodView->Position);
         lod = (int32)Math::Pow(distance / chunkEdgeSize, lodDistribution);
         lod += lodBias;
 
         //lod = 0;
         //lod = 10;
-        //lod = (_x + _z + TerrainPatch::CHUNKS_COUNT_EDGE * (_patch->_x + _patch->_z));
-        //lod = (int32)Vector2::Distance(Vector2(2, 2), Vector2(_patch->_x, _patch->_z) * TerrainPatch::CHUNKS_COUNT_EDGE + Vector2(_x, _z));
+        //lod = (_x + _z + Terrain::ChunksCountEdge * (_patch->_x + _patch->_z));
+        //lod = (int32)Vector2::Distance(Vector2(2, 2), Vector2(_patch->_x, _patch->_z) * Terrain::ChunksCountEdge + Vector2(_x, _z));
         //lod = (int32)(Vector3::Distance(_bounds.GetCenter(), view.Position) / 10000.0f);
     }
     lod = Math::Clamp(lod, minStreamedLod, lodCount - 1);
@@ -74,7 +83,7 @@ bool TerrainChunk::PrepareDraw(const RenderContext& renderContext)
     return true;
 }
 
-void TerrainChunk::Draw(const RenderContext& renderContext) const
+void TerrainChunk::Draw(const RenderContext& renderContext, DrawPass drawModes) const
 {
     const int32 lod = _cachedDrawLOD;
     const int32 minLod = Math::Max(lod + 1, 0);
@@ -84,13 +93,16 @@ void TerrainChunk::Draw(const RenderContext& renderContext) const
     DrawCall drawCall;
     if (TerrainManager::GetChunkGeometry(drawCall, chunkSize, lod))
         return;
+    if (!_neighbors[0])
+        const_cast<TerrainChunk*>(this)->CacheNeighbors();
     drawCall.InstanceCount = 1;
     drawCall.Material = _cachedDrawMaterial;
-    drawCall.World = _world;
+    renderContext.View.GetWorldMatrix(_transform, drawCall.World);
     drawCall.ObjectPosition = drawCall.World.GetTranslation();
+    drawCall.ObjectRadius = (float)_sphere.Radius;
     drawCall.Terrain.Patch = _patch;
     drawCall.Terrain.HeightmapUVScaleBias = _heightmapUVScaleBias;
-    drawCall.Terrain.OffsetUV = Vector2((float)(_patch->_x * TerrainPatch::CHUNKS_COUNT_EDGE + _x), (float)(_patch->_z * TerrainPatch::CHUNKS_COUNT_EDGE + _z));
+    drawCall.Terrain.OffsetUV = Vector2((float)(_patch->_x * Terrain::ChunksCountEdge + _x), (float)(_patch->_z * Terrain::ChunksCountEdge + _z));
     drawCall.Terrain.CurrentLOD = (float)lod;
     drawCall.Terrain.ChunkSizeNextLOD = (float)(((chunkSize + 1) >> (lod + 1)) - 1);
     drawCall.Terrain.TerrainChunkSizeLOD0 = TERRAIN_UNITS_PER_VERTEX * chunkSize;
@@ -101,7 +113,7 @@ void TerrainChunk::Draw(const RenderContext& renderContext) const
     drawCall.Terrain.NeighborLOD.W = (float)Math::Clamp<int32>(_neighbors[3]->_cachedDrawLOD, lod, minLod);
     const auto scene = _patch->_terrain->GetScene();
     const auto flags = _patch->_terrain->_staticFlags;
-    if (flags & StaticFlags::Lightmap && scene)
+    if ((flags & StaticFlags::Lightmap) != StaticFlags::None && scene)
     {
         drawCall.Terrain.Lightmap = scene->LightmapsData.GetReadyLightmap(Lightmap.TextureIndex);
         drawCall.Terrain.LightmapUVsArea = Lightmap.UVsArea;
@@ -109,10 +121,17 @@ void TerrainChunk::Draw(const RenderContext& renderContext) const
     else
     {
         drawCall.Terrain.Lightmap = nullptr;
-        drawCall.Terrain.LightmapUVsArea = Rectangle::Empty;
+        drawCall.Terrain.LightmapUVsArea = Half4::Zero;
     }
-    drawCall.WorldDeterminantSign = Math::FloatSelect(drawCall.World.RotDeterminant(), 1, -1);
     drawCall.PerInstanceRandom = _perInstanceRandom;
+    drawCall.SetStencilValue(_patch->_terrain->GetLayer());
+#if USE_EDITOR
+    if (renderContext.View.Mode == ViewMode::LightmapUVsDensity)
+    {
+        float lightmapScale = 1.0f;
+        drawCall.Surface.SkinningBonesOffset = *(uint32*)&lightmapScale; // See LightmapUVsDensityMaterialShader
+    }
+#endif
 
     // Add half-texel offset for heightmap sampling in vertex shader
     //const float lodHeightmapSize = Math::Max(1, drawCall.TerrainData.Heightmap->Width() >> lod);
@@ -121,7 +140,9 @@ void TerrainChunk::Draw(const RenderContext& renderContext) const
     //drawCall.TerrainData.HeightmapUVScaleBias.W += halfTexelOffset;
 
     // Submit draw call
-    renderContext.List->AddDrawCall(_patch->_terrain->DrawModes, flags, drawCall, true);
+    drawModes &= renderContext.View.Pass & drawCall.Material->GetDrawModes();
+    if (drawModes != DrawPass::None)
+        renderContext.List->AddDrawCall(renderContext, drawModes, flags, drawCall, true);
 }
 
 void TerrainChunk::Draw(const RenderContext& renderContext, MaterialBase* material, int32 lodIndex) const
@@ -141,11 +162,12 @@ void TerrainChunk::Draw(const RenderContext& renderContext, MaterialBase* materi
         return;
     drawCall.InstanceCount = 1;
     drawCall.Material = material;
-    drawCall.World = _world;
+    renderContext.View.GetWorldMatrix(_transform, drawCall.World);
     drawCall.ObjectPosition = drawCall.World.GetTranslation();
+    drawCall.ObjectRadius = (float)_sphere.Radius;
     drawCall.Terrain.Patch = _patch;
     drawCall.Terrain.HeightmapUVScaleBias = _heightmapUVScaleBias;
-    drawCall.Terrain.OffsetUV = Vector2((float)(_patch->_x * TerrainPatch::CHUNKS_COUNT_EDGE + _x), (float)(_patch->_z * TerrainPatch::CHUNKS_COUNT_EDGE + _z));
+    drawCall.Terrain.OffsetUV = Vector2((float)(_patch->_x * Terrain::ChunksCountEdge + _x), (float)(_patch->_z * Terrain::ChunksCountEdge + _z));
     drawCall.Terrain.CurrentLOD = (float)lod;
     drawCall.Terrain.ChunkSizeNextLOD = (float)(((chunkSize + 1) >> (lod + 1)) - 1);
     drawCall.Terrain.TerrainChunkSizeLOD0 = TERRAIN_UNITS_PER_VERTEX * chunkSize;
@@ -155,7 +177,7 @@ void TerrainChunk::Draw(const RenderContext& renderContext, MaterialBase* materi
     drawCall.Terrain.NeighborLOD.W = (float)lod;
     const auto scene = _patch->_terrain->GetScene();
     const auto flags = _patch->_terrain->_staticFlags;
-    if (flags & StaticFlags::Lightmap && scene)
+    if ((flags & StaticFlags::Lightmap) != StaticFlags::None && scene)
     {
         drawCall.Terrain.Lightmap = scene->LightmapsData.GetReadyLightmap(Lightmap.TextureIndex);
         drawCall.Terrain.LightmapUVsArea = Lightmap.UVsArea;
@@ -163,10 +185,17 @@ void TerrainChunk::Draw(const RenderContext& renderContext, MaterialBase* materi
     else
     {
         drawCall.Terrain.Lightmap = nullptr;
-        drawCall.Terrain.LightmapUVsArea = Rectangle::Empty;
+        drawCall.Terrain.LightmapUVsArea = Half4::Zero;
     }
-    drawCall.WorldDeterminantSign = Math::FloatSelect(drawCall.World.RotDeterminant(), 1, -1);
     drawCall.PerInstanceRandom = _perInstanceRandom;
+    drawCall.SetStencilValue(_patch->_terrain->GetLayer());
+#if USE_EDITOR
+    if (renderContext.View.Mode == ViewMode::LightmapUVsDensity)
+    {
+        float lightmapScale = 1.0f;
+        drawCall.Surface.SkinningBonesOffset = *(uint32*)&lightmapScale; // See LightmapUVsDensityMaterialShader
+    }
+#endif
 
     // Add half-texel offset for heightmap sampling in vertex shader
     //const float lodHeightmapSize = Math::Max(1, drawCall.TerrainData.Heightmap->Width() >> lod);
@@ -175,10 +204,12 @@ void TerrainChunk::Draw(const RenderContext& renderContext, MaterialBase* materi
     //drawCall.TerrainData.HeightmapUVScaleBias.W += halfTexelOffset;
 
     // Submit draw call
-    renderContext.List->AddDrawCall(_patch->_terrain->DrawModes, flags, drawCall, true);
+    const DrawPass drawModes = _patch->_terrain->DrawModes & renderContext.View.Pass & drawCall.Material->GetDrawModes();
+    if (drawModes != DrawPass::None)
+        renderContext.List->AddDrawCall(renderContext, drawModes, flags, drawCall, true);
 }
 
-bool TerrainChunk::Intersects(const Ray& ray, float& distance)
+bool TerrainChunk::Intersects(const Ray& ray, Real& distance)
 {
     return _bounds.Intersects(ray, distance);
 }
@@ -187,7 +218,7 @@ void TerrainChunk::UpdateBounds()
 {
     const Vector3 boundsExtent = _patch->_terrain->_boundsExtent;
     const float size = (float)_patch->_terrain->_chunkSize * TERRAIN_UNITS_PER_VERTEX;
-    Transform terrainTransform = _patch->_terrain->_transform;
+    const Transform terrainTransform = _patch->_terrain->_transform;
 
     Transform localTransform;
     localTransform.Translation = _patch->_offset + Vector3(_x * size, _yOffset, _z * size);
@@ -195,13 +226,10 @@ void TerrainChunk::UpdateBounds()
     localTransform.Scale = Vector3(size, _yHeight, size);
     localTransform = terrainTransform.LocalToWorld(localTransform);
 
-    Matrix world;
-    localTransform.GetWorld(world);
-
     OrientedBoundingBox obb(Vector3::Zero, Vector3::One);
-    obb.Transform(world);
+    obb.Transform(localTransform);
     obb.GetBoundingBox(_bounds);
-    _boundsCenter = _bounds.GetCenter();
+    BoundingSphere::FromBox(_bounds, _sphere);
 
     _bounds.Minimum -= boundsExtent;
     _bounds.Maximum += boundsExtent;
@@ -215,8 +243,7 @@ void TerrainChunk::UpdateTransform()
     localTransform.Translation = _patch->_offset + Vector3(_x * size, _patch->_yOffset, _z * size);
     localTransform.Orientation = Quaternion::Identity;
     localTransform.Scale = Vector3(1.0f, _patch->_yHeight, 1.0f);
-    localTransform = terrainTransform.LocalToWorld(localTransform);
-    localTransform.GetWorld(_world);
+    _transform = terrainTransform.LocalToWorld(localTransform);
 }
 
 void TerrainChunk::CacheNeighbors()
@@ -228,46 +255,46 @@ void TerrainChunk::CacheNeighbors()
     _neighbors[0] = this;
     if (_z > 0)
     {
-        _neighbors[0] = &_patch->Chunks[(_z - 1) * TerrainPatch::CHUNKS_COUNT_EDGE + _x];
+        _neighbors[0] = &_patch->Chunks[(_z - 1) * Terrain::ChunksCountEdge + _x];
     }
     else
     {
         const auto patch = _patch->_terrain->GetPatch(_patch->_x, _patch->_z - 1);
         if (patch)
-            _neighbors[0] = &patch->Chunks[(TerrainPatch::CHUNKS_COUNT_EDGE - 1) * TerrainPatch::CHUNKS_COUNT_EDGE + _x];
+            _neighbors[0] = &patch->Chunks[(Terrain::ChunksCountEdge - 1) * Terrain::ChunksCountEdge + _x];
     }
 
     // 1: left
     _neighbors[1] = this;
     if (_x > 0)
     {
-        _neighbors[1] = &_patch->Chunks[_z * TerrainPatch::CHUNKS_COUNT_EDGE + (_x - 1)];
+        _neighbors[1] = &_patch->Chunks[_z * Terrain::ChunksCountEdge + (_x - 1)];
     }
     else
     {
         const auto patch = _patch->_terrain->GetPatch(_patch->_x - 1, _patch->_z);
         if (patch)
-            _neighbors[1] = &patch->Chunks[_z * TerrainPatch::CHUNKS_COUNT_EDGE + (TerrainPatch::CHUNKS_COUNT_EDGE - 1)];
+            _neighbors[1] = &patch->Chunks[_z * Terrain::ChunksCountEdge + (Terrain::ChunksCountEdge - 1)];
     }
 
     // 2: right 
     _neighbors[2] = this;
-    if (_x < TerrainPatch::CHUNKS_COUNT_EDGE - 1)
+    if (_x < Terrain::ChunksCountEdge - 1)
     {
-        _neighbors[2] = &_patch->Chunks[_z * TerrainPatch::CHUNKS_COUNT_EDGE + (_x + 1)];
+        _neighbors[2] = &_patch->Chunks[_z * Terrain::ChunksCountEdge + (_x + 1)];
     }
     else
     {
         const auto patch = _patch->_terrain->GetPatch(_patch->_x + 1, _patch->_z);
         if (patch)
-            _neighbors[2] = &patch->Chunks[_z * TerrainPatch::CHUNKS_COUNT_EDGE];
+            _neighbors[2] = &patch->Chunks[_z * Terrain::ChunksCountEdge];
     }
 
     // 3: top
     _neighbors[3] = this;
-    if (_z < TerrainPatch::CHUNKS_COUNT_EDGE - 1)
+    if (_z < Terrain::ChunksCountEdge - 1)
     {
-        _neighbors[3] = &_patch->Chunks[(_z + 1) * TerrainPatch::CHUNKS_COUNT_EDGE + _x];
+        _neighbors[3] = &_patch->Chunks[(_z + 1) * Terrain::ChunksCountEdge + _x];
     }
     else
     {
@@ -287,15 +314,11 @@ void TerrainChunk::Serialize(SerializeStream& stream, const void* otherObj)
 
     if (HasLightmap()
 #if USE_EDITOR
-        && PrefabManager::IsNotCreatingPrefab
+        && !PrefabManager::IsCreatingPrefab
 #endif
     )
     {
-        stream.JKEY("LightmapIndex");
-        stream.Int(Lightmap.TextureIndex);
-
-        stream.JKEY("LightmapArea");
-        stream.Rectangle(Lightmap.UVsArea);
+        Lightmap.Serialize(stream);
     }
 }
 
@@ -304,6 +327,5 @@ void TerrainChunk::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     DESERIALIZE_MEMBER(Offset, _yOffset);
     DESERIALIZE_MEMBER(Height, _yHeight);
     DESERIALIZE_MEMBER(Material, OverrideMaterial);
-    DESERIALIZE_MEMBER(LightmapIndex, Lightmap.TextureIndex);
-    DESERIALIZE_MEMBER(LightmapArea, Lightmap.UVsArea);
+    Lightmap.Deserialize(stream);
 }

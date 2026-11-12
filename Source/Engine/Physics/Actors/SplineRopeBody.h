@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,35 +13,46 @@ class Spline;
 /// <seealso cref="Spline" />
 API_CLASS() class FLAXENGINE_API SplineRopeBody : public Actor
 {
-API_AUTO_SERIALIZATION();
-DECLARE_SCENE_OBJECT(SplineRopeBody);
+    API_AUTO_SERIALIZATION();
+    DECLARE_SCENE_OBJECT(SplineRopeBody);
 private:
-
     struct Mass
     {
         Vector3 Position;
-        float SegmentLength;
+        Real SegmentLength;
         Vector3 PrevPosition;
         bool Unconstrained;
     };
 
     Spline* _spline = nullptr;
+    Transform _splineTransform;
     float _time = 0.0f;
     Array<Mass> _masses;
 
 public:
-
     /// <summary>
-    /// The target actor too attach the rope end to. If unset the rope end will run freely.
+    /// The target actor to attach the rope end to. If unset the rope end will run freely.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(0), DefaultValue(null), EditorDisplay(\"Rope\")")
     ScriptingObjectReference<Actor> AttachEnd;
 
     /// <summary>
-    /// The world gravity scale applied to the rope. Can be used to adjust gravity force or disable it.
+    /// The world gravity scale. Can be used to adjust gravity force or disable it.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Rope\")")
     float GravityScale = 1.0f;
+
+    /// <summary>
+    /// The scale of velocity applied to rope. The greater the value, the more suppressed the movement. Lower values increase movement freedom.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(15), EditorDisplay(\"Rope\"), Limit(0, 0.99f, 0.001f)")
+    float Drag = 0.1f;
+
+    /// <summary>
+    /// The maximum bones stretch scale. The value of 0 means no stretch, 1 - can stretch up to double length.
+    /// </summary>
+    API_FIELD(Attributes = "EditorOrder(19), EditorDisplay(\"Rope\"), Limit(0)")
+    float StretchLimit = 0.0f;
 
     /// <summary>
     /// The additional, external force applied to rope (world-space). This can be eg. wind force.
@@ -62,11 +73,9 @@ public:
     float SubstepTime = 0.02f;
 
 private:
-
     void Tick();
 
 public:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;

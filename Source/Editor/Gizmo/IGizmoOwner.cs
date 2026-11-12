@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.Collections.Generic;
 using FlaxEngine;
 
 namespace FlaxEditor.Gizmo
@@ -10,6 +11,11 @@ namespace FlaxEditor.Gizmo
     [HideInEditor]
     public interface IGizmoOwner
     {
+        /// <summary>
+        /// Gets the gizmos collection.
+        /// </summary>
+        FlaxEditor.Viewport.EditorViewport Viewport { get; }
+
         /// <summary>
         /// Gets the gizmos collection.
         /// </summary>
@@ -46,9 +52,14 @@ namespace FlaxEditor.Gizmo
         bool SnapToGround { get; }
 
         /// <summary>
+        /// Gets a value indicating whether to use vertex snapping (check if user pressed the given input key to call action).
+        /// </summary>
+        bool SnapToVertex { get; }
+
+        /// <summary>
         /// Gets the view forward direction.
         /// </summary>
-        Vector3 ViewDirection { get; }
+        Float3 ViewDirection { get; }
 
         /// <summary>
         /// Gets the view position.
@@ -73,7 +84,7 @@ namespace FlaxEditor.Gizmo
         /// <summary>
         /// Gets the mouse movement delta.
         /// </summary>
-        Vector2 MouseDelta { get; }
+        Float2 MouseDelta { get; }
 
         /// <summary>
         /// Gets a value indicating whether use grid snapping during gizmo operations.
@@ -94,5 +105,22 @@ namespace FlaxEditor.Gizmo
         /// Gets the root tree node for the scene graph.
         /// </summary>
         SceneGraph.RootNode SceneGraphRoot { get; }
+
+        /// <summary>
+        /// Selects the scene objects.
+        /// </summary>
+        /// <param name="nodes">The nodes to select</param>
+        void Select(List<SceneGraph.SceneGraphNode> nodes);
+
+        /// <summary>
+        /// Spawns the actor in the viewport hierarchy.
+        /// </summary>
+        /// <param name="actor">The new actor to spawn.</param>
+        void Spawn(Actor actor);
+
+        /// <summary>
+        /// Opens the context menu at the current mouse location (using current selection).
+        /// </summary>
+        void OpenContextMenu();
     }
 }

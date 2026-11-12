@@ -1,15 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
+#include "Engine/Core/Math/Vector4.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "GPUDeviceDX11.h"
 #include "GPUPipelineStateDX11.h"
 #include "../IncludeDirectXHeaders.h"
+#include <ThirdParty/tracy/tracy/TracyD3D11.hpp>
 
 #if GRAPHICS_API_DIRECTX11
 
 class GPUBufferDX11;
+class GPUVertexLayoutDX11;
 
 /// <summary>
 /// GPU Context for DirectX 11 backend.
@@ -23,17 +26,23 @@ private:
 #if GPU_ALLOW_PROFILE_EVENTS
     ID3DUserDefinedAnnotation* _userDefinedAnnotations;
 #endif
-    int32 _maxUASlotsForCS;
+#if COMPILE_WITH_PROFILER
+    void* _tracyContext;
+    byte _tracyZone[TracyD3D11ZoneSize];
+#endif
+    int32 _maxUASlots;
+    bool _flushOnDispatch;
+    bool _depthBounds;
 
     // Output Merger
     bool _omDirtyFlag;
     int32 _rtCount;
     ID3D11DepthStencilView* _rtDepth;
     ID3D11RenderTargetView* _rtHandles[GPU_MAX_RT_BINDED];
-    ID3D11UnorderedAccessView* _uaOutput;
 
     // Shader Resources
-    bool _srDirtyFlag;
+    uint32 _srMaskDirtyGraphics;
+    uint32 _srMaskDirtyCompute;
     ID3D11ShaderResourceView* _srHandles[GPU_MAX_SR_BINDED];
 
     // Unordered Access
@@ -49,19 +58,28 @@ private:
     ID3D11Buffer* _vbHandles[GPU_MAX_VB_BINDED];
     UINT _vbStrides[GPU_MAX_VB_BINDED];
     UINT _vbOffsets[GPU_MAX_VB_BINDED];
+    GPUVertexLayoutDX11* _vertexLayout;
+    bool _iaInputLayoutDirtyFlag;
 
     // Pipeline State
+    ID3D11ComputeShader* _currentCompute;
     GPUPipelineStateDX11* _currentState;
     ID3D11BlendState* CurrentBlendState;
     ID3D11RasterizerState* CurrentRasterizerState;
     ID3D11DepthStencilState* CurrentDepthStencilState;
     GPUShaderProgramVSDX11* CurrentVS;
+#if GPU_ALLOW_TESSELLATION_SHADERS
     GPUShaderProgramHSDX11* CurrentHS;
     GPUShaderProgramDSDX11* CurrentDS;
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
     GPUShaderProgramGSDX11* CurrentGS;
+#endif
     GPUShaderProgramPSDX11* CurrentPS;
     GPUShaderProgramCSDX11* CurrentCS;
     D3D11_PRIMITIVE_TOPOLOGY CurrentPrimitiveTopology;
+    uint32 CurrentStencilRef;
+    Float4 CurrentBlendFactor;
 
 public:
 
@@ -94,12 +112,16 @@ private:
     void flushUAVs();
     void flushCBs();
     void flushOM();
+    void flushIA();
     void onDrawCall();
+    void onDispatch(GPUShaderProgramCS* shader);
+    void SetDepthBounds(bool enable, float minDepth, float maxDepth);
 
 public:
 
     // [GPUContext]
     void FrameBegin() override;
+    void OnPresent() override;
 #if GPU_ALLOW_PROFILE_EVENTS
     void EventBegin(const Char* name) override;
     void EventEnd() override;
@@ -107,20 +129,24 @@ public:
     void* GetNativePtr() const override;
     bool IsDepthBufferBinded() override;
     void Clear(GPUTextureView* rt, const Color& color) override;
-    void ClearDepth(GPUTextureView* depthBuffer, float depthValue) override;
-    void ClearUA(GPUBuffer* buf, const Vector4& value) override;
+    void ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue) override;
+    void ClearUA(GPUBuffer* buf, const Float4& value) override;
+    void ClearUA(GPUBuffer* buf, const uint32 value[4]) override;
+    void ClearUA(GPUTexture* texture, const uint32 value[4]) override;
+    void ClearUA(GPUTexture* texture, const Float4& value) override;
     void ResetRenderTarget() override;
     void SetRenderTarget(GPUTextureView* rt) override;
     void SetRenderTarget(GPUTextureView* depthBuffer, GPUTextureView* rt) override;
     void SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts) override;
-    void SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput) override;
+    void SetBlendFactor(const Float4& value) override;
+    void SetStencilRef(uint32 value) override;
     void ResetSR() override;
     void ResetUA() override;
     void ResetCB() override;
     void BindCB(int32 slot, GPUConstantBuffer* cb) override;
     void BindSR(int32 slot, GPUResourceView* view) override;
     void BindUA(int32 slot, GPUResourceView* view) override;
-    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr) override;
+    void BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets = nullptr, GPUVertexLayout* vertexLayout = nullptr) override;
     void BindIB(GPUBuffer* indexBuffer) override;
     void BindSampler(int32 slot, GPUSampler* sampler) override;
     void UpdateCB(GPUConstantBuffer* cb, const void* data) override;
@@ -131,11 +157,14 @@ public:
     void DrawIndexedInstanced(uint32 indicesCount, uint32 instanceCount, int32 startInstance, int32 startVertex, int32 startIndex) override;
     void DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs) override;
     void DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs) override;
+    uint64 BeginQuery(GPUQueryType type) override;
+    void EndQuery(uint64 queryID) override;
     void SetViewport(const Viewport& viewport) override;
     void SetScissor(const Rectangle& scissorRect) override;
+    void SetDepthBounds(float minDepth, float maxDepth) override;
     GPUPipelineState* GetState() const override;
     void SetState(GPUPipelineState* state) override;
-    void ClearState() override;
+    void ResetState() override;
     void FlushState() override;
     void Flush() override;
     void UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 size, uint32 offset) override;
@@ -146,6 +175,7 @@ public:
     void CopyCounter(GPUBuffer* dstBuffer, uint32 dstOffset, GPUBuffer* srcBuffer) override;
     void CopyResource(GPUResource* dstResource, GPUResource* srcResource) override;
     void CopySubresource(GPUResource* dstResource, uint32 dstSubresource, GPUResource* srcResource, uint32 srcSubresource) override;
+    void OverlapUA(bool end) override;
 };
 
 #endif

@@ -1,6 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS && !PLATFORM_SDL
 
 #include "WindowsInput.h"
 #include "WindowsWindow.h"
@@ -59,7 +59,7 @@ public:
 public:
 
     // [Mouse]
-    void SetMousePosition(const Vector2& newPosition) final override
+    void SetMousePosition(const Float2& newPosition) final override
     {
         ::SetCursorPos(static_cast<int32>(newPosition.X), static_cast<int32>(newPosition.Y));
 
@@ -189,8 +189,9 @@ bool WindowsMouse::WndProc(Window* window, const UINT msg, WPARAM wParam, LPARAM
     POINT p;
     p.x = static_cast<LONG>(WINDOWS_GET_X_LPARAM(lParam));
     p.y = static_cast<LONG>(WINDOWS_GET_Y_LPARAM(lParam));
+    const Float2 mousePosScreen(static_cast<float>(p.x), static_cast<float>(p.y));
     ::ClientToScreen(window->GetHWND(), &p);
-    const auto mousePos = Vector2(static_cast<float>(p.x), static_cast<float>(p.y));
+    const Float2 mousePos(static_cast<float>(p.x), static_cast<float>(p.y));
 
     // Handle mouse related messages
     switch (msg)
@@ -198,6 +199,13 @@ bool WindowsMouse::WndProc(Window* window, const UINT msg, WPARAM wParam, LPARAM
     case WM_MOUSEMOVE:
     {
         OnMouseMove(mousePos, window);
+        result = true;
+        break;
+    }    
+    case WM_NCMOUSEMOVE:
+    {
+        // The position in the message is already reported in screen-space
+        OnMouseMove(mousePosScreen, window);
         result = true;
         break;
     }
@@ -259,19 +267,38 @@ bool WindowsMouse::WndProc(Window* window, const UINT msg, WPARAM wParam, LPARAM
     }
     case WM_LBUTTONDBLCLK:
     {
-        OnMouseDoubleClick(mousePos, MouseButton::Left, window);
+        if (!Input::Mouse->IsRelative())
+            OnMouseDoubleClick(mousePos, MouseButton::Left, window);
+        else
+            OnMouseDown(mousePos, MouseButton::Left, window);
         result = true;
         break;
     }
     case WM_RBUTTONDBLCLK:
     {
-        OnMouseDoubleClick(mousePos, MouseButton::Right, window);
+        if (!Input::Mouse->IsRelative())
+            OnMouseDoubleClick(mousePos, MouseButton::Right, window);
+        else
+            OnMouseDown(mousePos, MouseButton::Right, window);
         result = true;
         break;
     }
     case WM_MBUTTONDBLCLK:
     {
-        OnMouseDoubleClick(mousePos, MouseButton::Middle, window);
+        if (!Input::Mouse->IsRelative())
+            OnMouseDoubleClick(mousePos, MouseButton::Middle, window);
+        else
+            OnMouseDown(mousePos, MouseButton::Middle, window);
+        result = true;
+        break;
+    }
+    case WM_XBUTTONDBLCLK:
+    {
+        const auto button = (HIWORD(wParam) & XBUTTON1) ? MouseButton::Extended1 : MouseButton::Extended2;
+        if (!Input::Mouse->IsRelative())
+            OnMouseDoubleClick(mousePos, button, window);
+        else
+            OnMouseDown(mousePos, button, window);
         result = true;
         break;
     }

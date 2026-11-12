@@ -1,13 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Math.h"
+#include "Vector2.h"
+#include "Vector3.h"
+#include "Vector4.h"
 
 /// <summary>
 /// Half-precision 16 bit floating point number consisting of a sign bit, a 5 bit biased exponent, and a 10 bit mantissa
 /// </summary>
-typedef uint16 Half;
+API_TYPEDEF() typedef uint16 Half;
 
 #define USE_SSE_HALF_CONVERSION 0
 
@@ -45,55 +48,23 @@ class FLAXENGINE_API Float16Compressor
     static const int32 minD = minC - subC - 1;
 
 public:
-
-    static Half Compress(const float value)
-    {
 #if USE_SSE_HALF_CONVERSION
+    FORCE_INLINE static Half Compress(float value)
+    {
 		__m128 value1 = _mm_set_ss(value);
 		__m128i value2 = _mm_cvtps_ph(value1, 0);
 		return static_cast<Half>(_mm_cvtsi128_si32(value2));
-#else
-        Bits v, s;
-        v.f = value;
-        uint32 sign = v.si & signN;
-        v.si ^= sign;
-        sign >>= shiftSign; // logical shift
-        s.si = mulN;
-        s.si = static_cast<int32>(s.f * v.f); // correct subnormals
-        v.si ^= (s.si ^ v.si) & -(minN > v.si);
-        v.si ^= (infN ^ v.si) & -((infN > v.si) & (v.si > maxN));
-        v.si ^= (nanN ^ v.si) & -((nanN > v.si) & (v.si > infN));
-        v.ui >>= shift; // logical shift
-        v.si ^= ((v.si - maxD) ^ v.si) & -(v.si > maxC);
-        v.si ^= ((v.si - minD) ^ v.si) & -(v.si > subC);
-        return v.ui | sign;
-#endif
     }
-
-    static float Decompress(const Half value)
+    FORCE_INLINE static float Decompress(Half value)
     {
-#if USE_SSE_HALF_CONVERSION
 		__m128i value1 = _mm_cvtsi32_si128(static_cast<int>(value));
 		__m128 value2 = _mm_cvtph_ps(value1);
 		return _mm_cvtss_f32(value2);
-#else
-        Bits v;
-        v.ui = value;
-        int32 sign = v.si & signC;
-        v.si ^= sign;
-        sign <<= shiftSign;
-        v.si ^= ((v.si + minD) ^ v.si) & -(v.si > subC);
-        v.si ^= ((v.si + maxD) ^ v.si) & -(v.si > maxC);
-        Bits s;
-        s.si = mulC;
-        s.f *= v.si;
-        const int32 mask = -(norC > v.si);
-        v.si <<= shift;
-        v.si ^= (s.si ^ v.si) & mask;
-        v.si |= sign;
-        return v.f;
-#endif
     }
+#else
+    static Half Compress(float value);
+    static float Decompress(Half value);
+#endif
 };
 
 /// <summary>
@@ -102,14 +73,12 @@ public:
 struct FLAXENGINE_API Half2
 {
 public:
-
     /// <summary>
     /// Zero vector
     /// </summary>
     static Half2 Zero;
 
 public:
-
     /// <summary>
     /// Gets or sets the X component of the vector.
     /// </summary>
@@ -121,11 +90,19 @@ public:
     Half Y;
 
 public:
-
     /// <summary>
     /// Default constructor
     /// </summary>
-    Half2()
+    Half2() = default;
+
+    /// <summary>
+    /// Init
+    /// </summary>
+    /// <param name="x">X component</param>
+    /// <param name="y">Y component</param>
+    FORCE_INLINE Half2(Half x, Half y)
+        : X(x)
+        , Y(y)
     {
     }
 
@@ -134,7 +111,7 @@ public:
     /// </summary>
     /// <param name="x">X component</param>
     /// <param name="y">Y component</param>
-    Half2(float x, float y)
+    FORCE_INLINE Half2(float x, float y)
     {
         X = Float16Compressor::Compress(x);
         Y = Float16Compressor::Compress(y);
@@ -144,15 +121,14 @@ public:
     /// Init
     /// </summary>
     /// <param name="v">X and Y components</param>
-    Half2(const Vector2& v);
+    FORCE_INLINE Half2(const Float2& v)
+    {
+        X = Float16Compressor::Compress(v.X);
+        Y = Float16Compressor::Compress(v.Y);
+    }
 
 public:
-
-    /// <summary>
-    /// Convert to Vector2
-    /// </summary>
-    /// <returns>Vector2</returns>
-    Vector2 ToVector2() const;
+    Float2 ToFloat2() const;
 };
 
 /// <summary>
@@ -161,14 +137,12 @@ public:
 struct FLAXENGINE_API Half3
 {
 public:
-
     /// <summary>
     /// Zero vector
     /// </summary>
     static Half3 Zero;
 
 public:
-
     /// <summary>
     /// Gets or sets the X component of the vector.
     /// </summary>
@@ -185,23 +159,31 @@ public:
     Half Z;
 
 public:
+    Half3() = default;
 
-    Half3()
+    FORCE_INLINE Half3(Half x, Half y, Half z)
+        : X(x)
+        , Y(y)
+        , Z(z)
     {
     }
 
-    Half3(const float x, const float y, const float z)
+    FORCE_INLINE Half3(float x, float y, float z)
     {
         X = Float16Compressor::Compress(x);
         Y = Float16Compressor::Compress(y);
         Z = Float16Compressor::Compress(z);
     }
 
-    Half3(const Vector3& v);
+    FORCE_INLINE Half3(const Float3& v)
+    {
+        X = Float16Compressor::Compress(v.X);
+        Y = Float16Compressor::Compress(v.Y);
+        Z = Float16Compressor::Compress(v.Z);
+    }
 
 public:
-
-    Vector3 ToVector3() const;
+    Float3 ToFloat3() const;
 };
 
 /// <summary>
@@ -210,14 +192,12 @@ public:
 struct FLAXENGINE_API Half4
 {
 public:
-
     /// <summary>
     /// Zero vector
     /// </summary>
     static Half4 Zero;
 
 public:
-
     /// <summary>
     /// Gets or sets the X component of the vector.
     /// </summary>
@@ -239,8 +219,13 @@ public:
     Half W;
 
 public:
+    Half4() = default;
 
-    Half4()
+    Half4(Half x, Half y, Half z, Half w)
+        : X(x)
+        , Y(y)
+        , Z(z)
+        , W(w)
     {
     }
 
@@ -260,13 +245,25 @@ public:
         W = Float16Compressor::Compress(w);
     }
 
-    explicit Half4(const Vector4& v);
+    explicit Half4(const Float4& v);
     explicit Half4(const Color& c);
     explicit Half4(const Rectangle& rect);
 
-public:
+    operator Float2() const
+    {
+        return ToFloat2();
+    }
+    operator Float3() const
+    {
+        return ToFloat3();
+    }
+    operator Float4() const
+    {
+        return ToFloat4();
+    }
 
-    Vector2 ToVector2() const;
-    Vector3 ToVector3() const;
-    Vector4 ToVector4() const;
+public:
+    Float2 ToFloat2() const;
+    Float3 ToFloat3() const;
+    Float4 ToFloat4() const;
 };

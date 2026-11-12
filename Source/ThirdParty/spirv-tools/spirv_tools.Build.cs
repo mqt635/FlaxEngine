@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -7,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://github.com/KhronosGroup/SPIRV-Tools
 /// </summary>
-public class spirv_tools : DepsModule
+public class spirv_tools : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -17,9 +17,6 @@ public class spirv_tools : DepsModule
         Name = "spirv-tools";
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "LICENSE.txt";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -35,6 +32,7 @@ public class spirv_tools : DepsModule
             options.OutputFiles.Add(Path.Combine(depsRoot, "SPIRV-Tools-opt.lib"));
             break;
         case TargetPlatform.Linux:
+        case TargetPlatform.Mac:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libSPIRV-Tools.a"));
             options.OutputFiles.Add(Path.Combine(depsRoot, "libSPIRV-Tools-opt.a"));
             break;

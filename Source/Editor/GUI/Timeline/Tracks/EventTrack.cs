@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -10,6 +10,8 @@ using System.Text;
 using FlaxEditor.GUI.Timeline.Undo;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.GUI.Timeline.Tracks
 {
@@ -51,9 +53,12 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             {
                 e.EventParamsSizes[i] = stream.ReadInt32();
                 var paramTypeName = LoadName(stream);
-                e.EventParamsTypes[i] = Scripting.TypeUtils.GetManagedType(paramTypeName);
+                e.EventParamsTypes[i] = TypeUtils.GetManagedType(paramTypeName);
                 if (e.EventParamsTypes[i] == null)
+                {
+                    Editor.LogError($"Unknown type {paramTypeName}.");
                     isInvalid = true;
+                }
             }
 
             if (isInvalid)
@@ -81,7 +86,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 for (int j = 0; j < paramsCount; j++)
                 {
                     stream.Read(dataBuffer, 0, e.EventParamsSizes[j]);
-                    key.Parameters[j] = Marshal.PtrToStructure(handle.AddrOfPinnedObject(), e.EventParamsTypes[j]);
+                    key.Parameters[j] = Utilities.Utils.ByteArrayToStructure(handle.AddrOfPinnedObject(), e.EventParamsTypes[j], e.EventParamsSizes[j]);
                 }
 
                 events[i] = new KeyframesEditor.Keyframe
@@ -124,8 +129,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
 
                 for (int j = 0; j < paramsCount; j++)
                 {
-                    Marshal.StructureToPtr(key.Parameters[j], ptr, true);
-                    Marshal.Copy(ptr, dataBuffer, 0, e.EventParamsSizes[j]);
+                    Utilities.Utils.StructureToByteArray(key.Parameters[j], e.EventParamsSizes[j], ptr, dataBuffer);
                     stream.Write(dataBuffer, 0, e.EventParamsSizes[j]);
                 }
             }
@@ -142,23 +146,23 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         /// <summary>
         /// The event parameters data sizes collection.
         /// </summary>
-        public int[] EventParamsSizes = Utils.GetEmptyArray<int>();
+        public int[] EventParamsSizes = Array.Empty<int>();
 
         /// <summary>
         /// The event parameters types collection.
         /// </summary>
-        public Type[] EventParamsTypes = Utils.GetEmptyArray<Type>();
+        public Type[] EventParamsTypes = Array.Empty<Type>();
 
         /// <summary>
         /// The event key data.
         /// </summary>
-        public struct EventKey
+        public struct EventKey : ICloneable
         {
             /// <summary>
             /// The parameters values.
             /// </summary>
             [EditorDisplay("Parameters", EditorDisplayAttribute.InlineStyle), ExpandGroups]
-            [Collection(CanReorderItems = false, ReadOnly = true)]
+            [Collection(CanReorderItems = false, CanResize = true)]
             public object[] Parameters;
 
             /// <inheritdoc />
@@ -176,6 +180,26 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 }
                 sb.Append(')');
                 return sb.ToString();
+            }
+
+            /// <inheritdoc />
+            public object Clone()
+            {
+                if (Parameters == null)
+                    return new EventKey();
+
+                // Deep clone parameter values (especially boxed value types need to be duplicated to avoid referencing the same ones)
+                var parameters = new object[Parameters.Length];
+                for (int i = 0; i < parameters.Length; i++)
+                {
+                    var p = Parameters[i];
+                    if (p == null || p is FlaxEngine.Object)
+                        parameters[i] = Parameters[i];
+                    else
+                        parameters[i] = JsonSerializer.Deserialize(JsonSerializer.Serialize(p), p.GetType());
+                }
+
+                return new EventKey { Parameters = parameters };
             }
         }
 
@@ -233,6 +257,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 var time = Timeline.CurrentTime;
                 if (!TryGetValue(out var value))
                     value = Events.Evaluate(time);
+                value = ((ICloneable)value).Clone();
 
                 // Find event at the current location
                 for (int i = Events.Keyframes.Count - 1; i >= 0; i--)
@@ -295,7 +320,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             Events.KeyframesEditorContext = Timeline;
             Events.CustomViewPanning = Timeline.OnKeyframesViewPanning;
             Events.Bounds = new Rectangle(Timeline.StartOffset, Y + 1.0f, Timeline.Duration * Timeline.UnitsPerSecond * Timeline.Zoom, Height - 2.0f);
-            Events.ViewScale = new Vector2(Timeline.Zoom, 1.0f);
+            Events.ViewScale = new Float2(Timeline.Zoom, 1.0f);
             Events.Visible = Visible;
             Events.UpdateKeyframes();
         }
@@ -355,7 +380,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             }
             else
             {
-                EventParamsTypes = Utils.GetEmptyArray<Type>();
+                EventParamsTypes = Array.Empty<Type>();
             }
             OnEventParamsChanged();
         }
@@ -443,7 +468,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         }
 
         /// <inheritdoc />
-        public new void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Vector2 location, bool start, bool end)
+        public new void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Float2 location, bool start, bool end)
         {
             if (Events != null && Events.Visible)
                 Events.OnKeyframesMove(editor, control, location, start, end);

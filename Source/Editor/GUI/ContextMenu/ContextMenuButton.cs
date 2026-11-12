@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -14,6 +14,11 @@ namespace FlaxEditor.GUI.ContextMenu
     public class ContextMenuButton : ContextMenuItem
     {
         private bool _isMouseDown;
+        
+        /// <summary>
+        /// The amount to adjust the short keys and arrow image by in x coordinates.
+        /// </summary>
+        public float ExtraAdjustmentAmount = 0;
 
         /// <summary>
         /// Event fired when user clicks on the button.
@@ -36,6 +41,11 @@ namespace FlaxEditor.GUI.ContextMenu
         public string ShortKeys;
 
         /// <summary>
+        /// The text color.
+        /// </summary>
+        public Color TextColor;
+
+        /// <summary>
         /// Item icon (best is 16x16).
         /// </summary>
         public SpriteHandle Icon;
@@ -51,6 +61,11 @@ namespace FlaxEditor.GUI.ContextMenu
         public bool AutoCheck;
 
         /// <summary>
+        /// Closes the context menu after clicking the button, otherwise menu will stay open.
+        /// </summary>
+        public bool CloseMenuOnClick = true;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ContextMenuButton"/> class.
         /// </summary>
         /// <param name="parent">The parent context menu.</param>
@@ -61,6 +76,7 @@ namespace FlaxEditor.GUI.ContextMenu
         {
             Text = text;
             ShortKeys = shortKeys;
+            TextColor = Style.Current.Foreground;
         }
 
         /// <summary>
@@ -90,14 +106,15 @@ namespace FlaxEditor.GUI.ContextMenu
         /// </summary>
         public void Click()
         {
-            // Close topmost context menu
-            ParentContextMenu?.TopmostCM.Hide();
+            if (CloseMenuOnClick)
+            {
+                // Close topmost context menu
+                ParentContextMenu?.TopmostCM.Hide();
+            }
 
             // Auto check logic
             if (AutoCheck)
-            {
                 Checked = !Checked;
-            }
 
             // Fire event
             Clicked?.Invoke();
@@ -108,11 +125,10 @@ namespace FlaxEditor.GUI.ContextMenu
         /// <inheritdoc />
         public override void Draw()
         {
-            // Cache data
             var style = Style.Current;
             var backgroundRect = new Rectangle(-X + 3, 0, Parent.Width - 6, Height);
             var textRect = new Rectangle(0, 0, Width - 8, Height);
-            var textColor = Enabled ? style.Foreground : style.ForegroundDisabled;
+            var textColor = Enabled ? TextColor : style.ForegroundDisabled;
 
             // Draw background
             if (IsMouseOver && Enabled)
@@ -128,14 +144,14 @@ namespace FlaxEditor.GUI.ContextMenu
             if (!string.IsNullOrEmpty(ShortKeys))
             {
                 // Draw short keys
-                Render2D.DrawText(style.FontMedium, ShortKeys, textRect, textColor, TextAlignment.Far, TextAlignment.Center);
+                Render2D.DrawText(style.FontMedium, ShortKeys, new Rectangle(textRect.X + ExtraAdjustmentAmount, textRect.Y, textRect.Width, textRect.Height), textColor, TextAlignment.Far, TextAlignment.Center);
             }
 
             // Draw icon
             const float iconSize = 14;
-            var icon = Checked ? Style.Current.CheckBoxTick : Icon;
+            var icon = Checked ? style.CheckBoxTick : Icon;
             if (icon.IsValid)
-                Render2D.DrawSprite(icon, new Rectangle(-iconSize - 1, (Height - iconSize) / 2, iconSize, iconSize), textColor);
+                Render2D.DrawSprite(icon, new Rectangle(-iconSize - 2, (Height - iconSize) / 2, iconSize, iconSize), textColor);
         }
 
         /// <inheritdoc />
@@ -147,7 +163,7 @@ namespace FlaxEditor.GUI.ContextMenu
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (base.OnMouseDown(location, button))
                 return true;
@@ -157,7 +173,7 @@ namespace FlaxEditor.GUI.ContextMenu
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (base.OnMouseUp(location, button))
                 return true;
@@ -228,15 +244,11 @@ namespace FlaxEditor.GUI.ContextMenu
             {
                 var style = Style.Current;
                 float width = 20;
-
                 if (style.FontMedium)
                 {
                     width += style.FontMedium.MeasureText(Text).X;
-
-                    if (ShortKeys.Length > 0)
-                    {
+                    if (!string.IsNullOrEmpty(ShortKeys))
                         width += 40 + style.FontMedium.MeasureText(ShortKeys).X;
-                    }
                 }
 
                 return Mathf.Max(width, base.MinimumWidth);

@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -17,26 +18,27 @@ namespace FlaxEngine
         /// <summary>
         /// The screen space rendering mode that places UI elements on the screen rendered on top of the scene. If the screen is resized or changes resolution, the Canvas will automatically change size to match this.
         /// </summary>
-        [Tooltip("The screen space rendering mode that places UI elements on the screen rendered on top of the scene. If the screen is resized or changes resolution, the Canvas will automatically change size to match this.")]
         ScreenSpace = 0,
 
         /// <summary>
         /// The camera space rendering mode that places Canvas in a given distance in front of a specified Camera. The UI elements are rendered by this camera, which means that the Camera settings affect the appearance of the UI. If the Camera is set to Perspective, the UI elements will be rendered with perspective, and the amount of perspective distortion can be controlled by the Camera Field of View. If the screen is resized, changes resolution, or the camera frustum changes, the Canvas will automatically change size to match as well.
         /// </summary>
-        [Tooltip("The camera space rendering mode that places Canvas in a given distance in front of a specified Camera. The UI elements are rendered by this camera, which means that the Camera settings affect the appearance of the UI. If the Camera is set to Perspective, the UI elements will be rendered with perspective, and the amount of perspective distortion can be controlled by the Camera Field of View. If the screen is resized, changes resolution, or the camera frustum changes, the Canvas will automatically change size to match as well.")]
         CameraSpace = 1,
 
         /// <summary>
         /// The world space rendering mode that places Canvas as any other object in the scene. The size of the Canvas can be set manually using its Transform, and UI elements will render in front of or behind other objects in the scene based on 3D placement. This is useful for UIs that are meant to be a part of the world. This is also known as a 'diegetic interface'.
         /// </summary>
-        [Tooltip("The world space rendering mode that places Canvas as any other object in the scene. The size of the Canvas can be set manually using its Transform, and UI elements will render in front of or behind other objects in the scene based on 3D placement. This is useful for UIs that are meant to be a part of the world. This is also known as a 'diegetic interface'.")]
         WorldSpace = 2,
 
         /// <summary>
         /// The world space rendering mode that places Canvas as any other object in the scene and orients it to face the camera. The size of the Canvas can be set manually using its Transform, and UI elements will render in front of or behind other objects in the scene based on 3D placement. This is useful for UIs that are meant to be a part of the world. This is also known as a 'diegetic interface'.
         /// </summary>
-        [Tooltip("The world space rendering mode that places Canvas as any other object in the scene and orients canvas to face the camera. The size of the Canvas can be set manually using its Transform, and UI elements will render in front of or behind other objects in the scene based on 3D placement. This is useful for UIs that are meant to be a part of the world. This is also known as a 'diegetic interface'.")]
         WorldSpaceFaceCamera = 3,
+
+        /// <summary>
+        /// The off-screen rendering mode that draws the contents of the canvas into a GPU texture that can be used in the scene or by other systems. The size of the canvas is automatically set to the size of the texture.
+        /// </summary>
+        GPUTexture = 4,
     }
 
     /// <summary>
@@ -52,37 +54,57 @@ namespace FlaxEngine
         public UICanvas Canvas;
 
         /// <inheritdoc />
-        public override bool UseSingleTarget => true;
+        public CanvasRenderer()
+        {
+            UseSingleTarget = true;
+        }
 
         /// <inheritdoc />
-        public override PostProcessEffectLocation Location => Canvas.RenderLocation;
+        public override bool CanRender()
+        {
+            if (!Canvas)
+                return false;
 
-        /// <inheritdoc />
-        public override int Order => Canvas.Order;
+            // Sync with canvas options
+            Location = Canvas.RenderLocation;
+            Order = Canvas.Order;
+
+            return base.CanRender();
+        }
 
         /// <inheritdoc />
         public override void Render(GPUContext context, ref RenderContext renderContext, GPUTexture input, GPUTexture output)
         {
-            if (renderContext.View.Frustum.Contains(Canvas.Bounds.GetBoundingBox()) == ContainmentType.Disjoint)
+            if (!Canvas.IsVisible(renderContext.View.RenderLayersMask))
                 return;
+            var bounds = Canvas.Bounds;
+            bounds.Transformation.Translation -= renderContext.View.Origin;
+            if (renderContext.View.Frustum.Contains(bounds.GetBoundingBox()) == ContainmentType.Disjoint)
+                return;
+            var drawInWorld = Canvas.RenderMode == CanvasRenderMode.CameraSpace || Canvas.RenderMode == CanvasRenderMode.WorldSpace || Canvas.RenderMode == CanvasRenderMode.WorldSpaceFaceCamera; 
 
+            Profiler.BeginEvent("UI Canvas");
             Profiler.BeginEventGPU("UI Canvas");
 
             // Calculate rendering matrix (world*view*projection)
-            Canvas.GetWorldMatrix(out Matrix worldMatrix);
+            Canvas.GetWorldMatrix(renderContext.View.Origin, out Matrix worldMatrix);
             Matrix.Multiply(ref worldMatrix, ref renderContext.View.View, out Matrix viewMatrix);
-            Matrix.Multiply(ref viewMatrix, ref renderContext.View.Projection, out Matrix viewProjectionMatrix);
+            Matrix projectionMatrix = renderContext.View.Projection;
+            if (drawInWorld && (Canvas.RenderLocation == PostProcessEffectLocation.Default || Canvas.RenderLocation == PostProcessEffectLocation.AfterAntiAliasingPass))
+                renderContext.View.GetOverlayProjection(out projectionMatrix); // Fix TAA jittering when rendering UI in world after TAA resolve
+            Matrix.Multiply(ref viewMatrix, ref projectionMatrix, out Matrix viewProjectionMatrix);
 
             // Pick a depth buffer
             GPUTexture depthBuffer = Canvas.IgnoreDepth ? null : renderContext.Buffers.DepthBuffer;
 
             // Render GUI in 3D
             var features = Render2D.Features;
-            if (Canvas.RenderMode == CanvasRenderMode.WorldSpace || Canvas.RenderMode == CanvasRenderMode.WorldSpaceFaceCamera)
+            if (drawInWorld)
                 Render2D.Features &= ~Render2D.RenderingFeatures.VertexSnapping;
             Render2D.CallDrawing(Canvas.GUI, context, input, depthBuffer, ref viewProjectionMatrix);
             Render2D.Features = features;
 
+            Profiler.EndEvent();
             Profiler.EndEventGPU();
         }
     }
@@ -92,7 +114,8 @@ namespace FlaxEngine
         private CanvasRenderMode _renderMode;
         private readonly CanvasRootControl _guiRoot;
         private CanvasRenderer _renderer;
-        private bool _isLoading, _isRegisteredForTick;
+        private bool _isLoading, _isRegisteredForTick, _isRegisteredForOnDraw;
+        private Float4 _viewportRect = new Float4(0, 0, 1, 1);
 
         /// <summary>
         /// Gets or sets the canvas rendering mode.
@@ -113,7 +136,7 @@ namespace FlaxEngine
 
                     // Reset size
                     if (previous == CanvasRenderMode.ScreenSpace || (_renderMode == CanvasRenderMode.WorldSpace || _renderMode == CanvasRenderMode.WorldSpaceFaceCamera))
-                        Size = new Vector2(500, 500);
+                        Size = new Float2(500, 500);
                 }
             }
         }
@@ -156,6 +179,8 @@ namespace FlaxEngine
 
         private bool Editor_IsCameraSpace => _renderMode == CanvasRenderMode.CameraSpace;
 
+        private bool Editor_IsGPUTexture => _renderMode == CanvasRenderMode.GPUTexture;
+
         private bool Editor_UseRenderCamera => _renderMode == CanvasRenderMode.CameraSpace || _renderMode == CanvasRenderMode.WorldSpaceFaceCamera;
 #endif
 
@@ -163,7 +188,7 @@ namespace FlaxEngine
         /// Gets or sets the size of the canvas. Used only in <see cref="CanvasRenderMode.WorldSpace"/> or <see cref="CanvasRenderMode.WorldSpaceFaceCamera"/>.
         /// </summary>
         [EditorOrder(20), EditorDisplay("Canvas"), VisibleIf("Editor_IsWorldSpace"), Tooltip("Canvas size.")]
-        public Vector2 Size
+        public Float2 Size
         {
             get => _guiRoot.Size;
             set
@@ -194,6 +219,27 @@ namespace FlaxEngine
         public float Distance { get; set; } = 500;
 
         /// <summary>
+        /// Gets or sets the output texture for the canvas when render mode is set to <see cref="CanvasRenderMode.GPUTexture"/>. The size of the canvas will be automatically set to the size of the texture. The canvas will render its content into this texture.
+        /// </summary>
+        [EditorOrder(70), NoSerialize, EditorDisplay("Canvas"), VisibleIf("Editor_IsGPUTexture")]
+        public GPUTexture OutputTexture { get; set; }
+
+        /// <summary>
+        /// Four values that define where on the screen this canvas should be drawn. Measured in normalized coordinates (range 0-1). Order: X, Y, Width, Height. For example (0, 0, 1, 1) means full screen, (0, 0, 0.5, 1) means left half of the screen and (0.5, 0, 0.5, 1) means right half of the screen.
+        /// </summary>
+        [EditorOrder(80), EditorDisplay("Canvas"), Limit(0, 1, 0.001f)]
+        [DefaultValue(typeof(Float4), "0,0,1,1")]
+        public Float4 ViewportRect
+        {
+            get => _viewportRect;
+            set
+            {
+                _viewportRect = value;
+                _guiRoot.PerformLayout();
+            }
+        }
+
+        /// <summary>
         /// Gets the canvas GUI root control.
         /// </summary>
         public CanvasRootControl GUI => _guiRoot;
@@ -203,7 +249,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="location">The location of the point to test in coordinates of the canvas root control (see <see cref="GUI"/>).</param>
         /// <returns>True if canvas was hit, otherwise false.</returns>
-        public delegate bool TestCanvasIntersectionDelegate(ref Vector2 location);
+        public delegate bool TestCanvasIntersectionDelegate(ref Float2 location);
 
         /// <summary>
         /// The callback used to perform custom canvas intersection test. Can be used to implement a canvas that has a holes or non-rectangular shape.
@@ -216,7 +262,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="location">The location in screen-space.</param>
         /// <param name="ray">The output ray in world-space.</param>
-        public delegate void CalculateRayDelegate(ref Vector2 location, out Ray ray);
+        public delegate void CalculateRayDelegate(ref Float2 location, out Ray ray);
 
         /// <summary>
         /// The current implementation of the <see cref="CalculateRayDelegate"/> used to calculate the mouse ray in 3D from the 2D location. Cannot be null.
@@ -228,7 +274,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="location">The location in screen-space.</param>
         /// <param name="ray">The output ray in world-space.</param>
-        public static void DefaultCalculateRay(ref Vector2 location, out Ray ray)
+        public static void DefaultCalculateRay(ref Float2 location, out Ray ray)
         {
             var camera = Camera.MainCamera;
             if (camera)
@@ -241,6 +287,59 @@ namespace FlaxEngine
             }
         }
 
+        #region Navigation
+
+        /// <summary>
+        /// The delay (in seconds) before a navigation input event starts repeating if input control is held down (Input Action mode is set to Pressing).
+        /// </summary>
+        [EditorOrder(505), EditorDisplay("Navigation", "Input Repeat Delay")]
+        [Tooltip("TheThe delay (in seconds) before a navigation input event starts repeating if input control is held down (Input Action mode is set to Pressing).")]
+        public float NavigationInputRepeatDelay { get; set; } = 0.5f;
+
+        /// <summary>
+        /// The delay (in seconds) between successive repeated navigation input events after the first one.
+        /// </summary>
+        [EditorOrder(506), EditorDisplay("Navigation", "Input Repeat Rate")]
+        [Tooltip("The delay (in seconds) between successive repeated navigation input events after the first one.")]
+        public float NavigationInputRepeatRate { get; set; } = 0.05f;
+
+        /// <summary>
+        /// The input action for performing UI navigation Up (from Input Settings).
+        /// </summary>
+        [EditorOrder(510), EditorDisplay("Navigation", "Navigate Up")]
+        [Tooltip("The input action for performing UI navigation Up (from Input Settings).")]
+        public InputEvent NavigateUp { get; set; } = new InputEvent("NavigateUp");
+
+        /// <summary>
+        /// The input action for performing UI navigation Down (from Input Settings).
+        /// </summary>
+        [EditorOrder(520), EditorDisplay("Navigation", "Navigate Down")]
+        [Tooltip("The input action for performing UI navigation Down (from Input Settings).")]
+        public InputEvent NavigateDown { get; set; } = new InputEvent("NavigateDown");
+
+        /// <summary>
+        /// The input action for performing UI navigation Left (from Input Settings).
+        /// </summary>
+        [EditorOrder(530), EditorDisplay("Navigation", "Navigate Left")]
+        [Tooltip("The input action for performing UI navigation Left (from Input Settings).")]
+        public InputEvent NavigateLeft { get; set; } = new InputEvent("NavigateLeft");
+
+        /// <summary>
+        /// The input action for performing UI navigation Right (from Input Settings).
+        /// </summary>
+        [EditorOrder(540), EditorDisplay("Navigation", "Navigate Right")]
+        [Tooltip("The input action for performing UI navigation Right (from Input Settings).")]
+        public InputEvent NavigateRight { get; set; } = new InputEvent("NavigateRight");
+
+        /// <summary>
+        /// The input action for performing UI navigation Submit (from Input Settings).
+        /// </summary>
+        [EditorOrder(550), EditorDisplay("Navigation", "Navigate Submit")]
+        [Tooltip("The input action for performing UI navigation Submit (from Input Settings).")]
+        public InputEvent NavigateSubmit { get; set; } = new InputEvent("NavigateSubmit");
+
+        #endregion
+
         /// <summary>
         /// Initializes a new instance of the <see cref="UICanvas"/> class.
         /// </summary>
@@ -248,7 +347,8 @@ namespace FlaxEngine
         {
             _guiRoot = new CanvasRootControl(this)
             {
-                IsLayoutLocked = false
+                IsLayoutLocked = false,
+                Pivot = Float2.Zero,
             };
         }
 
@@ -262,6 +362,11 @@ namespace FlaxEngine
                 _isRegisteredForTick = false;
                 Scripting.Update -= OnUpdate;
             }
+            if (_isRegisteredForOnDraw)
+            {
+                _isRegisteredForOnDraw = false;
+                Scripting.Draw -= OnDraw;
+            }
         }
 
         /// <summary>
@@ -273,11 +378,12 @@ namespace FlaxEngine
             {
                 OrientedBoundingBox bounds = new OrientedBoundingBox
                 {
-                    Extents = new Vector3(_guiRoot.Size * 0.5f, Mathf.Epsilon)
+                    Extents = new Float3(_guiRoot.Size * 0.5f, Mathf.Epsilon)
                 };
                 GetWorldMatrix(out Matrix world);
-                Matrix.Translation(bounds.Extents.X, bounds.Extents.Y, 0, out Matrix offset);
-                Matrix.Multiply(ref offset, ref world, out bounds.Transformation);
+                Matrix.Translation((float)bounds.Extents.X, (float)bounds.Extents.Y, 0, out Matrix offset);
+                Matrix.Multiply(ref offset, ref world, out var boxWorld);
+                boxWorld.Decompose(out bounds.Transformation);
                 return bounds;
             }
         }
@@ -290,7 +396,7 @@ namespace FlaxEngine
         /// <summary>
         /// Gets a value indicating whether canvas is 3D (world-space or camera-space).
         /// </summary>
-        public bool Is3D => _renderMode != CanvasRenderMode.ScreenSpace;
+        public bool Is3D => _renderMode != CanvasRenderMode.ScreenSpace && _renderMode != CanvasRenderMode.GPUTexture;
 
         /// <summary>
         /// Gets the world matrix used to transform the GUI from the local space to the world space. Handles canvas rendering mode
@@ -298,25 +404,37 @@ namespace FlaxEngine
         /// <param name="world">The world.</param>
         public void GetWorldMatrix(out Matrix world)
         {
+            GetWorldMatrix(Vector3.Zero, out world);
+        }
+
+        /// <summary>
+        /// Gets the world matrix used to transform the GUI from the local space to the world space. Handles canvas rendering mode
+        /// </summary>
+        /// <param name="viewOrigin">The view origin (when using relative-to-camera rendering).</param>
+        /// <param name="world">The world.</param>
+        public void GetWorldMatrix(Vector3 viewOrigin, out Matrix world)
+        {
+            var transform = Transform;
+            Float3 translation = transform.Translation - viewOrigin;
+
 #if FLAX_EDITOR
             // Override projection for editor preview
             if (_editorTask)
             {
                 if (_renderMode == CanvasRenderMode.WorldSpace)
                 {
-                    GetLocalToWorldMatrix(out world);
+                    Matrix.Transformation(ref transform.Scale, ref transform.Orientation, ref translation, out world);
                 }
                 else if (_renderMode == CanvasRenderMode.WorldSpaceFaceCamera)
                 {
                     var view = _editorTask.View;
-                    var transform = Transform;
                     Matrix.Translation(_guiRoot.Width * -0.5f, _guiRoot.Height * -0.5f, 0, out var m1);
                     Matrix.Scaling(ref transform.Scale, out var m2);
                     Matrix.Multiply(ref m1, ref m2, out var m3);
                     Quaternion.Euler(180, 180, 0, out var quat);
                     Matrix.RotationQuaternion(ref quat, out m2);
                     Matrix.Multiply(ref m3, ref m2, out m1);
-                    m2 = Matrix.Transformation(Vector3.One, Quaternion.FromDirection(-view.Direction), transform.Translation);
+                    m2 = Matrix.Transformation(Float3.One, Quaternion.FromDirection(-view.Direction), translation);
                     Matrix.Multiply(ref m1, ref m2, out world);
                 }
                 else if (_renderMode == CanvasRenderMode.CameraSpace)
@@ -324,15 +442,15 @@ namespace FlaxEngine
                     var view = _editorTask.View;
                     var frustum = view.Frustum;
                     if (!frustum.IsOrthographic)
-                        _guiRoot.Size = new Vector2(frustum.GetWidthAtDepth(Distance), frustum.GetHeightAtDepth(Distance));
+                        _guiRoot.Size = new Float2(frustum.GetWidthAtDepth(Distance), frustum.GetHeightAtDepth(Distance));
                     else
                         _guiRoot.Size = _editorTask.Viewport.Size;
                     Matrix.Translation(_guiRoot.Width / -2.0f, _guiRoot.Height / -2.0f, 0, out world);
                     Matrix.RotationYawPitchRoll(Mathf.Pi, Mathf.Pi, 0, out var tmp2);
                     Matrix.Multiply(ref world, ref tmp2, out var tmp1);
-                    var viewPos = view.Position;
-                    var viewRot = view.Direction != Vector3.Up ? Quaternion.LookRotation(view.Direction, Vector3.Up) : Quaternion.LookRotation(view.Direction, Vector3.Right);
-                    var viewUp = Vector3.Up * viewRot;
+                    Float3 viewPos = view.Position - viewOrigin;
+                    var viewRot = view.Direction != Float3.Up ? Quaternion.LookRotation(view.Direction, Float3.Up) : Quaternion.LookRotation(view.Direction, Float3.Right);
+                    var viewUp = Float3.Up * viewRot;
                     var viewForward = view.Direction;
                     var pos = view.Position + view.Direction * Distance;
                     Matrix.Billboard(ref pos, ref viewPos, ref viewUp, ref viewForward, out tmp2);
@@ -353,19 +471,18 @@ namespace FlaxEngine
             if (_renderMode == CanvasRenderMode.WorldSpace || (_renderMode == CanvasRenderMode.WorldSpaceFaceCamera && !camera))
             {
                 // In 3D world
-                GetLocalToWorldMatrix(out world);
+                Matrix.Transformation(ref transform.Scale, ref transform.Orientation, ref translation, out world);
             }
             else if (_renderMode == CanvasRenderMode.WorldSpaceFaceCamera)
             {
                 // In 3D world face camera
-                var transform = Transform;
                 Matrix.Translation(_guiRoot.Width * -0.5f, _guiRoot.Height * -0.5f, 0, out var m1);
                 Matrix.Scaling(ref transform.Scale, out var m2);
                 Matrix.Multiply(ref m1, ref m2, out var m3);
                 Quaternion.Euler(180, 180, 0, out var quat);
                 Matrix.RotationQuaternion(ref quat, out m2);
                 Matrix.Multiply(ref m3, ref m2, out m1);
-                m2 = Matrix.Transformation(Vector3.One, Quaternion.FromDirection(-camera.Direction), transform.Translation);
+                m2 = Matrix.Transformation(Vector3.One, Quaternion.FromDirection(-camera.Forward), translation);
                 Matrix.Multiply(ref m1, ref m2, out world);
             }
             else if (_renderMode == CanvasRenderMode.CameraSpace && camera)
@@ -378,8 +495,8 @@ namespace FlaxEngine
                 {
                     camera.GetMatrices(out tmp1, out var tmp3, ref viewport);
                     Matrix.Multiply(ref tmp1, ref tmp3, out tmp2);
-                    var frustum = new BoundingFrustum(tmp2);
-                    _guiRoot.Size = new Vector2(frustum.GetWidthAtDepth(Distance), frustum.GetHeightAtDepth(Distance));
+                    var frustum = new BoundingFrustum(ref tmp2);
+                    _guiRoot.Size = new Float2(frustum.GetWidthAtDepth(Distance), frustum.GetHeightAtDepth(Distance));
                 }
                 else
                 {
@@ -392,10 +509,10 @@ namespace FlaxEngine
                 Matrix.Multiply(ref world, ref tmp2, out tmp1);
 
                 // In front of the camera
-                var viewPos = camera.Position;
+                Float3 viewPos = camera.Position - viewOrigin;
                 var viewRot = camera.Orientation;
-                var viewUp = Vector3.Up * viewRot;
-                var viewForward = Vector3.Forward * viewRot;
+                var viewUp = Float3.Up * viewRot;
+                var viewForward = Float3.Forward * viewRot;
                 var pos = viewPos + viewForward * Distance;
                 Matrix.Billboard(ref pos, ref viewPos, ref viewUp, ref viewForward, out tmp2);
 
@@ -412,6 +529,11 @@ namespace FlaxEngine
         {
             if (_isLoading)
                 return;
+            if (_isRegisteredForOnDraw)
+            {
+                _isRegisteredForOnDraw = false;
+                Scripting.Draw -= OnDraw;
+            }
 
             switch (_renderMode)
             {
@@ -423,9 +545,10 @@ namespace FlaxEngine
                 if (_renderer)
                 {
 #if FLAX_EDITOR
-                    _editorTask?.CustomPostFx.Remove(_renderer);
+                    if (_editorTask != null)
+                        _editorTask.RemoveCustomPostFx(_renderer);
 #endif
-                    SceneRenderTask.GlobalCustomPostFx.Remove(_renderer);
+                    SceneRenderTask.RemoveGlobalCustomPostFx(_renderer);
                     _renderer.Canvas = null;
                     Destroy(_renderer);
                     _renderer = null;
@@ -463,16 +586,16 @@ namespace FlaxEngine
 #if FLAX_EDITOR
                         if (_editorTask != null)
                         {
-                            _editorTask.CustomPostFx.Add(_renderer);
+                            _editorTask.AddCustomPostFx(_renderer);
                             break;
                         }
 #endif
-                        SceneRenderTask.GlobalCustomPostFx.Add(_renderer);
+                        SceneRenderTask.AddGlobalCustomPostFx(_renderer);
                     }
 #if FLAX_EDITOR
                     else if (_editorTask != null && IsActiveInHierarchy)
                     {
-                        _editorTask.CustomPostFx.Add(_renderer);
+                        _editorTask.AddCustomPostFx(_renderer);
                     }
 #endif
                 }
@@ -483,7 +606,32 @@ namespace FlaxEngine
                 }
                 break;
             }
+            case CanvasRenderMode.GPUTexture:
+            {
+                if (!_isRegisteredForOnDraw)
+                {
+                    _isRegisteredForOnDraw = true;
+                    Scripting.Draw += OnDraw;
+                }
+                break;
             }
+            }
+        }
+
+        private void OnDraw()
+        {
+            var outputTexture = OutputTexture;
+            if (!outputTexture || !outputTexture.IsAllocated)
+                return;
+            var context = GPUDevice.Instance.MainContext;
+            _guiRoot.Size = outputTexture.Size;
+
+            Profiler.BeginEvent("UI Canvas");
+            Profiler.BeginEventGPU("UI Canvas");
+            context.Clear(outputTexture.View(), Color.Transparent);
+            Render2D.CallDrawing(GUI, context, outputTexture);
+            Profiler.EndEvent();
+            Profiler.EndEventGPU();
         }
 
         private void OnUpdate()
@@ -502,8 +650,9 @@ namespace FlaxEngine
             }
         }
 
-        internal string Serialize()
+        internal string Serialize(UICanvas other)
         {
+            bool noOther = other == null;
             StringBuilder sb = new StringBuilder(256);
             StringWriter sw = new StringWriter(sb, CultureInfo.InvariantCulture);
             using (JsonTextWriter jsonWriter = new JsonTextWriter(sw))
@@ -514,28 +663,67 @@ namespace FlaxEngine
 
                 jsonWriter.WriteStartObject();
 
-                jsonWriter.WritePropertyName("RenderMode");
-                jsonWriter.WriteValue(_renderMode);
+                if (noOther || _renderMode != other._renderMode)
+                {
+                    jsonWriter.WritePropertyName("RenderMode");
+                    jsonWriter.WriteValue(_renderMode);
+                }
 
-                jsonWriter.WritePropertyName("RenderLocation");
-                jsonWriter.WriteValue(RenderLocation);
+                if (noOther || RenderLocation != other.RenderLocation)
+                {
+                    jsonWriter.WritePropertyName("RenderLocation");
+                    jsonWriter.WriteValue(RenderLocation);
+                }
 
-                jsonWriter.WritePropertyName("Order");
-                jsonWriter.WriteValue(Order);
+                if (noOther || Order != other.Order)
+                {
+                    jsonWriter.WritePropertyName("Order");
+                    jsonWriter.WriteValue(Order);
+                }
 
-                jsonWriter.WritePropertyName("ReceivesEvents");
-                jsonWriter.WriteValue(ReceivesEvents);
+                if (noOther || ReceivesEvents != other.ReceivesEvents)
+                {
+                    jsonWriter.WritePropertyName("ReceivesEvents");
+                    jsonWriter.WriteValue(ReceivesEvents);
+                }
 
-                jsonWriter.WritePropertyName("IgnoreDepth");
-                jsonWriter.WriteValue(IgnoreDepth);
+                if (noOther || IgnoreDepth != other.IgnoreDepth)
+                {
+                    jsonWriter.WritePropertyName("IgnoreDepth");
+                    jsonWriter.WriteValue(IgnoreDepth);
+                }
 
-                jsonWriter.WritePropertyName("RenderCamera");
-                jsonWriter.WriteValue(Json.JsonSerializer.GetStringID(RenderCamera));
+                if (noOther || RenderCamera != other.RenderCamera)
+                {
+                    jsonWriter.WritePropertyName("RenderCamera");
+                    jsonWriter.WriteValue(Json.JsonSerializer.GetStringID(RenderCamera));
+                }
 
-                jsonWriter.WritePropertyName("Distance");
-                jsonWriter.WriteValue(Distance);
+                if (noOther || Mathf.Abs(Distance - other.Distance) > Mathf.Epsilon)
+                {
+                    jsonWriter.WritePropertyName("Distance");
+                    jsonWriter.WriteValue(Distance);
+                }
 
-                if (RenderMode == CanvasRenderMode.WorldSpace || RenderMode == CanvasRenderMode.WorldSpaceFaceCamera)
+                if (noOther || _viewportRect != other._viewportRect)
+                {
+                    jsonWriter.WritePropertyName("ViewportRect");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WritePropertyName("X");
+                    jsonWriter.WriteValue(_viewportRect.X);
+                    jsonWriter.WritePropertyName("Y");
+                    jsonWriter.WriteValue(_viewportRect.Y);
+                    jsonWriter.WritePropertyName("Z");
+                    jsonWriter.WriteValue(_viewportRect.Z);
+                    jsonWriter.WritePropertyName("W");
+                    jsonWriter.WriteValue(_viewportRect.W);
+                    jsonWriter.WriteEndObject();
+                }
+
+                bool saveSize = RenderMode == CanvasRenderMode.WorldSpace || RenderMode == CanvasRenderMode.WorldSpaceFaceCamera;
+                if (!noOther)
+                    saveSize = (saveSize || other.RenderMode == CanvasRenderMode.WorldSpace || other.RenderMode == CanvasRenderMode.WorldSpaceFaceCamera) && Size != other.Size;
+                if (saveSize)
                 {
                     jsonWriter.WritePropertyName("Size");
                     jsonWriter.WriteStartObject();
@@ -546,77 +734,54 @@ namespace FlaxEngine
                     jsonWriter.WriteEndObject();
                 }
 
-                jsonWriter.WriteEndObject();
-            }
-
-            return sw.ToString();
-        }
-
-        internal string SerializeDiff(UICanvas other)
-        {
-            StringBuilder sb = new StringBuilder(256);
-            StringWriter sw = new StringWriter(sb, CultureInfo.InvariantCulture);
-            using (JsonTextWriter jsonWriter = new JsonTextWriter(sw))
-            {
-                jsonWriter.IndentChar = '\t';
-                jsonWriter.Indentation = 1;
-                jsonWriter.Formatting = Formatting.Indented;
-
-                jsonWriter.WriteStartObject();
-
-                if (_renderMode != other._renderMode)
+                if (noOther || !Mathf.NearEqual(NavigationInputRepeatDelay, other.NavigationInputRepeatDelay))
                 {
-                    jsonWriter.WritePropertyName("RenderMode");
-                    jsonWriter.WriteValue(_renderMode);
+                    jsonWriter.WritePropertyName("NavigationInputRepeatDelay");
+                    jsonWriter.WriteValue(NavigationInputRepeatDelay);
                 }
-
-                if (RenderLocation != other.RenderLocation)
+                if (noOther || !Mathf.NearEqual(NavigationInputRepeatRate, other.NavigationInputRepeatRate))
                 {
-                    jsonWriter.WritePropertyName("RenderLocation");
-                    jsonWriter.WriteValue(RenderLocation);
+                    jsonWriter.WritePropertyName("NavigationInputRepeatRate");
+                    jsonWriter.WriteValue(NavigationInputRepeatRate);
                 }
-
-                if (Order != other.Order)
+                if (noOther || NavigateUp.Name != other.NavigateUp.Name)
                 {
-                    jsonWriter.WritePropertyName("Order");
-                    jsonWriter.WriteValue(Order);
-                }
-
-                if (ReceivesEvents != other.ReceivesEvents)
-                {
-                    jsonWriter.WritePropertyName("ReceivesEvents");
-                    jsonWriter.WriteValue(ReceivesEvents);
-                }
-
-                if (IgnoreDepth != other.IgnoreDepth)
-                {
-                    jsonWriter.WritePropertyName("IgnoreDepth");
-                    jsonWriter.WriteValue(IgnoreDepth);
-                }
-
-                if (RenderCamera != other.RenderCamera)
-                {
-                    jsonWriter.WritePropertyName("RenderCamera");
-                    jsonWriter.WriteValue(Json.JsonSerializer.GetStringID(RenderCamera));
-                }
-
-                if (Mathf.Abs(Distance - other.Distance) > Mathf.Epsilon)
-                {
-                    jsonWriter.WritePropertyName("Distance");
-                    jsonWriter.WriteValue(Distance);
-                }
-
-                if ((RenderMode == CanvasRenderMode.WorldSpace ||
-                     RenderMode == CanvasRenderMode.WorldSpaceFaceCamera ||
-                     other.RenderMode == CanvasRenderMode.WorldSpace ||
-                     other.RenderMode == CanvasRenderMode.WorldSpaceFaceCamera) && Size != other.Size)
-                {
-                    jsonWriter.WritePropertyName("Size");
+                    jsonWriter.WritePropertyName("NavigateUp");
                     jsonWriter.WriteStartObject();
-                    jsonWriter.WritePropertyName("X");
-                    jsonWriter.WriteValue(Size.X);
-                    jsonWriter.WritePropertyName("Y");
-                    jsonWriter.WriteValue(Size.Y);
+                    jsonWriter.WritePropertyName("Name");
+                    jsonWriter.WriteValue(NavigateUp.Name);
+                    jsonWriter.WriteEndObject();
+                }
+                if (noOther || NavigateDown.Name != other.NavigateDown.Name)
+                {
+                    jsonWriter.WritePropertyName("NavigateDown");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WritePropertyName("Name");
+                    jsonWriter.WriteValue(NavigateDown.Name);
+                    jsonWriter.WriteEndObject();
+                }
+                if (noOther || NavigateLeft.Name != other.NavigateLeft.Name)
+                {
+                    jsonWriter.WritePropertyName("NavigateLeft");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WritePropertyName("Name");
+                    jsonWriter.WriteValue(NavigateLeft.Name);
+                    jsonWriter.WriteEndObject();
+                }
+                if (noOther || NavigateRight.Name != other.NavigateRight.Name)
+                {
+                    jsonWriter.WritePropertyName("NavigateRight");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WritePropertyName("Name");
+                    jsonWriter.WriteValue(NavigateRight.Name);
+                    jsonWriter.WriteEndObject();
+                }
+                if (noOther || NavigateSubmit.Name != other.NavigateSubmit.Name)
+                {
+                    jsonWriter.WritePropertyName("NavigateSubmit");
+                    jsonWriter.WriteStartObject();
+                    jsonWriter.WritePropertyName("Name");
+                    jsonWriter.WriteValue(NavigateSubmit.Name);
                     jsonWriter.WriteEndObject();
                 }
 
@@ -649,7 +814,7 @@ namespace FlaxEngine
 #endif
         }
 
-        internal void OnEnable()
+        internal void Enable()
         {
 #if FLAX_EDITOR
             if (_editorRoot != null)
@@ -670,26 +835,33 @@ namespace FlaxEngine
 #if FLAX_EDITOR
                 if (_editorTask != null)
                 {
-                    _editorTask.CustomPostFx.Add(_renderer);
+                    _editorTask.AddCustomPostFx(_renderer);
                     return;
                 }
 #endif
-                SceneRenderTask.GlobalCustomPostFx.Add(_renderer);
+                SceneRenderTask.AddGlobalCustomPostFx(_renderer);
             }
         }
 
-        internal void OnDisable()
+        internal void Disable()
         {
             _guiRoot.Parent = null;
 
             if (_renderer)
             {
-                SceneRenderTask.GlobalCustomPostFx.Remove(_renderer);
+#if FLAX_EDITOR
+                if (_editorTask != null)
+                {
+                    _editorTask.RemoveCustomPostFx(_renderer);
+                    return;
+                }
+#endif
+                SceneRenderTask.RemoveGlobalCustomPostFx(_renderer);
             }
         }
 
 #if FLAX_EDITOR
-        internal void OnActiveInTreeChanged()
+        internal void ActiveInTreeChanged()
         {
             if (RenderMode == CanvasRenderMode.ScreenSpace && _editorRoot != null && _guiRoot != null)
             {
@@ -709,11 +881,25 @@ namespace FlaxEngine
 
             if (_renderer)
             {
-                SceneRenderTask.GlobalCustomPostFx.Remove(_renderer);
+                SceneRenderTask.RemoveGlobalCustomPostFx(_renderer);
                 _renderer.Canvas = null;
                 Destroy(_renderer);
                 _renderer = null;
             }
+        }
+
+        internal bool IsVisible()
+        {
+            return IsVisible(MainRenderTask.Instance?.ViewLayersMask ?? LayersMask.Default);
+        }
+
+        internal bool IsVisible(LayersMask layersMask)
+        {
+#if FLAX_EDITOR
+            if (_editorTask != null || _editorRoot != null)
+                return true;
+#endif
+            return layersMask.HasLayer(Layer);
         }
 
 #if FLAX_EDITOR
@@ -725,7 +911,7 @@ namespace FlaxEngine
             if (_editorTask == task && _editorRoot == root)
                 return;
             if (_editorTask != null && _renderer != null)
-                _editorTask.CustomPostFx.Remove(_renderer);
+                _editorTask.RemoveCustomPostFx(_renderer);
             if (_editorRoot != null && _guiRoot != null)
                 _guiRoot.Parent = null;
 

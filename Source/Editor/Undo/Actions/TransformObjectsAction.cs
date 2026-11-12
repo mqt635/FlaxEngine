@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -121,12 +121,12 @@ namespace FlaxEditor
                 // Handle simple case where objects were moved just a little and use one navmesh build request to improve performance
                 if (data.BeforeBounds.Intersects(ref data.AfterBounds))
                 {
-                    Navigation.BuildNavMesh(data.Scene, BoundingBox.Merge(data.BeforeBounds, data.AfterBounds), options.General.AutoRebuildNavMeshTimeoutMs);
+                    Navigation.BuildNavMesh(BoundingBox.Merge(data.BeforeBounds, data.AfterBounds), options.General.AutoRebuildNavMeshTimeoutMs);
                 }
                 else
                 {
-                    Navigation.BuildNavMesh(data.Scene, data.BeforeBounds, options.General.AutoRebuildNavMeshTimeoutMs);
-                    Navigation.BuildNavMesh(data.Scene, data.AfterBounds, options.General.AutoRebuildNavMeshTimeoutMs);
+                    Navigation.BuildNavMesh(data.BeforeBounds, options.General.AutoRebuildNavMeshTimeoutMs);
+                    Navigation.BuildNavMesh(data.AfterBounds, options.General.AutoRebuildNavMeshTimeoutMs);
                 }
             }
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -52,7 +52,7 @@ namespace FlaxEditor.GUI
         /// <param name="location">The source movement location (in source control local space).</param>
         /// <param name="start">The movement start flag.</param>
         /// <param name="end">The movement end flag.</param>
-        void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Vector2 location, bool start, bool end);
+        void OnKeyframesMove(IKeyframesEditor editor, ContainerControl control, Float2 location, bool start, bool end);
 
         /// <summary>
         /// Called when keyframes selection should be copied.

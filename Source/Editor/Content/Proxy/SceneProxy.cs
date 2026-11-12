@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Windows;
 using FlaxEngine;
 
@@ -10,6 +11,7 @@ namespace FlaxEditor.Content
     /// Content proxy for <see cref="SceneItem"/>.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.JsonAssetBaseProxy" />
+    [ContentContextMenu("New/Scene")]
     public sealed class SceneProxy : JsonAssetBaseProxy
     {
         /// <summary>
@@ -27,6 +29,12 @@ namespace FlaxEditor.Content
         public override bool IsProxyFor(ContentItem item)
         {
             return item is SceneItem;
+        }
+
+        /// <inheritdoc />
+        public override bool AcceptsAsset(string typeName, string path)
+        {
+            return (typeName == Scene.AssetTypename || typeName == Scene.EditorPickerTypename) && path.EndsWith(FileExtension, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <inheritdoc />
@@ -51,15 +59,22 @@ namespace FlaxEditor.Content
         }
 
         /// <inheritdoc />
-        public override Color AccentColor => Color.FromRGB(0xbb37ef);
-
-        /// <inheritdoc />
         public override string TypeName => Scene.AssetTypename;
 
         /// <inheritdoc />
         public override AssetItem ConstructItem(string path, string typeName, ref Guid id)
         {
             return new SceneItem(path, id);
+        }
+
+        /// <inheritdoc />
+        public override void OnContentWindowContextMenu(ContextMenu menu, ContentItem item)
+        {
+            var id = ((SceneItem)item).ID;
+            if (Level.FindScene(id) == null)
+            {
+                menu.AddButton("Open (additive)", () => { Editor.Instance.Scene.OpenScene(id, true); });
+            }
         }
     }
 }

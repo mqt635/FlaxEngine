@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -8,10 +8,11 @@ namespace FlaxEngine.GUI
     /// Panel that arranges child controls like tiles.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public class TilesPanel : ContainerControl
     {
         private Margin _tileMargin;
-        private Vector2 _tileSize = new Vector2(64);
+        private Float2 _tileSize = new Float2(64);
         private bool _autoResize = false;
 
         /// <summary>
@@ -35,15 +36,14 @@ namespace FlaxEngine.GUI
         /// Gets or sets the size of the tile.
         /// </summary>
         [EditorOrder(0), Limit(0.01f), Tooltip("The size of the single tile.")]
-        public Vector2 TileSize
+        public Float2 TileSize
         {
             get => _tileSize;
             set
             {
                 if (value.MinValue <= 0.0f)
                     throw new ArgumentException("Tiles cannot have negative size.");
-
-                if (!Vector2.Equals(ref _tileSize, ref value))
+                if (!Float2.Equals(ref _tileSize, ref value))
                 {
                     _tileSize = value;
                     PerformLayout();

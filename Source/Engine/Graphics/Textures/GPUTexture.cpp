@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GPUTexture.h"
 #include "GPUTextureDescription.h"
@@ -15,6 +15,9 @@
 #include "Engine/Graphics/GPULimits.h"
 #include "Engine/Threading/ThreadPoolTask.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#include "Engine/Scripting/Enums.h"
 
 namespace
 {
@@ -89,7 +92,7 @@ GPUTextureDescription GPUTextureDescription::New2D(int32 width, int32 height, Pi
     return desc;
 }
 
-GPUTextureDescription GPUTextureDescription::New3D(const Vector3& size, PixelFormat format, GPUTextureFlags textureFlags)
+GPUTextureDescription GPUTextureDescription::New3D(const Float3& size, PixelFormat format, GPUTextureFlags textureFlags)
 {
     return New3D((int32)size.X, (int32)size.Y, (int32)size.Z, 1, format, textureFlags);
 }
@@ -140,6 +143,14 @@ GPUTextureDescription GPUTextureDescription::ToStagingReadback() const
     return copy;
 }
 
+GPUTextureDescription GPUTextureDescription::ToStaging() const
+{
+    auto copy = *this;
+    copy.Flags = GPUTextureFlags::None;
+    copy.Usage = GPUResourceUsage::Staging;
+    return copy;
+}
+
 bool GPUTextureDescription::Equals(const GPUTextureDescription& other) const
 {
     return Dimensions == other.Dimensions
@@ -157,29 +168,6 @@ bool GPUTextureDescription::Equals(const GPUTextureDescription& other) const
 
 String GPUTextureDescription::ToString() const
 {
-    // TODO: add tool to Format to string
-
-    String flags;
-    if (Flags == GPUTextureFlags::None)
-    {
-        flags = TEXT("None");
-    }
-    else
-    {
-        // TODO: create tool to auto convert flag enums to string
-
-#define CONVERT_FLAGS_FLAGS_2_STR(value) if(Flags & GPUTextureFlags::value) { if (flags.HasChars()) flags += TEXT('|'); flags += TEXT(#value); }
-        CONVERT_FLAGS_FLAGS_2_STR(ShaderResource);
-        CONVERT_FLAGS_FLAGS_2_STR(RenderTarget);
-        CONVERT_FLAGS_FLAGS_2_STR(UnorderedAccess);
-        CONVERT_FLAGS_FLAGS_2_STR(DepthStencil);
-        CONVERT_FLAGS_FLAGS_2_STR(PerMipViews);
-        CONVERT_FLAGS_FLAGS_2_STR(PerSliceViews);
-        CONVERT_FLAGS_FLAGS_2_STR(ReadOnlyDepthView);
-        CONVERT_FLAGS_FLAGS_2_STR(BackBuffer);
-#undef CONVERT_FLAGS_FLAGS_2_STR
-    }
-
     return String::Format(TEXT("Size: {0}x{1}x{2}[{3}], Type: {4}, Mips: {5}, Format: {6}, MSAA: {7}, Flags: {8}, Usage: {9}"),
                           Width,
                           Height,
@@ -187,9 +175,9 @@ String GPUTextureDescription::ToString() const
                           ArraySize,
                           ::ToString(Dimensions),
                           MipLevels,
-                          (int32)Format,
+                          ScriptingEnum::ToString(Format),
                           ::ToString(MultiSampleLevel),
-                          flags,
+                          ScriptingEnum::ToStringFlags(Flags),
                           (int32)Usage);
 }
 
@@ -211,16 +199,16 @@ uint32 GetHash(const GPUTextureDescription& key)
 
 GPUTexture* GPUTexture::Spawn(const SpawnParams& params)
 {
-    return GPUDevice::Instance->CreateTexture(String::Empty);
+    return GPUDevice::Instance->CreateTexture();
 }
 
 GPUTexture* GPUTexture::New()
 {
-    return GPUDevice::Instance->CreateTexture(String::Empty);
+    return GPUDevice::Instance->CreateTexture();
 }
 
 GPUTexture::GPUTexture()
-    : GPUResource(SpawnParams(Guid::New(), GPUTexture::TypeInitializer))
+    : GPUResource(SpawnParams(Guid::New(), TypeInitializer))
     , _residentMipLevels(0)
     , _sRGB(false)
     , _isBlockCompressed(false)
@@ -229,14 +217,19 @@ GPUTexture::GPUTexture()
     _desc.Clear();
 }
 
-Vector2 GPUTexture::Size() const
+bool GPUTexture::IsStaging() const
 {
-    return Vector2(static_cast<float>(_desc.Width), static_cast<float>(_desc.Height));
+    return _desc.Usage == GPUResourceUsage::StagingUpload || _desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::Staging;
 }
 
-Vector3 GPUTexture::Size3() const
+Float2 GPUTexture::Size() const
 {
-    return Vector3(static_cast<float>(_desc.Width), static_cast<float>(_desc.Height), static_cast<float>(_desc.Depth));
+    return Float2(static_cast<float>(_desc.Width), static_cast<float>(_desc.Height));
+}
+
+Float3 GPUTexture::Size3() const
+{
+    return Float3(static_cast<float>(_desc.Width), static_cast<float>(_desc.Height), static_cast<float>(_desc.Depth));
 }
 
 bool GPUTexture::IsPowerOfTwo() const
@@ -336,14 +329,12 @@ int32 GPUTexture::ComputeBufferOffset(int32 subresource, int32 rowAlign, int32 s
 int32 GPUTexture::ComputeBufferTotalSize(int32 rowAlign, int32 sliceAlign) const
 {
     int32 result = 0;
-
     for (int32 mipLevel = 0; mipLevel < MipLevels(); mipLevel++)
     {
         const int32 slicePitch = ComputeSlicePitch(mipLevel, rowAlign);
         const int32 depth = CalculateMipSize(Depth(), mipLevel);
         result += Math::AlignUp<int32>(slicePitch * depth, sliceAlign);
     }
-
     return result * ArraySize();
 }
 
@@ -354,23 +345,28 @@ int32 GPUTexture::ComputeSlicePitch(int32 mipLevel, int32 rowAlign) const
 
 int32 GPUTexture::ComputeRowPitch(int32 mipLevel, int32 rowAlign) const
 {
-    const int32 formatSize = PixelFormatExtensions::SizeInBytes(Format());
-    return Math::AlignUp<int32>(CalculateMipSize(Width(), mipLevel) * formatSize, rowAlign);
+    int32 mipWidth = CalculateMipSize(Width(), mipLevel);
+    int32 mipHeight = CalculateMipSize(Height(), mipLevel);
+    uint32 rowPitch, slicePitch;
+    RenderTools::ComputePitch(Format(), mipWidth, mipHeight, rowPitch, slicePitch);
+    return Math::AlignUp<int32>(rowPitch, rowAlign);
 }
 
 bool GPUTexture::Init(const GPUTextureDescription& desc)
 {
-    ASSERT(Math::IsInRange(desc.Width, 1, GPU_MAX_TEXTURE_SIZE)
-        && Math::IsInRange(desc.Height, 1, GPU_MAX_TEXTURE_SIZE)
-        && Math::IsInRange(desc.Depth, 1, GPU_MAX_TEXTURE_SIZE)
-        && Math::IsInRange(desc.ArraySize, 1, GPU_MAX_TEXTURE_ARRAY_SIZE)
-        && Math::IsInRange(desc.MipLevels, 1, GPU_MAX_TEXTURE_MIP_LEVELS));
+    PROFILE_CPU();
+    PROFILE_MEM(GraphicsTextures);
 
     // Validate description
     const auto device = GPUDevice::Instance;
     if (desc.Usage == GPUResourceUsage::Dynamic)
     {
         LOG(Warning, "Cannot create texture. Dynamic textures are not supported. Description: {0}", desc.ToString());
+        return true;
+    }
+    if (desc.MipLevels < 0 || desc.MipLevels > GPU_MAX_TEXTURE_MIP_LEVELS)
+    {
+        LOG(Warning, "Cannot create texture. Invalid amount of mip levels. Description: {0}", desc.ToString());
         return true;
     }
     if (desc.IsDepthStencil())
@@ -385,7 +381,7 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
             LOG(Warning, "Cannot create texture. Depth Stencil texture cannot be used as a Render Target. Description: {0}", desc.ToString());
             return true;
         }
-        if (desc.Flags & GPUTextureFlags::ReadOnlyDepthView && !device->Limits.HasReadOnlyDepth)
+        if (EnumHasAnyFlags(desc.Flags, GPUTextureFlags::ReadOnlyDepthView) && !device->Limits.HasReadOnlyDepth)
         {
             LOG(Warning, "Cannot create texture. The current graphics platform does not support read-only Depth Stencil texture. Description: {0}", desc.ToString());
             return true;
@@ -393,7 +389,7 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
     }
     else
     {
-        if (desc.Flags & GPUTextureFlags::ReadOnlyDepthView)
+        if (EnumHasAnyFlags(desc.Flags, GPUTextureFlags::ReadOnlyDepthView))
         {
             LOG(Warning, "Cannot create texture. Cannot create read-only Depth Stencil texture that is not a Depth Stencil texture. Add DepthStencil flag. Description: {0}", desc.ToString());
             return true;
@@ -404,6 +400,7 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
         LOG(Warning, "Cannot create texture. Depth Stencil texture cannot have mip maps. Description: {0}", desc.ToString());
         return true;
     }
+    auto formatFeatures = device->GetFormatFeatures(desc.Format);
     switch (desc.Dimensions)
     {
     case TextureDimensions::Texture:
@@ -413,27 +410,29 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
             LOG(Warning, "Cannot create texture. Texture cannot have per slice views. Description: {0}", desc.ToString());
             return true;
         }
-        if (desc.Width > device->Limits.MaximumTexture2DSize
+        if (EnumHasNoneFlags(formatFeatures.Support, FormatSupport::Texture2D))
+        {
+            LOG(Warning, "Cannot create texture. Not supported format. Description: {0}", desc.ToString());
+            return true;
+        }
+        if (desc.Width <= 0 || desc.Height <= 0 || desc.ArraySize <= 0
+            || desc.Width > device->Limits.MaximumTexture2DSize
             || desc.Height > device->Limits.MaximumTexture2DSize
             || desc.ArraySize > device->Limits.MaximumTexture2DArraySize)
         {
             LOG(Warning, "Cannot create texture. Invalid dimensions. Description: {0}", desc.ToString());
+            if (desc.Width > 0 && desc.Height > 0 && desc.ArraySize > 0)
+                LOG(Warning, "GPU device supports max 2D texture size {} and array size: {}", device->Limits.MaximumTexture2DSize, device->Limits.MaximumTexture2DArraySize);
             return true;
         }
 
         break;
     }
-
     case TextureDimensions::VolumeTexture:
     {
         if (desc.IsDepthStencil())
         {
             LOG(Warning, "Cannot create texture. Only 2D Texture can be used as a Depth Stencil. Description: {0}", desc.ToString());
-            return true;
-        }
-        if (desc.MipLevels != 1)
-        {
-            LOG(Warning, "Cannot create texture. Volume texture cannot have more than 1 mip level. Description: {0}", desc.ToString());
             return true;
         }
         if (desc.ArraySize != 1)
@@ -456,17 +455,24 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
             LOG(Warning, "Cannot create texture. Volume texture cannot have per slice map views if is not a render target. Description: {0}", desc.ToString());
             return true;
         }
-        if (desc.Width > device->Limits.MaximumTexture3DSize
+        if (EnumHasNoneFlags(formatFeatures.Support, FormatSupport::Texture3D))
+        {
+            LOG(Warning, "Cannot create texture. Not supported format. Description: {0}", desc.ToString());
+            return true;
+        }
+        if (desc.Width <= 0 || desc.Height <= 0 || desc.Depth <= 0
+            || desc.Width > device->Limits.MaximumTexture3DSize
             || desc.Height > device->Limits.MaximumTexture3DSize
             || desc.Depth > device->Limits.MaximumTexture3DSize)
         {
             LOG(Warning, "Cannot create texture. Invalid dimensions. Description: {0}", desc.ToString());
+            if (desc.Width > 0 && desc.Height > 0 && desc.Depth > 0)
+                LOG(Warning, "GPU device supports max 3D texture size {}", device->Limits.MaximumTexture3DSize);
             return true;
         }
 
         break;
     }
-
     case TextureDimensions::CubeTexture:
     {
         if (desc.HasPerSliceViews())
@@ -474,17 +480,35 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
             LOG(Warning, "Cannot create texture. Cube texture cannot have per slice views. Description: {0}", desc.ToString());
             return true;
         }
-        if (desc.Width > device->Limits.MaximumTextureCubeSize
+        if (EnumHasNoneFlags(formatFeatures.Support, FormatSupport::TextureCube))
+        {
+            LOG(Warning, "Cannot create texture. Not supported format. Description: {0}", desc.ToString());
+            return true;
+        }
+        if (desc.Width <= 0 || desc.ArraySize <= 0
+            || desc.Width > device->Limits.MaximumTextureCubeSize
             || desc.Height > device->Limits.MaximumTextureCubeSize
             || desc.ArraySize * 6 > device->Limits.MaximumTexture2DArraySize
             || desc.Width != desc.Height)
         {
             LOG(Warning, "Cannot create texture. Invalid dimensions. Description: {0}", desc.ToString());
+            if (desc.Width > 0 && desc.Height > 0 && desc.ArraySize > 0)
+                LOG(Warning, "GPU device supports max cue texture size {} and array size: {}", device->Limits.MaximumTextureCubeSize, device->Limits.MaximumTexture2DArraySize / 6);
             return true;
         }
 
         break;
     }
+    }
+    const bool isCompressed = PixelFormatExtensions::IsCompressed(desc.Format);
+    if (isCompressed)
+    {
+        const int32 blockSize = PixelFormatExtensions::ComputeBlockSize(desc.Format);
+        if (desc.Width < blockSize || desc.Height < blockSize)
+        {
+            LOG(Warning, "Cannot create texture. Invalid dimensions. Description: {0}", desc.ToString());
+            return true;
+        }
     }
 
     // Release previous data
@@ -493,13 +517,27 @@ bool GPUTexture::Init(const GPUTextureDescription& desc)
     // Initialize
     _desc = desc;
     _sRGB = PixelFormatExtensions::IsSRGB(desc.Format);
-    _isBlockCompressed = PixelFormatExtensions::IsCompressed(desc.Format);
+    _isBlockCompressed = isCompressed;
     if (OnInit())
     {
         ReleaseGPU();
+        _desc.Clear();
+        _residentMipLevels = 0;
         LOG(Warning, "Cannot initialize texture. Description: {0}", desc.ToString());
         return true;
     }
+
+#if COMPILE_WITH_PROFILER
+    ZoneValue(_memoryUsage / 1024); // Memory size in kB
+    auto group = ProfilerMemory::Groups::GraphicsTextures;
+    if (_desc.IsRenderTarget())
+        group = ProfilerMemory::Groups::GraphicsRenderTargets;
+    else if (_desc.IsCubeMap())
+        group = ProfilerMemory::Groups::GraphicsCubeMaps;
+    else if (_desc.IsVolume())
+        group = ProfilerMemory::Groups::GraphicsVolumeTextures;
+    ProfilerMemory::IncrementGroup(group, _memoryUsage);
+#endif
 
     // Render targets and depth buffers doesn't support normal textures streaming and are considered to be always resident
     if (IsRegularTexture() == false)
@@ -536,9 +574,9 @@ GPUTexture* GPUTexture::ToStagingUpload() const
     return staging;
 }
 
-bool GPUTexture::Resize(int32 width, int32 height, int32 depth)
+bool GPUTexture::Resize(int32 width, int32 height, int32 depth, PixelFormat format)
 {
-    // Validate texture is created
+    PROFILE_CPU();
     if (!IsAllocated())
     {
         LOG(Warning, "Cannot resize not created textures.");
@@ -546,14 +584,19 @@ bool GPUTexture::Resize(int32 width, int32 height, int32 depth)
     }
 
     auto desc = GetDescription();
+    if (format == PixelFormat::Unknown)
+        format = desc.Format;
 
     // Skip if size won't change
-    if (desc.Width == width && desc.Height == height && desc.Depth == depth)
+    if (desc.Width == width && desc.Height == height && desc.Depth == depth && desc.Format == format)
         return false;
 
+    desc.Format = format;
     desc.Width = width;
     desc.Height = height;
     desc.Depth = depth;
+    if (desc.MipLevels > 1)
+        desc.MipLevels = CalculateMipMapCount(0, Math::Max(width, height));
 
     // Recreate
     return Init(desc);
@@ -573,51 +616,96 @@ String GPUTexture::ToString() const
 #endif
 }
 
-GPUResource::ResourceType GPUTexture::GetResourceType() const
+GPUResourceType GPUTexture::GetResourceType() const
 {
     if (IsVolume())
-        return ResourceType::VolumeTexture;
+        return GPUResourceType::VolumeTexture;
     if (IsCubeMap())
-        return ResourceType::CubeTexture;
-    return IsRegularTexture() ? ResourceType::Texture : ResourceType::RenderTarget;
-}
-
-GPUResource::ObjectType GPUTexture::GetObjectType() const
-{
-    return ObjectType::Texture;
+        return GPUResourceType::CubeTexture;
+    return IsRegularTexture() ? GPUResourceType::Texture : GPUResourceType::RenderTarget;
 }
 
 void GPUTexture::OnReleaseGPU()
 {
+#if COMPILE_WITH_PROFILER
+    auto group = ProfilerMemory::Groups::GraphicsTextures;
+    if (_desc.IsRenderTarget())
+        group = ProfilerMemory::Groups::GraphicsRenderTargets;
+    else if (_desc.IsCubeMap())
+        group = ProfilerMemory::Groups::GraphicsCubeMaps;
+    else if (_desc.IsVolume())
+        group = ProfilerMemory::Groups::GraphicsVolumeTextures;
+    ProfilerMemory::DecrementGroup(group, _memoryUsage);
+#endif
+
     _desc.Clear();
     _residentMipLevels = 0;
 }
 
-GPUTask* GPUTexture::UploadMipMapAsync(const BytesContainer& data, int32 mipIndex)
+GPUTask* GPUTexture::UploadMipMapAsync(const BytesContainer& data, int32 mipIndex, bool copyData)
 {
-    ASSERT(IsRegularTexture() && IsAllocated());
-    //ASSERT(Math::IsInRange(mipIndex, HighestResidentMipIndex() - 1, MipLevels() - 1) && mipIndex < MipLevels() && data.IsValid());
+    uint32 rowPitch, slicePitch;
+    ComputePitch(mipIndex, rowPitch, slicePitch);
+    return UploadMipMapAsync(data, mipIndex, rowPitch, slicePitch, copyData);
+}
+
+GPUTask* GPUTexture::UploadMipMapAsync(const BytesContainer& data, int32 mipIndex, int32 rowPitch, int32 slicePitch, bool copyData)
+{
+    PROFILE_CPU();
+    PROFILE_MEM(GraphicsTextures);
+    ASSERT(IsAllocated());
     ASSERT(mipIndex < MipLevels() && data.IsValid());
-    ASSERT(data.Length() == SlicePitch(mipIndex) * ArraySize());
+    ASSERT(data.Length() >= slicePitch);
 
-    // Create task
-    auto task = ::New<GPUUploadTextureMipTask>(this, mipIndex, data, false);
-    ASSERT(task && task->HasReference(this));
+    // Optimize texture upload invoked during rendering
+    if (IsInRenderThread() && GPUDevice::Instance->IsRendering())
+    {
+        // Update all array slices
+        const byte* dataSource = data.Get();
+        for (int32 arrayIndex = 0; arrayIndex < _desc.ArraySize; arrayIndex++)
+        {
+            GPUDevice::Instance->GetMainContext()->UpdateTexture(this, arrayIndex, mipIndex, dataSource, rowPitch, slicePitch);
+            dataSource += slicePitch;
+        }
+        if (mipIndex == HighestResidentMipIndex() - 1)
+        {
+            // Mark as mip loaded
+            SetResidentMipLevels(ResidentMipLevels() + 1);
+        }
+        return nullptr;
+    }
 
+    auto task = ::New<GPUUploadTextureMipTask>(this, mipIndex, data, rowPitch, slicePitch, copyData);
+    ASSERT_LOW_LAYER(task && task->HasReference(this));
     return task;
+}
+
+bool GPUTexture::UploadData(TextureData& data, bool copyData)
+{
+    if (!IsAllocated())
+        return true;
+    if (data.Width != Width() || data.Height != Height() || data.Depth != Depth() || data.GetArraySize() != ArraySize() || data.Format != Format())
+        return true;
+    for (int32 arrayIndex = 0; arrayIndex < ArraySize(); arrayIndex++)
+    {
+        for (int32 mipLevel = 0; mipLevel < MipLevels(); mipLevel++)
+        {
+            TextureMipData* mip = data.GetData(arrayIndex, mipLevel);
+            UploadMipMapAsync(mip->Data, mipLevel, mip->RowPitch, mip->DepthPitch, copyData);
+        }
+    }
+    return false;
 }
 
 class TextureDownloadDataTask : public ThreadPoolTask
 {
 private:
-
     GPUTextureReference _texture;
     GPUTexture* _staging;
     TextureData* _data;
     bool _deleteStaging;
 
 public:
-
     TextureDownloadDataTask(GPUTexture* texture, GPUTexture* staging, TextureData& data)
         : _texture(texture)
         , _staging(staging)
@@ -633,7 +721,6 @@ public:
     }
 
 public:
-
     // [ThreadPoolTask]
     bool HasReference(Object* resource) const override
     {
@@ -641,7 +728,6 @@ public:
     }
 
 protected:
-
     // [ThreadPoolTask]
     bool Run() override
     {
@@ -675,9 +761,11 @@ bool GPUTexture::DownloadData(TextureData& result)
     {
         MISSING_CODE("support volume texture data downloading.");
     }
+    PROFILE_CPU();
+    PROFILE_MEM(GraphicsTextures);
 
     // Use faster path for staging resources
-    if (IsStaging())
+    if (IsStaging()) // TODO: what about chips with unified memory? if rendering is not active then we can access GPU memory from CPU directly (eg. mobile, integrated GPUs and some consoles)
     {
         const auto arraySize = ArraySize();
         const auto mipLevels = MipLevels();
@@ -716,7 +804,11 @@ bool GPUTexture::DownloadData(TextureData& result)
         return false;
     }
 
+#if GPU_ENABLE_RESOURCE_NAMING
     const auto name = ToString();
+#else
+    const StringView name = TEXT("Texture");
+#endif
 
     // Ensure not running on main thread - we support DownloadData from textures only on a worker threads (Thread Pool Workers or Content Loaders)
     if (IsInMainThread())
@@ -756,6 +848,8 @@ Task* GPUTexture::DownloadDataAsync(TextureData& result)
     {
         MISSING_CODE("support volume texture data downloading.");
     }
+    PROFILE_CPU();
+    PROFILE_MEM(GraphicsTextures);
 
     // Use faster path for staging resources
     if (IsStaging())
@@ -790,9 +884,10 @@ Task* GPUTexture::DownloadDataAsync(TextureData& result)
 
 void GPUTexture::SetResidentMipLevels(int32 count)
 {
-    ASSERT(IsRegularTexture() && IsAllocated());
-    ASSERT(Math::IsInRange(count, 0, MipLevels()));
-
+    count = Math::Clamp(count, 0, MipLevels());
+    if (_residentMipLevels == count || !IsRegularTexture())
+        return;
     _residentMipLevels = count;
-    onResidentMipsChanged();
+    OnResidentMipsChanged();
+    ResidentMipsChanged(this);
 }

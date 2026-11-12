@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -17,6 +17,9 @@ namespace Flax.Build.Bindings
             "ScriptingObject",
             "ManagedScriptingObject",
             "PersistentScriptingObject",
+            "ScriptingObjectReference",
+            "ScriptingObjectInterfaceReference",
+            "AssetReference",
             "BinaryAsset",
             "SceneObject",
             "Asset",
@@ -66,14 +69,14 @@ namespace Flax.Build.Bindings
             if (BaseType is ClassInfo baseClass)
             {
                 if (baseClass.IsStatic)
-                    throw new Exception(string.Format("Class {0} inherits from thr class {1} that is {2}.", FullNameNative, baseClass.FullNameNative, "static"));
+                    throw new Exception(string.Format("Class {0} inherits from the class {1} that is {2}.", FullNameNative, baseClass.FullNameNative, "static"));
                 if (baseClass.IsSealed)
                     throw new Exception(string.Format("Class {0} inherits from the class {1} that is {2}.", FullNameNative, baseClass.FullNameNative, "sealed"));
             }
 
             foreach (var fieldInfo in Fields)
             {
-                if (fieldInfo.Access == AccessLevel.Private)
+                if (fieldInfo.IsHidden)
                     continue;
 
                 fieldInfo.Getter = new FunctionInfo

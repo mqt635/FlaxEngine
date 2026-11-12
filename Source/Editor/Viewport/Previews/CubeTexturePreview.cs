@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Viewport.Widgets;
@@ -237,13 +237,13 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <inheritdoc />
-        public override bool HasLoadedAssets => base.HasLoadedAssets && _previewMaterial.IsLoaded && _previewMaterial.BaseMaterial.IsLoaded;
+        public override bool HasContentLoaded => base.HasContentLoaded && _previewMaterial.IsLoaded && _previewMaterial.BaseMaterial.IsLoaded;
 
         /// <inheritdoc />
         public override void OnDestroy()
         {
             Material = null;
-            Object.Destroy(ref _previewMaterial);
+            FlaxEngine.Object.Destroy(ref _previewMaterial);
 
             base.OnDestroy();
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -62,15 +62,38 @@ namespace Flax.Build
 
             // Add include paths for this project sources and engine third-party sources
             var depsRoot = options.DepsFolder;
-            options.CompileEnv.IncludePaths.Add(Path.Combine(Globals.EngineRoot, @"Source\ThirdParty\mono-2.0")); // TODO: let mono module expose it
             options.CompileEnv.IncludePaths.Add(Path.Combine(Globals.EngineRoot, @"Source\ThirdParty"));
-            options.CompileEnv.IncludePaths.Add(Path.Combine(Project.ProjectFolderPath, "Source"));
             options.LinkEnv.LibraryPaths.Add(depsRoot);
 
-            // Add include paths for referenced projects sources
-            foreach (var reference in Project.References)
+            // Ensure to propagate global configuration defines to the whole codebase
+            if (!EngineConfiguration.WithCSharp(options))
             {
-                options.CompileEnv.IncludePaths.Add(Path.Combine(reference.Project.ProjectFolderPath, "Source"));
+                options.CompileEnv.PreprocessorDefinitions.Add("COMPILE_WITHOUT_CSHARP");
+            }
+            if (EngineConfiguration.WithLargeWorlds(options))
+            {
+                options.CompileEnv.PreprocessorDefinitions.Add("USE_LARGE_WORLDS");
+                options.ScriptingAPI.Defines.Add("USE_LARGE_WORLDS");
+            }
+            if (!EngineConfiguration.UseLogInRelease && !IsEditor)
+            {
+                options.CompileEnv.PreprocessorDefinitions.Add("LOG_ENABLE=0");
+            }
+            if (EngineConfiguration.WithSDL(options))
+            {
+                options.CompileEnv.PreprocessorDefinitions.Add("PLATFORM_SDL");
+                options.ScriptingAPI.Defines.Add("PLATFORM_SDL");
+            }
+            if (EngineConfiguration.WithReverseZ(options))
+            {
+                options.CompileEnv.PreprocessorDefinitions.Add("REVERSE_Z");
+                options.ScriptingAPI.Defines.Add("REVERSE_Z");
+            }
+
+            // Add include paths for this and all referenced projects sources
+            foreach (var project in Project.GetAllProjects())
+            {
+                options.CompileEnv.IncludePaths.Add(Path.Combine(project.ProjectFolderPath, "Source"));
             }
         }
     }

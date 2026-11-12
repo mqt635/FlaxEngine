@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -14,6 +14,11 @@ public class ModelTool : EngineModule
     public override void Setup(BuildOptions options)
     {
         base.Setup(options);
+
+        options.PublicDefinitions.Add("COMPILE_WITH_MODEL_TOOL");
+
+        if (!options.Target.IsEditor)
+            return;
 
         bool useAssimp = true;
         bool useAutodeskFbxSdk = false;
@@ -56,18 +61,19 @@ public class ModelTool : EngineModule
             options.PrivateDependencies.Add("UVAtlas");
             break;
         case TargetPlatform.Linux:
-            break;
+        case TargetPlatform.Mac: break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }
 
         options.PrivateDependencies.Add("meshoptimizer");
-
-        options.PublicDefinitions.Add("COMPILE_WITH_MODEL_TOOL");
+        options.PrivateDependencies.Add("MikkTSpace");
+        options.PrivateDependencies.Add("Physics");
     }
 
     /// <inheritdoc />
     public override void GetFilesToDeploy(List<string> files)
     {
         files.Add(Path.Combine(FolderPath, "ModelTool.h"));
+        files.Add(Path.Combine(FolderPath, "MeshAccelerationStructure.h"));
     }
 }

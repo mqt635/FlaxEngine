@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -27,9 +27,35 @@ API_ENUM() enum class WindowStartPosition
 };
 
 /// <summary>
+/// Specifies the type of the window.
+/// </summary>
+API_ENUM() enum class WindowType
+{
+    /// <summary>
+    /// Regular window.
+    /// </summary>
+    Regular,
+
+    /// <summary>
+    /// Utility window.
+    /// </summary>
+    Utility,
+
+    /// <summary>
+    /// Tooltip window.
+    /// </summary>
+    Tooltip,
+
+    /// <summary>
+    /// Popup window.
+    /// </summary>
+    Popup,
+};
+
+/// <summary>
 /// Settings for new window.
 /// </summary>
-API_STRUCT() struct CreateWindowSettings
+API_STRUCT(NoDefault) struct CreateWindowSettings
 {
 DECLARE_SCRIPTING_TYPE_MINIMAL(CreateWindowSettings);
 
@@ -46,22 +72,22 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(CreateWindowSettings);
     /// <summary>
     /// The custom start position.
     /// </summary>
-    API_FIELD() Vector2 Position = Vector2(100, 400);
+    API_FIELD() Float2 Position = Float2(100, 400);
 
     /// <summary>
     /// The client size.
     /// </summary>
-    API_FIELD() Vector2 Size = Vector2(640, 480);
+    API_FIELD() Float2 Size = Float2(640, 480);
 
     /// <summary>
     /// The minimum size.
     /// </summary>
-    API_FIELD() Vector2 MinimumSize = Vector2(1, 1);
+    API_FIELD() Float2 MinimumSize = Float2(1, 1);
 
     /// <summary>
-    /// The maximum size.
+    /// The maximum size. Set to 0 to use unlimited size.
     /// </summary>
-    API_FIELD() Vector2 MaximumSize = Vector2(8192, 4096);
+    API_FIELD() Float2 MaximumSize = Float2(0, 0);
 
     /// <summary>
     /// The start position mode.
@@ -119,9 +145,16 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(CreateWindowSettings);
     API_FIELD() bool IsTopmost = false;
 
     /// <summary>
-    /// True if it's a regular window, false for tooltips, contextmenu and other utility windows.
+    /// True if it's a regular window, false for tooltips, context menu and other utility windows.
+    /// [Deprecated in v1.12]
     /// </summary>
-    API_FIELD() bool IsRegularWindow = true;
+    API_FIELD() DEPRECATED("Use Type instead") bool IsRegularWindow;
+
+    /// <summary>
+    /// The type of window. The type affects the behaviour of the window in system level.
+    /// Note: Tooltip and Popup windows require Parent to be set.
+    /// </summary>
+    API_FIELD() WindowType Type = WindowType::Regular;
 
     /// <summary>
     /// Enable/disable window sizing frame.
@@ -131,10 +164,22 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(CreateWindowSettings);
     /// <summary>
     /// Enable/disable window auto-show after the first paint.
     /// </summary>
-    API_FIELD() bool ShowAfterFirstPaint = false;
+    API_FIELD() bool ShowAfterFirstPaint = true;
 
     /// <summary>
     /// The custom data (platform dependant).
     /// </summary>
     API_FIELD() void* Data = nullptr;
+
+public:
+    // Ignore deprecation warnings in defaults
+    PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    CreateWindowSettings()
+    {
+        IsRegularWindow = true;
+    }
+    CreateWindowSettings(const CreateWindowSettings& other) = default;
+    CreateWindowSettings(CreateWindowSettings&& other) = default;
+    CreateWindowSettings& operator=(const CreateWindowSettings& other) = default;
+    PRAGMA_ENABLE_DEPRECATION_WARNINGS
 };

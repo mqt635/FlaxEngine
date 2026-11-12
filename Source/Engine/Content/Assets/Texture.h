@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API Texture : public TextureBase
 {
-DECLARE_BINARY_ASSET_HEADER(Texture, TexturesSerializedVersion);
+    DECLARE_BINARY_ASSET_HEADER(Texture, TexturesSerializedVersion);
 
     /// <summary>
     /// Gets the texture format type.
@@ -22,19 +22,7 @@ DECLARE_BINARY_ASSET_HEADER(Texture, TexturesSerializedVersion);
     API_PROPERTY() bool IsNormalMap() const;
 
 public:
-
 #if USE_EDITOR
-
-    /// <summary>
-    /// Saves this asset to the file. Supported only in Editor.
-    /// </summary>
-    /// <param name="path">The custom asset path to use for the saving. Use empty value to save this asset to its own storage location. Can be used to duplicate asset. Must be specified when saving virtual asset.</param>
-    /// <returns>True if cannot save data, otherwise false.</returns>
-    API_FUNCTION() bool Save(const StringView& path = StringView::Empty)
-    {
-        return Save(path, nullptr);
-    }
-
     /// <summary>
     /// Saves this asset to the file. Supported only in Editor.
     /// </summary>
@@ -42,7 +30,6 @@ public:
     /// <param name="customData">The custom texture data container. Can be used to override the data stored in the asset. Use null to ignore this argument.</param>
     /// <returns>True if cannot save data, otherwise false.</returns>
     bool Save(const StringView& path, const InitData* customData);
-
 #endif
 
     /// <summary>
@@ -61,4 +48,29 @@ public:
     /// <param name="generateMips">True if generate mipmaps for the imported texture.</param>
     /// <returns>The loaded texture (virtual asset) or null if fails.</returns>
     API_FUNCTION() static Texture* FromFile(const StringView& path, bool generateMips = false);
+
+    /// <summary>
+    /// Loads the texture from the image memory. Supported data formats depend on a runtime platform. All platform support loading PNG, BMP, TGA, HDR and JPEG files.
+    /// </summary>
+    /// <remarks>Valid only for virtual assets.</remarks>
+    /// <param name="data">The source image file data (eg. raw PNG file contents).</param>
+    /// <param name="format">The source image file format (from extension).</param>
+    /// <param name="generateMips">True if generate mipmaps for the imported texture.</param>
+    /// <returns>True if fails, otherwise false.</returns>
+    API_FUNCTION() bool LoadMemory(Span<byte> data, ImageFormat format, bool generateMips = false);
+
+    /// <summary>
+    /// Loads the texture from the image memory and creates the virtual texture asset for it. Supported data formats depend on a runtime platform. All platform support loading PNG, BMP, TGA, HDR and JPEG files.
+    /// </summary>
+    /// <param name="data">The source image file data (eg. raw PNG file contents).</param>
+    /// <param name="format">The source image file format (from extension).</param>
+    /// <param name="generateMips">True if generate mipmaps for the imported texture.</param>
+    /// <returns>The loaded texture (virtual asset) or null if fails.</returns>
+    API_FUNCTION() static Texture* FromMemory(Span<byte> data, ImageFormat format, bool generateMips = false);
+
+public:
+    // [TextureBase]
+#if USE_EDITOR
+    bool Save(const StringView& path = StringView::Empty) override;
+#endif
 };

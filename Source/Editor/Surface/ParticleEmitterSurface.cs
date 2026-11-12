@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -23,6 +23,9 @@ namespace FlaxEditor.Surface
         /// Gets the root node of the emitter graph.
         /// </summary>
         public FlaxEditor.Surface.Archetypes.Particles.ParticleEmitterNode RootNode => _rootNode;
+
+        /// <inheritdoc />
+        public override bool UseContextMenuDescriptionPanel => true;
 
         /// <inheritdoc />
         public ParticleEmitterSurface(IVisjectSurfaceOwner owner, Action onSave, FlaxEditor.Undo undo)
@@ -56,7 +59,7 @@ namespace FlaxEditor.Surface
             var width = _rootNode.Width;
             var rootPos = _rootNode.Location;
             var pos = rootPos;
-            pos.Y += Constants.NodeHeaderSize + 1.0f + 7 * Constants.LayoutOffsetY + 6.0f + 4.0f;
+            pos.Y += Constants.NodeHeaderHeight + 1.0f + 7 * Constants.LayoutOffsetY + 6.0f + 4.0f;
 
             for (int i = 0; i < _rootNode.Headers.Length; i++)
             {
@@ -64,7 +67,7 @@ namespace FlaxEditor.Surface
 
                 var modulesStart = pos - rootPos;
                 var modules = modulesGroups.FirstOrDefault(x => x.Key == header.ModuleType);
-                pos.Y += Constants.NodeHeaderSize + 2.0f;
+                pos.Y += Constants.NodeHeaderHeight + 2.0f;
                 if (modules != null)
                 {
                     foreach (var module in modules)
@@ -87,13 +90,13 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        public override bool CanUseNodeType(NodeArchetype nodeArchetype)
+        public override bool CanUseNodeType(GroupArchetype groupArchetype, NodeArchetype nodeArchetype)
         {
-            return (nodeArchetype.Flags & NodeFlags.ParticleEmitterGraph) != 0 && base.CanUseNodeType(nodeArchetype);
+            return (nodeArchetype.Flags & NodeFlags.ParticleEmitterGraph) != 0 && base.CanUseNodeType(groupArchetype, nodeArchetype);
         }
 
         /// <inheritdoc />
-        protected override NodeArchetype GetParameterGetterNodeArchetype(out ushort groupId)
+        protected internal override NodeArchetype GetParameterGetterNodeArchetype(out ushort groupId)
         {
             groupId = 6;
             return Archetypes.Parameters.Nodes[1];

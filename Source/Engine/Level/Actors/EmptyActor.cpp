@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "EmptyActor.h"
 
@@ -6,16 +6,6 @@ EmptyActor::EmptyActor(const SpawnParams& params)
     : Actor(params)
 {
 }
-
-#if USE_EDITOR
-
-BoundingBox EmptyActor::GetEditorBox() const
-{
-    const Vector3 size(50);
-    return BoundingBox(_transform.Translation - size, _transform.Translation + size);
-}
-
-#endif
 
 void EmptyActor::OnTransformChanged()
 {

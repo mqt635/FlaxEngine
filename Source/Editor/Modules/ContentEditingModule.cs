@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content;
@@ -20,6 +20,20 @@ namespace FlaxEditor.Modules
         }
 
         /// <summary>
+        /// Opens the specified asset in dedicated editor window.
+        /// </summary>
+        /// <param name="asset">The asset.</param>
+        /// <param name="disableAutoShow">True if disable automatic window showing. Used during workspace layout loading to deserialize it faster.</param>
+        /// <returns>Opened window or null if cannot open item.</returns>
+        public EditorWindow Open(Asset asset, bool disableAutoShow = false)
+        {
+            if (asset == null)
+                throw new ArgumentNullException();
+            var item = Editor.ContentDatabase.FindAsset(asset.ID);
+            return item != null ? Open(item) : null;
+        }
+
+        /// <summary>
         /// Opens the specified item in dedicated editor window.
         /// </summary>
         /// <param name="item">The content item.</param>
@@ -28,7 +42,7 @@ namespace FlaxEditor.Modules
         public EditorWindow Open(ContentItem item, bool disableAutoShow = false)
         {
             if (item == null)
-                throw new ArgumentNullException();
+                return null;
 
             // Check if any window is already editing this item
             var window = Editor.Windows.FindEditor(item);
@@ -57,31 +71,7 @@ namespace FlaxEditor.Modules
             }
             if (window != null && !disableAutoShow)
             {
-                var newLocation = (DockState)Editor.Options.Options.Interface.NewWindowLocation;
-                if (newLocation == DockState.Float)
-                {
-                    // Check if there is a floating window that has the same size
-                    Vector2 defaultSize = window.DefaultSize;
-                    for (var i = 0; i < Editor.UI.MasterPanel.FloatingPanels.Count; i++)
-                    {
-                        var win = Editor.UI.MasterPanel.FloatingPanels[i];
-
-                        // Check if size is similar
-                        if (Vector2.Abs(win.Size - defaultSize).LengthSquared < 100)
-                        {
-                            // Dock
-                            window.Show(DockState.DockFill, win);
-                            window.Focus();
-                            return window;
-                        }
-                    }
-
-                    window.ShowFloating(defaultSize);
-                }
-                else
-                {
-                    window.Show(newLocation);
-                }
+                Editor.Windows.Open(window);
             }
 
             return window;
@@ -93,9 +83,7 @@ namespace FlaxEditor.Modules
         /// <param name="item">The item.</param>
         /// <param name="shortName">The new short name.</param>
         /// <param name="hint">The hint text if name is invalid.</param>
-        /// <returns>
-        ///   <c>true</c> if name is valid; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if name is valid; otherwise, <c>false</c>.</returns>
         public bool IsValidAssetName(ContentItem item, string shortName, out string hint)
         {
             // Check if name is the same except has some chars in upper case and some in lower case
@@ -114,6 +102,12 @@ namespace FlaxEditor.Modules
                 if (shortName.Length > 60)
                 {
                     hint = "Too long name.";
+                    return false;
+                }
+
+                if (item.IsFolder && shortName.EndsWith("."))
+                {
+                    hint = "Name cannot end with '.'";
                     return false;
                 }
 
@@ -146,7 +140,7 @@ namespace FlaxEditor.Modules
                 // Cache data
                 string sourcePath = item.Path;
                 string sourceFolder = System.IO.Path.GetDirectoryName(sourcePath);
-                string extension = System.IO.Path.GetExtension(sourcePath);
+                string extension = item.IsFolder ? "" : System.IO.Path.GetExtension(sourcePath);
                 string destinationPath = StringUtils.CombinePaths(sourceFolder, shortName + extension);
 
                 if (item.IsFolder)

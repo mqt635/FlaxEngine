@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -14,11 +14,10 @@ public class FlaxGame : EngineTarget
     {
         base.Init();
 
-        // Initialize
         OutputName = "FlaxGame";
         ConfigurationName = "Game";
         IsPreBuilt = false;
-        Win32ResourceFile = Path.Combine(Globals.EngineRoot, "Source", "FlaxGame.rc");
+        IsMonolithicExecutable = false;
     }
 
     /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../Game.h"
 
@@ -16,6 +16,7 @@
 #include "Engine/Content/JsonAsset.h"
 #include "Engine/Content/AssetReference.h"
 #include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Render2D/Render2D.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
@@ -73,7 +74,7 @@ int32 GameBase::LoadProduct()
             goto LOAD_GAME_HEAD_FAILED;
 
         // Load game primary data
-        stream->ReadArray(&data);
+        stream->Read(data);
         if (data.Count() != 808 + sizeof(Guid))
             goto LOAD_GAME_HEAD_FAILED;
         Encryption::DecryptBytes(data.Get(), data.Count());
@@ -106,8 +107,10 @@ int32 GameBase::LoadProduct()
 
 bool GameBase::Init()
 {
+    PROFILE_CPU();
+
     // Preload splash screen texture
-    if (GameBaseImpl::HeaderFlags & GameHeaderFlags::ShowSplashScreen)
+    if (EnumHasAnyFlags(GameBaseImpl::HeaderFlags, GameHeaderFlags::ShowSplashScreen))
     {
         LOG(Info, "Loading splash screen");
         if (GameBaseImpl::SplashScreenId)
@@ -125,6 +128,7 @@ bool GameBase::Init()
     if (!gameSettings)
         return true;
     GameBaseImpl::FirstScene = gameSettings->FirstScene;
+    Level::PreloadSceneAsync(GameBaseImpl::FirstScene.GetID());
 
     return false;
 }
@@ -173,7 +177,7 @@ Window* GameBase::CreateMainWindow()
     settings.AllowMaximize = true;
     settings.AllowMinimize = true;
     settings.Size = Platform::GetDesktopSize();
-    settings.Position = Vector2::Zero;
+    settings.Position = Float2::Zero;
 
     Game::InitMainWindowSettings(settings);
 
@@ -196,7 +200,7 @@ void GameBaseImpl::OnMainWindowClosed()
     Engine::MainWindow = nullptr;
 
     // Request engine exit
-    Globals::IsRequestingExit = true;
+    Engine::RequestExit(0);
 }
 
 void GameBaseImpl::OnPostRender(GPUContext* context, RenderContext& renderContext)
@@ -209,7 +213,7 @@ void GameBaseImpl::OnPostRender(GPUContext* context, RenderContext& renderContex
     }
 
     // Wait for texture loaded before showing splash screen
-    if (!SplashScreen->IsLoaded() || SplashScreen.Get()->GetTexture()->MipLevels() != SplashScreen.Get()->StreamingTexture()->TotalMipLevels())
+    if (!SplashScreen->IsLoaded() || SplashScreen.Get()->GetResidentMipLevels() != SplashScreen.Get()->GetMipLevels())
     {
         return;
     }
@@ -239,7 +243,7 @@ void GameBaseImpl::OnPostRender(GPUContext* context, RenderContext& renderContex
         fade = 1.0f - (SplashScreenTime - fadeTime - showTime) / fadeTime;
 
     // Calculate image area (fill screen, keep aspect ratio, and snap to pixels)
-    const auto viewport = renderContext.Task->GetViewport();
+    const auto viewport = renderContext.Task->GetOutputViewport();
     const Rectangle screenRect(viewport.X, viewport.Y, viewport.Width, viewport.Height);
     Rectangle imageArea = screenRect;
     imageArea.Scale(0.6f);
@@ -247,8 +251,8 @@ void GameBaseImpl::OnPostRender(GPUContext* context, RenderContext& renderContex
     const float height = imageArea.GetWidth() / aspectRatio;
     imageArea.Location.Y += (imageArea.GetHeight() - height) * 0.5f;
     imageArea.Size.Y = height;
-    imageArea.Location = Vector2::Ceil(imageArea.Location);
-    imageArea.Size = Vector2::Ceil(imageArea.Size);
+    imageArea.Location = Float2::Ceil(imageArea.Location);
+    imageArea.Size = Float2::Ceil(imageArea.Size);
 
     // Draw
     Render2D::Begin(GPUDevice::Instance->GetMainContext(), renderContext.Task->GetOutputView(), nullptr, viewport);
@@ -265,8 +269,8 @@ void GameBaseImpl::OnSplashScreenEnd()
     MainRenderTask::Instance->PostRender.Unbind(&OnPostRender);
 
     // Load the first scene
-    LOG(Info, "Loading the first scene");
     const auto sceneId = FirstScene ? FirstScene.GetID() : Guid::Empty;
+    LOG(Info, "Loading the first scene ({})", sceneId);
     FirstScene = nullptr;
     if (Level::LoadSceneAsync(sceneId))
     {

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -33,7 +33,10 @@ namespace FlaxEditor.Gizmo
         public IEditorPrimitivesOwner Viewport;
 
         /// <inheritdoc />
-        public override int Order => -100;
+        public EditorPrimitives()
+        {
+            Order = 100;
+        }
 
         /// <inheritdoc />
         public override void Render(GPUContext context, ref RenderContext renderContext, GPUTexture input, GPUTexture output)
@@ -54,7 +57,7 @@ namespace FlaxEditor.Gizmo
             var height = output.Height;
             var desc = GPUTextureDescription.New2D(width, height, format, GPUTextureFlags.RenderTarget | GPUTextureFlags.ShaderResource, 1, 1, msaaLevel);
             var target = RenderTargetPool.Get(ref desc);
-            desc = GPUTextureDescription.New2D(width, height, PixelFormat.D24_UNorm_S8_UInt, GPUTextureFlags.DepthStencil, 1, 1, msaaLevel);
+            desc = GPUTextureDescription.New2D(width, height, renderContext.Buffers.DepthBuffer.Format, GPUTextureFlags.DepthStencil, 1, 1, msaaLevel);
             var targetDepth = RenderTargetPool.Get(ref desc);
 
             // Copy frame and clear depth
@@ -67,6 +70,7 @@ namespace FlaxEditor.Gizmo
             var renderList = RenderList.GetFromPool();
             var prevList = renderContext.List;
             renderContext.List = renderList;
+            renderContext.View.Pass = DrawPass.GBuffer | DrawPass.Forward;
             try
             {
                 Viewport.DrawEditorPrimitives(context, ref renderContext, target, targetDepth);

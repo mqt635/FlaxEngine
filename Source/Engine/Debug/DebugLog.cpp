@@ -1,16 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "DebugLog.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/BinaryModule.h"
-#include "Engine/Scripting/MainThreadManagedInvokeAction.h"
+#include "Engine/Scripting/ManagedCLR/MCore.h"
 #include "Engine/Scripting/ManagedCLR/MDomain.h"
 #include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
+#include "Engine/Scripting/Internal/MainThreadManagedInvokeAction.h"
 #include "Engine/Threading/Threading.h"
 #include "FlaxEngine.Gen.h"
-#include <ThirdParty/mono-2.0/mono/metadata/exception.h>
-#include <ThirdParty/mono-2.0/mono/metadata/appdomain.h>
+
+#if USE_CSHARP
 
 namespace Impl
 {
@@ -61,50 +62,59 @@ bool CacheMethods()
     return false;
 }
 
+#endif
+
 void DebugLog::Log(LogType type, const StringView& message)
 {
+#if USE_CSHARP
     if (CacheMethods())
         return;
 
     auto scriptsDomain = Scripting::GetScriptsDomain();
     MainThreadManagedInvokeAction::ParamsBuilder params;
     params.AddParam(type);
-    params.AddParam(message, scriptsDomain->GetNative());
+    params.AddParam(message, scriptsDomain);
 #if BUILD_RELEASE
-    params.AddParam(StringView::Empty, scriptsDomain->GetNative());
+    params.AddParam(StringView::Empty, scriptsDomain);
 #else
     const String stackTrace = Platform::GetStackTrace(1);
-    params.AddParam(stackTrace, scriptsDomain->GetNative());
+    params.AddParam(stackTrace, scriptsDomain);
 #endif
     MainThreadManagedInvokeAction::Invoke(Internal_SendLog, params);
+#endif
 }
 
-void DebugLog::LogException(MonoObject* exceptionObject)
+void DebugLog::LogException(MObject* exceptionObject)
 {
+#if USE_CSHARP
     if (exceptionObject == nullptr || CacheMethods())
         return;
 
     MainThreadManagedInvokeAction::ParamsBuilder params;
     params.AddParam(exceptionObject);
     MainThreadManagedInvokeAction::Invoke(Internal_SendLogException, params);
+#endif
 }
 
 String DebugLog::GetStackTrace()
 {
     String result;
+#if USE_CSHARP
     if (!CacheMethods())
     {
         auto stackTraceObj = Internal_GetStackTrace->Invoke(nullptr, nullptr, nullptr);
-        MUtils::ToString((MonoString*)stackTraceObj, result);
+        MUtils::ToString((MString*)stackTraceObj, result);
     }
+#endif
     return result;
 }
 
 void DebugLog::ThrowException(const char* msg)
 {
-    // Throw exception to the C# world
-    auto ex = mono_exception_from_name_msg(mono_get_corlib(), "System", "Exception", msg);
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::Get(msg);
+    MCore::Exception::Throw(ex);
+#endif
 }
 
 void DebugLog::ThrowNullReference()
@@ -112,35 +122,40 @@ void DebugLog::ThrowNullReference()
     //LOG(Warning, "Invalid null reference.");
     //LOG_STR(Warning, DebugLog::GetStackTrace());
 
-    // Throw exception to the C# world
-    auto ex = mono_get_exception_null_reference();
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::GetNullReference();
+    MCore::Exception::Throw(ex);
+#endif
 }
 
 void DebugLog::ThrowArgument(const char* arg, const char* msg)
 {
-    // Throw exception to the C# world
-    auto ex = mono_get_exception_argument(arg, msg);
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::GetArgument(arg, msg);
+    MCore::Exception::Throw(ex);
+#endif
 }
 
 void DebugLog::ThrowArgumentNull(const char* arg)
 {
-    // Throw exception to the C# world
-    auto ex = mono_get_exception_argument_null(arg);
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::GetArgumentNull(arg);
+    MCore::Exception::Throw(ex);
+#endif
 }
 
 void DebugLog::ThrowArgumentOutOfRange(const char* arg)
 {
-    // Throw exception to the C# world
-    auto ex = mono_get_exception_argument_out_of_range(arg);
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::GetArgumentOutOfRange(arg);
+    MCore::Exception::Throw(ex);
+#endif
 }
 
 void DebugLog::ThrowNotSupported(const char* msg)
 {
-    // Throw exception to the C# world
-    auto ex = mono_get_exception_not_supported(msg);
-    mono_raise_exception(ex);
+#if USE_CSHARP
+    auto ex = MCore::Exception::GetNotSupported(msg);
+    MCore::Exception::Throw(ex);
+#endif
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,33 +9,21 @@
 
 #if GRAPHICS_API_VULKAN
 
+class GPUVertexLayoutVulkan;
 class PipelineLayoutVulkan;
 
 class ComputePipelineStateVulkan
 {
 private:
-
     GPUDeviceVulkan* _device;
     VkPipeline _handle;
     PipelineLayoutVulkan* _layout;
 
 public:
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="ComputePipelineStateVulkan"/> class.
-    /// </summary>
-    /// <param name="device">The graphics device.</param>
-    /// <param name="pipeline">The pipeline object.</param>
-    /// <param name="layout">The pipeline layout.</param>
     ComputePipelineStateVulkan(GPUDeviceVulkan* device, VkPipeline pipeline, PipelineLayoutVulkan* layout);
-
-    /// <summary>
-    /// Finalizes an instance of the <see cref="GPUPipelineStateVulkan"/> class.
-    /// </summary>
     ~ComputePipelineStateVulkan();
 
 public:
-
     /// <summary>
     /// The cached shader descriptor infos for compute shader.
     /// </summary>
@@ -54,30 +42,29 @@ public:
         DescriptorPoolSetContainerVulkan* cmdBufferPoolSet = cmdBuffer->GetDescriptorPoolSet();
         if (CurrentTypedDescriptorPoolSet == nullptr || CurrentTypedDescriptorPoolSet->GetOwner() != cmdBufferPoolSet)
         {
-            ASSERT(cmdBufferPoolSet);
+            if (CurrentTypedDescriptorPoolSet)
+                CurrentTypedDescriptorPoolSet->GetOwner()->Refs--;
             CurrentTypedDescriptorPoolSet = cmdBufferPoolSet->AcquireTypedPoolSet(*DescriptorSetsLayout);
+            CurrentTypedDescriptorPoolSet->GetOwner()->Refs++;
             return true;
         }
-
         return false;
     }
 
     inline bool AllocateDescriptorSets()
     {
-        ASSERT(CurrentTypedDescriptorPoolSet);
         return CurrentTypedDescriptorPoolSet->AllocateDescriptorSets(*DescriptorSetsLayout, DescriptorSetHandles.Get());
     }
 
     Array<uint32> DynamicOffsets;
 
 public:
-
     void Bind(CmdBufferVulkan* cmdBuffer)
     {
         vkCmdBindDescriptorSets(
             cmdBuffer->GetHandle(),
             VK_PIPELINE_BIND_POINT_COMPUTE,
-            GetLayout()->GetHandle(),
+            GetLayout()->Handle,
             0,
             DescriptorSetHandles.Count(),
             DescriptorSetHandles.Get(),
@@ -86,7 +73,6 @@ public:
     }
 
 public:
-
     VkPipeline GetHandle() const
     {
         return _handle;
@@ -104,15 +90,16 @@ public:
 class GPUPipelineStateVulkan : public GPUResourceVulkan<GPUPipelineState>
 {
 private:
-
-    Dictionary<RenderPassVulkan*, VkPipeline> _pipelines;
+    Dictionary<Pair<RenderPassVulkan*, GPUVertexLayoutVulkan*>, VkPipeline> _pipelines;
     VkGraphicsPipelineCreateInfo _desc;
     VkPipelineShaderStageCreateInfo _shaderStages[ShaderStage_Count - 1];
     VkPipelineInputAssemblyStateCreateInfo _descInputAssembly;
+#if GPU_ALLOW_TESSELLATION_SHADERS
     VkPipelineTessellationStateCreateInfo _descTessellation;
+#endif
     VkPipelineViewportStateCreateInfo _descViewport;
     VkPipelineDynamicStateCreateInfo _descDynamic;
-    VkDynamicState _dynamicStates[3];
+    VkDynamicState _dynamicStates[5];
     VkPipelineMultisampleStateCreateInfo _descMultisample;
     VkPipelineDepthStencilStateCreateInfo _descDepthStencil;
     VkPipelineRasterizationStateCreateInfo _descRasterization;
@@ -121,7 +108,6 @@ private:
     PipelineLayoutVulkan* _layout;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUPipelineStateVulkan"/> class.
     /// </summary>
@@ -129,13 +115,17 @@ public:
     GPUPipelineStateVulkan(GPUDeviceVulkan* device);
 
 public:
-
     /// <summary>
     /// The bitmask of stages that exist in this pipeline.
     /// </summary>
     uint32 UsedStagesMask;
 
-    bool BlendEnable;
+    uint32 BlendEnable : 1;
+    uint32 DepthReadEnable : 1;
+    uint32 DepthWriteEnable : 1;
+    uint32 DepthBoundsEnable : 1;
+    uint32 StencilReadEnable : 1;
+    uint32 StencilWriteEnable : 1;
 
     /// <summary>
     /// The bitmask of stages that have descriptors.
@@ -152,53 +142,34 @@ public:
     /// </summary>
     const SpirvShaderDescriptorInfo* DescriptorInfoPerStage[DescriptorSet::GraphicsStagesCount];
 
-    const VkPipelineVertexInputStateCreateInfo* GetVertexInputState() const
-    {
-        return _desc.pVertexInputState;
-    }
-
     DescriptorSetWriteContainerVulkan DSWriteContainer;
     DescriptorSetWriterVulkan DSWriter[DescriptorSet::GraphicsStagesCount];
 
     const DescriptorSetLayoutVulkan* DescriptorSetsLayout = nullptr;
     TypedDescriptorPoolSetVulkan* CurrentTypedDescriptorPoolSet = nullptr;
+    GPUVertexLayoutVulkan* VertexInputLayout = nullptr;
+    GPUVertexLayoutVulkan* VertexBufferLayout = nullptr;
     Array<VkDescriptorSet> DescriptorSetHandles;
+    Array<uint32> DynamicOffsets;
 
+public:
     inline bool AcquirePoolSet(CmdBufferVulkan* cmdBuffer)
     {
+        // Lazy init
+        if (!DescriptorSetsLayout)
+            GetLayout();
+
         // Pipeline state has no current descriptor pools set or set owner is not current - acquire a new pool set
         DescriptorPoolSetContainerVulkan* cmdBufferPoolSet = cmdBuffer->GetDescriptorPoolSet();
         if (CurrentTypedDescriptorPoolSet == nullptr || CurrentTypedDescriptorPoolSet->GetOwner() != cmdBufferPoolSet)
         {
-            ASSERT(cmdBufferPoolSet);
+            if (CurrentTypedDescriptorPoolSet)
+                CurrentTypedDescriptorPoolSet->GetOwner()->Refs--;
             CurrentTypedDescriptorPoolSet = cmdBufferPoolSet->AcquireTypedPoolSet(*DescriptorSetsLayout);
+            CurrentTypedDescriptorPoolSet->GetOwner()->Refs++;
             return true;
         }
-
         return false;
-    }
-
-    inline bool AllocateDescriptorSets()
-    {
-        ASSERT(CurrentTypedDescriptorPoolSet);
-        return CurrentTypedDescriptorPoolSet->AllocateDescriptorSets(*DescriptorSetsLayout, DescriptorSetHandles.Get());
-    }
-
-    Array<uint32> DynamicOffsets;
-
-public:
-
-    void Bind(CmdBufferVulkan* cmdBuffer)
-    {
-        vkCmdBindDescriptorSets(
-            cmdBuffer->GetHandle(),
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            GetLayout()->GetHandle(),
-            0,
-            DescriptorSetHandles.Count(),
-            DescriptorSetHandles.Get(),
-            DynamicOffsets.Count(),
-            DynamicOffsets.Get());
     }
 
     /// <summary>
@@ -211,17 +182,16 @@ public:
     /// Gets the Vulkan graphics pipeline object for the given rendering state. Uses depth buffer and render targets formats and multi-sample levels to setup a proper PSO. Uses caching.
     /// </summary>
     /// <param name="renderPass">The render pass.</param>
+    /// <param name="vertexLayout">The vertex layout.</param>
     /// <returns>Vulkan graphics pipeline object.</returns>
-    VkPipeline GetState(RenderPassVulkan* renderPass);
+    VkPipeline GetState(RenderPassVulkan* renderPass, GPUVertexLayoutVulkan* vertexLayout);
 
 public:
-
     // [GPUPipelineState]
     bool IsValid() const final override;
     bool Init(const Description& desc) final override;
 
 protected:
-
     // [GPUResourceVulkan]
     void OnReleaseGPU() override;
 };

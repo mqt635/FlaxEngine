@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -28,4 +28,16 @@
 #endif
 #if PLATFORM_SWITCH
 #include "Platforms/Switch/Engine/Platform/SwitchPlatformSettings.h"
+#endif
+#if PLATFORM_PS5
+#include "Platforms/PS5/Engine/Platform/PS5PlatformSettings.h"
+#endif
+#if PLATFORM_MAC
+#include "Engine/Platform/Mac/MacPlatformSettings.h"
+#endif
+#if PLATFORM_IOS
+#include "Engine/Platform/iOS/iOSPlatformSettings.h"
+#endif
+#if PLATFORM_WEB
+#include "Engine/Platform/Web/WebPlatformSettings.h"
 #endif

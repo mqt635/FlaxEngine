@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
+using FlaxEditor.Utilities;
 using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Tools.Terrain.Sculpt
@@ -28,7 +29,7 @@ namespace FlaxEditor.Tools.Terrain.Sculpt
         public override bool SupportsNegativeApply => true;
 
         /// <inheritdoc />
-        public override unsafe void Apply(ref ApplyParams p)
+        public override unsafe void ApplyBrushToPatch(ref ApplyParams p)
         {
             // Prepare
             var brushPosition = p.Gizmo.CursorPosition;

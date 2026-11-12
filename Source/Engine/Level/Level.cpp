@@ -1,31 +1,36 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Level.h"
 #include "ActorsCache.h"
+#include "LargeWorlds.h"
 #include "SceneQuery.h"
 #include "SceneObjectsFactory.h"
+#include "FlaxEngine.Gen.h"
 #include "Scene/Scene.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Core/Cache.h"
 #include "Engine/Core/Collections/CollectionPoolCache.h"
 #include "Engine/Core/ObjectsRemovalService.h"
 #include "Engine/Core/Config/LayersTagsSettings.h"
 #include "Engine/Core/Types/LayersMask.h"
+#include "Engine/Core/Types/Stopwatch.h"
 #include "Engine/Debug/Exceptions/ArgumentException.h"
 #include "Engine/Debug/Exceptions/ArgumentNullException.h"
 #include "Engine/Debug/Exceptions/InvalidOperationException.h"
 #include "Engine/Debug/Exceptions/JsonParseException.h"
+#include "Engine/Engine/Engine.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Threading/JobSystem.h"
 #include "Engine/Platform/File.h"
-#include "Engine/Platform/FileSystem.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Scripting/Script.h"
 #include "Engine/Engine/Time.h"
-#include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MDomain.h"
-#include "Engine/Scripting/MException.h"
+#include "Engine/Scripting/ManagedCLR/MException.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/BinaryModule.h"
 #include "Engine/Serialization/JsonTools.h"
@@ -36,11 +41,44 @@
 #include "Editor/Editor.h"
 #include "Engine/Platform/MessageBox.h"
 #include "Engine/Engine/CommandLine.h"
+#include "Engine/Serialization/JsonSerializer.h"
+#include "Editor/Scripting/ScriptsBuilder.h"
 #endif
+
+#if USE_LARGE_WORLDS
+bool LargeWorlds::Enable = true;
+#else
+bool LargeWorlds::Enable = false;
+#endif
+
+void LargeWorlds::UpdateOrigin(Vector3& origin, const Vector3& position)
+{
+    if (Enable)
+    {
+        constexpr Real chunkSizeInv = 1.0 / ChunkSize;
+        constexpr Real chunkSizeHalf = ChunkSize * 0.5;
+        origin = Vector3(Int3((position - chunkSizeHalf) * chunkSizeInv)) * ChunkSize;
+    }
+}
 
 bool LayersMask::HasLayer(const StringView& layerName) const
 {
     return HasLayer(Level::GetLayerIndex(layerName));
+}
+
+LayersMask LayersMask::GetMask(Span<StringView> layerNames)
+{
+    LayersMask mask(0);
+    for (StringView& layerName : layerNames)
+    {
+        // Ignore blank entries
+        if (layerName.Length() == 0)
+            continue;
+        int32 index = Level::GetLayerIndex(layerName);
+        if (index != -1)
+            mask.Mask |= (uint32)(1 << index);
+    }
+    return mask;
 }
 
 enum class SceneEventType
@@ -53,25 +91,155 @@ enum class SceneEventType
     OnSceneLoadError = 5,
     OnSceneUnloading = 6,
     OnSceneUnloaded = 7,
+    OnScenePreloaded = 8,
+};
+
+enum class SceneResult
+{
+    Success,
+    Failed,
+    Wait,
 };
 
 class SceneAction
 {
 public:
-
     virtual ~SceneAction()
     {
     }
 
-    virtual bool CanDo() const
+    struct Context
     {
-        return true;
+        // Amount of seconds that action can take to run within a budget.
+        float TimeBudget = MAX_float;
+    };
+
+    virtual SceneResult Do(Context& context)
+    {
+        return SceneResult::Failed;
     }
 
-    virtual bool Do() const
+    virtual bool IsPreloading(const Guid* sceneId = nullptr)
     {
-        return true;
+        return false;
     }
+};
+
+#if USE_EDITOR
+
+struct ScriptsReloadObject
+{
+    StringAnsi TypeName;
+    ScriptingObject** Object;
+    Array<byte> Data;
+};
+
+#endif
+
+// Small utility for dividing the iterative work over data set that can run in equal slicer limited by time.
+struct TimeSlicer
+{
+    int32 Index = -1;
+    int32 Count = 0;
+    double TimeBudget;
+    double StartTime;
+
+    void BeginSync(float timeBudget, int32 count, int32 startIndex = 0);
+    bool StepSync();
+    SceneResult End();
+};
+
+// Async map loading utility for state tracking and synchronization of various load stages.
+class SceneLoader
+{
+public:
+    enum class Modes
+    {
+        Sync,
+        Async,
+        Preload,
+    };
+
+    struct Args
+    {
+        rapidjson_flax::Value& Data;
+        StringView AssetPath;
+        int32 EngineBuild;
+        float TimeBudget;
+    };
+
+    enum class Stages
+    {
+        Begin,
+        Spawn,
+        SetupPrefabs,
+        SyncNewPrefabs,
+        Deserialize,
+        SyncPrefabs,
+        SetupTransforms,
+        Initialize,
+        BeginPlay,
+        End,
+        Loaded,
+    } Stage = Stages::Begin;
+
+    bool AsyncLoad;
+    bool AsyncJobs;
+    bool Preload;
+    bool DeprecatedFlag = false;
+    Guid SceneId = Guid::Empty;
+    Scene* Scene = nullptr;
+    float TotalTime = 0.0f;
+    uint64 StartFrame;
+
+    // Cache data
+    ISerializeModifier* Modifier = nullptr;
+    ActorsCache::SceneObjectsListType* SceneObjects = nullptr;
+    Array<Actor*> InjectedSceneChildren;
+    SceneObjectsFactory::Context Context;
+    SceneObjectsFactory::PrefabSyncData* PrefabSyncData = nullptr;
+    TimeSlicer StageSlicer;
+
+    SceneLoader(Modes mode = Modes::Sync)
+        : AsyncLoad(mode != Modes::Sync)
+        , AsyncJobs(JobSystem::GetThreadsCount() > 1)
+        , Preload(mode == Modes::Preload)
+        , Modifier(Cache::ISerializeModifier.GetUnscoped())
+        , Context(Modifier)
+    {
+    }
+
+    ~SceneLoader()
+    {
+        if (PrefabSyncData)
+            Delete(PrefabSyncData);
+        if (SceneObjects)
+            ActorsCache::SceneObjectsListCache.Put(SceneObjects);
+        if (Modifier)
+            Cache::ISerializeModifier.Put(Modifier);
+    }
+
+    NON_COPYABLE(SceneLoader);
+
+    FORCE_INLINE void NextStage()
+    {
+        Stage = (Stages)((uint8)Stage + 1);
+    }
+
+    SceneResult Tick(Args& args);
+    SceneResult OnBegin(Args& args);
+    SceneResult OnSpawn(Args& args);
+    SceneResult OnSetupPrefabs(Args& args);
+    SceneResult OnSyncNewPrefabs(Args& args);
+    SceneResult OnDeserialize(Args& args);
+    SceneResult OnSyncPrefabs(Args& args);
+    SceneResult OnSetupTransforms(Args& args);
+    SceneResult OnInitialize(Args& args);
+    SceneResult OnBeginPlay(Args& args);
+    SceneResult OnEnd(Args& args);
+
+    void PostLoad(Args& args);
+    static bool LoadPreloadedScene(::Scene* scene);
 };
 
 namespace LevelImpl
@@ -79,10 +247,18 @@ namespace LevelImpl
     Array<SceneAction*> _sceneActions;
     CriticalSection _sceneActionsLocker;
     DateTime _lastSceneLoadTime(0);
+    Array<Scene*> _preloadedScenes;
+#if USE_EDITOR
+    Array<ScriptsReloadObject> ScriptsReloadObjects;
+#endif
 
     void CallSceneEvent(SceneEventType eventType, Scene* scene, Guid sceneId);
 
     void flushActions();
+    SceneResult loadScene(SceneLoader& loader, JsonAsset* sceneAsset, float* timeBudget = nullptr);
+    SceneResult loadScene(SceneLoader& loader, const BytesContainer& sceneData, Scene** outScene = nullptr, float* timeBudget = nullptr);
+    SceneResult loadScene(SceneLoader& loader, rapidjson_flax::Document& document, Scene** outScene = nullptr, float* timeBudget = nullptr);
+    SceneResult loadScene(SceneLoader& loader, rapidjson_flax::Value& data, int32 engineBuild, Scene** outScene = nullptr, StringView assetPath = StringView(), float* timeBudget = nullptr);
     bool unloadScene(Scene* scene);
     bool unloadScenes();
     bool saveScene(Scene* scene);
@@ -98,28 +274,34 @@ using namespace LevelImpl;
 class LevelService : public EngineService
 {
 public:
-
     LevelService()
-        : EngineService(TEXT("Scene Manager"), 30)
+        : EngineService(TEXT("Scene Manager"), 200)
     {
     }
 
     void Update() override;
     void LateUpdate() override;
     void FixedUpdate() override;
+    void LateFixedUpdate() override;
     void Dispose() override;
 };
 
 LevelService LevelServiceInstanceService;
+extern double EngineIdleTime;
 
 CriticalSection Level::ScenesLock;
 Array<Scene*> Level::Scenes;
+bool Level::TickEnabled = true;
+float Level::StreamingFrameBudget = 0.3f;
 Delegate<Actor*> Level::ActorSpawned;
 Delegate<Actor*> Level::ActorDeleted;
 Delegate<Actor*, Actor*> Level::ActorParentChanged;
 Delegate<Actor*> Level::ActorOrderInParentChanged;
 Delegate<Actor*> Level::ActorNameChanged;
 Delegate<Actor*> Level::ActorActiveChanged;
+#if USE_EDITOR
+Delegate<Actor*> Level::ActorDestroyChildren;
+#endif
 Delegate<Scene*, const Guid&> Level::SceneSaving;
 Delegate<Scene*, const Guid&> Level::SceneSaved;
 Delegate<Scene*, const Guid&> Level::SceneSaveError;
@@ -128,10 +310,13 @@ Delegate<Scene*, const Guid&> Level::SceneLoaded;
 Delegate<Scene*, const Guid&> Level::SceneLoadError;
 Delegate<Scene*, const Guid&> Level::SceneUnloading;
 Delegate<Scene*, const Guid&> Level::SceneUnloaded;
+Delegate<Scene*, const Guid&> Level::ScenePreloaded;
+#if USE_EDITOR
 Action Level::ScriptsReloadStart;
 Action Level::ScriptsReload;
+Action Level::ScriptsReloaded;
 Action Level::ScriptsReloadEnd;
-Array<String> Level::Tags;
+#endif
 String Level::Layers[32];
 
 bool LevelImpl::spawnActor(Actor* actor, Actor* parent)
@@ -142,10 +327,16 @@ bool LevelImpl::spawnActor(Actor* actor, Actor* parent)
         return true;
     }
 
+    if (actor->GetType().ManagedClass->IsAbstract())
+    {
+        Log::Exception(TEXT("Cannot spawn abstract actor type."));
+        return true;
+    }
+
     if (actor->Is<Scene>())
     {
         // Spawn scene
-        actor->PostSpawn();
+        actor->InitializeHierarchy();
         actor->OnTransformChanged();
         {
             SceneBeginData beginData;
@@ -164,6 +355,8 @@ bool LevelImpl::spawnActor(Actor* actor, Actor* parent)
         }
         if (parent == nullptr)
             parent = Level::Scenes[0];
+
+        actor->SetPhysicsScene(parent->GetPhysicsScene());
         actor->SetParent(parent, true, true);
     }
 
@@ -189,8 +382,7 @@ void LayersAndTagsSettings::Apply()
     // Tags/Layers are stored as index in actors so collection change would break the linkage
     for (auto& tag : Tags)
     {
-        if (!Level::Tags.Contains(tag))
-            Level::Tags.Add(tag);
+        Tags::Get(tag);
     }
     for (int32 i = 0; i < ARRAY_COUNT(Level::Layers); i++)
     {
@@ -201,99 +393,66 @@ void LayersAndTagsSettings::Apply()
     }
 }
 
-void LevelService::Update()
-{
-    PROFILE_CPU_NAMED("Level::Update");
-
-    ScopeLock lock(Level::ScenesLock);
-    auto& scenes = Level::Scenes;
-
-    // Update all actors
-    if (!Time::GetGamePaused())
-    {
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.Update.Tick();
-        }
+#define TICK_LEVEL(tickingStage, name) \
+    PROFILE_CPU_NAMED(name); \
+    PROFILE_MEM(Level); \
+    ScopeLock lock(Level::ScenesLock); \
+    auto& scenes = Level::Scenes; \
+    if (!Time::GetGamePaused() && Level::TickEnabled) \
+    { \
+        for (int32 i = 0; i < scenes.Count(); i++) \
+        { \
+            if (scenes[i]->GetIsActive()) \
+                scenes[i]->Ticking.tickingStage.Tick(); \
+        } \
     }
 #if USE_EDITOR
-    else if (!Editor::IsPlayMode)
-    {
-        // Run event for script executed in editor
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.Update.TickExecuteInEditor();
-        }
+#define TICK_LEVEL_EDITOR(tickingStage) \
+    else if (!Editor::IsPlayMode) \
+    { \
+        for (int32 i = 0; i < scenes.Count(); i++) \
+        { \
+            if (scenes[i]->GetIsActive()) \
+                scenes[i]->Ticking.tickingStage.TickExecuteInEditor(); \
+        } \
     }
+#else
+#define TICK_LEVEL_EDITOR(tickingStage)
 #endif
+
+void LevelService::Update()
+{
+    TICK_LEVEL(Update, "Level::Update")
+    TICK_LEVEL_EDITOR(Update)
 }
 
 void LevelService::LateUpdate()
 {
-    PROFILE_CPU_NAMED("Level::LateUpdate");
-
-    ScopeLock lock(Level::ScenesLock);
-    auto& scenes = Level::Scenes;
-
-    // Update all actors
-    if (!Time::GetGamePaused())
-    {
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.LateUpdate.Tick();
-        }
-    }
-#if USE_EDITOR
-    else if (!Editor::IsPlayMode)
-    {
-        // Run event for script executed in editor
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.LateUpdate.TickExecuteInEditor();
-        }
-    }
-#endif
-
-    // Flush actions
+    TICK_LEVEL(LateUpdate, "Level::LateUpdate")
+    TICK_LEVEL_EDITOR(LateUpdate)
     flushActions();
 }
 
 void LevelService::FixedUpdate()
 {
-    PROFILE_CPU_NAMED("Level::FixedUpdate");
-
-    ScopeLock lock(Level::ScenesLock);
-    auto& scenes = Level::Scenes;
-
-    // Update all actors
-    if (!Time::GetGamePaused())
-    {
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.FixedUpdate.Tick();
-        }
-    }
-#if USE_EDITOR
-    else if (!Editor::IsPlayMode)
-    {
-        // Run event for script executed in editor
-        for (int32 i = 0; i < scenes.Count(); i++)
-        {
-            if (scenes[i]->GetIsActive())
-                scenes[i]->Ticking.FixedUpdate.TickExecuteInEditor();
-        }
-    }
-#endif
+    TICK_LEVEL(FixedUpdate, "Level::FixedUpdate")
+    TICK_LEVEL_EDITOR(FixedUpdate)
 }
+
+void LevelService::LateFixedUpdate()
+{
+    TICK_LEVEL(LateFixedUpdate, "Level::LateFixedUpdate")
+    TICK_LEVEL_EDITOR(LateFixedUpdate)
+}
+
+#undef TICK_LEVEL
+#undef TICK_LEVEL_EDITOR
 
 void LevelService::Dispose()
 {
+    // End scene actions
     ScopeLock lock(_sceneActionsLocker);
+    _sceneActions.ClearDelete();
 
     // Unload scenes
     unloadScenes();
@@ -352,15 +511,16 @@ void Level::CallBeginPlay(Actor* obj)
     }
 }
 
-void Level::DrawActors(RenderContext& renderContext)
+void Level::DrawActors(RenderContextBatch& renderContextBatch, byte category)
 {
     PROFILE_CPU();
 
     //ScopeLock lock(ScenesLock);
 
-    for (int32 i = 0; i < Scenes.Count(); i++)
+    for (Scene* scene : Scenes)
     {
-        Scenes[i]->Rendering.Draw(renderContext);
+        if (scene->IsActiveInHierarchy())
+            scene->Rendering.Draw(renderContextBatch, (SceneRendering::DrawCategory)category);
     }
 }
 
@@ -370,59 +530,45 @@ void Level::CollectPostFxVolumes(RenderContext& renderContext)
 
     //ScopeLock lock(ScenesLock);
 
-    for (int32 i = 0; i < Scenes.Count(); i++)
+    for (Scene* scene : Scenes)
     {
-        Scenes[i]->Rendering.CollectPostFxVolumes(renderContext);
+        if (scene->IsActiveInHierarchy())
+            scene->Rendering.CollectPostFxVolumes(renderContext);
     }
 }
 
 class LoadSceneAction : public SceneAction
 {
 public:
-
     Guid SceneId;
     AssetReference<JsonAsset> SceneAsset;
+    SceneLoader Loader;
 
-    LoadSceneAction(const Guid& sceneId, JsonAsset* sceneAsset)
+    LoadSceneAction(const Guid& sceneId, JsonAsset* sceneAsset, SceneLoader::Modes mode)
+        : Loader(mode)
     {
         SceneId = sceneId;
         SceneAsset = sceneAsset;
     }
 
-    bool CanDo() const override
+    SceneResult Do(Context& context) override
     {
-        return SceneAsset == nullptr || SceneAsset->IsLoaded();
+        if (SceneAsset == nullptr)
+            return SceneResult::Failed;
+        if (!SceneAsset->IsLoaded())
+            return SceneResult::Wait;
+        return LevelImpl::loadScene(Loader, SceneAsset, &context.TimeBudget);
     }
 
-    bool Do() const override
+    bool IsPreloading(const Guid* sceneId) override
     {
-        // Now to deserialize scene in a proper way we need to load scripting
-        if (!Scripting::IsEveryAssemblyLoaded())
-        {
-            LOG(Error, "Scripts must be compiled without any errors in order to load a scene.");
-#if USE_EDITOR
-            Platform::Error(TEXT("Scripts must be compiled without any errors in order to load a scene. Please fix it."));
-#endif
-            CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
-            return true;
-        }
-
-        // Load scene
-        if (Level::loadScene(SceneAsset.Get()))
-        {
-            LOG(Error, "Failed to deserialize scene {0}", SceneId);
-            CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
-            return true;
-        }
-
-        return false;
+        return Loader.Preload && (!sceneId || *sceneId == SceneId);
     }
 };
 
 class UnloadSceneAction : public SceneAction
 {
 public:
-
     Guid TargetScene;
 
     UnloadSceneAction(Scene* scene)
@@ -430,33 +576,31 @@ public:
         TargetScene = scene->GetID();
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
-        auto scene = Scripting::FindObject<Scene>(TargetScene);
+        auto scene = Level::FindScene(TargetScene);
         if (!scene)
-            return true;
-        return unloadScene(scene);
+            return SceneResult::Failed;
+        return unloadScene(scene) ? SceneResult::Failed : SceneResult::Success;
     }
 };
 
 class UnloadScenesAction : public SceneAction
 {
 public:
-
     UnloadScenesAction()
     {
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
-        return unloadScenes();
+        return unloadScenes() ? SceneResult::Failed : SceneResult::Success;
     }
 };
 
 class SaveSceneAction : public SceneAction
 {
 public:
-
     Scene* TargetScene;
     bool PrettyJson;
 
@@ -466,14 +610,14 @@ public:
         PrettyJson = prettyJson;
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
         if (saveScene(TargetScene))
         {
             LOG(Error, "Failed to save scene {0}", TargetScene ? TargetScene->GetName() : String::Empty);
-            return true;
+            return SceneResult::Failed;
         }
-        return false;
+        return SceneResult::Success;
     }
 };
 
@@ -482,12 +626,11 @@ public:
 class ReloadScriptsAction : public SceneAction
 {
 public:
-
     ReloadScriptsAction()
     {
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
         // Reloading scripts workflow:
         // - save scenes (to temporary files)
@@ -498,6 +641,7 @@ public:
         // Note: we don't want to override original scene files
 
         PROFILE_CPU_NAMED("Level.ReloadScripts");
+        PROFILE_MEM(Level);
         LOG(Info, "Scripts reloading start");
         const auto startTime = DateTime::NowUTC();
 
@@ -547,7 +691,7 @@ public:
             {
                 LOG(Error, "Failed to save scene '{0}' for scripts reload.", scenes[i].Name);
                 CallSceneEvent(SceneEventType::OnSceneSaveError, scene, scene->GetID());
-                return true;
+                return SceneResult::Failed;
             }
             CallSceneEvent(SceneEventType::OnSceneSaved, scene, scene->GetID());
         }
@@ -558,6 +702,25 @@ public:
         // Reload scripting
         Level::ScriptsReload();
         Scripting::Reload();
+        Level::ScriptsReloaded();
+
+        // Restore objects
+        for (auto& e : ScriptsReloadObjects)
+        {
+            const ScriptingTypeHandle typeHandle = Scripting::FindScriptingType(e.TypeName);
+            *e.Object = ScriptingObject::NewObject(typeHandle);
+            if (!*e.Object)
+            {
+                LOG(Warning, "Failed to restore hot-reloaded object of type {0}.", String(e.TypeName));
+                continue;
+            }
+            auto* serializable = ScriptingObject::ToInterface<ISerializable>(*e.Object);
+            if (serializable && e.Data.HasItems())
+            {
+                JsonSerializer::LoadFromBytes(serializable, e.Data, FLAXENGINE_VERSION_BUILD);
+            }
+        }
+        ScriptsReloadObjects.Clear();
 
         // Restore scenes (from memory)
         for (int32 i = 0; i < scenesCount; i++)
@@ -573,16 +736,17 @@ public:
             }
             if (document.HasParseError())
             {
-                LOG(Error, "Failed to deserialize scene {0}. Result: {1}", scenes[i].Name, GetParseError_En(document.GetParseError()));
-                return true;
+                LOG(Error, "Failed to deserialize scene {0}. SceneResult: {1}", scenes[i].Name, GetParseError_En(document.GetParseError()));
+                return SceneResult::Failed;
             }
 
             // Load scene
-            if (Level::loadScene(document))
+            SceneLoader loader;
+            if (LevelImpl::loadScene(loader, document) != SceneResult::Success)
             {
                 LOG(Error, "Failed to deserialize scene {0}", scenes[i].Name);
                 CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, scenes[i].ID);
-                return true;
+                return SceneResult::Failed;
             }
         }
         scenes.Resize(0);
@@ -591,45 +755,57 @@ public:
         LOG(Info, "Scripts reloading end. Total time: {0}ms", static_cast<int32>((DateTime::NowUTC() - startTime).GetTotalMilliseconds()));
         Level::ScriptsReloadEnd();
 
-        return false;
+        return SceneResult::Success;
     }
 };
+
+void Level::ScriptsReloadRegisterObject(ScriptingObject*& obj)
+{
+    if (!obj)
+        return;
+    auto& e = ScriptsReloadObjects.AddOne();
+    e.Object = &obj;
+    e.TypeName = obj->GetType().Fullname;
+    if (auto* serializable = ScriptingObject::ToInterface<ISerializable>(obj))
+        e.Data = JsonSerializer::SaveToBytes(serializable);
+    ScriptingObject* o = obj;
+    obj = nullptr;
+    o->DeleteObjectNow();
+}
 
 #endif
 
 class SpawnActorAction : public SceneAction
 {
 public:
-
     ScriptingObjectReference<Actor> TargetActor;
     ScriptingObjectReference<Actor> ParentActor;
 
     SpawnActorAction(Actor* actor, Actor* parent)
+        : TargetActor(actor)
+        , ParentActor(parent)
     {
-        TargetActor = actor;
-        ParentActor = parent;
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
-        return spawnActor(TargetActor, ParentActor);
+        return spawnActor(TargetActor, ParentActor) ? SceneResult::Failed : SceneResult::Success;
     }
 };
 
 class DeleteActorAction : public SceneAction
 {
 public:
-
     ScriptingObjectReference<Actor> TargetActor;
 
     DeleteActorAction(Actor* actor)
+        : TargetActor(actor)
     {
-        TargetActor = actor;
     }
 
-    bool Do() const override
+    SceneResult Do(Context& context) override
     {
-        return deleteActor(TargetActor);
+        return deleteActor(TargetActor) ? SceneResult::Failed : SceneResult::Success;
     }
 };
 
@@ -667,18 +843,10 @@ void LevelImpl::CallSceneEvent(SceneEventType eventType, Scene* scene, Guid scen
     case SceneEventType::OnSceneUnloaded:
         Level::SceneUnloaded(scene, sceneId);
         break;
+    case SceneEventType::OnScenePreloaded:
+        Level::ScenePreloaded(scene, sceneId);
+        break;
     }
-}
-
-int32 Level::GetOrAddTag(const StringView& tag)
-{
-    int32 index = Tags.Find(tag);
-    if (index == INVALID_INDEX)
-    {
-        index = Tags.Count();
-        Tags.AddOne() = tag;
-    }
-    return index;
 }
 
 int32 Level::GetNonEmptyLayerNamesCount()
@@ -701,6 +869,18 @@ int32 Level::GetLayerIndex(const StringView& layer)
         }
     }
     return result;
+}
+
+StringView Level::GetLayerName(const int32 layerIndex)
+{
+    for (int32 i = 0; i < 32; i++)
+    {
+        if (i == layerIndex)
+        {
+            return Layers[i];
+        }
+    }
+    return TEXT("");
 }
 
 void Level::callActorEvent(ActorEventType eventType, Actor* a, Actor* b)
@@ -733,18 +913,52 @@ void Level::callActorEvent(ActorEventType eventType, Actor* a, Actor* b)
     case ActorEventType::OnActorActiveChanged:
         ActorActiveChanged(a);
         break;
+#if USE_EDITOR
+    case ActorEventType::OnActorDestroyChildren:
+        ActorDestroyChildren(a);
+        break;
+#endif
     }
 }
 
 void LevelImpl::flushActions()
 {
-    ScopeLock lock(_sceneActionsLocker);
+    // Calculate time budget for the streaming (relative to the game frame rate to scale across different devices)
+    SceneAction::Context context;
+    float targetFps = 60;
+    if (Time::UpdateFPS > ZeroTolerance)
+        targetFps = Time::UpdateFPS;
+    else if (Engine::GetFramesPerSecond() > 0)
+        targetFps = (float)Engine::GetFramesPerSecond();
+    context.TimeBudget = Level::StreamingFrameBudget / targetFps;
+    if (EngineIdleTime > 0.001)
+        context.TimeBudget += (float)(EngineIdleTime * 0.5); // Increase time budget if engine has some idle time for spare
+#if USE_EDITOR
+    // Throttle up in Editor
+    context.TimeBudget *= Editor::IsPlayMode ? 1.2f : 2.0f;
+#endif
+#if BUILD_DEBUG
+    // Throttle up in Debug
+    context.TimeBudget *= 1.2f;
+#endif
+    if (context.TimeBudget <= 0.0f)
+        context.TimeBudget = MAX_float; // Unlimited if 0
+    context.TimeBudget = Math::Max(context.TimeBudget, 0.001f); // Minimum 1ms
 
-    while (_sceneActions.HasItems() && _sceneActions.First()->CanDo())
+    // Runs actions in order
+    ScopeLock lock(_sceneActionsLocker);
+    for (int32 i = 0; i < _sceneActions.Count() && context.TimeBudget >= 0.0; i++)
     {
-        const auto action = _sceneActions.Dequeue();
-        action->Do();
-        Delete(action);
+        auto action = _sceneActions[i];
+        Stopwatch time;
+        auto result = action->Do(context);
+        time.Stop();
+        context.TimeBudget -= time.GetTotalSeconds();
+        if (result != SceneResult::Wait)
+        {
+            _sceneActions.RemoveAtKeepOrder(i--);
+            Delete(action);
+        }
     }
 }
 
@@ -758,6 +972,7 @@ bool LevelImpl::unloadScene(Scene* scene)
     const auto sceneId = scene->GetID();
 
     PROFILE_CPU_NAMED("Level.UnloadScene");
+    PROFILE_MEM(Level);
 
     // Fire event
     CallSceneEvent(SceneEventType::OnSceneUnloading, scene, sceneId);
@@ -766,23 +981,47 @@ bool LevelImpl::unloadScene(Scene* scene)
     if (scene->IsDuringPlay())
         scene->EndPlay();
 
-    // Simple enqueue scene root object to be deleted
+    // Remove from scenes list
+    _preloadedScenes.Remove(scene);
     Level::Scenes.Remove(scene);
-    scene->DeleteObject();
 
     // Fire event
-    CallSceneEvent(SceneEventType::OnSceneUnloaded, nullptr, sceneId);
+    CallSceneEvent(SceneEventType::OnSceneUnloaded, scene, sceneId);
 
-    // Force flush deleted objects so we actually delete unloaded scene objects (prevent from reloading their managed objects, etc.)
-    ObjectsRemovalService::Flush();
+    // Simple enqueue scene root object to be deleted
+    scene->DeleteObject();
 
     return false;
 }
 
 bool LevelImpl::unloadScenes()
 {
+    PROFILE_MEM(Level);
+
+    // Preloading actions
+    _sceneActionsLocker.Lock();
+    for (int32 i = _sceneActions.Count() - 1; i >= 0; i--)
+    {
+        auto action = _sceneActions[i];
+        if (action->IsPreloading())
+        {
+            _sceneActions.RemoveAtKeepOrder(i);
+            Delete(action);
+        }
+    }
+    _sceneActionsLocker.Unlock();
+
+    // Preloaded scenes
+    auto preloadedScenes = _preloadedScenes;
+    for (auto scene : preloadedScenes)
+    {
+        if (unloadScene(scene))
+            return true;
+    }
+
+    // Active scenes
     auto scenes = Level::Scenes;
-    for (int32 i = 0; i < scenes.Count(); i++)
+    for (int32 i = scenes.Count() - 1; i >= 0; i--)
     {
         if (unloadScene(scenes[i]))
             return true;
@@ -791,56 +1030,27 @@ bool LevelImpl::unloadScenes()
     return false;
 }
 
-bool Level::loadScene(const Guid& sceneId)
-{
-    const auto sceneAsset = Content::LoadAsync<JsonAsset>(sceneId);
-    return loadScene(sceneAsset);
-}
-
-bool Level::loadScene(const String& scenePath)
-{
-    LOG(Info, "Loading scene from file. Path: \'{0}\'", scenePath);
-
-    // Check for missing file
-    if (!FileSystem::FileExists(scenePath))
-    {
-        LOG(Error, "Missing scene file.");
-        return true;
-    }
-
-    // Load file
-    BytesContainer sceneData;
-    if (File::ReadAllBytes(scenePath, sceneData))
-    {
-        LOG(Error, "Cannot load data from file.");
-        return true;
-    }
-
-    return loadScene(sceneData);
-}
-
-bool Level::loadScene(JsonAsset* sceneAsset)
+SceneResult LevelImpl::loadScene(SceneLoader& loader, JsonAsset* sceneAsset, float* timeBudget)
 {
     // Keep reference to the asset (prevent unloading during action)
     AssetReference<JsonAsset> ref = sceneAsset;
-
-    // Wait for loaded
     if (sceneAsset == nullptr || sceneAsset->WaitForLoaded())
     {
         LOG(Error, "Cannot load scene asset.");
-        return true;
+        return SceneResult::Failed;
     }
 
-    return loadScene(*sceneAsset->Data, sceneAsset->DataEngineBuild);
+    return loadScene(loader, *sceneAsset->Data, sceneAsset->DataEngineBuild, nullptr, sceneAsset->GetPath(), timeBudget);
 }
 
-bool Level::loadScene(const BytesContainer& sceneData, Scene** outScene)
+SceneResult LevelImpl::loadScene(SceneLoader& loader, const BytesContainer& sceneData, Scene** outScene, float* timeBudget)
 {
     if (sceneData.IsInvalid())
     {
         LOG(Error, "Missing scene data.");
-        return true;
+        return SceneResult::Failed;
     }
+    PROFILE_MEM(Level);
 
     // Parse scene JSON file
     rapidjson_flax::Document document;
@@ -851,103 +1061,237 @@ bool Level::loadScene(const BytesContainer& sceneData, Scene** outScene)
     if (document.HasParseError())
     {
         Log::JsonParseException(document.GetParseError(), document.GetErrorOffset());
-        return true;
+        return SceneResult::Failed;
     }
 
-    return loadScene(document, outScene);
+    ScopeLock lock(Level::ScenesLock);
+    return loadScene(loader, document, outScene, timeBudget);
 }
 
-bool Level::loadScene(rapidjson_flax::Document& document, Scene** outScene)
+SceneResult LevelImpl::loadScene(SceneLoader& loader, rapidjson_flax::Document& document, Scene** outScene, float* timeBudget)
 {
     auto data = document.FindMember("Data");
     if (data == document.MemberEnd())
     {
         LOG(Error, "Missing Data member.");
-        return true;
+        return SceneResult::Failed;
     }
     const int32 saveEngineBuild = JsonTools::GetInt(document, "EngineBuild", 0);
-    return loadScene(data->value, saveEngineBuild, outScene);
+    return loadScene(loader, data->value, saveEngineBuild, outScene, nullptr, timeBudget);
 }
 
-bool Level::loadScene(rapidjson_flax::Value& data, int32 engineBuild, Scene** outScene)
+SceneResult LevelImpl::loadScene(SceneLoader& loader, rapidjson_flax::Value& data, int32 engineBuild, Scene** outScene, StringView assetPath, float* timeBudget)
 {
     PROFILE_CPU_NAMED("Level.LoadScene");
-
+    PROFILE_MEM(Level);
+#if USE_EDITOR
+    ContentDeprecated::Clear();
+#endif
+    SceneResult result = SceneResult::Success;
+    float timeLeft = timeBudget ? *timeBudget : MAX_float;
+    SceneLoader::Args args = { data, assetPath, engineBuild, timeLeft };
+    while (timeLeft > 0.0f && loader.Stage != SceneLoader::Stages::Loaded)
+    {
+        Stopwatch time;
+        result = loader.Tick(args);
+        time.Stop();
+        const float delta = time.GetTotalSeconds();
+        loader.TotalTime += delta;
+        timeLeft -= delta;
+        if (timeLeft < 0.0f && result == SceneResult::Success && loader.Stage != SceneLoader::Stages::Loaded)
+        {
+            result = SceneResult::Wait;
+            break;
+        }
+    }
+#if USE_EDITOR
+    loader.DeprecatedFlag |= ContentDeprecated::Clear();
+#endif
     if (outScene)
-        *outScene = nullptr;
+        *outScene = loader.Scene;
+    return result;
+}
 
+void TimeSlicer::BeginSync(float timeBudget, int32 count, int32 startIndex)
+{
+    if (Index == -1)
+    {
+        // Starting
+        Index = startIndex;
+        Count = count;
+    }
+    TimeBudget = (double)timeBudget;
+    StartTime = Platform::GetTimeSeconds();
+}
+
+bool TimeSlicer::StepSync()
+{
+    Index++;
+    double time = Platform::GetTimeSeconds();
+    double dt = time - StartTime;
+    return dt >= TimeBudget;
+}
+
+SceneResult TimeSlicer::End()
+{
+    if (Index >= Count)
+    {
+        // Finished
+        *this = TimeSlicer();
+        return SceneResult::Success;
+    }
+
+    return SceneResult::Wait;
+}
+
+SceneResult SceneLoader::Tick(Args& args)
+{
+    switch (Stage)
+    {
+    case Stages::Begin:
+        return OnBegin(args);
+    case Stages::Spawn:
+        return OnSpawn(args);
+    case Stages::SetupPrefabs:
+        return OnSetupPrefabs(args);
+    case Stages::SyncNewPrefabs:
+        return OnSyncNewPrefabs(args);
+    case Stages::Deserialize:
+        return OnDeserialize(args);
+    case Stages::SyncPrefabs:
+        return OnSyncPrefabs(args);
+    case Stages::Initialize:
+        return OnInitialize(args);
+    case Stages::SetupTransforms:
+        return OnSetupTransforms(args);
+    case Stages::BeginPlay:
+        return OnBeginPlay(args);
+    case Stages::End:
+        return OnEnd(args);
+    default:
+        return SceneResult::Failed;
+    }
+}
+
+SceneResult SceneLoader::OnBegin(Args& args)
+{
+    PROFILE_CPU_NAMED("Begin");
     LOG(Info, "Loading scene...");
-    const DateTime startTime = DateTime::NowUTC();
-    _lastSceneLoadTime = startTime;
+    _lastSceneLoadTime = DateTime::Now();
+    StartFrame = Engine::UpdateCount;
 
-    // Here whole scripting backend should be loaded for current project
-    // Later scripts will setup attached scripts and restore initial vars
+    // Validate arguments
+    if (!args.Data.IsArray())
+    {
+        LOG(Error, "Invalid Data member.");
+        CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, Guid::Empty);
+        return SceneResult::Failed;
+    }
+
+    // Peek scene node value (it's the first actor serialized)
+    SceneId = JsonTools::GetGuid(args.Data[0], "ID");
+    if (!SceneId.IsValid())
+    {
+        LOG(Error, "Invalid scene id.");
+        CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
+        return SceneResult::Failed;
+    }
+
+    // Peek meta
+    if (args.EngineBuild < 6000)
+    {
+        LOG(Error, "Invalid serialized engine build.");
+        CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
+        return SceneResult::Failed;
+    }
+    Modifier->EngineBuild = args.EngineBuild;
+
+    // Scripting backend should be loaded for the current project before loading scene
     if (!Scripting::HasGameModulesLoaded())
     {
         LOG(Error, "Cannot load scene without game modules loaded.");
 #if USE_EDITOR
         if (!CommandLine::Options.Headless.IsTrue())
-            MessageBox::Show(TEXT("Cannot load scene without game script modules. Please fix the compilation issues."), TEXT("Missing game modules"), MessageBoxButtons::OK, MessageBoxIcon::Error);
+        {
+            if (ScriptsBuilder::LastCompilationFailed())
+                MessageBox::Show(TEXT("Script compilation failed.\n\nCannot load scene without game script modules. Please fix any compilation issues.\n\nSee Output Log or logs for more info."), TEXT("Failed to compile scripts"), MessageBoxButtons::OK, MessageBoxIcon::Error);
+            else
+                MessageBox::Show(TEXT("Failed to load scripts.\n\nCannot load scene without game script modules.\n\nSee logs for more info."), TEXT("Missing game modules"), MessageBoxButtons::OK, MessageBoxIcon::Error);
+        }
 #endif
-        return true;
+        CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
+        return SceneResult::Failed;
     }
-
-    // Peek meta
-    if (engineBuild < 6000)
-    {
-        LOG(Error, "Invalid serialized engine build.");
-        return true;
-    }
-    if (!data.IsArray())
-    {
-        LOG(Error, "Invalid Data member.");
-        return true;
-    }
-    int32 objectsCount = data.Size();
-
-    // Peek scene node value (it's the first actor serialized)
-    auto& sceneValue = data[0];
-    auto sceneId = JsonTools::GetGuid(sceneValue, "ID");
-    if (!sceneId.IsValid())
-    {
-        LOG(Error, "Invalid scene id.");
-        return true;
-    }
-    auto modifier = Cache::ISerializeModifier.Get();
-    modifier->EngineBuild = engineBuild;
 
     // Skip is that scene is already loaded
-    if (FindScene(sceneId) != nullptr)
+    if (Level::FindScene(SceneId) != nullptr)
     {
-        LOG(Info, "Scene {0} is already loaded.", sceneId);
-        return false;
+        LOG(Info, "Scene {0} is already loaded.", SceneId);
+        CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, SceneId);
+        return SceneResult::Failed;
     }
 
     // Create scene actor
-    // Note: the first object in the scene file data is a Scene Actor
-    auto scene = New<Scene>(ScriptingObjectSpawnParams(sceneId, Scene::TypeInitializer));
-    scene->LoadTime = startTime;
-    scene->RegisterObject();
-    scene->Deserialize(sceneValue, modifier.Value);
+    Scene = New<::Scene>(ScriptingObjectSpawnParams(SceneId, Scene::TypeInitializer));
+    Scene->RegisterObject();
+    Scene->Deserialize(args.Data[0], Modifier);
 
     // Fire event
-    CallSceneEvent(SceneEventType::OnSceneLoading, scene, sceneId);
+    CallSceneEvent(SceneEventType::OnSceneLoading, Scene, SceneId);
 
-    // Loaded scene objects list
-    CollectionPoolCache<ActorsCache::SceneObjectsListType>::ScopeCache sceneObjects = ActorsCache::SceneObjectsListCache.Get();
-    sceneObjects->Resize(objectsCount);
-    sceneObjects->At(0) = scene;
+    NextStage();
+    return SceneResult::Success;
+}
 
-    SceneObjectsFactory::Context context(modifier.Value);
+SceneResult SceneLoader::OnSpawn(Args& args)
+{
+    PROFILE_CPU_NAMED("Spawn");
+
+    // Get any injected children of the scene.
+    InjectedSceneChildren = Scene->Children;
+
+    // Allocate scene objects list
+    SceneObjects = ActorsCache::SceneObjectsListCache.GetUnscoped();
+    const int32 dataCount = (int32)args.Data.Size();
+    SceneObjects->Resize(dataCount);
+    SceneObjects->At(0) = Scene;
+    AsyncJobs &= dataCount > 10;
+
+    // Spawn all scene objects
+    Context.Async = AsyncJobs;
+    SceneObject** objects = SceneObjects->Get();
+    if (Context.Async)
     {
-        PROFILE_CPU_NAMED("Spawn");
-
-        // Spawn all scene objects
-        for (int32 i = 1; i < objectsCount; i++) // start from 1. at index [0] was scene
+        Level::ScenesLock.Unlock(); // Unlock scenes from Main Thread so Job Threads can use it to safely setup actors hierarchy (see Actor::Deserialize)
+        JobSystem::Execute([&](int32 i)
         {
-            auto& stream = data[i];
-            auto obj = SceneObjectsFactory::Spawn(context, stream);
-            sceneObjects->At(i) = obj;
+            PROFILE_MEM(Level);
+            i++; // Start from 1. at index [0] was scene
+            auto& stream = args.Data[i];
+            auto obj = SceneObjectsFactory::Spawn(Context, stream);
+            objects[i] = obj;
+            if (obj)
+            {
+                if (!obj->IsRegistered())
+                    obj->RegisterObject();
+#if USE_EDITOR
+                // Auto-create C# objects for all actors in Editor during scene load when running in async (so main thread already has all of them)
+                if (!obj->GetManagedInstance())
+                    obj->CreateManaged();
+#endif
+            }
+            else
+                SceneObjectsFactory::HandleObjectDeserializationError(stream);
+        }, dataCount - 1);
+        Level::ScenesLock.Lock();
+    }
+    else
+    {
+        for (int32 i = 1; i < dataCount; i++) // start from 1. at index [0] was scene
+        {
+            auto& stream = args.Data[i];
+            auto obj = SceneObjectsFactory::Spawn(Context, stream);
+            objects[i] = obj;
             if (obj)
                 obj->RegisterObject();
             else
@@ -955,90 +1299,250 @@ bool Level::loadScene(rapidjson_flax::Value& data, int32 engineBuild, Scene** ou
         }
     }
 
-    SceneObjectsFactory::PrefabSyncData prefabSyncData(*sceneObjects.Value, data, modifier.Value);
+    NextStage();
+    return SceneResult::Success;
+}
 
-    SceneObjectsFactory::SetupPrefabInstances(context, prefabSyncData);
+SceneResult SceneLoader::OnSetupPrefabs(Args& args)
+{
+    // Capture prefab instances in a scene to restore any missing objects (eg. newly added objects to prefab that are missing in scene file)
+    PrefabSyncData = New<SceneObjectsFactory::PrefabSyncData>(*SceneObjects, args.Data, Modifier);
+    SceneObjectsFactory::SetupPrefabInstances(Context, *PrefabSyncData);
 
+    NextStage();
+    return SceneResult::Success;
+}
+
+SceneResult SceneLoader::OnSyncNewPrefabs(Args& args)
+{
+    // Sync the new prefab instances by spawning missing objects that were added to prefab but were not saved in a scene
     // TODO: resave and force sync scenes during game cooking so this step could be skipped in game
-    SceneObjectsFactory::SynchronizeNewPrefabInstances(context, prefabSyncData);
+    SceneObjectsFactory::SynchronizeNewPrefabInstances(Context, *PrefabSyncData);
 
-    // /\ all above this has to be done on an any thread
-    // \/ all below this has to be done on multiple threads at once
+    NextStage();
+    return SceneResult::Success;
+}
 
+SceneResult SceneLoader::OnDeserialize(Args& args)
+{
+    PROFILE_CPU_NAMED("Deserialize");
+    const int32 dataCount = (int32)args.Data.Size();
+    SceneObject** objects = SceneObjects->Get();
+    bool wasAsync = Context.Async;
+    Context.Async = false; // TODO: before doing full async for scene objects fix:
+    // TODO: - fix Actor's Scripts and Children order when loading objects data out of order via async jobs
+    // TODO: - add _loadNoAsync flag to SceneObject or Actor to handle non-async loading for those types (eg. UIControl/UICanvas)
+
+    // Load all scene objects
+    if (Context.Async)
     {
-        PROFILE_CPU_NAMED("Deserialize");
-
-        // TODO: at this point we would probably spawn a few thread pool tasks which will load deserialize scene object but only if scene is big enough
-
-        // Load all scene objects
-        Scripting::ObjectsLookupIdMapping.Set(&modifier.Value->IdsMapping);
-        for (int32 i = 1; i < objectsCount; i++) // start from 1. at index [0] was scene
+        Level::ScenesLock.Unlock(); // Unlock scenes from Main Thread so Job Threads can use it to safely setup actors hierarchy (see Actor::Deserialize)
+#if USE_EDITOR
+        volatile int64 deprecated = 0;
+#endif
+        JobSystem::Execute([&](int32 i)
         {
-            auto& objData = data[i];
-            auto obj = sceneObjects->At(i);
+            i++; // Start from 1. at index [0] was scene
+            auto obj = objects[i];
             if (obj)
-                SceneObjectsFactory::Deserialize(context, obj, objData);
+            {
+                auto& idMapping = Scripting::ObjectsLookupIdMapping.Get();
+                idMapping = &Context.GetModifier()->IdsMapping;
+                SceneObjectsFactory::Deserialize(Context, obj, args.Data[i]);
+#if USE_EDITOR
+                if (ContentDeprecated::Clear())
+                    Platform::InterlockedIncrement(&deprecated);
+#endif
+                idMapping = nullptr;
+            }
+        }, dataCount - 1);
+#if USE_EDITOR
+        if (deprecated != 0)
+            ContentDeprecated::Mark();
+#endif
+        Level::ScenesLock.Lock();
+    }
+    else
+    {
+        Scripting::ObjectsLookupIdMapping.Set(&Modifier->IdsMapping);
+        StageSlicer.BeginSync(args.TimeBudget, dataCount, 1); // start from 1. at index [0] was scene
+        while (StageSlicer.Index < StageSlicer.Count)
+        {
+            auto& objData = args.Data[StageSlicer.Index];
+            auto obj = objects[StageSlicer.Index];
+            if (obj)
+                SceneObjectsFactory::Deserialize(Context, obj, objData);
+            if (StageSlicer.StepSync())
+                break;
         }
         Scripting::ObjectsLookupIdMapping.Set(nullptr);
     }
+    Context.Async = wasAsync;
 
-    // /\ all above this has to be done on multiple threads at once
-    // \/ all below this has to be done on an any thread
+    auto result = StageSlicer.End();
+    if (result != SceneResult::Wait)
+        NextStage();
+    return result;
+}
+
+SceneResult SceneLoader::OnSyncPrefabs(Args& args)
+{
+    // Add injected children of scene (via OnSceneLoading) into sceneObjects to be initialized
+    for (auto child : InjectedSceneChildren)
+    {
+        Array<SceneObject*> injectedSceneObjects;
+        injectedSceneObjects.Add(child);
+        SceneQuery::GetAllSceneObjects(child, injectedSceneObjects);
+        for (auto o : injectedSceneObjects)
+        {
+            if (!o->IsRegistered())
+                o->RegisterObject();
+            SceneObjects->Add(o);
+        }
+    }
 
     // Synchronize prefab instances (prefab may have objects removed or reordered so deserialized instances need to synchronize with it)
     // TODO: resave and force sync scenes during game cooking so this step could be skipped in game
-    SceneObjectsFactory::SynchronizePrefabInstances(context, prefabSyncData);
+    SceneObjectsFactory::SynchronizePrefabInstances(Context, *PrefabSyncData);
 
-    // Call post load event to connect all scene actors
+    NextStage();
+    return SceneResult::Success;
+}
+
+SceneResult SceneLoader::OnSetupTransforms(Args& args)
+{
+    // Cache actor transformations
+    PROFILE_CPU_NAMED("SetupTransforms");
+    Scene->OnTransformChanged();
+
+    NextStage();
+    return SceneResult::Success;
+}
+
+SceneResult SceneLoader::OnInitialize(Args& args)
+{
+    // Initialize scene objects
+    PROFILE_CPU_NAMED("Initialize");
+    ASSERT_LOW_LAYER(IsInMainThread());
+    SceneObject** objects = SceneObjects->Get();
+    for (int32 i = 0; i < SceneObjects->Count(); i++)
     {
-        PROFILE_CPU_NAMED("Post Load");
-
-        for (int32 i = 0; i < sceneObjects->Count(); i++)
+        SceneObject* obj = objects[i];
+        if (obj)
         {
-            SceneObject* obj = sceneObjects->At(i);
-            if (obj)
-                obj->PostLoad();
+            obj->Initialize();
+
+            // Delete objects without parent
+            if (i != 0 && obj->GetParent() == nullptr)
+            {
+                LOG(Warning, "Scene object {0} {1} has missing parent object after load. Removing it.", obj->GetID(), obj->ToString());
+                obj->DeleteObject();
+            }
         }
     }
+    PrefabSyncData->InitNewObjects();
 
-    // Delete objects without parent
-    for (int32 i = 1; i < objectsCount; i++)
+    NextStage();
+    return SceneResult::Success;
+}
+
+SceneResult SceneLoader::OnBeginPlay(Args& args)
+{
+    if (Preload)
     {
-        SceneObject* obj = sceneObjects->At(i);
-        if (obj && obj->GetParent() == nullptr)
-        {
-            LOG(Warning, "Scene object {0} {1} has missing parent object after load. Removing it.", obj->GetID(), obj->ToString());
-            obj->DeleteObject();
-        }
+        // Scene got preloaded
+        _preloadedScenes.Add(Scene);
+        CallSceneEvent(SceneEventType::OnScenePreloaded, Scene, SceneId);
+        LOG(Info, "Scene pre-loaded in {}ms ({} frames)", (int32)(TotalTime * 1000.0), Engine::UpdateCount - StartFrame);
+        PostLoad(args);
+        Stage = Stages::Loaded;
+        return SceneResult::Success;
     }
+    PROFILE_CPU_NAMED("BeginPlay");
+    ASSERT_LOW_LAYER(IsInMainThread());
 
-    // Cache transformations
-    {
-        PROFILE_CPU_NAMED("Cache Transform");
+    // Link scene
+    ScopeLock lock(Level::ScenesLock);
+    Level::Scenes.Add(Scene);
 
-        scene->OnTransformChanged();
-    }
+    // TODO: prototype time-slicing with load-balancing for Begin Play:
+    // TODO: - collect all actors to enable
+    // TODO: - invoke in order OnBeginPlay -> Child Actors Begin -> Child Scripts Begin -> OnEnable for each actor
+    // TODO: - consider not drawing level until it's fully loaded (other engine systems should respect this too?)
+    // TODO: - consider refactoring Joints creation maybe? to get rid of SceneBeginData
 
-    // /\ all above this has to be done on an any thread
-    // \/ all below this has to be done on a main thread
+    // Start the game for scene objects
+    SceneBeginData beginData;
+    Scene->BeginPlay(&beginData);
+    beginData.OnDone();
 
-    // Link scene and call init
-    {
-        PROFILE_CPU_NAMED("BeginPlay");
+    NextStage();
+    return SceneResult::Success;
+}
 
-        ScopeLock lock(ScenesLock);
-        Scenes.Add(scene);
-        SceneBeginData beginData;
-        scene->BeginPlay(&beginData);
-        beginData.OnDone();
-    }
+SceneResult SceneLoader::OnEnd(Args& args)
+{
+    PROFILE_CPU_NAMED("End");
+    Stopwatch time;
 
     // Fire event
-    CallSceneEvent(SceneEventType::OnSceneLoaded, scene, sceneId);
+    CallSceneEvent(SceneEventType::OnSceneLoaded, Scene, SceneId);
 
-    LOG(Info, "Scene loaded in {0} ms", (int32)(DateTime::NowUTC() - startTime).GetTotalMilliseconds());
-    if (outScene)
-        *outScene = scene;
+    time.Stop();
+    LOG(Info, "Scene loaded in {}ms ({} frames)", (int32)((TotalTime + time.GetTotalSeconds()) * 1000.0), Engine::UpdateCount - StartFrame);
+
+    PostLoad(args);
+
+    NextStage();
+    return SceneResult::Success;
+}
+
+void SceneLoader::PostLoad(Args& args)
+{
+#if USE_EDITOR
+    // Resave assets that use deprecated data format
+    for (auto& e : Context.DeprecatedPrefabs)
+    {
+        AssetReference<Prefab> prefab = e.Item;
+        LOG(Info, "Resaving asset '{}' that uses deprecated data format", prefab->GetPath());
+        if (prefab->Resave())
+        {
+            LOG(Error, "Failed to resave asset '{}'", prefab->GetPath());
+        }
+    }
+    if (DeprecatedFlag && args.AssetPath != StringView())
+    {
+        LOG(Info, "Resaving asset '{}' that uses deprecated data format", args.AssetPath);
+        if (saveScene(Scene, args.AssetPath))
+        {
+            LOG(Error, "Failed to resave asset '{}'", args.AssetPath);
+        }
+    }
+#endif
+}
+
+bool SceneLoader::LoadPreloadedScene(::Scene* scene)
+{
+    PROFILE_CPU_NAMED("BeginPlay");
+    ASSERT_LOW_LAYER(IsInMainThread());
+    Stopwatch time;
+
+    // Link scene
+    ScopeLock lock(Level::ScenesLock);
+    _preloadedScenes.Remove(scene);
+    Level::Scenes.Add(scene);
+
+    // Start the game for scene objects
+    SceneBeginData beginData;
+    scene->BeginPlay(&beginData);
+    beginData.OnDone();
+
+    // Fire event
+    CallSceneEvent(SceneEventType::OnSceneLoaded, scene, scene->GetID());
+
+    time.Stop();
+    LOG(Info, "Scene loaded in {}ms", (int32)(time.GetTotalSeconds() * 1000.0));
+
     return false;
 }
 
@@ -1061,12 +1565,13 @@ bool LevelImpl::saveScene(Scene* scene)
 
 bool LevelImpl::saveScene(Scene* scene, const String& path)
 {
-    ASSERT(scene);
+    PROFILE_CPU_NAMED("Level.SaveScene");
+    PROFILE_MEM(Level);
+    ASSERT(scene && EnumHasNoneFlags(scene->Flags, ObjectFlags::WasMarkedToDelete));
     auto sceneId = scene->GetID();
 
     LOG(Info, "Saving scene {0} to \'{1}\'", scene->GetName(), path);
-    const DateTime startTime = DateTime::NowUTC();
-    scene->SaveTime = startTime;
+    Stopwatch stopwatch;
 
     // Serialize to json
     rapidjson_flax::StringBuffer buffer;
@@ -1084,7 +1589,17 @@ bool LevelImpl::saveScene(Scene* scene, const String& path)
         return true;
     }
 
-    LOG(Info, "Scene saved! Time {0} ms", Math::CeilToInt((float)(DateTime::NowUTC() - startTime).GetTotalMilliseconds()));
+    stopwatch.Stop();
+    LOG(Info, "Scene saved! Time {0}ms", stopwatch.GetMilliseconds());
+
+#if USE_EDITOR
+    // Reload asset at the target location if is loaded
+    Asset* asset = Content::GetAsset(sceneId);
+    if (!asset)
+        asset = Content::GetAsset(path);
+    if (asset)
+        asset->Reload();
+#endif
 
     // Fire event
     CallSceneEvent(SceneEventType::OnSceneSaved, scene, sceneId);
@@ -1095,6 +1610,7 @@ bool LevelImpl::saveScene(Scene* scene, const String& path)
 bool LevelImpl::saveScene(Scene* scene, rapidjson_flax::StringBuffer& outBuffer, bool prettyJson)
 {
     PROFILE_CPU_NAMED("Level.SaveScene");
+    PROFILE_MEM(Level);
     if (prettyJson)
     {
         PrettyJsonWriter writerObj(outBuffer);
@@ -1135,10 +1651,9 @@ bool LevelImpl::saveScene(Scene* scene, rapidjson_flax::StringBuffer& outBuffer,
         // Json resource data
         writer.JKEY("Data");
         writer.StartArray();
+        SceneObject** objects = allObjects.Get();
         for (int32 i = 0; i < allObjects.Count(); i++)
-        {
-            writer.SceneObject(allObjects[i]);
-        }
+            writer.SceneObject(objects[i]);
         writer.EndArray();
     }
     writer.EndObject();
@@ -1149,17 +1664,16 @@ bool LevelImpl::saveScene(Scene* scene, rapidjson_flax::StringBuffer& outBuffer,
 bool Level::SaveScene(Scene* scene, bool prettyJson)
 {
     ScopeLock lock(_sceneActionsLocker);
-    return SaveSceneAction(scene, prettyJson).Do();
+    SceneAction::Context context;
+    return SaveSceneAction(scene, prettyJson).Do(context) != SceneResult::Success;
 }
 
 bool Level::SaveSceneToBytes(Scene* scene, rapidjson_flax::StringBuffer& outData, bool prettyJson)
 {
     ASSERT(scene);
     ScopeLock lock(_sceneActionsLocker);
-
+    Stopwatch stopwatch;
     LOG(Info, "Saving scene {0} to bytes", scene->GetName());
-    const DateTime startTime = DateTime::NowUTC();
-    scene->SaveTime = startTime;
 
     // Serialize to json
     if (saveScene(scene, outData, prettyJson))
@@ -1168,8 +1682,8 @@ bool Level::SaveSceneToBytes(Scene* scene, rapidjson_flax::StringBuffer& outData
         return true;
     }
 
-    // Info
-    LOG(Info, "Scene saved! Time {0} ms", Math::CeilToInt(static_cast<float>((DateTime::NowUTC()- startTime).GetTotalMilliseconds())));
+    stopwatch.Stop();
+    LOG(Info, "Scene saved! Time {0}ms", stopwatch.GetMilliseconds());
 
     // Fire event
     CallSceneEvent(SceneEventType::OnSceneSaved, scene, scene->GetID());
@@ -1197,9 +1711,10 @@ void Level::SaveSceneAsync(Scene* scene)
 bool Level::SaveAllScenes()
 {
     ScopeLock lock(_sceneActionsLocker);
+    SceneAction::Context context;
     for (int32 i = 0; i < Scenes.Count(); i++)
     {
-        if (SaveSceneAction(Scenes[i]).Do())
+        if (SaveSceneAction(Scenes[i]).Do(context) != SceneResult::Success)
             return true;
     }
     return false;
@@ -1239,6 +1754,33 @@ bool Level::LoadScene(const Guid& id)
         return true;
     }
 
+    // Check preloaded scenes
+    for (auto scene : _preloadedScenes)
+    {
+        if (scene->GetID() == id)
+            return SceneLoader::LoadPreloadedScene(scene);
+    }
+
+    // Check if scene is during preloading
+    _sceneActionsLocker.Lock();
+    for (auto action : _sceneActions)
+    {
+        if (action->IsPreloading(&id))
+        {
+            // Turn preloading into loading and run it now
+            auto loadAction = (LoadSceneAction*)action;
+            loadAction->Loader.Preload = false;
+            if (loadScene(loadAction->Loader, loadAction->SceneAsset) != SceneResult::Success)
+            {
+                LOG(Error, "Failed to deserialize scene {0}", id);
+                CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, id);
+                return true;
+            }
+            return false;
+        }
+    }
+    _sceneActionsLocker.Unlock();
+
     // Preload scene asset
     const auto sceneAsset = Content::LoadAsync<JsonAsset>(id);
     if (sceneAsset == nullptr)
@@ -1248,7 +1790,9 @@ bool Level::LoadScene(const Guid& id)
     }
 
     // Load scene
-    if (loadScene(sceneAsset))
+    ScopeLock lock(ScenesLock);
+    SceneLoader loader;
+    if (loadScene(loader, sceneAsset) != SceneResult::Success)
     {
         LOG(Error, "Failed to deserialize scene {0}", id);
         CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, id);
@@ -1260,7 +1804,8 @@ bool Level::LoadScene(const Guid& id)
 Scene* Level::LoadSceneFromBytes(const BytesContainer& data)
 {
     Scene* scene = nullptr;
-    if (loadScene(data, &scene))
+    SceneLoader loader;
+    if (loadScene(loader, data, &scene) != SceneResult::Success)
     {
         LOG(Error, "Failed to deserialize scene from bytes");
         CallSceneEvent(SceneEventType::OnSceneLoadError, nullptr, Guid::Empty);
@@ -1270,7 +1815,6 @@ Scene* Level::LoadSceneFromBytes(const BytesContainer& data)
 
 bool Level::LoadSceneAsync(const Guid& id)
 {
-    // Check ID
     if (!id.IsValid())
     {
         Log::ArgumentException();
@@ -1285,8 +1829,98 @@ bool Level::LoadSceneAsync(const Guid& id)
         return true;
     }
 
+    // Check preloaded scenes
+    // TODO: if scene loader gets time-slicing to begin play then make a new action to perform it in async
+    for (auto scene : _preloadedScenes)
+    {
+        if (scene->GetID() == id)
+            return SceneLoader::LoadPreloadedScene(scene);
+    }
+
+    // Check if scene is during preloading
+    _sceneActionsLocker.Lock();
+    for (auto action : _sceneActions)
+    {
+        if (action->IsPreloading(&id))
+        {
+            // Turn preloading into loading and let it load this scene (it might be in progress already)
+            auto loadAction = (LoadSceneAction*)action;
+            loadAction->Loader.Preload = false;
+            return false;
+        }
+    }
+    _sceneActionsLocker.Unlock();
+
     ScopeLock lock(_sceneActionsLocker);
-    _sceneActions.Enqueue(New<LoadSceneAction>(id, sceneAsset));
+    _sceneActions.Enqueue(New<LoadSceneAction>(id, sceneAsset, SceneLoader::Modes::Async));
+
+    return false;
+}
+
+bool Level::PreloadSceneAsync(const Guid& id)
+{
+    if (!id.IsValid())
+    {
+        Log::ArgumentException();
+        return true;
+    }
+
+    // Check preloaded scenes
+    for (auto scene : _preloadedScenes)
+    {
+        if (scene->GetID() == id)
+            return false; // Already preloaded
+    }
+
+    // Check queue
+    _sceneActionsLocker.Lock();
+    for (auto action : _sceneActions)
+    {
+        if (action->IsPreloading(&id))
+            return false; // Already preloading
+    }
+    _sceneActionsLocker.Unlock();
+
+    // Preload scene asset
+    const auto sceneAsset = Content::LoadAsync<JsonAsset>(id);
+    if (sceneAsset == nullptr)
+    {
+        LOG(Error, "Cannot load scene asset.");
+        return true;
+    }
+
+    ScopeLock lock(_sceneActionsLocker);
+    _sceneActions.Enqueue(New<LoadSceneAction>(id, sceneAsset, SceneLoader::Modes::Preload));
+
+    return false;
+}
+
+bool Level::UnloadScene(const Guid& id)
+{
+    // Try with already loaded scene
+    if (Scene* scene = FindScene(id))
+        return unloadScene(scene);
+
+    // Check preloaded scenes
+    for (auto scene : _preloadedScenes)
+    {
+        if (scene->GetID() == id)
+            return unloadScene(scene);
+    }
+
+    // Check loading queue
+    _sceneActionsLocker.Lock();
+    for (int32 i = _sceneActions.Count() - 1; i >= 0; i--)
+    {
+        auto action = _sceneActions[i];
+        if (action->IsPreloading(&id))
+        {
+            _sceneActions.RemoveAtKeepOrder(i--);
+            Delete(action);
+            break;
+        }
+    }
+    _sceneActionsLocker.Unlock();
 
     return false;
 }
@@ -1327,30 +1961,176 @@ void Level::ReloadScriptsAsync()
 
 Actor* Level::FindActor(const Guid& id)
 {
-    return Scripting::FindObject<Actor>(id);
+    return Scripting::TryFindObject<Actor>(id);
 }
 
 Actor* Level::FindActor(const StringView& name)
 {
     Actor* result = nullptr;
-
     ScopeLock lock(ScenesLock);
-
     for (int32 i = 0; result == nullptr && i < Scenes.Count(); i++)
-    {
         result = Scenes[i]->FindActor(name);
-    }
-
     return result;
 }
 
-Actor* Level::FindActor(const MClass* type)
+Actor* Level::FindActor(const MClass* type, bool activeOnly)
 {
     CHECK_RETURN(type, nullptr);
     Actor* result = nullptr;
     ScopeLock lock(ScenesLock);
     for (int32 i = 0; result == nullptr && i < Scenes.Count(); i++)
-        result = Scenes[i]->FindActor(type);
+        result = Scenes[i]->FindActor(type, activeOnly);
+    return result;
+}
+
+Actor* Level::FindActor(const MClass* type, const StringView& name)
+{
+    CHECK_RETURN(type, nullptr);
+    Actor* result = nullptr;
+    ScopeLock lock(ScenesLock);
+    for (int32 i = 0; result == nullptr && i < Scenes.Count(); i++)
+        result = Scenes[i]->FindActor(type, name);
+    return result;
+}
+
+Actor* FindActorRecursive(Actor* node, const Tag& tag, bool activeOnly)
+{
+    if (activeOnly && !node->GetIsActive())
+        return nullptr;
+    if (node->HasTag(tag))
+        return node;
+    Actor* result = nullptr;
+    for (Actor* child : node->Children)
+    {
+        result = FindActorRecursive(child, tag, activeOnly);
+        if (result)
+            break;
+    }
+    return result;
+}
+
+Actor* FindActorRecursiveByType(Actor* node, const MClass* type, const Tag& tag, bool activeOnly)
+{
+    CHECK_RETURN(type, nullptr);
+    if (activeOnly && !node->GetIsActive())
+        return nullptr;
+    if (node->HasTag(tag) && (node->GetClass()->IsSubClassOf(type) || node->GetClass()->HasInterface(type)))
+        return node;
+    Actor* result = nullptr;
+    for (Actor* child : node->Children)
+    {
+        result = FindActorRecursiveByType(child, type, tag, activeOnly);
+        if (result)
+            break;
+    }
+    return result;
+}
+
+void FindActorsRecursive(Actor* node, const Tag& tag, const bool activeOnly, Array<Actor*>& result)
+{
+    if (activeOnly && !node->GetIsActive())
+        return;
+    if (node->HasTag(tag))
+        result.Add(node);
+    for (Actor* child : node->Children)
+        FindActorsRecursive(child, tag, activeOnly, result);
+}
+
+void FindActorsRecursiveByParentTags(Actor* node, const Array<Tag>& tags, const bool activeOnly, Array<Actor*>& result)
+{
+    if (activeOnly && !node->GetIsActive())
+        return;
+    for (Tag tag : tags)
+    {
+        if (node->HasTag(tag))
+        {
+            result.Add(node);
+            break;
+        }
+    }
+    for (Actor* child : node->Children)
+        FindActorsRecursiveByParentTags(child, tags, activeOnly, result);
+}
+
+Actor* Level::FindActor(const Tag& tag, bool activeOnly, Actor* root)
+{
+    PROFILE_CPU();
+    if (root)
+        return FindActorRecursive(root, tag, activeOnly);
+    Actor* result = nullptr;
+    for (Scene* scene : Scenes)
+    {
+        result = FindActorRecursive(scene, tag, activeOnly);
+        if (result)
+            break;
+    }
+    return result;
+}
+
+Actor* Level::FindActor(const MClass* type, const Tag& tag, bool activeOnly, Actor* root)
+{
+    CHECK_RETURN(type, nullptr);
+    if (root)
+        return FindActorRecursiveByType(root, type, tag, activeOnly);
+    Actor* result = nullptr;
+    ScopeLock lock(ScenesLock);
+    for (int32 i = 0; result == nullptr && i < Scenes.Count(); i++)
+        result = Scenes[i]->FindActor(type, tag, activeOnly);
+    return result;
+}
+
+void FindActorRecursive(Actor* node, const Tag& tag, Array<Actor*>& result)
+{
+    if (node->HasTag(tag))
+        result.Add(node);
+    for (Actor* child : node->Children)
+        FindActorRecursive(child, tag, result);
+}
+
+Array<Actor*> Level::FindActors(const Tag& tag, const bool activeOnly, Actor* root)
+{
+    PROFILE_CPU();
+    Array<Actor*> result;
+    if (root)
+    {
+        FindActorsRecursive(root, tag, activeOnly, result);
+    }
+    else
+    {
+        ScopeLock lock(ScenesLock);
+        for (Scene* scene : Scenes)
+            FindActorsRecursive(scene, tag, activeOnly, result);
+    }
+    return result;
+}
+
+Array<Actor*> Level::FindActorsByParentTag(const Tag& parentTag, const bool activeOnly, Actor* root)
+{
+    PROFILE_CPU();
+    Array<Actor*> result;
+    const Array<Tag> subTags = Tags::GetSubTags(parentTag);
+
+    if (subTags.Count() == 0)
+    {
+        return result;
+    }
+    if (subTags.Count() == 1)
+    {
+        result = FindActors(subTags[0], activeOnly, root);
+        return result;
+    }
+
+    if (root)
+    {
+        FindActorsRecursiveByParentTags(root, subTags, activeOnly, result);
+    }
+    else
+    {
+        ScopeLock lock(ScenesLock);
+        for (Scene* scene : Scenes)
+            FindActorsRecursiveByParentTags(scene, subTags, activeOnly, result);
+    }
+
     return result;
 }
 
@@ -1366,41 +2146,51 @@ Script* Level::FindScript(const MClass* type)
 
 namespace
 {
-    void GetActors(const MClass* type, Actor* actor, Array<Actor*>& result)
+    void GetActors(const MClass* type, bool isInterface, Actor* actor, bool activeOnly, Array<Actor*>& result)
     {
-        if (actor->GetClass()->IsSubClassOf(type))
+        if (activeOnly && !actor->GetIsActive())
+            return;
+        if ((!isInterface && actor->GetClass()->IsSubClassOf(type)) ||
+            (isInterface && actor->GetClass()->HasInterface(type)))
             result.Add(actor);
         for (auto child : actor->Children)
-            GetActors(type, child, result);
+            GetActors(type, isInterface, child, activeOnly, result);
     }
 
-    void GetScripts(const MClass* type, Actor* actor, Array<Script*>& result)
+    void GetScripts(const MClass* type, bool isInterface, Actor* actor, Array<Script*>& result)
     {
         for (auto script : actor->Scripts)
-            if (script->GetClass()->IsSubClassOf(type))
+        {
+            if ((!isInterface && script->GetClass()->IsSubClassOf(type)) ||
+                (isInterface && script->GetClass()->HasInterface(type)))
                 result.Add(script);
+        }
         for (auto child : actor->Children)
-            GetScripts(type, child, result);
+            GetScripts(type, isInterface, child, result);
     }
 }
 
-Array<Actor*> Level::GetActors(const MClass* type)
+Array<Actor*> Level::GetActors(const MClass* type, bool activeOnly)
 {
     Array<Actor*> result;
     CHECK_RETURN(type, result);
     ScopeLock lock(ScenesLock);
     for (int32 i = 0; i < Scenes.Count(); i++)
-        ::GetActors(type, Scenes[i], result);
+        ::GetActors(type, type->IsInterface(), Scenes[i], activeOnly, result);
     return result;
 }
 
-Array<Script*> Level::GetScripts(const MClass* type)
+Array<Script*> Level::GetScripts(const MClass* type, Actor* root)
 {
     Array<Script*> result;
     CHECK_RETURN(type, result);
     ScopeLock lock(ScenesLock);
-    for (int32 i = 0; i < Scenes.Count(); i++)
-        ::GetScripts(type, Scenes[i], result);
+    const bool isInterface = type->IsInterface();
+    if (root)
+        ::GetScripts(type, isInterface, root, result);
+    else
+        for (int32 i = 0; i < Scenes.Count(); i++)
+            ::GetScripts(type, isInterface, Scenes[i], result);
     return result;
 }
 

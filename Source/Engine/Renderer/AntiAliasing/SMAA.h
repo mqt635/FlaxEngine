@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "../RendererPass.h"
+#include "Engine/Renderer/RendererPass.h"
 #include "Engine/Graphics/GPUPipelineStatePermutations.h"
 
 #define SMAA_AREA_TEX TEXT("Engine/Textures/SMAA_AreaTex")
@@ -15,9 +15,8 @@ class SMAA : public RendererPass<SMAA>
 {
 private:
 
-    PACK_STRUCT(struct Data
-        {
-        Vector4 RtSize;
+    GPU_CB_STRUCT(Data {
+        Float4 RtSize;
         });
 
     AssetReference<Shader> _shader;

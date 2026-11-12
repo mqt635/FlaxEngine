@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,9 +11,9 @@
 /// <summary>
 /// Describes a single skeleton node data. Used by the runtime.
 /// </summary>
-API_STRUCT() struct SkeletonNode
+API_STRUCT() struct FLAXENGINE_API SkeletonNode
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(SkeletonNode);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(SkeletonNode);
 
     /// <summary>
     /// The parent node index. The root node uses value -1.
@@ -34,9 +34,9 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(SkeletonNode);
 /// <summary>
 /// Describes a single skeleton bone data. Used by the runtime. Skeleton bones are subset of the skeleton nodes collection that are actually used by the skinned model meshes.
 /// </summary>
-API_STRUCT() struct SkeletonBone
+API_STRUCT() struct FLAXENGINE_API SkeletonBone
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(SkeletonBone);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(SkeletonBone);
 
     /// <summary>
     /// The parent bone index. The root bone uses value -1.
@@ -71,10 +71,13 @@ struct TIsPODType<SkeletonBone>
 /// <remarks>
 /// Bones are ordered so that parents always come first, allowing for hierarchical updates in a simple loop.
 /// </remarks>
-class SkeletonData
+class FLAXENGINE_API SkeletonData
 {
-public:
+private:
+    mutable volatile intptr _dirty = 1;
+    mutable Array<Matrix> _cachedPose;
 
+public:
     /// <summary>
     /// The nodes in this hierarchy. The root node is always at the index 0.
     /// </summary>
@@ -86,63 +89,44 @@ public:
     Array<SkeletonBone> Bones;
 
 public:
-
     /// <summary>
     /// Gets the root node reference.
     /// </summary>
-    /// <returns>The root node.</returns>
     FORCE_INLINE SkeletonNode& RootNode()
     {
         ASSERT(Nodes.HasItems());
-        return Nodes[0];
+        return Nodes.Get()[0];
     }
 
     /// <summary>
     /// Gets the root node reference.
     /// </summary>
-    /// <returns>The root node.</returns>
     FORCE_INLINE const SkeletonNode& RootNode() const
     {
         ASSERT(Nodes.HasItems());
-        return Nodes[0];
+        return Nodes.Get()[0];
     }
 
     /// <summary>
     /// Swaps the contents of object with the other object without copy operation. Performs fast internal data exchange.
     /// </summary>
-    /// <param name="other">The other object.</param>
-    void Swap(SkeletonData& other)
-    {
-        Nodes.Swap(other.Nodes);
-        Bones.Swap(other.Bones);
-    }
+    void Swap(SkeletonData& other);
 
-    int32 FindNode(const StringView& name)
-    {
-        for (int32 i = 0; i < Nodes.Count(); i++)
-        {
-            if (Nodes[i].Name == name)
-                return i;
-        }
-        return -1;
-    }
+    Transform GetNodeTransform(int32 nodeIndex) const;
+    void SetNodeTransform(int32 nodeIndex, const Transform& value);
 
-    int32 FindBone(int32 nodeIndex)
-    {
-        for (int32 i = 0; i < Bones.Count(); i++)
-        {
-            if (Bones[i].NodeIndex == nodeIndex)
-                return i;
-        }
-        return -1;
-    }
+    int32 FindNode(const StringView& name) const;
+    int32 FindBone(int32 nodeIndex) const;
+
+    // Gets the skeleton nodes transforms in mesh space (pose). Calculated from the local node transforms and hierarchy. Cached internally and updated when data is dirty.
+    const Array<Matrix>& GetNodesPose() const;
+
+    // Marks data as dirty (modified) to update internal state and recalculate cached data if needed (eg. skeleton pose).
+    void Dirty();
+    uint64 GetMemoryUsage() const;
 
     /// <summary>
     /// Releases data.
     /// </summary>
-    void Dispose()
-    {
-        Nodes.Resize(0);
-        Bones.Resize(0);
-    }
+    void Dispose();
 };

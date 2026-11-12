@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.Linq;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEngine;
@@ -20,31 +21,30 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <inheritdoc />
         public override void Initialize(LayoutElementsContainer layout)
         {
-            _element = null;
-
-            // Try get limit attribute for value min/max range setting and slider speed
+            var doubleValue = layout.DoubleValue();
+            doubleValue.ValueBox.ValueChanged += OnValueChanged;
+            doubleValue.ValueBox.SlidingEnd += ClearToken;
+            _element = doubleValue;
             var attributes = Values.GetAttributes();
             if (attributes != null)
             {
-                var limit = attributes.FirstOrDefault(x => x is LimitAttribute);
-                if (limit != null)
+                var limit = (LimitAttribute)attributes.FirstOrDefault(x => x is LimitAttribute);
+                doubleValue.SetLimits(limit);
+                var valueCategory = ((ValueCategoryAttribute)attributes.FirstOrDefault(x => x is ValueCategoryAttribute))?.Category ?? Utils.ValueCategory.None;
+                if (valueCategory != Utils.ValueCategory.None)
                 {
-                    // Use double value editor with limit
-                    var doubleValue = layout.DoubleValue();
-                    doubleValue.SetLimits((LimitAttribute)limit);
-                    doubleValue.DoubleValue.ValueChanged += OnValueChanged;
-                    doubleValue.DoubleValue.SlidingEnd += ClearToken;
-                    _element = doubleValue;
-                    return;
+                    doubleValue.SetCategory(valueCategory);
+                    if (LinkedLabel != null)
+                    {
+                        LinkedLabel.SetupContextMenu += (label, menu, editor) =>
+                        {
+                            menu.AddSeparator();
+                            var mb = menu.AddButton("Show formatted", bt => { doubleValue.SetCategory(bt.Checked ? valueCategory : Utils.ValueCategory.None); });
+                            mb.AutoCheck = true;
+                            mb.Checked = doubleValue.ValueBox.Category != Utils.ValueCategory.None;
+                        };
+                    }
                 }
-            }
-            if (_element == null)
-            {
-                // Use double value editor
-                var doubleValue = layout.DoubleValue();
-                doubleValue.DoubleValue.ValueChanged += OnValueChanged;
-                doubleValue.DoubleValue.SlidingEnd += ClearToken;
-                _element = doubleValue;
             }
         }
 
@@ -66,7 +66,13 @@ namespace FlaxEditor.CustomEditors.Editors
             }
             else
             {
-                _element.Value = (double)Values[0];
+                var value = Values[0];
+                if (value is double asDouble)
+                    _element.Value = (float)asDouble;
+                else if (value is float asFloat)
+                    _element.Value = asFloat;
+                else
+                    throw new Exception(string.Format("Invalid value type {0}.", value?.GetType().ToString() ?? "<null>"));
             }
         }
     }

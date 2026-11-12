@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,18 +7,25 @@
 #include "Engine/Core/NonCopyable.h"
 #include "Engine/Core/Enums.h"
 #include "Engine/Core/Types/TimeSpan.h"
-#include "Engine/Core/Collections/Array.h"
 #include "Engine/Platform/Platform.h"
 
 /// <summary>
 /// Represents the current stage in the lifecycle of a Task.
 /// </summary>
-DECLARE_ENUM_EX_6(TaskState, int64, 0, Created, Failed, Canceled, Queued, Running, Finished);
+enum class TaskState : int64
+{
+    Created = 0,
+    Failed,
+    Canceled,
+    Queued,
+    Running,
+    Finished
+};
 
 /// <summary>
 /// Represents an asynchronous operation.
 /// </summary>
-class FLAXENGINE_API Task : public RemovableObject, public NonCopyable
+class FLAXENGINE_API Task : public Object, public NonCopyable
 {
     //
     // Tasks execution and states flow:
@@ -41,7 +48,6 @@ class FLAXENGINE_API Task : public RemovableObject, public NonCopyable
     //
 
 protected:
-
     /// <summary>
     /// The cancel flag used to indicate that there is request to cancel task operation.
     /// </summary>
@@ -57,14 +63,23 @@ protected:
     /// </summary>
     Task* _continueWith = nullptr;
 
-public:
+    /// <summary>
+    /// The task that's starts removal chain, used to sync whole task chain lifetime.
+    /// </summary>
+    Task* _rootForRemoval = nullptr;
 
+    void SetState(TaskState state)
+    {
+        Platform::AtomicStore((int64 volatile*)&_state, (uint64)state);
+    }
+
+public:
     /// <summary>
     /// Gets the task state.
     /// </summary>
     FORCE_INLINE TaskState GetState() const
     {
-        return static_cast<TaskState>(Platform::AtomicRead((int64 volatile*)&_state));
+        return (TaskState)Platform::AtomicRead((int64 const volatile*)&_state);
     }
 
     /// <summary>
@@ -86,7 +101,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Checks if operation failed.
     /// </summary>
@@ -145,7 +159,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Starts this task execution (and will continue with all children).
     /// </summary>
@@ -179,19 +192,21 @@ public:
     /// <param name="tasks">The tasks list to wait for.</param>
     /// <param name="timeoutMilliseconds">The maximum amount of milliseconds to wait for the task to finish it's job. Timeout smaller/equal 0 will result in infinite waiting.</param>
     /// <returns>True if any task failed or has been canceled or has timeout, otherwise false.</returns>
-    template<class T = Task>
-    static bool WaitAll(Array<T*>& tasks, double timeoutMilliseconds = -1)
+    static bool WaitAll(const Span<Task*>& tasks, double timeoutMilliseconds = -1);
+
+    /// <summary>
+    /// Waits for all the tasks from the list.
+    /// </summary>
+    /// <param name="tasks">The tasks list to wait for.</param>
+    /// <param name="timeoutMilliseconds">The maximum amount of milliseconds to wait for the task to finish it's job. Timeout smaller/equal 0 will result in infinite waiting.</param>
+    /// <returns>True if any task failed or has been canceled or has timeout, otherwise false.</returns>
+    template<class T = Task, typename AllocationType = HeapAllocation>
+    static bool WaitAll(const Array<T*, AllocationType>& tasks, double timeoutMilliseconds = -1)
     {
-        for (int32 i = 0; i < tasks.Count(); i++)
-        {
-            if (tasks[i]->Wait())
-                return true;
-        }
-        return false;
+        return WaitAll(ToSpan(tasks), timeoutMilliseconds);
     }
 
 public:
-
     /// <summary>
     /// Continues that task execution with a given task (will call Start on given task after finishing that one).
     /// </summary>
@@ -213,7 +228,7 @@ public:
     /// <param name="action">Action to run.</param>
     /// <param name="target">The action target object.</param>
     /// <returns>Enqueued task.</returns>
-    Task* ContinueWith(Function<void()> action, Object* target = nullptr);
+    Task* ContinueWith(const Function<void()>& action, Object* target = nullptr);
 
     /// <summary>
     /// Continues that task execution with a given action (will spawn new async action).
@@ -221,10 +236,9 @@ public:
     /// <param name="action">Action to run.</param>
     /// <param name="target">The action target object.</param>
     /// <returns>Enqueued task.</returns>
-    Task* ContinueWith(Function<bool()> action, Object* target = nullptr);
+    Task* ContinueWith(const Function<bool()>& action, Object* target = nullptr);
 
 public:
-
     /// <summary>
     /// Starts the new task.
     /// </summary>
@@ -238,7 +252,7 @@ public:
     /// <param name="action">The action.</param>
     /// <param name="target">The action target object.</param>
     /// <returns>Task</returns>
-    static Task* StartNew(Function<void()>& action, Object* target = nullptr);
+    static Task* StartNew(const Function<void()>& action, Object* target = nullptr);
 
     /// <summary>
     /// Starts the new task.
@@ -251,10 +265,23 @@ public:
     /// <summary>
     /// Starts the new task.
     /// </summary>
+    /// <param name="callee">The callee object.</param>
+    /// <returns>Task</returns>
+    template<class T, void(T::* Method)()>
+    static Task* StartNew(T* callee)
+    {
+        Function<void()> action;
+        action.Bind<T, Method>(callee);
+        return StartNew(action, dynamic_cast<Object*>(callee));
+    }
+
+    /// <summary>
+    /// Starts the new task.
+    /// </summary>
     /// <param name="action">The action.</param>
     /// <param name="target">The action target object.</param>
     /// <returns>Task</returns>
-    static Task* StartNew(Function<bool()>& action, Object* target = nullptr);
+    static Task* StartNew(const Function<bool()>& action, Object* target = nullptr);
 
     /// <summary>
     /// Starts the new task.
@@ -280,34 +307,27 @@ public:
     /// <summary>
     /// Cancels all the tasks from the list and clears it.
     /// </summary>
-    template<class T = Task>
-    static void CancelAll(Array<T*>& tasks)
+    template<class T = Task, typename AllocationType = HeapAllocation>
+    static void CancelAll(Array<T*, AllocationType>& tasks)
     {
         for (int32 i = 0; i < tasks.Count(); i++)
-        {
             tasks[i]->Cancel();
-        }
         tasks.Clear();
     }
 
 protected:
-
     /// <summary>
-    /// Executes this task.
-    /// It should be called by the task consumer (thread pool or other executor of this task type).
-    /// It calls run() and handles result).
+    /// Executes this task. It should be called by the task consumer (thread pool or other executor of this task type). It calls run() and handles result).
     /// </summary>
     void Execute();
 
     /// <summary>
-    /// Runs the task specified operations
-    /// Does not handles any task related logic, only performs the actual job.
+    /// Runs the task specified operations. It does not handle any task related logic, but only performs the actual job.
     /// </summary>
     /// <returns>The task execution result. Returns true if failed, otherwise false.</returns>
     virtual bool Run() = 0;
 
 protected:
-
     virtual void Enqueue() = 0;
     virtual void OnStart();
     virtual void OnFinish();

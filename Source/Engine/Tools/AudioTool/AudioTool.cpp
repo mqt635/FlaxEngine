@@ -1,8 +1,30 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if COMPILE_WITH_AUDIO_TOOL
 
 #include "AudioTool.h"
 #include "Engine/Core/Core.h"
+#include "Engine/Core/Math/Math.h"
 #include "Engine/Core/Memory/Allocation.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#if USE_EDITOR
+#include "Engine/Serialization/Serialization.h"
+#include "Engine/Scripting/Enums.h"
+#endif
+
+#define CONVERT_TO_MONO_AVG 1
+#if !CONVERT_TO_MONO_AVG
+#include "Engine/Core/Math/Math.h"
+#endif
+
+#if USE_EDITOR
+
+String AudioTool::Options::ToString() const
+{
+    return String::Format(TEXT("Volume: {}, Format:{}, DisableStreaming:{}, Is3D:{}, Quality:{}, BitDepth:{}"), Volume, ScriptingEnum::ToString(Format), DisableStreaming, Is3D, Quality, (int32)BitDepth);
+}
+
+#endif
 
 void ConvertToMono8(const int8* input, uint8* output, uint32 numSamples, uint32 numChannels)
 {
@@ -15,7 +37,11 @@ void ConvertToMono8(const int8* input, uint8* output, uint32 numSamples, uint32 
             ++input;
         }
 
-        *output = sum / numChannels;
+#if CONVERT_TO_MONO_AVG
+        *output = (uint8)(sum / numChannels);
+#else
+        *output = (uint8)Math::Clamp<int16>(sum, 0, MAX_uint8);
+#endif
         ++output;
     }
 }
@@ -31,7 +57,11 @@ void ConvertToMono16(const int16* input, int16* output, uint32 numSamples, uint3
             ++input;
         }
 
-        *output = sum / numChannels;
+#if CONVERT_TO_MONO_AVG
+        *output = (int16)(sum / numChannels);
+#else
+        *output = (int16)Math::Clamp<int32>(sum, MIN_int16, MAX_int16);
+#endif
         ++output;
     }
 }
@@ -55,8 +85,12 @@ void ConvertToMono24(const uint8* input, uint8* output, uint32 numSamples, uint3
             input += 3;
         }
 
-        const int32 avg = (int32)(sum / numChannels);
-        Convert32To24Bits(avg, output);
+#if CONVERT_TO_MONO_AVG
+        const int32 val = (int32)(sum / numChannels);
+#else
+        const int32 val = (int32)Math::Clamp<int64>(sum, MIN_int16, MAX_int16);
+#endif
+        Convert32To24Bits(val, output);
         output += 3;
     }
 }
@@ -72,7 +106,11 @@ void ConvertToMono32(const int32* input, int32* output, uint32 numSamples, uint3
             ++input;
         }
 
+#if CONVERT_TO_MONO_AVG
         *output = (int32)(sum / numChannels);
+#else
+        *output = (int32)Math::Clamp<int64>(sum, MIN_int16, MAX_int16);
+#endif
         ++output;
     }
 }
@@ -124,6 +162,7 @@ void Convert32To24Bits(const int32* input, uint8* output, uint32 numSamples)
 
 void AudioTool::ConvertToMono(const byte* input, byte* output, uint32 bitDepth, uint32 numSamples, uint32 numChannels)
 {
+    PROFILE_CPU();
     switch (bitDepth)
     {
     case 8:
@@ -146,6 +185,7 @@ void AudioTool::ConvertToMono(const byte* input, byte* output, uint32 bitDepth, 
 
 void AudioTool::ConvertBitDepth(const byte* input, uint32 inBitDepth, byte* output, uint32 outBitDepth, uint32 numSamples)
 {
+    PROFILE_CPU();
     int32* srcBuffer = nullptr;
 
     const bool needTempBuffer = inBitDepth != 32;
@@ -205,13 +245,13 @@ void AudioTool::ConvertBitDepth(const byte* input, uint32 inBitDepth, byte* outp
 
 void AudioTool::ConvertToFloat(const byte* input, uint32 inBitDepth, float* output, uint32 numSamples)
 {
+    PROFILE_CPU();
     if (inBitDepth == 8)
     {
         for (uint32 i = 0; i < numSamples; i++)
         {
             const int8 sample = *(int8*)input;
-            output[i] = sample / 127.0f;
-
+            output[i] = sample * (1.0f / 127.0f);
             input++;
         }
     }
@@ -220,8 +260,7 @@ void AudioTool::ConvertToFloat(const byte* input, uint32 inBitDepth, float* outp
         for (uint32 i = 0; i < numSamples; i++)
         {
             const int16 sample = *(int16*)input;
-            output[i] = sample / 32767.0f;
-
+            output[i] = sample * (1.0f / 32767.0f);
             input += 2;
         }
     }
@@ -230,8 +269,7 @@ void AudioTool::ConvertToFloat(const byte* input, uint32 inBitDepth, float* outp
         for (uint32 i = 0; i < numSamples; i++)
         {
             const int32 sample = Convert24To32Bits(input);
-            output[i] = sample / 2147483647.0f;
-
+            output[i] = sample * (1.0f / 2147483647.0f);
             input += 3;
         }
     }
@@ -240,8 +278,7 @@ void AudioTool::ConvertToFloat(const byte* input, uint32 inBitDepth, float* outp
         for (uint32 i = 0; i < numSamples; i++)
         {
             const int32 sample = *(int32*)input;
-            output[i] = sample / 2147483647.0f;
-
+            output[i] = sample * (1.0f / 2147483647.0f);
             input += 4;
         }
     }
@@ -253,11 +290,14 @@ void AudioTool::ConvertToFloat(const byte* input, uint32 inBitDepth, float* outp
 
 void AudioTool::ConvertFromFloat(const float* input, int32* output, uint32 numSamples)
 {
+    PROFILE_CPU();
     for (uint32 i = 0; i < numSamples; i++)
     {
-        const float sample = *(float*)input;
-        output[i] = static_cast<int32>(sample * 2147483647.0f);
-
+        float sample = *(float*)input;
+        sample = Math::Clamp(sample, -1.0f + ZeroTolerance, +1.0f - ZeroTolerance);
+        output[i] = static_cast<int32>(sample * 2147483648.0f);
         input++;
     }
 }
+
+#endif

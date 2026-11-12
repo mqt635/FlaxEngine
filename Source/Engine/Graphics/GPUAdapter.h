@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
+#include "Engine/Core/Types/Version.h"
 #include "Engine/Scripting/ScriptingObject.h"
 
 // GPU vendors IDs
@@ -9,17 +10,17 @@
 #define GPU_VENDOR_ID_INTEL 0x8086
 #define GPU_VENDOR_ID_NVIDIA 0x10DE
 #define GPU_VENDOR_ID_MICROSOFT 0x1414
+#define GPU_VENDOR_ID_APPLE 0x106B
 
 /// <summary>
 /// Interface for GPU device adapter.
 /// </summary>
-API_CLASS(NoSpawn, Attributes="HideInEditor") class FLAXENGINE_API GPUAdapter : public PersistentScriptingObject
+API_CLASS(NoSpawn, Attributes="HideInEditor") class FLAXENGINE_API GPUAdapter : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDevice);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDevice);
 public:
-
     GPUAdapter()
-        : PersistentScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
+        : ScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
     {
     }
 
@@ -35,12 +36,16 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Checks if adapter is valid and returns true if it is.
     /// </summary>
     /// <returns>True if valid, otherwise false.</returns>
     virtual bool IsValid() const = 0;
+
+    /// <summary>
+    /// Gets the native pointer to the underlying graphics device adapter. It's a low-level platform-specific handle.
+    /// </summary>
+    API_PROPERTY() virtual void* GetNativePtr() const = 0;
 
     /// <summary>
     /// Gets the GPU vendor identifier.
@@ -52,8 +57,12 @@ public:
     /// </summary>
     API_PROPERTY() virtual String GetDescription() const = 0;
 
-public:
+    /// <summary>
+    /// Gets the GPU driver version.
+    /// </summary>
+    API_PROPERTY() virtual Version GetDriverVersion() const = 0;
 
+public:
     // Returns true if adapter's vendor is AMD.
     API_PROPERTY() FORCE_INLINE bool IsAMD() const
     {

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -50,6 +50,19 @@ public class Audio : EngineModule
             options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "Switch", "Engine", "Audio"));
             options.CompileEnv.PreprocessorDefinitions.Add("AUDIO_API_SWITCH");
             break;
+        case TargetPlatform.PS5:
+            options.SourcePaths.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "PS5", "Engine", "Audio"));
+            options.CompileEnv.PreprocessorDefinitions.Add("AUDIO_API_PS5");
+            break;
+        case TargetPlatform.Mac:
+            useOpenAL = true;
+            break;
+        case TargetPlatform.iOS:
+            useOpenAL = true;
+            break;
+        case TargetPlatform.Web:
+            useOpenAL = true;
+            break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }
 
@@ -77,6 +90,22 @@ public class Audio : EngineModule
             case TargetPlatform.Android:
                 options.OutputFiles.Add(Path.Combine(depsRoot, "libopenal.a"));
                 options.Libraries.Add("OpenSLES");
+                break;
+            case TargetPlatform.Mac:
+                options.OutputFiles.Add(Path.Combine(depsRoot, "libopenal.a"));
+                options.Libraries.Add("CoreAudio.framework");
+                options.Libraries.Add("AudioUnit.framework");
+                options.Libraries.Add("AudioToolbox.framework");
+                break;
+            case TargetPlatform.iOS:
+                options.OutputFiles.Add(Path.Combine(depsRoot, "libopenal.a"));
+                options.Libraries.Add("CoreAudio.framework");
+                options.Libraries.Add("AudioToolbox.framework");
+                options.PrivateDefinitions.Add("ALC_DEVICE_DETECTION=0");
+                break;
+            case TargetPlatform.Web:
+                options.LinkEnv.CustomArgs.Add("-lopenal");
+                options.PrivateDefinitions.Add("ALC_DEVICE_DETECTION=0");
                 break;
             default: throw new InvalidPlatformException(options.Platform.Target);
             }

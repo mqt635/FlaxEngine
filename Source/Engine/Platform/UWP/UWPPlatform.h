@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -34,15 +34,8 @@ public:
     static int32 GetDpi();
     static String GetUserLocaleName();
     static String GetComputerName();
-    static String GetUserName();
     static bool GetHasFocus();
-    static bool CanOpenUrl(const StringView& url);
-    static void OpenUrl(const StringView& url);
-    static Vector2 GetMousePosition();
-    static void SetMousePosition(const Vector2& pos);
-    static Rectangle GetMonitorBounds(const Vector2& screenPos);
-    static Vector2 GetDesktopSize();
-    static Rectangle GetVirtualDesktopBounds();
+    static Float2 GetDesktopSize();
     static Window* CreateWindow(const CreateWindowSettings& settings);
     static void* LoadLibrary(const Char* filename);
 };

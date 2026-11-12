@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -6,6 +6,8 @@
 #include "GPUContextDX12.h"
 #include "../IncludeDirectXHeaders.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 void BackBufferDX12::Setup(GPUSwapChainDX12* window, ID3D12Resource* backbuffer)
 {
@@ -24,7 +26,7 @@ void BackBufferDX12::Setup(GPUSwapChainDX12* window, ID3D12Resource* backbuffer)
         Handle.SetRTV(rtDesc);
     }
 
-#if GPU_USE_WINDOW_SRV
+#if GPU_ENABLE_WINDOW_SRV
     // Create SRV
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srDesc;
@@ -51,6 +53,8 @@ GPUSwapChainDX12::GPUSwapChainDX12(GPUDeviceDX12* device, Window* window)
     , _windowHandle(static_cast<HWND>(window->GetNativePtr()))
     , _swapChain(nullptr)
     , _currentFrameIndex(0)
+    , _allowTearing(false)
+    , _isFullscreen(false)
 {
     ASSERT(_windowHandle);
     _window = window;
@@ -64,11 +68,12 @@ void GPUSwapChainDX12::OnReleaseGPU()
     // Disable fullscreen mode
     if (_swapChain)
     {
-        VALIDATE_DIRECTX_RESULT(_swapChain->SetFullscreenState(false, nullptr));
+        VALIDATE_DIRECTX_CALL(_swapChain->SetFullscreenState(false, nullptr));
     }
 #endif
 
     // Release data
+    PROFILE_MEM_DEC(Graphics, _memoryUsage);
     releaseBackBuffer();
     _backBuffers.Resize(0);
     if (_swapChain)
@@ -77,6 +82,7 @@ void GPUSwapChainDX12::OnReleaseGPU()
         _swapChain = nullptr;
     }
     _width = _height = 0;
+    _memoryUsage = 0;
 }
 
 void GPUSwapChainDX12::releaseBackBuffer()
@@ -98,7 +104,7 @@ bool GPUSwapChainDX12::IsFullscreen()
 
     // Get state
     BOOL state;
-    VALIDATE_DIRECTX_RESULT(_swapChain->GetFullscreenState(&state, nullptr));
+    VALIDATE_DIRECTX_CALL(_swapChain->GetFullscreenState(&state, nullptr));
     return state == TRUE;
 #endif
 }
@@ -135,6 +141,16 @@ void GPUSwapChainDX12::SetFullscreen(bool isFullscreen)
         }
 
         _isFullscreen = isFullscreen;
+
+        // Buffers must be resized in flip presentation model
+        if (swapChainDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL ||
+            swapChainDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
+        {
+            const int32 width = _width;
+            const int32 height = _height;
+            _width = _height = 0;
+            Resize(width, height);
+        }
     }
 #else
     LOG(Info, "Cannot change fullscreen mode on this platform");
@@ -182,7 +198,7 @@ bool GPUSwapChainDX12::Resize(int32 width, int32 height)
         swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
         swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
         swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-#if GPU_USE_WINDOW_SRV
+#if GPU_ENABLE_WINDOW_SRV
         swapChainDesc.BufferUsage |= DXGI_USAGE_SHADER_INPUT;
 #endif
         if (_allowTearing)
@@ -209,7 +225,7 @@ bool GPUSwapChainDX12::Resize(int32 width, int32 height)
         // Create swap chain (it needs the queue so that it can force a flush on it)
         IDXGISwapChain1* swapChain;
         auto dxgiFactory = _device->GetDXGIFactory();
-        VALIDATE_DIRECTX_RESULT(dxgiFactory->CreateSwapChainForHwnd(_device->GetCommandQueueDX12(), _windowHandle, &swapChainDesc, &fullscreenDesc, nullptr, &swapChain));
+        VALIDATE_DIRECTX_CALL(dxgiFactory->CreateSwapChainForHwnd(_device->GetCommandQueueDX12(), _windowHandle, &swapChainDesc, &fullscreenDesc, nullptr, &swapChain));
         _swapChain = static_cast<IDXGISwapChain3*>(swapChain);
         ASSERT(_swapChain);
         DX_SET_DEBUG_NAME_EX(_swapChain, TEXT("RenderOutput"), TEXT("SwapChain"), TEXT(""));
@@ -217,7 +233,7 @@ bool GPUSwapChainDX12::Resize(int32 width, int32 height)
         _backBuffers.Resize(swapChainDesc.BufferCount);
 
         // Disable DXGI changes to the window
-        dxgiFactory->MakeWindowAssociation(_windowHandle, 0);
+        VALIDATE_DIRECTX_CALL(dxgiFactory->MakeWindowAssociation(_windowHandle, DXGI_MWA_NO_ALT_ENTER));
     }
     else
     {
@@ -225,13 +241,14 @@ bool GPUSwapChainDX12::Resize(int32 width, int32 height)
 
         _swapChain->GetDesc1(&swapChainDesc);
 
-        VALIDATE_DIRECTX_RESULT(_swapChain->ResizeBuffers(swapChainDesc.BufferCount, width, height, swapChainDesc.Format, swapChainDesc.Flags));
+        VALIDATE_DIRECTX_CALL(_swapChain->ResizeBuffers(swapChainDesc.BufferCount, width, height, swapChainDesc.Format, swapChainDesc.Flags));
     }
 
     _currentFrameIndex = _swapChain->GetCurrentBackBufferIndex();
     _width = width;
     _height = height;
     _memoryUsage = RenderTools::CalculateTextureMemoryUsage(_format, _width, _height, 1) * swapChainDesc.BufferCount;
+    PROFILE_MEM_INC(Graphics, _memoryUsage);
 
     getBackBuffer();
 #endif
@@ -304,7 +321,7 @@ void GPUSwapChainDX12::getBackBuffer()
         swapChainBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         D3D12_CLEAR_VALUE swapChainOptimizedClearValue = {};
         swapChainOptimizedClearValue.Format = swapChainBufferDesc.Format;
-        VALIDATE_DIRECTX_RESULT(_device->GetDevice()->CreateCommittedResource(
+        VALIDATE_DIRECTX_CALL(_device->GetDevice()->CreateCommittedResource(
             &swapChainHeapProperties,
             D3D12_HEAP_FLAG_ALLOW_DISPLAY,
             &swapChainBufferDesc,
@@ -312,7 +329,7 @@ void GPUSwapChainDX12::getBackBuffer()
             &swapChainOptimizedClearValue,
             IID_GRAPHICS_PPV_ARGS(&backbuffer)));
 #else
-        VALIDATE_DIRECTX_RESULT(_swapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffer)));
+        VALIDATE_DIRECTX_CALL(_swapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffer)));
 #endif
         DX_SET_DEBUG_NAME_EX(backbuffer, TEXT("RenderOutput"), TEXT("BackBuffer"), i);
         _backBuffers[i].Setup(this, backbuffer);
@@ -325,7 +342,7 @@ void GPUSwapChainDX12::Begin(RenderTask* task)
 {
     // Wait until frame start is signaled
     _framePipelineToken = D3D12XBOX_FRAME_PIPELINE_TOKEN_NULL;
-    VALIDATE_DIRECTX_RESULT(_device->GetDevice()->WaitFrameEventX(D3D12XBOX_FRAME_EVENT_ORIGIN, INFINITE, nullptr, D3D12XBOX_WAIT_FRAME_EVENT_FLAG_NONE, &_framePipelineToken));
+    VALIDATE_DIRECTX_CALL(_device->GetDevice()->WaitFrameEventX(D3D12XBOX_FRAME_EVENT_ORIGIN, INFINITE, nullptr, D3D12XBOX_WAIT_FRAME_EVENT_FLAG_NONE, &_framePipelineToken));
 
     GPUSwapChain::Begin(task);
 }
@@ -337,24 +354,20 @@ void GPUSwapChainDX12::End(RenderTask* task)
     GPUSwapChain::End(task);
 
     auto context = _device->GetMainContextDX12();
-
-    // Indicate that the back buffer will be used to present a frame
-    // Note: after that we should not use this backbuffer
-    context->SetResourceState(&_backBuffers[_currentFrameIndex], D3D12_RESOURCE_STATE_PRESENT);
-
-    // Send event
-    context->OnSwapChainFlush();
+    context->OnSwapChainFlush(&_backBuffers[_currentFrameIndex]);
 }
 
 void GPUSwapChainDX12::Present(bool vsync)
 {
+    PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
 #if PLATFORM_XBOX_SCARLETT || PLATFORM_XBOX_ONE
     ID3D12Resource* backBuffer = _backBuffers[_currentFrameIndex].GetResource();
     D3D12XBOX_PRESENT_PLANE_PARAMETERS planeParameters = {};
     planeParameters.Token = _framePipelineToken;
     planeParameters.ResourceCount = 1;
     planeParameters.ppResources = &backBuffer;
-    VALIDATE_DIRECTX_RESULT(_device->GetCommandQueueDX12()->PresentX(1, &planeParameters, nullptr));
+    VALIDATE_DIRECTX_CALL(_device->GetCommandQueueDX12()->PresentX(1, &planeParameters, nullptr));
 
     // Base
     GPUSwapChain::Present(vsync);
@@ -368,6 +381,10 @@ void GPUSwapChainDX12::Present(bool vsync)
     {
         presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
     }
+#if GPU_ENABLE_ASSERTION
+    //ASSERT(_currentFrameIndex == _swapChain->GetCurrentBackBufferIndex());
+    ASSERT(_backBuffers[_currentFrameIndex].State.CheckResourceState(D3D12_RESOURCE_STATE_PRESENT));
+#endif
     const HRESULT res = _swapChain->Present(vsync ? 1 : 0, presentFlags);
     LOG_DIRECTX_RESULT(res);
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -8,8 +8,14 @@ namespace FlaxEngine.GUI
     /// Drop Panel arranges control vertically and provides feature to collapse contents.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public class DropPanel : ContainerControl
     {
+        /// <summary>
+        /// Size of the drop down icon. 
+        /// </summary>
+        public const float DropDownIconSize = 14.0f;
+
         /// <summary>
         /// The header height.
         /// </summary>
@@ -51,6 +57,11 @@ namespace FlaxEngine.GUI
         protected float _cachedHeight = 16.0f;
 
         /// <summary>
+        /// The items spacing.
+        /// </summary>
+        protected float _itemsSpacing = 2.0f;
+
+        /// <summary>
         /// The items margin.
         /// </summary>
         protected Margin _itemsMargin = new Margin(2.0f, 2.0f, 2.0f, 2.0f);
@@ -60,6 +71,33 @@ namespace FlaxEngine.GUI
         /// </summary>
         [EditorOrder(10), Tooltip("The text to show on a panel header.")]
         public string HeaderText { get; set; }
+
+        /// <summary>
+        /// The active search text query used to highlight matching parts of the header text.
+        /// </summary>
+        public string SearchText = string.Empty;
+
+        private string _lastSearchText;
+        private string _lastHeaderText;
+        private int _highlightIndex = -1;
+
+        private void UpdateHighlights()
+        {
+            if (_lastSearchText == SearchText && _lastHeaderText == HeaderText)
+                return;
+
+            _lastSearchText = SearchText;
+            _lastHeaderText = HeaderText;
+
+            if (!string.IsNullOrEmpty(SearchText) && !string.IsNullOrEmpty(HeaderText))
+            {
+                _highlightIndex = HeaderText.IndexOf(SearchText, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                _highlightIndex = -1;
+            }
+        }
 
         /// <summary>
         /// Gets or sets the height of the header.
@@ -96,45 +134,58 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Gets or sets a value indicating whether enable drop down icon drawing.
+        /// </summary>
+        [EditorOrder(2)]
+        public bool EnableDropDownIcon { get; set; }
+
+        /// <summary>
+        /// Get or sets a value indicating whether the panel can be opened or closed via the user interacting with the ui.
+        /// Changing the open/ closed state from code or the Properties panel will still work regardless.
+        /// </summary>
+        [EditorOrder(1)]
+        public bool CanOpenClose { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to enable containment line drawing,
+        /// </summary>
+        [EditorOrder(3)]
+        public bool EnableContainmentLines { get; set; } = false;
+
+        /// <summary>
         /// Gets or sets the color used to draw header text.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Header Style"), EditorOrder(2010), ExpandGroups]
         public Color HeaderTextColor;
 
         /// <summary>
         /// Gets or sets the color of the header.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Header Style"), EditorOrder(2011)]
         public Color HeaderColor { get; set; }
 
         /// <summary>
         /// Gets or sets the color of the header when mouse is over.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Header Style"), EditorOrder(2012)]
         public Color HeaderColorMouseOver { get; set; }
 
         /// <summary>
         /// Gets or sets the font used to render panel header text.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Header Text Style"), EditorOrder(2020), ExpandGroups]
         public FontReference HeaderTextFont { get; set; }
 
         /// <summary>
         /// Gets or sets the custom material used to render the text. It must has domain set to GUI and have a public texture parameter named Font used to sample font atlas texture with font characters data.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("Custom material used to render the header text. It must has domain set to GUI and have a public texture parameter named Font used to sample font atlas texture with font characters data.")]
+        [EditorDisplay("Header Text Style"), EditorOrder(2021), Tooltip("Custom material used to render the header text. It must has domain set to GUI and have a public texture parameter named Font used to sample font atlas texture with font characters data.")]
         public MaterialBase HeaderTextMaterial { get; set; }
-
-        /// <summary>
-        /// Gets or sets a value indicating whether enable drop down icon drawing.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public bool EnableDropDownIcon { get; set; }
 
         /// <summary>
         /// Occurs when mouse right-clicks over the header.
         /// </summary>
-        public event Action<DropPanel, Vector2> MouseButtonRightClicked;
+        public event Action<DropPanel, Float2> MouseButtonRightClicked;
 
         /// <summary>
         /// Occurs when drop panel is opened or closed.
@@ -161,9 +212,9 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
-        /// Gets or sets the item slots margin (the space between items).
+        /// Gets or sets the item slots margin (the space around items).
         /// </summary>
-        [EditorOrder(10), Tooltip("The item slots margin (the space between items).")]
+        [EditorOrder(10)]
         public Margin ItemsMargin
         {
             get => _itemsMargin;
@@ -178,6 +229,23 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Gets or sets the item slots spacing (the margin between items).
+        /// </summary>
+        [EditorOrder(11)]
+        public float ItemsSpacing
+        {
+            get => _itemsSpacing;
+            set
+            {
+                if (!Mathf.NearEqual(_itemsSpacing, value))
+                {
+                    _itemsSpacing = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets or sets the panel close/open animation duration (in seconds).
         /// </summary>
         [EditorOrder(10), Limit(0, 100, 0.01f), Tooltip("The panel close/open animation duration (in seconds).")]
@@ -186,13 +254,13 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the image used to render drop panel drop arrow icon when panel is opened.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The image used to render drop panel drop arrow icon when panel is opened.")]
+        [EditorDisplay("Icon Style"), EditorOrder(2030), Tooltip("The image used to render drop panel drop arrow icon when panel is opened."), ExpandGroups]
         public IBrush ArrowImageOpened { get; set; }
 
         /// <summary>
         /// Gets or sets the image used to render drop panel drop arrow icon when panel is closed.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The image used to render drop panel drop arrow icon when panel is closed.")]
+        [EditorDisplay("Icon Style"), EditorOrder(2031), Tooltip("The image used to render drop panel drop arrow icon when panel is closed.")]
         public IBrush ArrowImageClosed { get; set; }
 
         /// <summary>
@@ -204,18 +272,18 @@ namespace FlaxEngine.GUI
         protected override bool ShowTooltip => base.ShowTooltip && _mouseOverHeader;
 
         /// <inheritdoc />
-        public override bool OnShowTooltip(out string text, out Vector2 location, out Rectangle area)
+        public override bool OnShowTooltip(out string text, out Float2 location, out Rectangle area)
         {
             var result = base.OnShowTooltip(out text, out location, out area);
 
             // Change the position
-            location = new Vector2(Width * 0.5f, HeaderHeight);
+            location = new Float2(Width * 0.5f, HeaderHeight);
 
             return result;
         }
 
         /// <inheritdoc />
-        public override bool OnTestTooltipOverControl(ref Vector2 location)
+        public override bool OnTestTooltipOverControl(ref Float2 location)
         {
             return HeaderRectangle.Contains(ref location);
         }
@@ -241,7 +309,7 @@ namespace FlaxEngine.GUI
         /// Opens the group.
         /// </summary>
         /// <param name="animate">Enable/disable animation feature.</param>
-        public void Open(bool animate = true)
+        public void Open(bool animate = false)
         {
             // Check if state will change
             if (_isClosed)
@@ -265,7 +333,7 @@ namespace FlaxEngine.GUI
         /// Closes the group.
         /// </summary>
         /// <param name="animate">Enable/disable animation feature.</param>
-        public void Close(bool animate = true)
+        public void Close(bool animate = false)
         {
             // Check if state will change
             if (!_isClosed)
@@ -291,9 +359,9 @@ namespace FlaxEngine.GUI
         public void Toggle()
         {
             if (_isClosed)
-                Open();
+                Open(true);
             else
-                Close();
+                Close(true);
         }
 
         /// <inheritdoc />
@@ -332,15 +400,15 @@ namespace FlaxEngine.GUI
             var style = Style.Current;
             var enabled = EnabledInHierarchy;
 
-            // Paint Background
+            // Draw Background
             var backgroundColor = BackgroundColor;
             if (backgroundColor.A > 0.0f)
             {
-                Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), backgroundColor);
+                Render2D.FillRectangle(new Rectangle(Float2.Zero, Size), backgroundColor);
             }
 
             // Header
-            var color = _mouseOverHeader ? HeaderColorMouseOver : HeaderColor;
+            var color = _mouseOverHeader && CanOpenClose ? HeaderColorMouseOver : HeaderColor;
             if (color.A > 0.0f)
             {
                 Render2D.FillRectangle(new Rectangle(0, 0, Width, HeaderHeight), color);
@@ -350,7 +418,7 @@ namespace FlaxEngine.GUI
             float textLeft = 0;
             if (EnableDropDownIcon)
             {
-                textLeft += 14;
+                textLeft += DropDownIconSize;
                 var dropDownRect = new Rectangle(2, (HeaderHeight - 12) / 2, 12, 12);
                 var arrowColor = _mouseOverHeader ? style.Foreground : style.ForegroundGrey;
                 if (_isClosed)
@@ -359,7 +427,7 @@ namespace FlaxEngine.GUI
                     ArrowImageOpened?.Draw(dropDownRect, arrowColor);
             }
 
-            // Text
+            // Header text
             var textRect = new Rectangle(textLeft, 0, Width - textLeft, HeaderHeight);
             _headerTextMargin.ShrinkRectangle(ref textRect);
             var textColor = HeaderTextColor;
@@ -368,7 +436,33 @@ namespace FlaxEngine.GUI
                 textColor *= 0.6f;
             }
 
+            Render2D.PushClip(textRect);
             Render2D.DrawText(HeaderTextFont.GetFont(), HeaderTextMaterial, HeaderText, textRect, textColor, TextAlignment.Near, TextAlignment.Center);
+            UpdateHighlights();
+            if (_highlightIndex >= 0)
+            {
+                var font = HeaderTextFont.GetFont();
+                if (font != null)
+                {
+                    var highlightColor = Style.Current.SearchHighlight;
+                    var textSize = font.MeasureText(HeaderText);
+                    var textY = (HeaderHeight - textSize.Y) * 0.5f;
+                    var start = font.GetCharPosition(HeaderText, _highlightIndex);
+                    var end = font.GetCharPosition(HeaderText, _highlightIndex + SearchText.Length);
+                    var highlightRect = new Rectangle(start.X + textRect.X, textY, end.X - start.X, textSize.Y);
+                    Render2D.FillRectangle(highlightRect, highlightColor);
+                }
+            }
+            Render2D.PopClip();
+
+            if (!_isClosed && EnableContainmentLines)
+            {
+                Color lineColor = HeaderColor;
+                float lineThickness = 0.1f;
+                Render2D.DrawLine(new Float2(1, HeaderHeight), new Float2(1, Height), lineColor, lineThickness);
+                Render2D.DrawLine(new Float2(1, Height), new Float2(Width, Height), lineColor, lineThickness);
+                Render2D.DrawLine(new Float2(Width, HeaderHeight), new Float2(Width, Height), lineColor, lineThickness);
+            }
 
             // Children
             DrawChildren();
@@ -434,7 +528,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (base.OnMouseDown(location, button))
                 return true;
@@ -455,7 +549,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             _mouseOverHeader = HeaderRectangle.Contains(location);
 
@@ -463,7 +557,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (base.OnMouseUp(location, button))
                 return true;
@@ -472,8 +566,25 @@ namespace FlaxEngine.GUI
             if (button == MouseButton.Left && _mouseButtonLeftDown)
             {
                 _mouseButtonLeftDown = false;
-                if (_mouseOverHeader)
+                if (_mouseOverHeader && CanOpenClose)
+                {
+                    bool wasClosed = IsClosed;
+                    
                     Toggle();
+
+                    // Open/ close all drop panels inside a vertical panel at once
+                    if (Input.GetKey(KeyboardKeys.Alt) && Parent is VerticalPanel panel)
+                    {
+                        foreach (Control child in panel.Children)
+                        {
+                            if (child is DropPanel dropPanel)
+                            {
+                                if (dropPanel.CanOpenClose && dropPanel.IsClosed == wasClosed)
+                                    dropPanel.Toggle();
+                            }
+                        }
+                    }
+                }
                 return true;
             }
             if (button == MouseButton.Right && _mouseButtonRightDown)
@@ -483,6 +594,29 @@ namespace FlaxEngine.GUI
                 return true;
             }
 
+            return false;
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
+        {
+            if (base.OnMouseDoubleClick(location, button))
+                return true;
+            
+            _mouseOverHeader = HeaderRectangle.Contains(location);
+            if (button == MouseButton.Left && _mouseOverHeader)
+            {
+                _mouseButtonLeftDown = true;
+                return true;
+            }
+
+            if (button == MouseButton.Left && _mouseButtonLeftDown)
+            {
+                _mouseButtonLeftDown = false;
+                if (_mouseOverHeader && CanOpenClose)
+                    Toggle();
+                return true;
+            }
             return false;
         }
 
@@ -524,29 +658,32 @@ namespace FlaxEngine.GUI
             var slotsLeft = clientArea.Left + slotsMargin.Left;
             var slotsWidth = clientArea.Width - slotsMargin.Width;
             float minHeight = HeaderHeight;
-            float y = clientArea.Top;
-            float height = clientArea.Top + dropOffset;
+            float y = clientArea.Top + slotsMargin.Top;
+            bool anyAdded = false;
             for (int i = 0; i < _children.Count; i++)
             {
                 Control c = _children[i];
                 if (c.IsScrollable && c.Visible)
                 {
                     var h = c.Height;
-                    y += slotsMargin.Top;
-
                     c.Bounds = new Rectangle(slotsLeft, y, slotsWidth, h);
-
-                    h += slotsMargin.Bottom;
+                    h += _itemsSpacing;
                     y += h;
-                    height += h + slotsMargin.Top;
+                    anyAdded = true;
                 }
             }
 
             // Update panel height
+            if (anyAdded)
+                y -= _itemsSpacing;
+            if (anyAdded)
+                y += slotsMargin.Bottom;
+            float height = dropOffset + y;
             _cachedHeight = height;
             if (_animationProgress >= 1.0f && _isClosed)
                 y = minHeight;
-            Height = Mathf.Max(minHeight, y);
+            var size = new Float2(Width, Mathf.Max(minHeight, y));
+            Resize(ref size);
         }
 
         /// <inheritdoc />
@@ -559,6 +696,15 @@ namespace FlaxEngine.GUI
         protected override void PerformLayoutAfterChildren()
         {
             Arrange();
+        }
+
+        /// <inheritdoc />
+        protected override bool CanNavigateChild(Control child)
+        {
+            // Closed panel skips navigation for hidden children
+            if (IsClosed && child.IsScrollable)
+                return false;
+            return base.CanNavigateChild(child);
         }
     }
 }

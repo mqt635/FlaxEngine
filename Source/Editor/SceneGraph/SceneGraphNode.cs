@@ -1,10 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using FlaxEditor.Modules;
 using FlaxEditor.SceneGraph.Actors;
+using FlaxEditor.Windows;
 using FlaxEngine;
 
 namespace FlaxEditor.SceneGraph
@@ -20,7 +27,7 @@ namespace FlaxEditor.SceneGraph
         /// <summary>
         /// The parent node.
         /// </summary>
-        protected SceneGraphNode parentNode;
+        internal SceneGraphNode parentNode;
 
         /// <summary>
         /// Gets the children list.
@@ -34,7 +41,11 @@ namespace FlaxEditor.SceneGraph
         protected SceneGraphNode(Guid id)
         {
             ID = id;
-            SceneGraphFactory.Nodes.Add(id, this);
+            if (SceneGraphFactory.Nodes.TryGetValue(id, out var duplicate) && duplicate != null)
+            {
+                Editor.LogWarning($"Duplicated Scene Graph node with ID {FlaxEngine.Json.JsonSerializer.GetStringID(id)} of type '{duplicate.GetType().FullName}'");
+            }
+            SceneGraphFactory.Nodes[id] = this;
         }
 
         /// <summary>
@@ -139,7 +150,6 @@ namespace FlaxEditor.SceneGraph
         {
             if (ChildNodes.Contains(node))
                 return true;
-
             return ChildNodes.Any(x => x.ContainsInHierarchy(node));
         }
 
@@ -188,6 +198,11 @@ namespace FlaxEditor.SceneGraph
                 /// The skip editor primitives. Use it to ignore editor icons and primitives intersections detection.
                 /// </summary>
                 SkipEditorPrimitives = 2,
+
+                /// <summary>
+                /// The skip trigger colliders flag. Use it to ignore physics trigger colliders intersections detection.
+                /// </summary>
+                SkipTriggers = 4,
             }
 
             /// <summary>
@@ -204,6 +219,18 @@ namespace FlaxEditor.SceneGraph
             /// The flags.
             /// </summary>
             public FlagTypes Flags;
+
+            /// <summary>
+            /// The list of objects to exclude from tracing against. Null if unused.
+            /// </summary>
+            public List<SceneGraphNode> ExcludeObjects;
+
+            /// <summary>
+            /// Initializes a new instance of the <see cref="RayCastData"/> struct.
+            /// </summary>
+            public RayCastData()
+            {
+            }
         }
 
         /// <summary>
@@ -213,7 +240,7 @@ namespace FlaxEditor.SceneGraph
         /// <param name="distance">The result distance.</param>
         /// <param name="normal">The result intersection surface normal vector.</param>
         /// <returns>Hit object or null if there is no intersection at all.</returns>
-        public virtual SceneGraphNode RayCastChildren(ref RayCastData ray, out float distance, out Vector3 normal)
+        public virtual SceneGraphNode RayCastChildren(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             if (!IsActive)
             {
@@ -223,7 +250,7 @@ namespace FlaxEditor.SceneGraph
             }
 
             SceneGraphNode minTarget = null;
-            float minDistance = float.MaxValue;
+            Real minDistance = Real.MaxValue;
             Vector3 minDistanceNormal = Vector3.Up;
 
             // Check all children
@@ -251,7 +278,7 @@ namespace FlaxEditor.SceneGraph
         /// <param name="distance">The result distance.</param>
         /// <param name="normal">The result intersection surface normal vector.</param>
         /// <returns>Hit object or null if there is no intersection at all.</returns>
-        public virtual SceneGraphNode RayCast(ref RayCastData ray, out float distance, out Vector3 normal)
+        public virtual SceneGraphNode RayCast(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             if (!IsActive)
             {
@@ -262,9 +289,9 @@ namespace FlaxEditor.SceneGraph
 
             // Check itself
             SceneGraphNode minTarget = null;
-            float minDistance = float.MaxValue;
+            Real minDistance = Real.MaxValue;
             Vector3 minDistanceNormal = Vector3.Up;
-            if (RayCastSelf(ref ray, out distance, out normal))
+            if (RayMask(ref ray) && RayCastSelf(ref ray, out distance, out normal))
             {
                 minTarget = this;
                 minDistance = distance;
@@ -289,6 +316,18 @@ namespace FlaxEditor.SceneGraph
             return minTarget;
         }
 
+        private bool RayMask(ref RayCastData ray)
+        {
+            if (ray.ExcludeObjects != null && ray.ExcludeObjects.Remove(this))
+            {
+                // Remove form exclude because it is passed by ref and function is recursive it will slowly shrink the list until nothing is left as a micro optimization
+                if (ray.ExcludeObjects.Count == 0)
+                    ray.ExcludeObjects = null;
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>
         /// Checks if given ray intersects with the node.
         /// </summary>
@@ -296,7 +335,7 @@ namespace FlaxEditor.SceneGraph
         /// <param name="distance">The distance.</param>
         /// <param name="normal">The result intersection surface normal vector.</param>
         /// <returns>True ray hits this node, otherwise false.</returns>
-        public virtual bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+        public virtual bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             distance = 0;
             normal = Vector3.Up;
@@ -318,6 +357,19 @@ namespace FlaxEditor.SceneGraph
         }
 
         /// <summary>
+        /// Performs the vertex snapping for a given ray and hitDistance.
+        /// </summary>
+        /// <param name="ray">The ray to raycast.</param>
+        /// <param name="hitDistance">Hit distance from ray to object bounding box.</param>
+        /// <param name="result">The result point on the object mesh that is closest to the specified location.</param>
+        /// <returns>True if got a valid result value, otherwise false (eg. if missing data or not initialized).</returns>
+        public virtual bool OnVertexSnap(ref Ray ray, Real hitDistance, out Vector3 result)
+        {
+            result = Vector3.Zero;
+            return false;
+        }
+
+        /// <summary>
         /// Called when selected nodes should draw debug shapes using <see cref="DebugDraw"/> interface.
         /// </summary>
         /// <param name="data">The debug draw data.</param>
@@ -328,7 +380,7 @@ namespace FlaxEditor.SceneGraph
         /// <summary>
         /// Called when scene tree window wants to show the context menu. Allows to add custom options.
         /// </summary>
-        public virtual void OnContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu contextMenu)
+        public virtual void OnContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu contextMenu, EditorWindow window)
         {
         }
 
@@ -417,6 +469,7 @@ namespace FlaxEditor.SceneGraph
             {
                 ChildNodes[i].OnDispose();
             }
+            ChildNodes.Clear();
 
             SceneGraphFactory.Nodes.Remove(ID);
         }
@@ -426,6 +479,21 @@ namespace FlaxEditor.SceneGraph
         /// </summary>
         protected virtual void OnParentChanged()
         {
+        }
+
+        /// <summary>
+        /// Randomizes the owner node identifier.
+        /// </summary>
+        /// <param name="ownerId">The owner node ID.</param>
+        /// <param name="index">The sub-object index.</param>
+        /// <returns>The sub-object ID.</returns>
+        protected static unsafe Guid GetSubID(Guid ownerId, int index)
+        {
+            var id = ownerId;
+            var idPtr = (FlaxEngine.Json.JsonSerializer.GuidInterop*)&id;
+            idPtr->B ^= (uint)(index * 387);
+            idPtr->D += (uint)(index + 1);
+            return id;
         }
     }
 }

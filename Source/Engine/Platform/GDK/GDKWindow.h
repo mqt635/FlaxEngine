@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,7 +17,6 @@ class FLAXENGINE_API GDKWindow : public WindowBase
 private:
 
     Windows::HWND _handle;
-    Vector2 _clientSize;
 
 public:
 
@@ -77,7 +76,7 @@ private:
 
 public:
 
-    // [Window]
+    // [WindowBase]
     void* GetNativePtr() const override;
     void Show() override;
     void Hide() override;

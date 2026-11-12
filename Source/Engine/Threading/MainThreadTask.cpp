@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MainThreadTask.h"
 #include "Engine/Platform/CriticalSection.h"
@@ -35,7 +35,7 @@ void MainThreadTask::RunAll(float dt)
 
 String MainThreadTask::ToString() const
 {
-    return String::Format(TEXT("Main Thread Task ({0})"), ::ToString(GetState()));
+    return String::Format(TEXT("Main Thread Task ({0})"), (int32)GetState());
 }
 
 void MainThreadTask::Enqueue()

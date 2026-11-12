@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 // -----------------------------------------------------------------------------
 // Original code from SharpDX project. https://github.com/sharpdx/SharpDX/
@@ -122,7 +122,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="location">The location of the upper-left corner of the viewport in pixels.</param>
         /// <param name="size">The size of the viewport in pixels.</param>
-        public Viewport(Vector2 location, Vector2 size)
+        public Viewport(Float2 location, Float2 size)
         {
             X = location.X;
             Y = location.Y;
@@ -151,9 +151,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the size of the viewport (width and height).
         /// </summary>
-        public Vector2 Size
+        public Float2 Size
         {
-            get => new Vector2(Width, Height);
+            get => new Float2(Width, Height);
             set
             {
                 Width = value.X;
@@ -162,12 +162,15 @@ namespace FlaxEngine
         }
 
         /// <summary>
+        /// Gets the aspect ratio used by the viewport.
+        /// </summary>
+        public float AspectRatio => !Mathf.IsZero(Height) ? Width / Height : 0f;
+
+        /// <summary>
         /// Determines whether the specified <see cref="Viewport"/> is equal to this instance.
         /// </summary>
         /// <param name="other">The <see cref="Viewport"/> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Viewport"/> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="Viewport"/> is equal to this instance; otherwise, <c>false</c>.</returns>
         public bool Equals(ref Viewport other)
         {
             return Mathf.NearEqual(X, other.X) &&
@@ -182,9 +185,7 @@ namespace FlaxEngine
         /// Determines whether the specified <see cref="Viewport"/> is equal to this instance.
         /// </summary>
         /// <param name="other">The <see cref="Viewport"/> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Viewport"/> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="Viewport"/> is equal to this instance; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Equals(Viewport other)
         {
@@ -195,16 +196,10 @@ namespace FlaxEngine
         /// Determines whether the specified object is equal to this instance.
         /// </summary>
         /// <param name="obj">The object to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified object is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified object is equal to this instance; otherwise, <c>false</c>.</returns>
         public override bool Equals(object obj)
         {
-            if (!(obj is Viewport))
-                return false;
-
-            var strongValue = (Viewport)obj;
-            return Equals(ref strongValue);
+            return obj is Viewport other && Equals(ref other);
         }
 
         /// <summary>
@@ -286,7 +281,7 @@ namespace FlaxEngine
         public void Project(ref Vector3 source, ref Matrix matrix, out Vector3 vector)
         {
             Vector3.Transform(ref source, ref matrix, out vector);
-            float w = source.X * matrix.M14 + source.Y * matrix.M24 + source.Z * matrix.M34 + matrix.M44;
+            var w = source.X * matrix.M14 + source.Y * matrix.M24 + source.Z * matrix.M34 + matrix.M44;
 
             if (!Mathf.IsZero(w))
             {
@@ -301,15 +296,13 @@ namespace FlaxEngine
         /// <summary>
         /// Converts a screen space point into a corresponding point in world space.
         /// </summary>
-        /// <param name="source">The vector to project.</param>
+        /// <param name="source">The vector to project, screen uv and device depth.</param>
         /// <param name="projection">The projection matrix.</param>
         /// <param name="view">The view matrix.</param>
-        /// <param name="world">The world matrix.</param>
         /// <returns>The unprojected Vector.</returns>
-        public Vector3 Unproject(Vector3 source, Matrix projection, Matrix view, Matrix world)
+        public Vector3 Unproject(Vector3 source, Matrix projection, Matrix view)
         {
-            Matrix.Multiply(ref world, ref view, out Matrix matrix);
-            Matrix.Multiply(ref matrix, ref projection, out matrix);
+            Matrix.Multiply(ref view, ref projection, out Matrix matrix);
             Matrix.Invert(ref matrix, out matrix);
 
             Unproject(ref source, ref matrix, out Vector3 vector);
@@ -319,8 +312,8 @@ namespace FlaxEngine
         /// <summary>
         /// Converts a screen space point into a corresponding point in world space.
         /// </summary>
-        /// <param name="source">The vector to project.</param>
-        /// <param name="matrix">An inverted combined WorldViewProjection matrix.</param>
+        /// <param name="source">The vector to project, screen uv and device depth.</param>
+        /// <param name="matrix">An inverted combined ViewProjection matrix.</param>
         /// <param name="vector">The unprojected vector.</param>
         public void Unproject(ref Vector3 source, ref Matrix matrix, out Vector3 vector)
         {
@@ -328,28 +321,12 @@ namespace FlaxEngine
             vector.Y = -((source.Y - Y) / Height * 2f - 1f);
             vector.Z = (source.Z - MinDepth) / (MaxDepth - MinDepth);
 
-            float w = vector.X * matrix.M14 + vector.Y * matrix.M24 + vector.Z * matrix.M34 + matrix.M44;
+            var w = vector.X * matrix.M14 + vector.Y * matrix.M24 + vector.Z * matrix.M34 + matrix.M44;
             Vector3.Transform(ref vector, ref matrix, out vector);
 
             if (!Mathf.IsZero(w))
             {
                 vector /= w;
-            }
-        }
-
-        /// <summary>
-        /// Gets the aspect ratio used by the viewport.
-        /// </summary>
-        /// <value>The aspect ratio.</value>
-        public float AspectRatio
-        {
-            get
-            {
-                if (!Mathf.IsZero(Height))
-                {
-                    return Width / Height;
-                }
-                return 0f;
             }
         }
     }

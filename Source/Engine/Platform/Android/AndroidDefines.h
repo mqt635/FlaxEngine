@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -32,5 +32,12 @@
 #endif
 #define PLATFORM_TYPE PlatformType::Android
 #define PLATFORM_CACHE_LINE_SIZE 64
+#define PLATFORM_OUT_OF_MEMORY_BUFFER_SIZE (64ull * 1024) // 64 kB
+
+#define USE_MONO_AOT_MODE MONO_AOT_MODE_NONE
+
+#define GPU_ALLOW_TESSELLATION_SHADERS 0 // Tess on mobile is not well supported
+#define GPU_ALLOW_GEOMETRY_SHADERS 0 // Don't even try GS on mobile
+#define GPU_ENABLE_PRELOADING_RESOURCES 0 // Don't preload things unless needed
 
 #endif

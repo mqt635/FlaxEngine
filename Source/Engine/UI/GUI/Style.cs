@@ -1,4 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System;
 
 namespace FlaxEngine.GUI
 {
@@ -75,15 +77,28 @@ namespace FlaxEngine.GUI
         public Color Background;
 
         /// <summary>
+        /// The background secondary tone color for list/tree/table/grid bi-coloring.
+        /// </summary>
+        [EditorOrder(61)]
+        public Color BackgroundTone;
+
+        /// <summary>
         /// The light background color.
         /// </summary>
         [EditorOrder(70)]
         public Color LightBackground;
 
         /// <summary>
-        /// The drag window color.
+        /// The dark background color.
         /// </summary>
         [EditorOrder(80)]
+        public Color DarkBackground;
+
+        /// <summary>
+        /// The drag window color.
+        /// [Deprecated in v1.14]
+        /// </summary>
+        [HideInEditor, Obsolete("Not used anymore. Deprecated in v1.14.")]
         public Color DragWindow;
 
         /// <summary>
@@ -103,6 +118,12 @@ namespace FlaxEngine.GUI
         /// </summary>
         [EditorOrder(110)]
         public Color ForegroundDisabled;
+
+        /// <summary>
+        /// The foreground color in viewports (usually have a dark background)
+        /// </summary>
+        [EditorOrder(115)]
+        public Color ForegroundViewport;
 
         /// <summary>
         /// The background highlighted color.
@@ -159,10 +180,46 @@ namespace FlaxEngine.GUI
         public Color CollectionBackgroundColor;
 
         /// <summary>
-        /// The progress normal color.
+        /// The progress bar normal color.
         /// </summary>
         [EditorOrder(200)]
         public Color ProgressNormal;
+
+        /// <summary>
+        /// The progress bar warning color.
+        /// </summary>
+        [EditorOrder(201)]
+        public Color ProgressWarning;
+
+        /// <summary>
+        /// The progress bar error color.
+        /// </summary>
+        [EditorOrder(201)]
+        public Color ProgressError;
+
+        /// <summary>
+        /// The background color for text selection.
+        /// </summary>
+        [EditorOrder(202)]
+        public Color SearchHighlight;
+
+        /// <summary>
+        /// The selection and drag drop highlights colors.
+        /// </summary>
+        [EditorOrder(205)]
+        public Color Selection;
+
+        /// <summary>
+        /// The selection and drag drop highlights border colors.
+        /// </summary>
+        [EditorOrder(206)]
+        public Color SelectionBorder;
+
+        /// <summary>
+        /// The status bar style
+        /// </summary>
+        [EditorOrder(210)]
+        public StatusbarStyle Statusbar;
 
         /// <summary>
         /// The arrow right icon.
@@ -241,5 +298,27 @@ namespace FlaxEngine.GUI
         /// </summary>
         [EditorOrder(340)]
         public Tooltip SharedTooltip;
+
+        /// <summary>
+        /// Style for the Statusbar
+        /// </summary>
+        [System.Serializable, ShowInEditor]
+        public struct StatusbarStyle
+        {
+            /// <summary>
+            /// Color of the Statusbar when in Play Mode
+            /// </summary>
+            public Color PlayMode;
+
+            /// <summary>
+            /// Color of the Statusbar when in loading state (e.g. when importing assets)
+            /// </summary>
+            public Color Loading;
+
+            /// <summary>
+            /// Color of the Statusbar in its failed state (e.g. with compilation errors)
+            /// </summary>
+            public Color Failed;
+        }
     }
 }

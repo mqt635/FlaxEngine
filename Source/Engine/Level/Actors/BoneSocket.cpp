@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BoneSocket.h"
 #include "Engine/Level/SceneObjectsFactory.h"
@@ -45,14 +45,21 @@ void BoneSocket::UpdateTransformation()
         }
 
         auto& nodes = parent->GraphInstance.NodesPose;
-        if (nodes.HasItems() && nodes.Count() > _index)
+        Transform t;
+        if (nodes.IsValidIndex(_index))
+            nodes.Get()[_index].Decompose(t);
+        else if (parent->SkinnedModel->Skeleton.Nodes.IsValidIndex(_index))
+            t = parent->SkinnedModel->Skeleton.GetNodeTransform(_index);
+        else
         {
-            Transform t;
-            nodes[_index].Decompose(t);
-            if (!_useScale)
-                t.Scale = _localTransform.Scale;
-            SetLocalTransform(t);
+            // Retry when cached index become invalid (eg. model reimport)
+            _index = -1;
+            UpdateTransformation();
+            return;
         }
+        if (!_useScale)
+            t.Scale = _localTransform.Scale;
+        SetLocalTransform(t);
     }
 }
 
@@ -89,6 +96,8 @@ void BoneSocket::Deserialize(DeserializeStream& stream, ISerializeModifier* modi
     _index = -1;
     DESERIALIZE_MEMBER(Node, _node);
     DESERIALIZE_MEMBER(UseScale, _useScale);
+    if (IsDuringPlay())
+        UpdateTransformation();
 }
 
 void BoneSocket::OnTransformChanged()
@@ -104,7 +113,7 @@ void BoneSocket::OnParentChanged()
 {
     // Base
     Actor::OnParentChanged();
-    
+
     if (!IsDuringPlay())
         return;
 

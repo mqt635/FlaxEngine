@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,7 @@ using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Scripting;
 using FlaxEditor.Surface.Elements;
 using FlaxEditor.Windows.Assets;
+using FlaxEngine.Utilities;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -53,9 +54,9 @@ namespace FlaxEditor.Surface.Archetypes
             protected abstract Asset LoadSignature(Guid id, out string[] types, out string[] names);
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 FlaxEngine.Content.AssetReloading += OnAssetReloading;
                 FlaxEngine.Content.AssetDisposing += OnContentAssetDisposing;
@@ -94,7 +95,7 @@ namespace FlaxEditor.Surface.Archetypes
 
             private void OnAssetPickerSelectedItemChanged()
             {
-                SetValue(0, _assetPicker.SelectedID);
+                SetValue(0, _assetPicker.Validator.SelectedID);
             }
 
             private void TryRestoreConnections(Box box, Box[] prevBoxes, ref NodeElementArchetype arch)
@@ -132,7 +133,7 @@ namespace FlaxEditor.Surface.Archetypes
                 var prevOutputs = _outputs;
 
                 // Extract function signature parameters (inputs and outputs packed)
-                _asset = LoadSignature(_assetPicker.SelectedID, out var typeNames, out var names);
+                _asset = LoadSignature(_assetPicker.Validator.SelectedID, out var typeNames, out var names);
                 if (typeNames != null && names != null)
                 {
                     var types = new Type[typeNames.Length];
@@ -173,7 +174,7 @@ namespace FlaxEditor.Surface.Archetypes
                         _outputs[i] = box;
                     }
 
-                    Title = _assetPicker.SelectedItem.ShortName;
+                    Title = _assetPicker.Validator.SelectedItem.ShortName;
                 }
                 else
                 {
@@ -266,7 +267,7 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 _nameField = new Label
                 {
-                    Width = 140.0f,
+                    Size = new Float2(140, FlaxEditor.Surface.Constants.BoxRowHeight),
                     TextColorHighlighted = Style.Current.ForegroundGrey,
                     HorizontalAlignment = TextAlignment.Near,
                     Parent = this,
@@ -274,17 +275,17 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 _nameField.Text = SignatureName;
             }
 
             /// <inheritdoc />
-            public override void OnSpawned()
+            public override void OnSpawned(SurfaceNodeActions action)
             {
-                base.OnSpawned();
+                base.OnSpawned(action);
 
                 // Ensure to have unique name
                 var name = SignatureName;
@@ -302,7 +303,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
                 if (base.OnMouseDoubleClick(location, button))
                     return true;
@@ -317,7 +318,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Vector2 location)
+            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
             {
                 base.OnShowSecondaryContextMenu(menu, location);
 
@@ -380,29 +381,34 @@ namespace FlaxEditor.Surface.Archetypes
             public FunctionInputNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
-                _types = ((IFunctionSurface)Surface).FunctionTypes;
-                _typePicker = new ComboBox
+                if (Surface is IFunctionSurface surface)
                 {
-                    Location = new Vector2(4, 32),
-                    Width = 80.0f,
-                    Parent = this,
-                };
-                for (int i = 0; i < _types.Length; i++)
-                    _typePicker.AddItem(Surface.GetTypeName(new ScriptType(_types[i])));
-                _nameField.Location = new Vector2(_typePicker.Right + 2.0f, _typePicker.Y);
+                    _types = surface.FunctionTypes;
+                    _typePicker = new ComboBox
+                    {
+                        Bounds = new Rectangle(4, 34, 80, FlaxEditor.Surface.Constants.BoxRowHeight),
+                        Parent = this,
+                    };
+                    for (int i = 0; i < _types.Length; i++)
+                        _typePicker.AddItem(Surface.GetTypeName(new ScriptType(_types[i])));
+                    _nameField.Location = new Float2(_typePicker.Right + 2.0f, _typePicker.Y);
+                }
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 _outputBox = GetBox(0);
                 _outputBox.CurrentType = SignatureType;
                 _defaultValueBox = GetBox(1);
                 _defaultValueBox.CurrentType = _outputBox.CurrentType;
-                _typePicker.SelectedIndex = Array.IndexOf(_types, _outputBox.CurrentType.Type);
-                _typePicker.SelectedIndexChanged += OnTypePickerSelectedIndexChanged;
+                if (_typePicker != null)
+                {
+                    _typePicker.SelectedIndex = Array.IndexOf(_types, _outputBox.CurrentType.Type);
+                    _typePicker.SelectedIndexChanged += OnTypePickerSelectedIndexChanged;
+                }
             }
 
             private void OnTypePickerSelectedIndexChanged(ComboBox picker)
@@ -417,7 +423,8 @@ namespace FlaxEditor.Surface.Archetypes
 
                 _outputBox.CurrentType = SignatureType;
                 _defaultValueBox.CurrentType = _outputBox.CurrentType;
-                _typePicker.SelectedIndex = Array.IndexOf(_types, _outputBox.CurrentType.Type);
+                if (_typePicker != null)
+                    _typePicker.SelectedIndex = Array.IndexOf(_types, _outputBox.CurrentType.Type);
             }
 
             /// <inheritdoc />
@@ -442,27 +449,32 @@ namespace FlaxEditor.Surface.Archetypes
             public FunctionOutputNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
-                _types = ((IFunctionSurface)Surface).FunctionTypes;
-                _typePicker = new ComboBox
+                if (Surface is IFunctionSurface surface)
                 {
-                    Location = new Vector2(24, 32),
-                    Width = 80.0f,
-                    Parent = this,
-                };
-                for (int i = 0; i < _types.Length; i++)
-                    _typePicker.AddItem(Surface.GetTypeName(new ScriptType(_types[i])));
-                _nameField.Location = new Vector2(_typePicker.Right + 2.0f, _typePicker.Y);
+                    _types = surface.FunctionTypes;
+                    _typePicker = new ComboBox
+                    {
+                        Bounds = new Rectangle(24, 34, 80, FlaxEditor.Surface.Constants.BoxRowHeight),
+                        Parent = this,
+                    };
+                    for (int i = 0; i < _types.Length; i++)
+                        _typePicker.AddItem(Surface.GetTypeName(new ScriptType(_types[i])));
+                    _nameField.Location = new Float2(_typePicker.Right + 2.0f, _typePicker.Y);
+                }
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 _inputBox = GetBox(0);
                 _inputBox.CurrentType = SignatureType;
-                _typePicker.SelectedIndex = Array.IndexOf(_types, _inputBox.CurrentType.Type);
-                _typePicker.SelectedIndexChanged += OnTypePickerSelectedIndexChanged;
+                if (_typePicker != null)
+                {
+                    _typePicker.SelectedIndex = Array.IndexOf(_types, _inputBox.CurrentType.Type);
+                    _typePicker.SelectedIndexChanged += OnTypePickerSelectedIndexChanged;
+                }
             }
 
             private void OnTypePickerSelectedIndexChanged(ComboBox picker)
@@ -476,7 +488,8 @@ namespace FlaxEditor.Surface.Archetypes
                 base.OnValuesChanged();
 
                 _inputBox.CurrentType = SignatureType;
-                _typePicker.SelectedIndex = Array.IndexOf(_types, _inputBox.CurrentType.Type);
+                if (_typePicker != null)
+                    _typePicker.SelectedIndex = Array.IndexOf(_types, _inputBox.CurrentType.Type);
             }
 
             /// <inheritdoc />
@@ -505,8 +518,8 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 _parameters = null;
                 var methodInfo = ScriptMemberInfo.Null;
-                var surface = (VisualScriptSurface)Surface;
-                if (surface.Script && !surface.Script.WaitForLoaded(100))
+                var surface = Surface as VisualScriptSurface;
+                if (surface != null && surface.Script && !surface.Script.WaitForLoaded(100))
                 {
                     var scriptMeta = surface.Script.Meta;
                     var scriptType = TypeUtils.GetType(scriptMeta.BaseTypename);
@@ -520,7 +533,7 @@ namespace FlaxEditor.Surface.Archetypes
                         }
                     }
                 }
-                if (!_isTypesChangedEventRegistered)
+                if (!_isTypesChangedEventRegistered && surface != null)
                 {
                     _isTypesChangedEventRegistered = true;
                     Editor.Instance.CodeEditing.TypesChanged += UpdateSignature;
@@ -537,10 +550,7 @@ namespace FlaxEditor.Surface.Archetypes
                 if (methodInfo)
                 {
                     // Update tooltip
-                    var attributes = methodInfo.GetAttributes(true);
-                    var tooltipAttribute = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
-                    if (tooltipAttribute != null)
-                        TooltipText = tooltipAttribute.Text;
+                    TooltipText = Editor.Instance.CodeDocs.GetTooltip(methodInfo);
 
                     // Generate signature from the method info
                     MakeBox(0, string.Empty, typeof(void), true);
@@ -564,7 +574,7 @@ namespace FlaxEditor.Surface.Archetypes
                     if (_parameters.Length == 0 && methodInfo.ValueType.IsVoid)
                     {
                         // Skip allocations if method is void and parameter-less
-                        Values[2] = Utils.GetEmptyArray<byte>();
+                        Values[2] = Array.Empty<byte>();
                     }
                     else
                     {
@@ -576,7 +586,7 @@ namespace FlaxEditor.Surface.Archetypes
                             for (int i = 0; i < _parameters.Length; i++)
                             {
                                 writer.Write(_parameters[i].Name); // Parameter name
-                                Utilities.VariantUtils.WriteVariantType(writer, TypeUtils.GetType(_parameters[i].Type)); // Box type
+                                VariantUtils.WriteVariantType(writer, TypeUtils.GetType(_parameters[i].Type)); // Box type
                             }
                             SetValue(2, stream.ToArray());
                         }
@@ -594,7 +604,7 @@ namespace FlaxEditor.Surface.Archetypes
                         for (int i = 0; i < parametersCount; i++)
                         {
                             var parameterName = reader.ReadString(); // Parameter name
-                            var boxType = Utilities.VariantUtils.ReadVariantType(reader); // Box type
+                            var boxType = VariantUtils.ReadVariantType(reader); // Box type
                             MakeBox(i + 1, parameterName, boxType);
                         }
                     }
@@ -619,21 +629,21 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            protected override Color FooterColor => new Color(200, 11, 112);
+            protected override Color ArchetypeColor => new Color(200, 11, 112);
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 Title = SurfaceUtils.GetMethodDisplayName((string)Values[0]);
                 UpdateSignature();
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 // Update the boxes connection types to match the signature
                 // Do it after surface load so connections can receive update on type changes of the method parameter
@@ -651,9 +661,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnSpawned()
+            public override void OnSpawned(SurfaceNodeActions action)
             {
-                base.OnSpawned();
+                base.OnSpawned(action);
 
                 var method = GetMethod();
                 _parameters = null;
@@ -670,7 +680,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Vector2 location)
+            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
             {
                 base.OnShowSecondaryContextMenu(menu, location);
 
@@ -687,7 +697,7 @@ namespace FlaxEditor.Surface.Archetypes
                 var impulseBox = GetBox(0);
                 var method = GetMethod();
                 _parameters = null;
-                var node = Context.SpawnNode(16, 5, UpperRight + new Vector2(40, 0), new object[] { method.ValueType.TypeName });
+                var node = Context.SpawnNode(16, 5, UpperRight + new Float2(40, 0), new object[] { method.ValueType.TypeName });
                 if (node != null && !impulseBox.HasAnyConnection)
                     impulseBox.Connect(node.GetBox(0));
             }
@@ -698,13 +708,13 @@ namespace FlaxEditor.Surface.Archetypes
                 var method = GetMethod();
                 _parameters = null;
                 var parametersCount = method.ParametersCount;
-                var node = Context.SpawnNode(16, 4, UpperRight + new Vector2(40, 0), new object[]
+                var node = Context.SpawnNode(16, 4, UpperRight + new Float2(40, 0), new object[]
                 {
                     method.DeclaringType.TypeName, // Script typename
                     method.Name, // Method name
                     parametersCount, // Method parameters count
                     false, // Is Pure?
-                    Utils.GetEmptyArray<byte>(), // Cached function signature data
+                    Array.Empty<byte>(), // Cached function signature data
                     // Default value for parameters (27 entries)
                     // @formatter:off
                     null,null,null,null,null,null,null,null,null,null,
@@ -732,6 +742,16 @@ namespace FlaxEditor.Surface.Archetypes
 
                 base.OnDestroy();
             }
+
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                return inputType.IsVoid;
+            }
         }
 
         private sealed class InvokeMethodNode : SurfaceNode
@@ -741,6 +761,17 @@ namespace FlaxEditor.Surface.Archetypes
                 public string Name;
                 public ScriptType Type;
                 public bool IsOut;
+
+                public override string ToString()
+                {
+                    var sb = new StringBuilder();
+                    if (IsOut)
+                        sb.Append("out ");
+                    sb.Append(Type.ToString());
+                    sb.Append(" ");
+                    sb.Append(Name);
+                    return sb.ToString();
+                }
             }
 
             private struct SignatureInfo
@@ -777,14 +808,14 @@ namespace FlaxEditor.Surface.Archetypes
                     {
                         reader.ReadByte(); // Version
                         signature.IsStatic = reader.ReadBoolean(); // Is Static
-                        signature.ReturnType = Utilities.VariantUtils.ReadVariantScriptType(reader); // Return type
+                        signature.ReturnType = VariantUtils.ReadVariantScriptType(reader); // Return type
                         var parametersCount = reader.ReadInt32(); // Parameters count
-                        signature.Params = parametersCount != 0 ? new SignatureParamInfo[parametersCount] : Utils.GetEmptyArray<SignatureParamInfo>();
+                        signature.Params = parametersCount != 0 ? new SignatureParamInfo[parametersCount] : Array.Empty<SignatureParamInfo>();
                         for (int i = 0; i < parametersCount; i++)
                         {
                             ref var param = ref signature.Params[i];
                             param.Name = Utilities.Utils.ReadStr(reader, 11); // Parameter name
-                            param.Type = Utilities.VariantUtils.ReadVariantScriptType(reader); // Parameter type
+                            param.Type = VariantUtils.ReadVariantScriptType(reader); // Parameter type
                             param.IsOut = reader.ReadByte() != 0; // Is parameter out
                         }
                     }
@@ -798,14 +829,14 @@ namespace FlaxEditor.Surface.Archetypes
                     {
                         reader.ReadByte(); // Version
                         signature.IsStatic = reader.ReadBoolean(); // Is Static
-                        signature.ReturnType = Utilities.VariantUtils.ReadVariantScriptType(reader); // Return type
+                        signature.ReturnType = VariantUtils.ReadVariantScriptType(reader); // Return type
                         var parametersCount = reader.ReadInt32(); // Parameters count
-                        signature.Params = parametersCount != 0 ? new SignatureParamInfo[parametersCount] : Utils.GetEmptyArray<SignatureParamInfo>();
+                        signature.Params = parametersCount != 0 ? new SignatureParamInfo[parametersCount] : Array.Empty<SignatureParamInfo>();
                         for (int i = 0; i < parametersCount; i++)
                         {
                             ref var param = ref signature.Params[i];
                             param.Name = reader.ReadString(); // Parameter name
-                            param.Type = Utilities.VariantUtils.ReadVariantScriptType(reader); // Parameter type
+                            param.Type = VariantUtils.ReadVariantScriptType(reader); // Parameter type
                             param.IsOut = reader.ReadByte() != 0; // Is parameter out
                         }
                     }
@@ -822,13 +853,13 @@ namespace FlaxEditor.Surface.Archetypes
                 {
                     writer.Write((byte)4); // Version
                     writer.Write(methodInfo.IsStatic); // Is Static
-                    Utilities.VariantUtils.WriteVariantType(writer, methodInfo.ValueType); // Return type
+                    VariantUtils.WriteVariantType(writer, methodInfo.ValueType); // Return type
                     writer.Write(parameters.Length); // Parameters count
                     for (int i = 0; i < parameters.Length; i++)
                     {
                         ref var param = ref parameters[i];
                         Utilities.Utils.WriteStr(writer, param.Name, 11); // Parameter name
-                        Utilities.VariantUtils.WriteVariantType(writer, param.Type); // Parameter type
+                        VariantUtils.WriteVariantType(writer, param.Type); // Parameter type
                         writer.Write((byte)(param.IsOut ? 1 : 0)); // Is parameter out
                     }
                     return stream.ToArray();
@@ -870,7 +901,7 @@ namespace FlaxEditor.Surface.Archetypes
                                 {
                                     ref var param = ref signature.Params[i];
                                     ref var paramMember = ref memberParameters[i];
-                                    if (param.Type != paramMember.Type || param.IsOut != paramMember.IsOut)
+                                    if (!SurfaceUtils.AreScriptTypesEqual(param.Type, paramMember.Type) || param.IsOut != paramMember.IsOut)
                                     {
                                         // Special case: param.Type is serialized as just a type while paramMember.Type might be a reference for output parameters (eg. `out Int32` vs `out Int32&`)
                                         var paramMemberTypeName = paramMember.Type.TypeName;
@@ -979,16 +1010,17 @@ namespace FlaxEditor.Surface.Archetypes
                 if (method)
                 {
                     TooltipText = SurfaceUtils.GetVisualScriptMemberInfoDescription(method);
-                    SetValue(4, GetSignatureData(method, parameters));
+                    if (Surface != null)
+                        SetValue(4, GetSignatureData(method, parameters));
                 }
 
                 ResizeAuto();
             }
 
             /// <inheritdoc />
-            public override void OnSpawned()
+            public override void OnSpawned(SurfaceNodeActions action)
             {
-                base.OnSpawned();
+                base.OnSpawned(action);
 
                 var method = GetMethod(out _, out _, out var parameters);
                 if (method && parameters != null)
@@ -1015,18 +1047,18 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 Title = SurfaceUtils.GetMethodDisplayName((string)Values[1]);
                 UpdateSignature();
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 // Update the boxes connection types to match the signature
                 // Do it after surface load so connections can receive update on type changes of the method parameter
@@ -1062,46 +1094,59 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Vector2 location)
+            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
             {
                 base.OnShowSecondaryContextMenu(menu, location);
 
                 var method = GetMethod(out _, out _, out _);
-                if (method && !method.ValueType.IsVoid)
+                if (method)
                 {
                     menu.AddSeparator();
-                    menu.AddButton((bool)Values[3] ? "Convert to method call" : "Convert to pure node", () => SetValue(3, !(bool)Values[3])).Enabled = Surface.CanEdit;
+                    if (!method.ValueType.IsVoid)
+                        menu.AddButton((bool)Values[3] ? "Convert to method call" : "Convert to pure node", () => SetValue(3, !(bool)Values[3])).Enabled = Surface.CanEdit;
+                    menu.AddButton("Find references...", OnFindReferences);
                 }
-                // TODO: add Find References option to search Visual Script function usages in the whole project
+            }
+
+            private void OnFindReferences()
+            {
+                Editor.Instance.ContentFinding.ShowSearch(Surface, '\"' + ContentSearchText + '\"');
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override string ContentSearchText
+            {
+                get
+                {
+                    var method = GetMethod(out var scriptType, out _, out _);
+                    return scriptType.TypeName + '.' + method.Name;
+                }
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left && _headerRect.Contains(ref location))
                 {
                     // Open function content item if exists
                     var method = GetMethod(out var scriptType, out _, out _);
                     var item = scriptType.ContentItem;
-                    if (item != null)
-                    {
-                        var window = Editor.Instance.ContentEditing.Open(item);
+                    var window = Editor.Instance.ContentEditing.Open(item);
 
-                        // Focus method
-                        if (window is VisualScriptWindow vsWindow && method)
+                    // Focus method
+                    if (window is VisualScriptWindow vsWindow && method)
+                    {
+                        foreach (var node in vsWindow.Surface.Nodes)
                         {
-                            foreach (var node in vsWindow.Surface.Nodes)
+                            if (node is VisualScriptFunctionNode functionNode &&
+                                method.Name == functionNode._signature.Name &&
+                                ((method.ParametersCount == 0 && functionNode._signature.Parameters == null) || method.ParametersCount == functionNode._signature.Parameters.Length) &&
+                                method.IsVirtual == functionNode._signature.IsVirtual &&
+                                method.IsStatic == functionNode._signature.IsStatic &&
+                                method.ValueType == functionNode._signature.ReturnType)
                             {
-                                if (node is VisualScriptFunctionNode functionNode &&
-                                    method.Name == functionNode._signature.Name &&
-                                    ((method.ParametersCount == 0 && functionNode._signature.Parameters == null) || method.ParametersCount == functionNode._signature.Parameters.Length) &&
-                                    method.IsVirtual == functionNode._signature.IsVirtual &&
-                                    method.IsStatic == functionNode._signature.IsStatic &&
-                                    method.ValueType == functionNode._signature.ReturnType)
-                                {
-                                    vsWindow.ShowNode(node);
-                                    break;
-                                }
+                                vsWindow.ShowNode(node);
+                                break;
                             }
                         }
                     }
@@ -1121,6 +1166,54 @@ namespace FlaxEditor.Surface.Archetypes
                 }
 
                 base.OnDestroy();
+            }
+
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                if (nodeArch.Tag is not ScriptMemberInfo memberInfo)
+                    return false;
+
+                if (!memberInfo.IsStatic)
+                {
+                    if (VisjectSurface.FullCastCheck(memberInfo.DeclaringType, outputType, hint))
+                        return true;
+                }
+
+                var parameters = memberInfo.GetParameters();
+                bool isPure = (parameters.Length == 0 && !memberInfo.ValueType.IsVoid);
+                if (outputType.IsVoid)
+                    return !isPure;
+
+                foreach (var param in parameters)
+                {
+                    if (param.IsOut)
+                        continue;
+                    if (VisjectSurface.FullCastCheck(param.Type, outputType, hint))
+                        return true;
+                }
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                if (nodeArch.Tag is not ScriptMemberInfo memberInfo)
+                    return false;
+                if (VisjectSurface.FullCastCheck(memberInfo.ValueType, inputType, hint))
+                    return true;
+
+                var parameters = memberInfo.GetParameters();
+                bool isPure = (parameters.Length == 0 && !memberInfo.ValueType.IsVoid);
+                if (inputType.IsVoid)
+                    return !isPure;
+
+                foreach (var param in memberInfo.GetParameters())
+                {
+                    if (!param.IsOut)
+                        continue;
+                    if (VisjectSurface.FullCastCheck(param.Type, inputType, hint))
+                        return true;
+                }
+                return false;
             }
         }
 
@@ -1153,9 +1246,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 UpdateSignature();
             }
@@ -1315,7 +1408,7 @@ namespace FlaxEditor.Surface.Archetypes
                     // Context menu dimensions
                     const float width = 340.0f;
                     const float height = 370.0f;
-                    Size = new Vector2(width, height);
+                    Size = new Float2(width, height);
 
                     // Title
                     var title = new Label(2, 2, width - 4, 23.0f)
@@ -1433,14 +1526,14 @@ namespace FlaxEditor.Surface.Archetypes
                     if (_signature.IsVirtual)
                         flags |= Flags.Virtual;
                     writer.Write((byte)flags); // Flags
-                    Utilities.VariantUtils.WriteVariantType(writer, _signature.ReturnType); // Return Type
+                    VariantUtils.WriteVariantType(writer, _signature.ReturnType); // Return Type
                     var parametersCount = _signature.Parameters?.Length ?? 0;
                     writer.Write(parametersCount); // Parameters count
                     for (int i = 0; i < parametersCount; i++)
                     {
                         ref var param = ref _signature.Parameters[i];
                         Utilities.Utils.WriteStrAnsi(writer, param.Name, 13); // Parameter name
-                        Utilities.VariantUtils.WriteVariantType(writer, param.Type); // Parameter type
+                        VariantUtils.WriteVariantType(writer, param.Type); // Parameter type
                         writer.Write((byte)0); // Is parameter out
                         writer.Write((byte)0); // Has default value
                     }
@@ -1469,13 +1562,13 @@ namespace FlaxEditor.Surface.Archetypes
                             var flags = (Flags)reader.ReadByte(); // Flags
                             _signature.IsStatic = (flags & Flags.Static) == Flags.Static;
                             _signature.IsVirtual = (flags & Flags.Virtual) == Flags.Virtual;
-                            _signature.ReturnType = Utilities.VariantUtils.ReadVariantScriptType(reader); // Return Type
+                            _signature.ReturnType = VariantUtils.ReadVariantScriptType(reader); // Return Type
                             var parametersCount = reader.ReadInt32(); // Parameters count
                             _signature.Parameters = new Parameter[parametersCount];
                             for (int i = 0; i < parametersCount; i++)
                             {
                                 var paramName = Utilities.Utils.ReadStrAnsi(reader, 13); // Parameter name
-                                var paramType = Utilities.VariantUtils.ReadVariantScriptType(reader); // Parameter type
+                                var paramType = VariantUtils.ReadVariantScriptType(reader); // Parameter type
                                 var isOut = reader.ReadByte() != 0; // Is parameter out
                                 var hasDefaultValue = reader.ReadByte() != 0; // Has default value
                                 _signature.Parameters[i] = new Parameter
@@ -1527,7 +1620,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Vector2 location)
+            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
             {
                 base.OnShowSecondaryContextMenu(menu, location);
 
@@ -1535,13 +1628,13 @@ namespace FlaxEditor.Surface.Archetypes
                 menu.AddButton("Add return node", OnAddReturnNode).Enabled = _signature.ReturnType != ScriptType.Null && Surface.CanEdit;
                 menu.AddButton("Edit signature...", OnEditSignature).Enabled = Surface.CanEdit;
                 menu.AddButton("Edit attributes...", OnEditAttributes).Enabled = Surface.CanEdit;
-                // TODO: add Find References option to search Visual Script function usages in the whole project
+                menu.AddButton("Find references...", OnFindReferences);
             }
 
             private void OnAddReturnNode()
             {
                 var impulseBox = GetBox(0);
-                var node = Context.SpawnNode(16, 5, UpperRight + new Vector2(40, 0), new object[] { _signature.ReturnType.TypeName });
+                var node = Context.SpawnNode(16, 5, UpperRight + new Float2(40, 0), new object[] { _signature.ReturnType.TypeName });
                 if (node != null && !impulseBox.HasAnyConnection)
                     impulseBox.Connect(node.GetBox(0));
             }
@@ -1573,7 +1666,7 @@ namespace FlaxEditor.Surface.Archetypes
                     SaveSignature();
 
                     // Check if return type has been changed
-                    if (_signature.ReturnType != prevReturnType)
+                    if (!SurfaceUtils.AreScriptTypesEqual(_signature.ReturnType, prevReturnType))
                     {
                         // Update all return nodes used by this function to match the new type
                         var usedNodes = DepthFirstTraversal(false);
@@ -1604,7 +1697,7 @@ namespace FlaxEditor.Surface.Archetypes
                             node.OnFunctionEdited(this);
                     }
                 };
-                editor.Show(this, Vector2.Zero);
+                editor.Show(this, Float2.Zero);
             }
 
             private void OnEditAttributes()
@@ -1623,7 +1716,12 @@ namespace FlaxEditor.Surface.Archetypes
                     action.Window.Undo?.AddAction(action);
                     action.Do();
                 };
-                editor.Show(this, Vector2.Zero);
+                editor.Show(this, Float2.Zero);
+            }
+
+            private void OnFindReferences()
+            {
+                Editor.Instance.ContentFinding.ShowSearch(Surface, '\"' + ContentSearchText + '\"');
             }
 
             private void CheckFunctionName(ref string name)
@@ -1640,7 +1738,21 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override string ContentSearchText
+            {
+                get
+                {
+                    var visualScript = Context.Context.SurfaceAsset as VisualScript;
+                    if (visualScript == null && Surface is VisualScriptSurface visualScriptSurface)
+                        visualScript = visualScriptSurface.Script;
+                    if (visualScript != null)
+                        return visualScript.ScriptTypeName + '.' + _signature.Name;
+                    return _signature.Name;
+                }
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
                 if (button == MouseButton.Left && _headerRect.Contains(ref location))
                 {
@@ -1652,24 +1764,24 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 LoadSignature();
 
                 // Send event
-                for (int i = 0; i < Surface.Nodes.Count; i++)
+                for (int i = 0; i < Context.Nodes.Count; i++)
                 {
-                    if (Surface.Nodes[i] is IFunctionsDependantNode node)
+                    if (Context.Nodes[i] is IFunctionsDependantNode node)
                         node.OnFunctionCreated(this);
                 }
             }
 
             /// <inheritdoc />
-            public override void OnSpawned()
+            public override void OnSpawned(SurfaceNodeActions action)
             {
-                base.OnSpawned();
+                base.OnSpawned(action);
 
                 // Setup initial signature
                 var defaultSignature = _signature.Node == null;
@@ -1695,7 +1807,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnDeleted()
+            public override void OnDeleted(SurfaceNodeActions action)
             {
                 // Send event
                 for (int i = 0; i < Surface.Nodes.Count; i++)
@@ -1704,7 +1816,7 @@ namespace FlaxEditor.Surface.Archetypes
                         node.OnFunctionDeleted(this);
                 }
 
-                base.OnDeleted();
+                base.OnDeleted(action);
             }
 
             /// <inheritdoc />
@@ -1729,22 +1841,31 @@ namespace FlaxEditor.Surface.Archetypes
 
                 base.OnDestroy();
             }
+
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                return inputType.IsVoid;
+            }
         }
 
-        private sealed class GetFieldNode : SurfaceNode
+        private abstract class FieldNodeBase : SurfaceNode
         {
             private bool _isTypesChangedEventRegistered;
 
-            /// <inheritdoc />
-            public GetFieldNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
+            protected FieldNodeBase(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
             }
 
-            private void UpdateSignature()
+            protected ScriptMemberInfo GetField(out ScriptType scriptType)
             {
                 var fieldInfo = ScriptMemberInfo.Null;
-                var scriptType = TypeUtils.GetType((string)Values[0]);
+                scriptType = TypeUtils.GetType((string)Values[0]);
                 if (scriptType != ScriptType.Null)
                 {
                     var members = scriptType.GetMembers((string)Values[1], MemberTypes.Field, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
@@ -1757,47 +1878,40 @@ namespace FlaxEditor.Surface.Archetypes
                         }
                     }
                 }
-                if (!_isTypesChangedEventRegistered)
+                if (!_isTypesChangedEventRegistered && Surface != null)
                 {
                     _isTypesChangedEventRegistered = true;
                     Editor.Instance.CodeEditing.TypesChanged += UpdateSignature;
                 }
-                var typeName = (string)Values[2];
-                var isStatic = (bool)Values[3];
-                ScriptType type;
-                if (fieldInfo)
-                {
-                    type = fieldInfo.ValueType;
-                    SetValue(2, type.TypeName);
-                    SetValue(3, type.IsStatic);
-                }
-                else
-                {
-                    type = TypeUtils.GetType(typeName);
-                }
-                if (type)
-                {
-                    AddBox(true, 0, 0, string.Empty, type, false);
-                    if (!isStatic)
-                        AddBox(false, 1, 0, "Instance", scriptType, true);
-                    else
-                        RemoveElement(GetBox(1));
-                }
-                else
-                {
-                    RemoveElement(GetBox(0));
-                    RemoveElement(GetBox(1));
-                }
-                ResizeAuto();
+                return fieldInfo;
+            }
+
+            protected abstract void UpdateSignature();
+
+            /// <inheritdoc />
+            public override void OnShowSecondaryContextMenu(FlaxEditor.GUI.ContextMenu.ContextMenu menu, Float2 location)
+            {
+                base.OnShowSecondaryContextMenu(menu, location);
+
+                if (GetField(out _) == ScriptMemberInfo.Null)
+                    return;
+                menu.AddSeparator();
+                menu.AddButton("Find references...", OnFindReferences);
+            }
+
+            private void OnFindReferences()
+            {
+                Editor.Instance.ContentFinding.ShowSearch(Surface, '\"' + ContentSearchText + '\"');
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override string ContentSearchText
             {
-                base.OnLoaded();
-
-                Title = "Get " + SurfaceUtils.GetMethodDisplayName((string)Values[1]);
-                UpdateSignature();
+                get
+                {
+                    var fieldInfo = GetField(out var scriptType);
+                    return scriptType.TypeName + '.' + fieldInfo.Name;
+                }
             }
 
             /// <inheritdoc />
@@ -1821,47 +1935,141 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        private sealed class SetFieldNode : SurfaceNode
+        private sealed class GetFieldNode : FieldNodeBase
         {
-            private bool _isTypesChangedEventRegistered;
+            public GetFieldNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
+            : base(id, context, nodeArch, groupArch)
+            {
+            }
 
+            protected override void UpdateSignature()
+            {
+                var fieldInfo = GetField(out var scriptType);
+                ScriptType type;
+                bool isStatic;
+                if (fieldInfo)
+                {
+                    type = fieldInfo.ValueType;
+                    isStatic = fieldInfo.IsStatic;
+                    if (Surface != null)
+                    {
+                        SetValue(2, type.TypeName);
+                        SetValue(3, isStatic);
+                    }
+                }
+                else
+                {
+                    var typeName = (string)Values[2];
+                    isStatic = (bool)Values[3];
+                    type = TypeUtils.GetType(typeName);
+                }
+                if (type)
+                {
+                    AddBox(true, 0, 0, string.Empty, type, false);
+                    if (!isStatic)
+                        AddBox(false, 1, 0, "Instance", scriptType, true);
+                    else
+                        RemoveElement(GetBox(1));
+                }
+                else
+                {
+                    RemoveElement(GetBox(0));
+                    RemoveElement(GetBox(1));
+                }
+                ResizeAuto();
+            }
+
+            /// <inheritdoc />
+            public override void OnLoaded(SurfaceNodeActions action)
+            {
+                base.OnLoaded(action);
+
+                Title = "Get " + SurfaceUtils.GetMethodDisplayName((string)Values[1]);
+                UpdateSignature();
+            }
+
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                var scriptType = TypeUtils.GetType((string)nodeArch.DefaultValues[0]);
+                if (scriptType == ScriptType.Null)
+                    return false;
+
+                var members = scriptType.GetMembers((string)nodeArch.DefaultValues[1], MemberTypes.Field, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+                foreach (var member in members)
+                {
+                    if (!SurfaceUtils.IsValidVisualScriptField(member))
+                        continue;
+
+                    if (member)
+                    {
+                        if (!member.IsStatic && VisjectSurface.FullCastCheck(scriptType, outputType, hint))
+                            return true;
+                    }
+                    else
+                    {
+                        var isStatic = (bool)nodeArch.DefaultValues[3];
+                        if (!isStatic && VisjectSurface.FullCastCheck(scriptType, outputType, hint))
+                            return true;
+                    }
+                    break;
+                }
+
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                var scriptType = TypeUtils.GetType((string)nodeArch.DefaultValues[0]);
+                if (scriptType == ScriptType.Null)
+                    return false;
+
+                var members = scriptType.GetMembers((string)nodeArch.DefaultValues[1], MemberTypes.Field, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+                foreach (var member in members)
+                {
+                    if (!SurfaceUtils.IsValidVisualScriptField(member))
+                        continue;
+
+                    if (member)
+                    {
+                        if (VisjectSurface.FullCastCheck(member.ValueType, inputType, hint))
+                            return true;
+                    }
+                    else
+                    {
+                        var typeName = (string)nodeArch.DefaultValues[2];
+                        if (VisjectSurface.FullCastCheck(TypeUtils.GetType(typeName), inputType, hint))
+                            return true;
+                    }
+                    break;
+                }
+
+                return false;
+            }
+        }
+
+        private sealed class SetFieldNode : FieldNodeBase
+        {
             public SetFieldNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
             }
 
-            private void UpdateSignature()
+            protected override void UpdateSignature()
             {
-                var fieldInfo = ScriptMemberInfo.Null;
-                var scriptType = TypeUtils.GetType((string)Values[0]);
-                if (scriptType != ScriptType.Null)
-                {
-                    var members = scriptType.GetMembers((string)Values[1], MemberTypes.Field, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
-                    foreach (var member in members)
-                    {
-                        if (SurfaceUtils.IsValidVisualScriptField(member))
-                        {
-                            fieldInfo = member;
-                            break;
-                        }
-                    }
-                }
-                if (!_isTypesChangedEventRegistered)
-                {
-                    _isTypesChangedEventRegistered = true;
-                    Editor.Instance.CodeEditing.TypesChanged += UpdateSignature;
-                }
-                var typeName = (string)Values[2];
-                var isStatic = (bool)Values[3];
+                var fieldInfo = GetField(out var scriptType);
                 ScriptType type;
+                bool isStatic;
                 if (fieldInfo)
                 {
                     type = fieldInfo.ValueType;
+                    isStatic = fieldInfo.IsStatic;
                     SetValue(2, type.TypeName);
-                    SetValue(3, type.IsStatic);
+                    SetValue(3, isStatic);
                 }
                 else
                 {
+                    var typeName = (string)Values[2];
+                    isStatic = (bool)Values[3];
                     type = TypeUtils.GetType(typeName);
                 }
                 AddBox(false, 2, 0, string.Empty, new ScriptType(typeof(void)), false);
@@ -1883,32 +2091,54 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 Title = "Set " + SurfaceUtils.GetMethodDisplayName((string)Values[1]);
                 UpdateSignature();
             }
 
-            /// <inheritdoc />
-            public override void OnValuesChanged()
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
             {
-                base.OnValuesChanged();
+                if (outputType.IsVoid)
+                    return true;
 
-                UpdateSignature();
-            }
+                var scriptType = TypeUtils.GetType((string)nodeArch.DefaultValues[0]);
+                if (scriptType == ScriptType.Null)
+                    return false;
 
-            /// <inheritdoc />
-            public override void OnDestroy()
-            {
-                if (_isTypesChangedEventRegistered)
+                var members = scriptType.GetMembers((string)nodeArch.DefaultValues[1], MemberTypes.Field, BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly);
+                foreach (var member in members)
                 {
-                    _isTypesChangedEventRegistered = false;
-                    Editor.Instance.CodeEditing.TypesChanged -= UpdateSignature;
+                    if (!SurfaceUtils.IsValidVisualScriptField(member))
+                        continue;
+
+                    if (member)
+                    {
+                        if (VisjectSurface.FullCastCheck(member.ValueType, outputType, hint))
+                            return true;
+                        if (!member.IsStatic && VisjectSurface.FullCastCheck(scriptType, outputType, hint))
+                            return true;
+                    }
+                    else
+                    {
+                        var typeName = (string)nodeArch.DefaultValues[2];
+                        if (VisjectSurface.FullCastCheck(TypeUtils.GetType(typeName), outputType, hint))
+                            return true;
+                        var isStatic = (bool)nodeArch.DefaultValues[3];
+                        if (!isStatic && VisjectSurface.FullCastCheck(scriptType, outputType, hint))
+                            return true;
+                    }
+                    break;
                 }
 
-                base.OnDestroy();
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                return inputType.IsVoid;
             }
         }
 
@@ -1934,7 +2164,7 @@ namespace FlaxEditor.Surface.Archetypes
                     return false;
                 for (int i = 0; i < _signature.Length; i++)
                 {
-                    if (_signature[i].Type != sig.Parameters[i].Type)
+                    if (!SurfaceUtils.AreScriptTypesEqual(_signature[i].Type, sig.Parameters[i].Type))
                         return false;
                 }
                 return true;
@@ -1952,8 +2182,8 @@ namespace FlaxEditor.Surface.Archetypes
                     _combobox.SelectedIndexChanged += OnSelectedChanged;
                     _helperButton = new Image
                     {
-                        Location = _combobox.UpperRight + new Vector2(4, 3),
-                        Size = new Vector2(12.0f),
+                        Location = _combobox.UpperRight + new Float2(4, 3),
+                        Size = new Float2(12.0f),
                         Parent = this,
                     };
                     _helperButton.Clicked += OnHelperButtonClicked;
@@ -1963,21 +2193,23 @@ namespace FlaxEditor.Surface.Archetypes
                 _combobox.ClearItems();
                 _tooltips.Clear();
                 _functionNodesIds.Clear();
-                var nodes = Surface.Nodes;
-                var count = _signature != null ? nodes.Count : 0;
-                for (int i = 0; i < count; i++)
+                if (Surface != null && _signature != null)
                 {
-                    if (nodes[i] is VisualScriptFunctionNode functionNode)
+                    var nodes = Surface.Nodes;
+                    for (int i = 0; i < nodes.Count; i++)
                     {
-                        // Get if function signature matches the event signature
-                        functionNode.GetSignature(out var functionSig);
-                        if (IsValidFunctionSignature(ref functionSig))
+                        if (nodes[i] is VisualScriptFunctionNode functionNode)
                         {
-                            if (functionNode.ID == handlerFunctionNodeId)
-                                toSelect = _functionNodesIds.Count;
-                            _functionNodesIds.Add(functionNode.ID);
-                            _tooltips.Add(functionNode.TooltipText);
-                            _combobox.AddItem(functionSig.ToString());
+                            // Get if function signature matches the event signature
+                            functionNode.GetSignature(out var functionSig);
+                            if (IsValidFunctionSignature(ref functionSig))
+                            {
+                                if (functionNode.ID == handlerFunctionNodeId)
+                                    toSelect = _functionNodesIds.Count;
+                                _functionNodesIds.Add(functionNode.ID);
+                                _tooltips.Add(functionNode.TooltipText);
+                                _combobox.AddItem(functionSig.ToString());
+                            }
                         }
                     }
                 }
@@ -2020,8 +2252,8 @@ namespace FlaxEditor.Surface.Archetypes
                 {
                     // Create new function that matches the event signature
                     var surfaceBounds = Surface.AllNodesBounds;
-                    Surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Vector2(200, 150)).MakeExpanded(400.0f));
-                    var node = Surface.Context.SpawnNode(16, 6, surfaceBounds.BottomLeft + new Vector2(0, 50), null, OnBeforeSpawnedNewHandler);
+                    Surface.ShowArea(new Rectangle(surfaceBounds.BottomLeft, new Float2(200, 150)).MakeExpanded(400.0f));
+                    var node = Surface.Context.SpawnNode(16, 6, surfaceBounds.BottomLeft + new Float2(0, 50), null, OnBeforeSpawnedNewHandler);
                     Surface.Select(node);
 
                     // Bind this function
@@ -2079,9 +2311,9 @@ namespace FlaxEditor.Surface.Archetypes
                 UpdateUI();
             }
 
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 // Find reflection information about event
                 _signature = null;
@@ -2128,6 +2360,43 @@ namespace FlaxEditor.Surface.Archetypes
 
                 base.OnDestroy();
             }
+
+            internal static bool IsInputCompatible(NodeArchetype nodeArch, ScriptType outputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                // Event based nodes always have a pulse input, so it's always compatible with void
+                if (outputType.IsVoid)
+                    return true;
+
+                var eventName = (string)nodeArch.DefaultValues[1];
+                var eventType = TypeUtils.GetType((string)nodeArch.DefaultValues[0]);
+                var member = eventType.GetMember(eventName, MemberTypes.Event, BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance);
+                if (member && SurfaceUtils.IsValidVisualScriptEvent(member))
+                {
+                    if (!member.IsStatic)
+                    {
+                        if (VisjectSurface.FullCastCheck(eventType, outputType, hint))
+                            return true;
+                    }
+                }
+                return false;
+            }
+
+            internal static bool IsOutputCompatible(NodeArchetype nodeArch, ScriptType inputType, ConnectionsHint hint, VisjectSurfaceContext context)
+            {
+                // Event based nodes always have a pulse output, so it's always compatible with void
+                if (inputType.IsVoid)
+                    return true;
+
+                var eventName = (string)nodeArch.DefaultValues[1];
+                var eventType = TypeUtils.GetType((string)nodeArch.DefaultValues[0]);
+                var member = eventType.GetMember(eventName, MemberTypes.Event, BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance);
+                if (member && SurfaceUtils.IsValidVisualScriptEvent(member))
+                {
+                    if (VisjectSurface.FullCastCheck(member.ValueType, inputType, hint))
+                        return true;
+                }
+                return false;
+            }
         }
 
         private sealed class BindEventNode : EventBaseNode
@@ -2137,11 +2406,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
             }
 
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
                 Title = "Bind " + (string)Values[1];
 
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
             }
         }
 
@@ -2152,11 +2421,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
             }
 
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
                 Title = "Unbind " + (string)Values[1];
 
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
             }
         }
 
@@ -2172,7 +2441,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Function Input",
                 Description = "The graph function input data",
                 Flags = NodeFlags.MaterialGraph | NodeFlags.ParticleEmitterGraph | NodeFlags.AnimGraph | NodeFlags.NoSpawnViaPaste,
-                Size = new Vector2(240, 60),
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     typeof(float).FullName,
@@ -2191,7 +2460,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Function Output",
                 Description = "The graph function output data",
                 Flags = NodeFlags.MaterialGraph | NodeFlags.ParticleEmitterGraph | NodeFlags.AnimGraph | NodeFlags.NoSpawnViaPaste,
-                Size = new Vector2(240, 60),
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     typeof(float).FullName,
@@ -2209,28 +2478,33 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = string.Empty,
                 Description = "Overrides the base class method with custom implementation",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI | NodeFlags.NoSpawnViaPaste,
-                Size = new Vector2(240, 60),
+                SortScore = 10,
+                IsInputCompatible = MethodOverrideNode.IsInputCompatible,
+                IsOutputCompatible = MethodOverrideNode.IsOutputCompatible,
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Overriden method name
                     0, // Overriden method parameters count
-                    Utils.GetEmptyArray<byte>(), // Cached function signature data
+                    Array.Empty<byte>(), // Cached function signature data
                 },
             },
             new NodeArchetype
             {
                 TypeID = 4,
                 Create = (id, context, arch, groupArch) => new InvokeMethodNode(id, context, arch, groupArch),
+                IsInputCompatible = InvokeMethodNode.IsInputCompatible,
+                IsOutputCompatible = InvokeMethodNode.IsOutputCompatible,
                 Title = string.Empty,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(240, 60),
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Script typename
                     string.Empty, // Method name
                     0, // Method parameters count
                     false, // Is Pure?
-                    Utils.GetEmptyArray<byte>(), // Cached function signature data
+                    Array.Empty<byte>(), // Cached function signature data
 
                     // Default value for parameters (27 entries)
                     // @formatter:off
@@ -2246,7 +2520,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new ReturnNode(id, context, arch, groupArch),
                 Title = "Return",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(100, 40),
+                Size = new Float2(100, 40),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Value TypeName
@@ -2261,22 +2535,26 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 6,
                 Create = (id, context, arch, groupArch) => new VisualScriptFunctionNode(id, context, arch, groupArch),
+                IsInputCompatible = VisualScriptFunctionNode.IsInputCompatible,
+                IsOutputCompatible = VisualScriptFunctionNode.IsOutputCompatible,
                 Title = "New Function",
                 Description = "Adds a new function to the script",
                 Flags = NodeFlags.VisualScriptGraph,
-                Size = new Vector2(240, 20),
+                Size = new Float2(240, 20),
                 DefaultValues = new object[]
                 {
-                    Utils.GetEmptyArray<byte>(), // Function signature data
+                    Array.Empty<byte>(), // Function signature data
                 },
             },
             new NodeArchetype
             {
                 TypeID = 7,
                 Create = (id, context, arch, groupArch) => new GetFieldNode(id, context, arch, groupArch),
+                IsInputCompatible = GetFieldNode.IsInputCompatible,
+                IsOutputCompatible = GetFieldNode.IsOutputCompatible,
                 Title = string.Empty,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(240, 60),
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Script typename
@@ -2289,9 +2567,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 8,
                 Create = (id, context, arch, groupArch) => new SetFieldNode(id, context, arch, groupArch),
+                IsInputCompatible = SetFieldNode.IsInputCompatible,
+                IsOutputCompatible = SetFieldNode.IsOutputCompatible,
                 Title = string.Empty,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(240, 60),
+                Size = new Float2(240, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Script typename
@@ -2305,9 +2585,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 9,
                 Create = (id, context, arch, groupArch) => new BindEventNode(id, context, arch, groupArch),
+                IsInputCompatible = EventBaseNode.IsInputCompatible,
+                IsOutputCompatible = EventBaseNode.IsOutputCompatible,
                 Title = string.Empty,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(260, 60),
+                Size = new Float2(260, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Event type
@@ -2327,9 +2609,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 10,
                 Create = (id, context, arch, groupArch) => new UnbindEventNode(id, context, arch, groupArch),
+                IsInputCompatible = EventBaseNode.IsInputCompatible,
+                IsOutputCompatible = EventBaseNode.IsOutputCompatible,
                 Title = string.Empty,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.NoSpawnViaGUI,
-                Size = new Vector2(260, 60),
+                Size = new Float2(260, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Event type

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
@@ -6,19 +6,18 @@ namespace FlaxEngine.GUI
     /// Base class for container controls that can offset controls in a view (eg. scroll panels).
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
-    [HideInEditor]
     public class ScrollableControl : ContainerControl
     {
         /// <summary>
         /// The view offset. Useful to offset contents of the container (used by the scrollbars and drop panels).
         /// </summary>
-        protected Vector2 _viewOffset;
+        protected Float2 _viewOffset;
 
         /// <summary>
         /// Gets current view offset for all the controls (used by the scroll bars).
         /// </summary>
         [HideInEditor, NoSerialize]
-        public Vector2 ViewOffset
+        public Float2 ViewOffset
         {
             get => _viewOffset;
             set => SetViewOffset(ref value);
@@ -28,7 +27,7 @@ namespace FlaxEngine.GUI
         /// Sets the view offset.
         /// </summary>
         /// <param name="value">The value.</param>
-        protected virtual void SetViewOffset(ref Vector2 value)
+        protected virtual void SetViewOffset(ref Float2 value)
         {
             _viewOffset = value;
             OnViewOffsetChanged();
@@ -67,7 +66,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool IntersectsChildContent(Control child, Vector2 location, out Vector2 childSpaceLocation)
+        public override bool IntersectsChildContent(Control child, Float2 location, out Float2 childSpaceLocation)
         {
             // Apply offset on scrollable controls
             if (child.IsScrollable)
@@ -77,7 +76,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool IntersectsContent(ref Vector2 locationParent, out Vector2 location)
+        public override bool IntersectsContent(ref Float2 locationParent, out Float2 location)
         {
             // Little workaround to prevent applying offset when performing intersection test with this scrollable control.
             // Note that overriden PointFromParent applies view offset.
@@ -86,13 +85,13 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 PointToParent(ref Vector2 location)
+        public override Float2 PointToParent(ref Float2 location)
         {
             return base.PointToParent(ref location) + _viewOffset;
         }
 
         /// <inheritdoc />
-        public override Vector2 PointFromParent(ref Vector2 location)
+        public override Float2 PointFromParent(ref Float2 location)
         {
             return base.PointFromParent(ref location) - _viewOffset;
         }

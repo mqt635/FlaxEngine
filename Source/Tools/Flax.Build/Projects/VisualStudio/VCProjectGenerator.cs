@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using Flax.Build.NativeCpp;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -26,6 +27,8 @@ namespace Flax.Build.Projects.VisualStudio
                 case VisualStudioVersion.VisualStudio2015: return "v140";
                 case VisualStudioVersion.VisualStudio2017: return "v141";
                 case VisualStudioVersion.VisualStudio2019: return "v142";
+                case VisualStudioVersion.VisualStudio2022: return "v143";
+                case VisualStudioVersion.VisualStudio2026: return "v145";
                 }
                 return string.Empty;
             }
@@ -53,7 +56,7 @@ namespace Flax.Build.Projects.VisualStudio
         }
 
         /// <inheritdoc />
-        public override void GenerateProject(Project project)
+        public override void GenerateProject(Project project, string solutionPath, bool isMainProject)
         {
             var vcProjectFileContent = new StringBuilder();
             var vcFiltersFileContent = new StringBuilder();
@@ -64,6 +67,13 @@ namespace Flax.Build.Projects.VisualStudio
             var projectFilePlatformToolsetVersion = ProjectFilePlatformToolsetVersion;
             var projectDirectory = Path.GetDirectoryName(project.Path);
             var filtersDirectory = project.SourceFolderPath;
+
+            // Try to reuse the existing project guid from existing files
+            vsProject.ProjectGuid = GetProjectGuid(vsProject.Path, vsProject.Name);
+            if (vsProject.ProjectGuid == Guid.Empty)
+                vsProject.ProjectGuid = GetProjectGuid(solutionPath, vsProject.Name);
+            if (vsProject.ProjectGuid == Guid.Empty)
+                vsProject.ProjectGuid = Guid.NewGuid();
 
             // Header
             vcProjectFileContent.AppendLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
@@ -96,12 +106,16 @@ namespace Flax.Build.Projects.VisualStudio
             // Globals
             vcProjectFileContent.AppendLine("  <PropertyGroup Label=\"Globals\">");
             vcProjectFileContent.AppendLine(string.Format("    <ProjectGuid>{0}</ProjectGuid>", vsProject.ProjectGuid.ToString("B").ToUpperInvariant()));
-            vcProjectFileContent.AppendLine(string.Format("    <RootNamespace>{0}</RootNamespace>", project.Name));
+            vcProjectFileContent.AppendLine(string.Format("    <RootNamespace>{0}</RootNamespace>", project.BaseName));
             vcProjectFileContent.AppendLine(string.Format("    <PlatformToolset>{0}</PlatformToolset>", projectFilePlatformToolsetVersion));
             vcProjectFileContent.AppendLine(string.Format("    <MinimumVisualStudioVersion>{0}</MinimumVisualStudioVersion>", projectFileToolVersion));
             vcProjectFileContent.AppendLine("    <TargetRuntime>Native</TargetRuntime>");
             vcProjectFileContent.AppendLine("    <CharacterSet>Unicode</CharacterSet>");
             vcProjectFileContent.AppendLine("    <Keyword>MakeFileProj</Keyword>");
+            if (Version >= VisualStudioVersion.VisualStudio2022)
+                vcProjectFileContent.AppendLine("    <ResolveNuGetPackages>false</ResolveNuGetPackages>");
+            vcProjectFileContent.AppendLine("    <VCTargetsPath Condition=\"$(Configuration.Contains('Linux'))\">./</VCTargetsPath>");
+            vcProjectFileContent.AppendLine("    <VCTargetsPath Condition=\"$(Configuration.Contains('Mac'))\">./</VCTargetsPath>");
             vcProjectFileContent.AppendLine("  </PropertyGroup>");
 
             // Default properties
@@ -132,7 +146,7 @@ namespace Flax.Build.Projects.VisualStudio
             vcProjectFileContent.AppendLine("  <PropertyGroup Label=\"UserMacros\" />");
 
             // Per configuration options
-            var buildToolPath = Utilities.MakePathRelativeTo(typeof(Builder).Assembly.Location, projectDirectory);
+            var buildToolPath = Path.ChangeExtension(Utilities.MakePathRelativeTo(typeof(Builder).Assembly.Location, projectDirectory), null);
             var preprocessorDefinitions = new HashSet<string>();
             var includePaths = new HashSet<string>();
             foreach (var configuration in project.Configurations)
@@ -160,15 +174,17 @@ namespace Flax.Build.Projects.VisualStudio
                                             configuration.Configuration,
                                             configuration.Platform,
                                             target.Name);
-                if (!string.IsNullOrEmpty(Configuration.Compiler))
-                    cmdLine += " -compiler=" + Configuration.Compiler;
+                Configuration.PassArgs(ref cmdLine);
 
                 vcProjectFileContent.AppendLine(string.Format("  <PropertyGroup Condition=\"'$(Configuration)|$(Platform)'=='{0}'\">", configuration.Name));
                 if (platform is IVisualStudioProjectCustomizer customizer)
                     customizer.WriteVisualStudioBuildProperties(vsProject, platform, toolchain, configuration, vcProjectFileContent, vcFiltersFileContent, vcUserFileContent);
                 vcProjectFileContent.AppendLine(string.Format("    <IntDir>{0}</IntDir>", targetBuildOptions.IntermediateFolder));
                 vcProjectFileContent.AppendLine(string.Format("    <OutDir>{0}</OutDir>", targetBuildOptions.OutputFolder));
-                vcProjectFileContent.AppendLine("    <IncludePath />");
+                if (includePaths.Count != 0)
+                    vcProjectFileContent.AppendLine(string.Format("    <IncludePath>$(IncludePath);{0}</IncludePath>", string.Join(";", includePaths)));
+                else
+                    vcProjectFileContent.AppendLine("    <IncludePath />");
                 vcProjectFileContent.AppendLine("    <ReferencePath />");
                 vcProjectFileContent.AppendLine("    <LibraryPath />");
                 vcProjectFileContent.AppendLine("    <LibraryWPath />");
@@ -185,6 +201,26 @@ namespace Flax.Build.Projects.VisualStudio
                 if (includePaths.Count != 0)
                     vcProjectFileContent.AppendLine(string.Format("    <NMakeIncludeSearchPath>$(NMakeIncludeSearchPath);{0}</NMakeIncludeSearchPath>", string.Join(";", includePaths)));
 
+                var additionalOptions = new List<string>();
+                additionalOptions.Add("$(AdditionalOptions)");
+                switch (configuration.TargetBuildOptions.CompileEnv.CppVersion)
+                {
+                    case CppVersion.Cpp14:
+                        additionalOptions.Add("/std:c++14");
+                        break;
+                    case CppVersion.Cpp17:
+                        additionalOptions.Add("/std:c++17");
+                        break;
+                    case CppVersion.Cpp20:
+                        additionalOptions.Add("/std:c++20");
+                        break;
+                    case CppVersion.Latest:
+                        additionalOptions.Add("/std:c++latest");
+                        break;
+                }
+
+                vcProjectFileContent.AppendLine(string.Format("    <AdditionalOptions>{0}</AdditionalOptions>", string.Join(" ", additionalOptions)));
+
                 vcProjectFileContent.AppendLine("  </PropertyGroup>");
             }
 
@@ -199,7 +235,6 @@ namespace Flax.Build.Projects.VisualStudio
             {
                 foreach (var folder in project.SourceDirectories)
                 {
-                    // TODO: optimize it? make source files searching faster?
                     files.AddRange(Directory.GetFiles(folder, "*", SearchOption.AllDirectories));
                 }
             }
@@ -208,11 +243,11 @@ namespace Flax.Build.Projects.VisualStudio
             foreach (var file in files)
             {
                 string fileType;
-                if (file.EndsWith(".h", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".inl", StringComparison.OrdinalIgnoreCase))
+                if (file.EndsWith(".h", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".inl", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".hpp", StringComparison.OrdinalIgnoreCase))
                 {
                     fileType = "ClInclude";
                 }
-                else if (file.EndsWith(".cpp", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".cc", StringComparison.OrdinalIgnoreCase))
+                else if (file.EndsWith(".cpp", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".cc", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".c", StringComparison.OrdinalIgnoreCase))
                 {
                     fileType = "ClCompile";
                 }
@@ -313,14 +348,17 @@ namespace Flax.Build.Projects.VisualStudio
             vcProjectFileContent.AppendLine("  </ItemGroup>");
             vcFiltersFileContent.AppendLine("  </ItemGroup>");
 
-            // IntelliSense information
-            vcProjectFileContent.AppendLine("  <PropertyGroup>");
-            vcProjectFileContent.AppendLine(string.Format("    <NMakePreprocessorDefinitions>$(NMakePreprocessorDefinitions){0}</NMakePreprocessorDefinitions>", (project.Defines.Count > 0 ? (";" + string.Join(";", project.Defines)) : "")));
-            vcProjectFileContent.AppendLine(string.Format("    <NMakeIncludeSearchPath>$(NMakeIncludeSearchPath){0}</NMakeIncludeSearchPath>", (project.SearchPaths.Length > 0 ? (";" + string.Join(";", project.SearchPaths)) : "")));
-            vcProjectFileContent.AppendLine("    <NMakeForcedIncludes>$(NMakeForcedIncludes)</NMakeForcedIncludes>");
-            vcProjectFileContent.AppendLine("    <NMakeAssemblySearchPath>$(NMakeAssemblySearchPath)</NMakeAssemblySearchPath>");
-            vcProjectFileContent.AppendLine("    <NMakeForcedUsingAssemblies>$(NMakeForcedUsingAssemblies)</NMakeForcedUsingAssemblies>");
-            vcProjectFileContent.AppendLine("  </PropertyGroup>");
+            {
+                // IntelliSense information
+                vcProjectFileContent.AppendLine("  <PropertyGroup>");
+                vcProjectFileContent.AppendLine(string.Format("    <NMakePreprocessorDefinitions>$(NMakePreprocessorDefinitions){0}</NMakePreprocessorDefinitions>", (project.Defines.Count > 0 ? (";" + string.Join(";", project.Defines)) : "")));
+                vcProjectFileContent.AppendLine(string.Format("    <NMakeIncludeSearchPath>$(NMakeIncludeSearchPath){0}</NMakeIncludeSearchPath>", (project.SearchPaths.Length > 0 ? (";" + string.Join(";", project.SearchPaths)) : "")));
+                vcProjectFileContent.AppendLine("    <NMakeForcedIncludes>$(NMakeForcedIncludes)</NMakeForcedIncludes>");
+                vcProjectFileContent.AppendLine("    <NMakeAssemblySearchPath>$(NMakeAssemblySearchPath)</NMakeAssemblySearchPath>");
+                vcProjectFileContent.AppendLine("    <NMakeForcedUsingAssemblies>$(NMakeForcedUsingAssemblies)</NMakeForcedUsingAssemblies>");
+                vcProjectFileContent.AppendLine("    <AdditionalOptions>$(AdditionalOptions)</AdditionalOptions>");
+                vcProjectFileContent.AppendLine("  </PropertyGroup>");
+            }
 
             foreach (var platform in platforms)
             {
@@ -339,6 +377,82 @@ namespace Flax.Build.Projects.VisualStudio
             vcFiltersFileContent.AppendLine("</Project>");
 
             vcUserFileContent.AppendLine("</Project>");
+
+            if (platforms.Any(x => x.Target == TargetPlatform.Linux || x.Target == TargetPlatform.Mac))
+            {
+                var editorPath = Utilities.NormalizePath(Path.Combine(Globals.EngineRoot, Platform.GetEditorBinaryDirectory(), "$(Configuration.Split('.')[2])", $"FlaxEditor{Utilities.GetPlatformExecutableExt()}")).Replace('\\', '/');
+                var debuggerProjectPath = Globals.Project.Name == "Flax" ? "" : Globals.Project.ProjectFolderPath;
+                var debuggerWorkingDirectory = Globals.Project.ProjectFolderPath;
+
+                // Override MSBuild .targets file with one that runs NMake commands (workaround for Rider not finding "Microsoft.Cpp.Default.props" file)
+                var cppTargetsFileContent = new StringBuilder();
+                cppTargetsFileContent.AppendLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+                cppTargetsFileContent.AppendLine("<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\" TreatAsLocalProperty=\"Platform\">");
+                cppTargetsFileContent.AppendLine("  <Import Project=\"Rider.Workarounds.Cpp.props\"/>");
+                cppTargetsFileContent.AppendLine("  <Target Name=\"Build\">");
+                cppTargetsFileContent.AppendLine("    <Exec Command='$(NMakeBuildCommandLine)'/>");
+                cppTargetsFileContent.AppendLine("  </Target>");
+                cppTargetsFileContent.AppendLine("  <Target Name=\"Rebuild\">");
+                cppTargetsFileContent.AppendLine("    <Exec Command='$(NMakeReBuildCommandLine)'/>");
+                cppTargetsFileContent.AppendLine("  </Target>");
+                cppTargetsFileContent.AppendLine("  <Target Name=\"Clean\">");
+                cppTargetsFileContent.AppendLine("    <Exec Command='$(NMakeCleanCommandLine)'/>");
+                cppTargetsFileContent.AppendLine("  </Target>");
+                cppTargetsFileContent.AppendLine("  <PropertyGroup>");
+                cppTargetsFileContent.AppendLine("    <TargetExt></TargetExt>");
+                cppTargetsFileContent.AppendLine("    <TargetName>$(RootNamespace)$(Configuration.Split('.')[0])</TargetName>");
+                cppTargetsFileContent.AppendLine("    <TargetPath>$(OutDir)/$(TargetName)$(TargetExt)</TargetPath>");
+                if (!string.IsNullOrEmpty(debuggerProjectPath))
+                    cppTargetsFileContent.AppendLine(string.Format("    <LocalDebuggerCommandArguments>-project=\"{0}\"</LocalDebuggerCommandArguments>", debuggerProjectPath));
+                else
+                    cppTargetsFileContent.AppendLine("    <LocalDebuggerCommandArguments></LocalDebuggerCommandArguments>");
+                cppTargetsFileContent.AppendLine(string.Format("    <LocalDebuggerCommand>{0}</LocalDebuggerCommand>", editorPath));
+                cppTargetsFileContent.AppendLine(string.Format("    <LocalDebuggerWorkingDirectory>{0}</LocalDebuggerWorkingDirectory>", debuggerWorkingDirectory));
+                cppTargetsFileContent.AppendLine("  </PropertyGroup>");
+                cppTargetsFileContent.AppendLine("</Project>");
+                
+                // Workarounds for Rider language server to not show errors over well known symbols 
+                Dictionary<string, string> preprocessor = new Dictionary<string, string>()
+                {
+                    {"__attribute__(x)", ""},
+                    {"__null", "0"},
+                    {"__extension__", ""},
+                    {"__asm__", "__asm"},
+                    {"_SIZE_T", "1"},
+                };
+                // Undefine hardcoded MSVC definitions
+                HashSet<string> undefine = new HashSet<string>()
+                {
+                    "_MSC_VER",
+                    "_MSC_EXTENSIONS",
+                    "_M_IX86",
+                    "_WIN32",
+                };
+
+                // Expose all known preprocessor definitions known by the compiler to language server 
+                var clangDefinitions = Utilities.ReadProcessOutput("clang++", "-dM -E -x c++ /dev/null");
+                foreach (var (def, val) in clangDefinitions.Split('\n').Select(x => (x.Split(' ')[1], x.Split(' ')[2])))
+                    preprocessor.Add(def, val);
+
+                var workaroundsFileContent = new StringBuilder();
+                workaroundsFileContent.AppendLine($"<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+                workaroundsFileContent.AppendLine($"<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\" TreatAsLocalProperty=\"Platform\">");
+                workaroundsFileContent.AppendLine($"  <ItemDefinitionGroup>");
+                workaroundsFileContent.AppendLine($"    <ClCompile>");
+                workaroundsFileContent.AppendLine($"      <AdditionalOptions>{string.Join(' ', undefine.Select(x => $"/U {x}"))} %(AdditionalOptions)</AdditionalOptions>");
+                workaroundsFileContent.AppendLine($"    </ClCompile>");
+                workaroundsFileContent.AppendLine($"  </ItemDefinitionGroup>");
+                workaroundsFileContent.AppendLine($"  <PropertyGroup>");
+                workaroundsFileContent.AppendLine($"    <NMakeIncludeSearchPath>/usr/include/c++/16/aarch64-redhat-linux/;$(NMakeIncludeSearchPath)</NMakeIncludeSearchPath>");
+                workaroundsFileContent.AppendLine($"    <NMakePreprocessorDefinitions>{string.Join(';', preprocessor.Select(x => $"{x.Key}={x.Value}"))};$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>");
+                workaroundsFileContent.AppendLine($"  </PropertyGroup>");
+                workaroundsFileContent.AppendLine($"</Project>");
+
+                Utilities.WriteFileIfChanged(Path.Combine(projectDirectory, "Microsoft.Cpp.targets"), cppTargetsFileContent.ToString());
+                Utilities.WriteFileIfChanged(Path.Combine(projectDirectory, "Microsoft.Cpp.Default.props"), vcUserFileContent.ToString());
+                Utilities.WriteFileIfChanged(Path.Combine(projectDirectory, "Microsoft.Cpp.props"), vcUserFileContent.ToString());
+                Utilities.WriteFileIfChanged(Path.Combine(projectDirectory, "Rider.Workarounds.Cpp.props"), workaroundsFileContent.ToString());
+            }
 
             // Save the files
             Utilities.WriteFileIfChanged(project.Path, vcProjectFileContent.ToString());

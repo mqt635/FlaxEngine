@@ -1,0 +1,1032 @@
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+// Implementation based on:
+// "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Probes", Journal of Computer Graphics Tools, April 2019
+// Zander Majercik, Jean-Philippe Guertin, Derek Nowrouzezahrai, and Morgan McGuire
+// https://morgan3d.github.io/articles/2019-04-01-ddgi/index.html and https://gdcvault.com/play/1026182/
+//
+// Additional references:
+// "Scaling Probe-Based Real-Time Dynamic Global Illumination for Production", https://jcgt.org/published/0010/02/01/
+// "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields", https://jcgt.org/published/0008/02/01/
+
+// Use point sampling in software raytracing
+#define GLOBAL_SURFACE_ATLAS_SAMPLER SamplerPointClamp
+//#define GLOBAL_SDF_SAMPLER SamplerPointClamp
+
+#include "./Flax/Common.hlsl"
+#include "./Flax/GBufferCommon.hlsl"
+#include "./Flax/Math/Math.hlsl"
+#include "./Flax/Math/Noise.hlsl"
+#include "./Flax/Math/Quaternion.hlsl"
+#include "./Flax/Math/MonteCarlo.hlsl"
+#include "./Flax/Utils/GlobalSignDistanceField.hlsl"
+#include "./Flax/GI/GlobalSurfaceAtlas.hlsl"
+#include "./Flax/GI/DDGI.hlsl"
+
+// This must match C++
+#define DDGI_TRACE_RAYS_PROBES_COUNT_LIMIT 4096 // Maximum amount of probes to update at once during rays tracing and blending
+#define DDGI_TRACE_RAYS_LIMIT 256 // Limit of rays per-probe (runtime value can be smaller)
+#define DDGI_TRACE_RAYS_MIN 16 // Minimum amount of rays to shoot for sleepy probes
+#define DDGI_TRACE_NEGATIVE 0 // If true, rays that start inside geometry will use negative distance to indicate backface hit
+#define DDGI_PROBE_UPDATE_BORDERS_GROUP_SIZE 8
+#define DDGI_PROBE_CLASSIFY_GROUP_SIZE 32
+#define DDGI_PROBE_RELOCATE_ITERATIVE 1 // If true, probes relocation algorithm tries to move them in additive way, otherwise all nearby locations are checked to find the best position
+#define DDGI_PROBE_RELOCATE_FIND_BEST 1 // If true, probes relocation algorithm tries to move to the best matching location within nearby area
+#define DDGI_PROBE_EMPTY_AREA_DENSITY 8 // Spacing (in probe grid) between fallback probes placed into empty areas to provide valid GI for nearby dynamic objects or transparency
+#define DDGI_DEBUG_STATS 0 // Enables additional GPU-driven stats for probe/rays count
+#define DDGI_DEBUG_INSTABILITY 0 // Enables additional probe irradiance instability debugging
+#define DDGI_SKY_DISTANCE 1e27f // Sky is the limit
+
+META_CB_BEGIN(0, Data0)
+DDGIData DDGI;
+GlobalSDFData GlobalSDF;
+GlobalSurfaceAtlasData GlobalSurfaceAtlas;
+GBufferData GBuffer;
+float4 RaysRotation;
+float SkyboxIntensity;
+uint ProbesCount;
+float ResetBlend;
+float TemporalTime;
+int4 ProbeScrollClears[4];
+float3 ViewDir;
+float TestValue;
+float3 QuantizationError;
+uint FrameIndexMod8;
+float2 ResolveDitherScale;
+float2 Padding0;
+META_CB_END
+
+META_CB_BEGIN(1, Data1)
+float Padding2;
+int StepSize;
+uint CascadeIndex;
+uint ProbeIndexOffset;
+META_CB_END
+
+// Calculates the evenly distributed direction ray on a sphere (Spherical Fibonacci lattice)
+float3 GetSphericalFibonacci(float sampleIndex, float samplesCount)
+{
+    float b = (sqrt(5.0f) * 0.5f + 0.5f) - 1.0f;
+    float s = sampleIndex * b;
+    float phi = (2.0f * PI) * (s - floor(s));
+    float cosTheta = 1.0f - (2.0f * sampleIndex + 1.0f) * (1.0f / samplesCount);
+    float sinTheta = sqrt(saturate(1.0f - (cosTheta * cosTheta)));
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+// Calculates a random normalized ray direction (based on the ray index and the current probes rotation phrase)
+float3 GetProbeRayDirection(DDGIData data, uint rayIndex, uint raysCount, uint probeIndex, uint3 probeCoords)
+{
+    float4 rotation = RaysRotation;
+
+    // Randomize rotation per-probe (otherwise all probes are in sync)
+    float3 probePos = (float3)probeCoords / (float3)data.ProbesCounts;
+    float3 randomAxis = normalize(Mod289(probePos));
+    float randomAngle = (float)probeIndex / (float)ProbesCount * (2.0f * PI);
+    rotation = QuaternionMultiply(rotation, QuaternionFromAxisAngle(randomAxis, randomAngle));
+
+    // Random rotation per-ray - relative to the per-frame rays rotation
+    float3 direction = GetSphericalFibonacci((float)rayIndex, (float)raysCount);
+    return normalize(QuaternionRotate(rotation, direction));
+}
+
+// Calculates amount of rays to allocate for a probe
+uint GetProbeRaysCount(DDGIData data, float probeAttention)
+{
+    //return data.RaysCount;
+    probeAttention = saturate((probeAttention - DDGI_PROBE_ATTENTION_MIN) / (DDGI_PROBE_ATTENTION_MAX - DDGI_PROBE_ATTENTION_MIN));
+    return DDGI_TRACE_RAYS_MIN + (uint)max(probeAttention * (float)(data.RaysCount - DDGI_TRACE_RAYS_MIN), 0.0f);
+}
+
+#ifdef _CS_Classify
+
+RWTexture2D<snorm float4> RWProbesData : register(u0);
+RWByteAddressBuffer RWActiveProbes : register(u1);
+
+Texture3D<snorm float> GlobalSDFTex : register(t0);
+Texture3D<snorm float> GlobalSDFMip : register(t1);
+
+float3 Remap(float3 value, float3 fromMin, float3 fromMax, float3 toMin, float3 toMax)
+{
+    return (value - fromMin) / (fromMax - fromMin) * (toMax - toMin) + toMin;
+}
+
+bool IsProbeAtBorder(uint3 probeCoords)
+{
+    return min(probeCoords.x, min(probeCoords.y, probeCoords.z)) == 0 || probeCoords.x == DDGI.ProbesCounts.x - 1 || probeCoords.y == DDGI.ProbesCounts.y - 1 || probeCoords.z == DDGI.ProbesCounts.z - 1;
+}
+
+// Compute shader for updating probes state between active and inactive and performing probes relocation.
+META_CS(true, FEATURE_LEVEL_SM5)
+[numthreads(DDGI_PROBE_CLASSIFY_GROUP_SIZE, 1, 1)]
+void CS_Classify(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint probeIndex = DispatchThreadId.x;
+    if (probeIndex >= ProbesCount)
+        return;
+    uint3 probeCoords = GetDDGIProbeCoords(DDGI, probeIndex);
+    probeIndex = GetDDGIScrollingProbeIndex(DDGI, CascadeIndex, probeCoords);
+    int2 probeDataCoords = GetDDGIProbeTexelCoords(DDGI, CascadeIndex, probeIndex);
+    float probesSpacing = DDGI.ProbesOriginAndSpacing[CascadeIndex].w;
+    float3 probeBasePosition = GetDDGIProbeWorldPosition(DDGI, CascadeIndex, probeCoords);
+
+#ifdef DDGI_DEBUG_CASCADE
+    // Single cascade-only debugging
+    if (CascadeIndex != DDGI_DEBUG_CASCADE)
+    {
+        RWProbesData[probeDataCoords] = EncodeDDGIProbeData(float3(0, 0, 0), DDGI_PROBE_STATE_INACTIVE, 0.0f);
+        return;
+    }
+#else
+    // Disable probes that are is in the range of higher-quality cascade
+    if (CascadeIndex > 0)
+    {
+        uint prevCascade = CascadeIndex - 1;
+        float prevProbesSpacing = DDGI.ProbesOriginAndSpacing[prevCascade].w;
+        float3 prevProbesOrigin = DDGI.ProbesScrollOffsets[prevCascade].xyz * prevProbesSpacing + DDGI.ProbesOriginAndSpacing[prevCascade].xyz;
+        float3 prevProbesExtent = (DDGI.ProbesCounts - 1) * (prevProbesSpacing * 0.5f);
+        prevProbesExtent -= probesSpacing * ceil(DDGI_CASCADE_BLEND_SIZE) * 2; // Apply safe margin to allow probes on cascade edges
+        float prevCascadeWeight = Min3(prevProbesExtent - abs(probeBasePosition - prevProbesOrigin));
+        if (prevCascadeWeight > 0.1f)
+        {
+            RWProbesData[probeDataCoords] = EncodeDDGIProbeData(float3(0, 0, 0), DDGI_PROBE_STATE_INACTIVE, 0.0f);
+            return;
+        }
+    }
+#endif
+
+    // Check if probe was scrolled
+    int3 probeScrollClears = ProbeScrollClears[CascadeIndex].xyz;
+    bool wasScrolled = false;
+    UNROLL
+    for (uint planeIndex = 0; planeIndex < 3; planeIndex++)
+    {
+        int probeCount = (int)DDGI.ProbesCounts[planeIndex];
+        int newCoord = (int)probeCoords[planeIndex] + probeScrollClears[planeIndex];
+        if (newCoord < 0 || newCoord >= probeCount)
+            wasScrolled = true;
+        newCoord = (int)probeCoords[planeIndex] - probeScrollClears[planeIndex];
+        if (newCoord < 0 || newCoord >= probeCount)
+            wasScrolled = true;
+    }
+
+    // Load probe state and position
+    float4 probeData = RWProbesData[probeDataCoords];
+    float probeAttention = DecodeDDGIProbeAttention(probeData);
+    uint probeState = DecodeDDGIProbeState(probeData);
+    uint probeStateOld = probeState;
+    float3 probeOffset = probeData.xyz * probesSpacing; // Probe offset is [-1;1] within probes spacing
+    if (wasScrolled || probeState == DDGI_PROBE_STATE_INACTIVE)
+    {
+        probeOffset = float3(0, 0, 0); // Clear offset for a new probe
+        probeAttention = 1.0f; // Wake-up
+    }
+    float3 probeOffsetOld = probeOffset;
+    float3 probePosition = probeBasePosition + probeOffset;
+
+    // Use Global SDF to quickly get distance and direction to the scene geometry
+#if DDGI_PROBE_RELOCATE_ITERATIVE
+    float sdf;
+    float3 sdfNormal = normalize(SampleGlobalSDFGradient(GlobalSDF, GlobalSDFTex, GlobalSDFMip, probePosition, sdf));
+#else
+    float sdf = SampleGlobalSDF(GlobalSDF, GlobalSDFTex, GlobalSDFMip, probePosition);
+#endif
+    float sdfDst = abs(sdf);
+    const float ProbesDistanceLimits[4] = { 1.1f, 2.3f, 2.5f, 2.5f };
+    const float ProbesRelocateLimits[4] = { 0.4f, 0.5f, 0.6f, 0.7f };
+    float voxelLimit = GlobalSDF.CascadeVoxelSize[CascadeIndex] * 0.8f;
+    float distanceLimit = probesSpacing * ProbesDistanceLimits[CascadeIndex];
+    float relocateLimit = probesSpacing * ProbesRelocateLimits[CascadeIndex];
+#ifdef DDGI_PROBE_EMPTY_AREA_DENSITY
+    uint3 probeCoordsStable = GetDDGIProbeCoords(DDGI, probeIndex);
+#endif
+
+    // Classify probe based on previous state and neighborhood
+#if DDGI_FALLBACK_OUTER_DEDICATED_PROBE
+    if (CascadeIndex == DDGI.CascadesCount - 1 && probeIndex == 0)
+    {
+        // Special probe as a fallback for ambient GI outside the last cascade
+        probeOffset = float3(0, 0, 0);
+        if (probeStateOld == DDGI_PROBE_STATE_INACTIVE)
+        {
+            probeState = DDGI_PROBE_STATE_ACTIVATED;
+            probeAttention = 1.0f;
+        }
+        else
+        {
+            probeState = DDGI_PROBE_STATE_ACTIVE;
+            probeAttention = 0.5f;
+        }
+    }
+    else
+#endif
+#ifdef DDGI_PROBE_EMPTY_AREA_DENSITY
+    if (sdf > probesSpacing * DDGI.ProbesCounts.x * 0.3f
+#if DDGI_PROBE_EMPTY_AREA_DENSITY > 1
+        && (
+            // Low-density grid grid
+            (probeCoordsStable.x % DDGI_PROBE_EMPTY_AREA_DENSITY == 0 && probeCoordsStable.y % DDGI_PROBE_EMPTY_AREA_DENSITY == 0 && probeCoordsStable.z % DDGI_PROBE_EMPTY_AREA_DENSITY == 0)
+            // Edge probes at the last cascade (for good fallback irradiance outside the GI distance) - not needed anymore as DDGI_FALLBACK_OUTER_DEDICATED_PROBE does a far better job
+            //|| (CascadeIndex + 1 == DDGI.CascadesCount && IsProbeAtBorder(probeCoords))
+        )
+#endif
+    )
+    {
+        // Add some fallback probes in empty areas to provide valid GI for nearby dynamic objects or transparency
+        probeOffset = float3(0, 0, 0);
+        if (wasScrolled || probeStateOld == DDGI_PROBE_STATE_INACTIVE)
+        {
+            probeState = DDGI_PROBE_STATE_ACTIVATED;
+            probeAttention = 1.0f;
+        }
+        else
+        {
+            probeState = DDGI_PROBE_STATE_ACTIVE;
+            probeAttention = DDGI_PROBE_ATTENTION_MIN;
+        }
+    }
+    else 
+#endif
+    if (sdfDst > distanceLimit + length(probeOffset))
+    {
+        // Probe is too far from geometry (or deep inside) so disable it
+        probeOffset = float3(0, 0, 0);
+        probeState = DDGI_PROBE_STATE_INACTIVE;
+        probeAttention = 0.0f;
+    }
+    else
+    {
+        // Apply distance/view heuristics to probe attention
+        probeState = DDGI_PROBE_STATE_ACTIVE;
+        float3 viewToProbe = probePosition - GBuffer.ViewPos;
+        float distanceToProbe = length(viewToProbe);
+        viewToProbe /= distanceToProbe;
+        float probeViewDot = dot(viewToProbe, ViewDir);
+        probeAttention *= lerp(0.1f, 1.0f, saturate(probeViewDot)); // Reduce quality for probes behind the camera (or away from view dir)
+        probeAttention *= lerp(1.0f, 0.5f, saturate(sdfDst / voxelLimit)); // Reduce quality for probes far away from geometry
+        probeAttention += (1.0f - saturate(distanceToProbe / 1000.0f)) * 1.2f; // Boost quality for probes nearby view
+        //probeAttention = 0.0f; // Debug test lowest ray count
+        //probeAttention = 1.0f; // Debug test highest ray count
+        probeAttention = clamp(probeAttention, DDGI_PROBE_ATTENTION_MIN, DDGI_PROBE_ATTENTION_MAX);
+
+        // Relocate only if probe location is not good enough
+        BRANCH
+        if (sdf <= voxelLimit)
+        {
+#if DDGI_PROBE_RELOCATE_ITERATIVE
+            {
+                // Use SDF gradient to relocate probe away the surface
+                float iterativeRelocateSpeed = probeStateOld != DDGI_PROBE_STATE_ACTIVE ? 1.0f : 0.3f;
+                float3 offsetToSet = probeOffset + sdfNormal * ((sdf + voxelLimit) * iterativeRelocateSpeed);
+                if (length(offsetToSet) < relocateLimit)
+                {
+                    // Relocate it
+                    probeOffset = offsetToSet;
+                }
+                else
+                {
+                    // Reset offset
+                    probeOffset = float3(0, 0, 0);
+                }
+
+                // Read SDF at the new position for additional check
+                probePosition = probeBasePosition + probeOffset;
+                sdf = SampleGlobalSDF(GlobalSDF, GlobalSDFTex, GlobalSDFMip, probePosition);
+                sdfDst = abs(sdf);
+            }
+            if (sdf <= voxelLimit * 1.1f) // Add some safe-bias to reduce artifacts
+#endif
+            {
+#if DDGI_PROBE_RELOCATE_FIND_BEST
+                // Sample Global SDF around the probe base location and select the best probe offset
+                uint sdfCascade = GetGlobalSDFCascade(GlobalSDF, probeBasePosition);
+                float4 bestOffset = float4(0, 0, 0, 0);
+                for (uint x = 0; x < 4; x++)
+                for (uint y = 0; y < 4; y++)
+                for (uint z = 0; z < 4; z++)
+                {
+                    float3 offset = Remap(float3(x, y, z), 0, 3, -0.707f, 0.707f) * relocateLimit;
+                    float offsetSdf = SampleGlobalSDFCascade(GlobalSDF, GlobalSDFTex, probeBasePosition + offset, sdfCascade);
+                    if (offsetSdf > bestOffset.w)
+                        bestOffset = float4(offset, offsetSdf);
+                }
+                if (bestOffset.w <= voxelLimit)
+                {
+                    // Disable probe that is too close to the geometry
+                    probeOffset = float3(0, 0, 0);
+                    probeState = DDGI_PROBE_STATE_INACTIVE;
+                    probeAttention = 0.0f;
+                }
+                else
+                {
+                    // Relocate the probe to the best found location
+                    probeOffset = bestOffset.xyz;
+                }
+#elif DDGI_PROBE_RELOCATE_ITERATIVE
+                // Disable probe
+                probeOffset = float3(0, 0, 0);
+                probeState = DDGI_PROBE_STATE_INACTIVE;
+                probeAttention = 0.0f;
+#endif
+            }
+        }
+
+        // If probe was in a different location or was activated now then mark it as activated
+        bool wasActivated = probeStateOld == DDGI_PROBE_STATE_INACTIVE;
+        bool wasRelocated = distance(probeOffset, probeOffsetOld) > 2.0f;
+#if DDGI_PROBE_RELOCATE_FIND_BEST || DDGI_PROBE_RELOCATE_ITERATIVE
+        BRANCH
+        if (wasRelocated && !wasActivated)
+        {
+            // If probe was relocated but the previous location is visible from the new one, then don't re-activate it for smoother blend
+            float3 diff = probeOffsetOld - probeOffset;
+            float diffLen = length(diff);
+            float3 diffDir = diff / diffLen;
+            GlobalSDFTrace trace;
+            trace.Init(probeBasePosition + probeOffset, diffDir, 0.0f, diffLen);
+            GlobalSDFHit hit = RayTraceGlobalSDF(GlobalSDF, GlobalSDFTex, GlobalSDFMip, trace);
+            if (!hit.IsHit())
+                wasRelocated = false;
+        }
+#endif
+        if ((wasActivated || wasScrolled || wasRelocated) && probeState == DDGI_PROBE_STATE_ACTIVE)
+        {
+            probeState = DDGI_PROBE_STATE_ACTIVATED;
+            probeAttention = 1.0f;
+        }
+    }
+
+    // Save probe state
+    probeOffset /= probesSpacing; // Move offset back to [-1;1] space
+    RWProbesData[probeDataCoords] = EncodeDDGIProbeData(probeOffset, probeState, probeAttention);
+
+    // Collect active probes
+    if (probeState != DDGI_PROBE_STATE_INACTIVE)
+    {
+        uint activeProbeIndex;
+        RWActiveProbes.InterlockedAdd(0, 1, activeProbeIndex); // Counter at 0
+        RWActiveProbes.Store(activeProbeIndex * 4 + 4, DispatchThreadId.x);
+    }
+}
+
+#endif
+
+#ifdef _CS_UpdateProbesInitArgs
+
+RWBuffer<uint> UpdateProbesInitArgs : register(u0);
+ByteAddressBuffer ActiveProbes : register(t0);
+
+// Compute shader for building indirect dispatch arguments for CS_TraceRays and CS_UpdateProbes.
+META_CS(true, FEATURE_LEVEL_SM5)
+[numthreads(1, 1, 1)]
+void CS_UpdateProbesInitArgs()
+{
+    uint activeProbesCount = ActiveProbes.Load(0); // Counter at 0
+    activeProbesCount = min(activeProbesCount, ProbesCount);
+    // The CPU submits every allocated batch, so always overwrite all arguments to avoid
+    // dispatching stale work left by a previous cascade or frame.
+    uint arg = 0;
+    for (uint probesOffset = 0; probesOffset < ProbesCount; probesOffset += DDGI_TRACE_RAYS_PROBES_COUNT_LIMIT)
+    {
+        uint probesBatchSize = probesOffset < activeProbesCount ? min(activeProbesCount - probesOffset, DDGI_TRACE_RAYS_PROBES_COUNT_LIMIT) : 0;
+        UpdateProbesInitArgs[arg++] = probesBatchSize;
+        UpdateProbesInitArgs[arg++] = 1;
+        UpdateProbesInitArgs[arg++] = 1;
+    }
+}
+
+#endif
+
+#ifdef _CS_UpdateInactiveProbes
+
+RWTexture2D<snorm float4> RWProbesData : register(u0);
+
+void CheckNearbyProbe(inout uint3 fallbackCoords, inout uint probeState, inout float minDistance, uint3 probeCoords, int3 probeCoordsEnd, int3 offset)
+{
+    uint3 nearbyCoords = (uint3)clamp(((int3)probeCoords + offset), int3(0, 0, 0), probeCoordsEnd);
+    uint nearbyIndex = GetDDGIScrollingProbeIndex(DDGI, CascadeIndex, nearbyCoords);
+    float4 nearbyData = RWProbesData[GetDDGIProbeTexelCoords(DDGI, CascadeIndex, nearbyIndex)];
+    float nearbyDist = distance((float3)nearbyCoords, (float3)probeCoords);
+    if (DecodeDDGIProbeState(nearbyData) != DDGI_PROBE_STATE_INACTIVE && nearbyDist < minDistance)
+    {
+        // Use nearby probe
+        fallbackCoords = nearbyCoords;
+        probeState = DDGI_PROBE_STATE_ACTIVE;
+        minDistance = nearbyDist;
+        return;
+    }
+    nearbyCoords = DDGI_FALLBACK_COORDS_DECODE(nearbyData);
+    nearbyDist = distance((float3)nearbyCoords, (float3)probeCoords);
+    if (DDGI_FALLBACK_COORDS_VALID(nearbyData) && nearbyDist < minDistance)
+    {
+        // Use fallback probe
+        fallbackCoords = nearbyCoords;
+        probeState = DDGI_PROBE_STATE_ACTIVE;
+        minDistance = nearbyDist;
+    }
+}
+
+// Compute shader to store closest valid probe coords inside inactive probes data for quick fallback lookup when sampling irradiance.
+// Uses Jump Flood algorithm.
+META_CS(true, FEATURE_LEVEL_SM5)
+[numthreads(DDGI_PROBE_CLASSIFY_GROUP_SIZE, 1, 1)]
+void CS_UpdateInactiveProbes(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint probeIndex = min(DispatchThreadId.x, ProbesCount - 1);
+    uint3 fallbackCoords = uint3(1000, 1000, 1000);
+
+    // Load probe data for the current thread
+    uint3 probeCoords = GetDDGIProbeCoords(DDGI, probeIndex);
+    probeIndex = GetDDGIScrollingProbeIndex(DDGI, CascadeIndex, probeCoords);
+    int2 probeDataCoords = GetDDGIProbeTexelCoords(DDGI, CascadeIndex, probeIndex);
+    float4 probeData = RWProbesData[probeDataCoords];
+    uint probeState = DecodeDDGIProbeState(probeData);
+    BRANCH
+    if (probeState == DDGI_PROBE_STATE_INACTIVE)
+    {
+        // Find the closest active probe (Jump Flood)
+        int3 probeCoordsEnd = (int3)DDGI.ProbesCounts - int3(1, 1, 1);
+        float minDistance = 1e27f;
+        UNROLL for (int z = -1; z <= 1; z++)
+        UNROLL for (int y = -1; y <= 1; y++)
+        UNROLL for (int x = -1; x <= 1; x++)
+        {
+            int3 offset = int3(x, y, z) * StepSize;
+            CheckNearbyProbe(fallbackCoords, probeState, minDistance, probeCoords, probeCoordsEnd, offset);
+        }
+    }
+
+    // Ensure all threads (within dispatch) got proper data before writing back to the same memory
+    AllMemoryBarrierWithGroupSync();
+
+    // Write modified probe data back (remain inactive)
+    BRANCH
+    if (probeState != DDGI_PROBE_STATE_INACTIVE && DispatchThreadId.x < ProbesCount && fallbackCoords.x != 1000)
+    {
+        RWProbesData[probeDataCoords] = EncodeDDGIProbeData(DDGI_FALLBACK_COORDS_ENCODE(fallbackCoords), DDGI_PROBE_STATE_INACTIVE, 0.0f);
+    }
+}
+
+#endif
+
+#ifdef _CS_TraceRays
+
+RWTexture2D<float4> RWProbesTrace : register(u0);
+#if DDGI_DEBUG_STATS
+RWByteAddressBuffer RWStats : register(u1);
+#endif
+
+Texture3D<snorm float> GlobalSDFTex : register(t0);
+Texture3D<snorm float> GlobalSDFMip : register(t1);
+ByteAddressBuffer GlobalSurfaceAtlasChunks : register(t2);
+ByteAddressBuffer GlobalSurfaceAtlasCulledObjects : register(t3);
+Buffer<float4> GlobalSurfaceAtlasObjects : register(t4);
+Texture2D GlobalSurfaceAtlasDepth : register(t5);
+Texture2D GlobalSurfaceAtlasTex : register(t6);
+Texture2D<snorm float4> ProbesData : register(t7);
+TextureCube Skybox : register(t8);
+ByteAddressBuffer ActiveProbes : register(t9);
+
+// Compute shader for tracing rays for probes using Global SDF and Global Surface Atlas (1 ray per-thread).
+META_CS(true, FEATURE_LEVEL_SM5)
+META_PERMUTATION_1(DDGI_TRACE_RAYS_COUNT=96)
+META_PERMUTATION_1(DDGI_TRACE_RAYS_COUNT=128)
+META_PERMUTATION_1(DDGI_TRACE_RAYS_COUNT=192)
+META_PERMUTATION_1(DDGI_TRACE_RAYS_COUNT=256)
+[numthreads(1, DDGI_TRACE_RAYS_COUNT, 1)]
+void CS_TraceRays(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint rayIndex = DispatchThreadId.y;
+    uint probeIndex = ActiveProbes.Load((DispatchThreadId.x + ProbeIndexOffset + 1) * 4);
+    uint3 probeCoords = GetDDGIProbeCoords(DDGI, probeIndex);
+    probeIndex = GetDDGIScrollingProbeIndex(DDGI, CascadeIndex, probeCoords);
+
+    // Load current probe state and position
+    float4 probeData = LoadDDGIProbeData(DDGI, ProbesData, CascadeIndex, probeIndex);
+    float probeAttention = DecodeDDGIProbeAttention(probeData);
+    uint probeState = DecodeDDGIProbeState(probeData);
+    uint probeRaysCount = GetProbeRaysCount(DDGI, probeAttention);
+    if (probeState == DDGI_PROBE_STATE_INACTIVE || rayIndex >= probeRaysCount)
+        return; // Skip disabled probes or if current thread's ray is unused
+    float3 probePosition = DecodeDDGIProbePosition(DDGI, probeData, CascadeIndex, probeIndex, probeCoords);
+    float3 probeRayDirection = GetProbeRayDirection(DDGI, rayIndex, probeRaysCount, probeIndex, probeCoords);
+    // TODO: implement ray-guiding based on the probe irradiance (prioritize directions with high luminance)
+
+#if DDGI_FALLBACK_OUTER_DEDICATED_PROBE
+    if (CascadeIndex == DDGI.CascadesCount - 1 && probeIndex == 0)
+    {
+        // Special probe as a fallback for ambient GI outside the last cascade
+        RWProbesTrace[uint2(rayIndex, DispatchThreadId.x)] = float4(Skybox.SampleLevel(SamplerLinearClamp, probeRayDirection, 0).rgb * SkyboxIntensity, DDGI_SKY_DISTANCE);
+        return;
+    }
+#endif
+
+    // Trace ray with Global SDF
+    GlobalSDFTrace trace;
+    trace.Init(probePosition, probeRayDirection, 0.0f, DDGI.RayMaxDistance);
+    GlobalSDFHit hit = RayTraceGlobalSDF(GlobalSDF, GlobalSDFTex, GlobalSDFMip, trace);
+
+    // Calculate radiance and distance
+    float4 radiance;
+    if (hit.IsHit())
+    {
+#if DDGI_TRACE_NEGATIVE
+        if (hit.HitSDF <= 0.0f && hit.HitTime <= GlobalSDF.CascadeVoxelSize[0])
+        {
+            // Ray starts inside geometry (mark as negative distance and reduce it's influence during irradiance blending)
+            radiance = float4(0, 0, 0, hit.HitTime * -0.25f);
+        }
+        else
+#endif
+        {
+            // Sample Global Surface Atlas to get the lighting at the hit location
+            float3 hitPosition = hit.GetHitPosition(trace);
+            float surfaceThreshold = GetGlobalSurfaceAtlasThreshold(GlobalSDF, hit);
+            float4 surfaceColor = SampleGlobalSurfaceAtlas(GlobalSurfaceAtlas, GlobalSurfaceAtlasChunks, GlobalSurfaceAtlasCulledObjects, GlobalSurfaceAtlasObjects, GlobalSurfaceAtlasDepth, GlobalSurfaceAtlasTex, hitPosition, -probeRayDirection, surfaceThreshold);
+            radiance = float4(surfaceColor.rgb, hit.HitTime);
+
+            // Add some bias to prevent self occlusion artifacts in Chebyshev due to Global SDF being very incorrect in small scale
+            radiance.w = max(radiance.w + GlobalSDF.CascadeVoxelSize[hit.HitCascade] * 0.5f, 0);
+            float probesSpacing = DDGI.ProbesOriginAndSpacing[CascadeIndex].w;
+            radiance.w += probesSpacing * 0.05f;
+        }
+    }
+    else
+    {
+        // Ray hits sky
+        radiance.rgb = Skybox.SampleLevel(SamplerLinearClamp, probeRayDirection, 0).rgb * SkyboxIntensity;
+        radiance.a = DDGI_SKY_DISTANCE;
+    }
+
+    // Write into probes trace results
+    RWProbesTrace[uint2(rayIndex, DispatchThreadId.x)] = radiance;
+
+#if DDGI_DEBUG_STATS
+    // Update stats
+    uint tmp;
+    RWStats.InterlockedAdd(0, 1, tmp);
+    if (rayIndex == 0)
+        RWStats.InterlockedAdd(4, 1, tmp);
+#endif
+}
+
+#endif
+
+#if defined(_CS_UpdateProbes)
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+// Update irradiance
+#define DDGI_PROBE_RESOLUTION DDGI_PROBE_RESOLUTION_IRRADIANCE
+groupshared float4 CachedProbesTraceRadiance[DDGI_TRACE_RAYS_LIMIT];
+groupshared float OutputInstability[DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION];
+#elif DDGI_PROBE_UPDATE_DEPTH
+// Update distance
+#define DDGI_PROBE_RESOLUTION DDGI_PROBE_RESOLUTION_DISTANCE
+groupshared float CachedProbesTraceDistance[DDGI_TRACE_RAYS_LIMIT];
+#elif DDGI_PROBE_UPDATE_RADIANCE
+// Update radiance
+#define DDGI_PROBE_RESOLUTION DDGI_PROBE_RESOLUTION_RADIANCE
+groupshared float4 CachedProbesTraceRadiance[DDGI_TRACE_RAYS_LIMIT];
+#endif
+
+// Source: https://github.com/turanszkij/WickedEngine
+#define BorderOffsetsSize (4 * DDGI_PROBE_RESOLUTION + 4)
+#if DDGI_PROBE_RESOLUTION == 6
+static const uint4 BorderOffsets[BorderOffsetsSize] = {
+    uint4(6, 1, 1, 0),
+    uint4(5, 1, 2, 0),
+    uint4(4, 1, 3, 0),
+    uint4(3, 1, 4, 0),
+    uint4(2, 1, 5, 0),
+    uint4(1, 1, 6, 0),
+
+    uint4(6, 6, 1, 7),
+    uint4(5, 6, 2, 7),
+    uint4(4, 6, 3, 7),
+    uint4(3, 6, 4, 7),
+    uint4(2, 6, 5, 7),
+    uint4(1, 6, 6, 7),
+
+    uint4(1, 1, 0, 6),
+    uint4(1, 2, 0, 5),
+    uint4(1, 3, 0, 4),
+    uint4(1, 4, 0, 3),
+    uint4(1, 5, 0, 2),
+    uint4(1, 6, 0, 1),
+
+    uint4(6, 1, 7, 6),
+    uint4(6, 2, 7, 5),
+    uint4(6, 3, 7, 4),
+    uint4(6, 4, 7, 3),
+    uint4(6, 5, 7, 2),
+    uint4(6, 6, 7, 1),
+
+    uint4(1, 1, 7, 7),
+    uint4(6, 1, 0, 7),
+    uint4(1, 6, 7, 0),
+    uint4(6, 6, 0, 0)
+};
+#elif DDGI_PROBE_RESOLUTION == 14
+static const uint4 BorderOffsets[BorderOffsetsSize] = {
+    uint4(14, 1, 1, 0),
+    uint4(13, 1, 2, 0),
+    uint4(12, 1, 3, 0),
+    uint4(11, 1, 4, 0),
+    uint4(10, 1, 5, 0),
+    uint4(9, 1, 6, 0),
+    uint4(8, 1, 7, 0),
+    uint4(7, 1, 8, 0),
+    uint4(6, 1, 9, 0),
+    uint4(5, 1, 10, 0),
+    uint4(4, 1, 11, 0),
+    uint4(3, 1, 12, 0),
+    uint4(2, 1, 13, 0),
+    uint4(1, 1, 14, 0),
+
+    uint4(14, 14, 1, 15),
+    uint4(13, 14, 2, 15),
+    uint4(12, 14, 3, 15),
+    uint4(11, 14, 4, 15),
+    uint4(10, 14, 5, 15),
+    uint4(9, 14, 6, 15),
+    uint4(8, 14, 7, 15),
+    uint4(7, 14, 8, 15),
+    uint4(6, 14, 9, 15),
+    uint4(5, 14, 10, 15),
+    uint4(4, 14, 11, 15),
+    uint4(3, 14, 12, 15),
+    uint4(2, 14, 13, 15),
+    uint4(1, 14, 14, 15),
+
+    uint4(1, 14, 0, 1),
+    uint4(1, 13, 0, 2),
+    uint4(1, 12, 0, 3),
+    uint4(1, 11, 0, 4),
+    uint4(1, 10, 0, 5),
+    uint4(1, 9, 0, 6),
+    uint4(1, 8, 0, 7),
+    uint4(1, 7, 0, 8),
+    uint4(1, 6, 0, 9),
+    uint4(1, 5, 0, 10),
+    uint4(1, 4, 0, 11),
+    uint4(1, 3, 0, 12),
+    uint4(1, 2, 0, 13),
+    uint4(1, 1, 0, 14),
+
+    uint4(14, 14, 15, 1),
+    uint4(14, 13, 15, 2),
+    uint4(14, 12, 15, 3),
+    uint4(14, 11, 15, 4),
+    uint4(14, 10, 15, 5),
+    uint4(14, 9, 15, 6),
+    uint4(14, 8, 15, 7),
+    uint4(14, 7, 15, 8),
+    uint4(14, 6, 15, 9),
+    uint4(14, 5, 15, 10),
+    uint4(14, 4, 15, 11),
+    uint4(14, 3, 15, 12),
+    uint4(14, 2, 15, 13),
+    uint4(14, 1, 15, 14),
+
+    uint4(14, 14, 0, 0),
+    uint4(1, 14, 15, 0),
+    uint4(14, 1, 0, 15),
+    uint4(1, 1, 15, 15)
+};
+#else
+#undef BorderOffsetsSize
+#endif
+
+groupshared float3 CachedProbesTraceDirection[DDGI_TRACE_RAYS_LIMIT];
+
+RWTexture2D<float4> RWOutput : register(u0);
+RWTexture2D<snorm float4> ProbesData : register(u1);
+#if DDGI_PROBE_UPDATE_IRRADIANCE && DDGI_DEBUG_INSTABILITY
+RWTexture2D<float> RWOutputInstability : register(u2);
+#endif
+Texture2D<float4> ProbesTrace : register(t1);
+ByteAddressBuffer ActiveProbes : register(t2);
+
+// Compute shader for updating probes irradiance or distance texture.
+META_CS(true, FEATURE_LEVEL_SM5)
+META_PERMUTATION_1(DDGI_PROBE_UPDATE_IRRADIANCE=1)
+META_PERMUTATION_1(DDGI_PROBE_UPDATE_DEPTH=1)
+META_PERMUTATION_1(DDGI_PROBE_UPDATE_RADIANCE=1)
+[numthreads(DDGI_PROBE_RESOLUTION, DDGI_PROBE_RESOLUTION, 1)]
+void CS_UpdateProbes(uint3 GroupThreadId : SV_GroupThreadID, uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+    // GroupThreadId.xy - coordinates of the probe texel: [0; DDGI_PROBE_RESOLUTION)
+    // GroupId.x - index of the thread group which is probe index within a batch: [0; batchSize)
+    // GroupIndex.x - index of the thread within a thread group: [0; DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION)
+    uint probeIndex = ActiveProbes.Load((GroupId.x + ProbeIndexOffset + 1) * 4);
+    uint3 probeCoords = GetDDGIProbeCoords(DDGI, probeIndex);
+    probeIndex = GetDDGIScrollingProbeIndex(DDGI, CascadeIndex, probeCoords);
+
+    // Load probe data
+    int2 probeDataCoords = GetDDGIProbeTexelCoords(DDGI, CascadeIndex, probeIndex);
+    float4 probeData = ProbesData[probeDataCoords];
+    float probeAttention = DecodeDDGIProbeAttention(probeData);
+    uint probeState = DecodeDDGIProbeState(probeData);
+    uint probeRaysCount = GetProbeRaysCount(DDGI, probeAttention);
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    uint backfacesCount = 0;
+    uint backfacesLimit = uint(probeRaysCount * 0.1f);
+#elif DDGI_PROBE_UPDATE_DEPTH
+    float probesSpacing = DDGI.ProbesOriginAndSpacing[CascadeIndex].w;
+    float distanceLimit = probesSpacing * 1.5f;
+#endif
+
+    // Load trace rays results into shared memory to reuse across whole thread group (raysCount per thread)
+    uint raysCount = (uint)(ceil((float)probeRaysCount / (float)(DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION)));
+    uint raysStart = GroupIndex * raysCount;
+    raysCount = max(min(raysStart + raysCount, probeRaysCount), raysStart) - raysStart;
+    for (uint i = 0; i < raysCount; i++)
+    {
+        uint rayIndex = raysStart + i;
+#if DDGI_PROBE_UPDATE_IRRADIANCE || DDGI_PROBE_UPDATE_RADIANCE
+        CachedProbesTraceRadiance[rayIndex] = ProbesTrace[uint2(rayIndex, GroupId.x)];
+#elif DDGI_PROBE_UPDATE_DEPTH
+        float rayDistance = ProbesTrace[uint2(rayIndex, GroupId.x)].w;
+        CachedProbesTraceDistance[rayIndex] = min(abs(rayDistance), distanceLimit);
+#endif
+        CachedProbesTraceDirection[rayIndex] = GetProbeRayDirection(DDGI, rayIndex, probeRaysCount, probeIndex, probeCoords);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    probeCoords = GetDDGIProbeCoords(DDGI, probeIndex);
+
+    // Calculate octahedral projection for probe (unwraps spherical projection into a square)
+    float2 octahedralCoords = GetOctahedralCoords(GroupThreadId.xy, DDGI_PROBE_RESOLUTION);
+    float3 octahedralDirection = GetOctahedralDirection(octahedralCoords);
+
+    // Loop over rays
+    float4 result = float4(0, 0, 0, 0);
+    LOOP
+    for (uint rayIndex = 0; rayIndex < probeRaysCount; rayIndex++)
+    {
+        float3 rayDirection = CachedProbesTraceDirection[rayIndex];
+        float rayWeight = max(dot(octahedralDirection, rayDirection), 0.0f);
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+        float4 rayRadiance = CachedProbesTraceRadiance[rayIndex];
+#if DDGI_TRACE_NEGATIVE
+        if (rayRadiance.w < 0.0f)
+        {
+            // Count backface hits
+            backfacesCount++;
+
+            // Skip further blending after reaching backfaces limit
+            if (backfacesCount >= backfacesLimit)
+            {
+                result = float4(0, 0, 0, 1);
+                break;
+            }
+            continue;
+        }
+#endif
+
+        // Add radiance (RGB) and weight (A)
+        result += float4(rayRadiance.rgb * rayWeight, rayWeight);
+#elif DDGI_PROBE_UPDATE_DEPTH
+        // Increase reaction speed for depth discontinuities
+        rayWeight = pow(rayWeight, 10.0f);
+
+        // Add distance (R), distance^2 (G) and weight (A)
+        float rayDistance = CachedProbesTraceDistance[rayIndex];
+        result += float4(rayDistance, rayDistance * rayDistance, 0.0f, 1.0f) * rayWeight;
+#elif DDGI_PROBE_UPDATE_RADIANCE
+        // Clamped cosine filtering
+        // ["Ray tracing the world of Assassin's Creed Shadows", SIGGRAPH 2025]
+        rayWeight = pow(saturate((rayWeight - 0.75) / (1 - 0.75)), 4);
+
+        // Add radiance (RGB) and weight (A)
+        float4 rayRadiance = CachedProbesTraceRadiance[rayIndex];
+        result += float4(rayRadiance.rgb * rayWeight, rayWeight);
+#endif
+    }
+
+    // Normalize results
+    float epsilon = (float)probeRaysCount * 1e-9f;
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    result.rgb *= 1.0f / (2.0f * max(result.a, epsilon));
+#elif DDGI_PROBE_UPDATE_DEPTH || DDGI_PROBE_UPDATE_RADIANCE
+    result.rgb *= 1.0f / max(result.a, epsilon);
+#endif
+
+    // Load current probe value
+    uint2 outputCoords = GetDDGIProbeTexelCoords(DDGI, CascadeIndex, probeIndex) * (DDGI_PROBE_RESOLUTION + 2) + 1 + GroupThreadId.xy;
+    float3 previous = RWOutput[outputCoords].rgb;
+    bool wasActivated = probeState == DDGI_PROBE_STATE_ACTIVATED || ResetBlend;
+    if (wasActivated)
+        previous = result.rgb;
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    // Calculate instability of the irradiance
+    float previousLuma = Luminance(previous.rgb);
+    float resultLuma = Luminance(result.rgb);
+    float instability = abs(previousLuma - resultLuma) / previousLuma; // Percentage change in luminance of irradiance
+    instability = max(instability, Max3(abs(result.rgb - previous) / previous)); // Percentage of color delta change of irradiance
+    //instability *= saturate(result.a); // Reduce instability in areas with a small ray-coverage
+    //instability = pow(instability, 1.2f); // Increase contrast
+    instability *= 2.0f; // Make it stronger on scene changes
+    //instability = saturate(instability);
+    OutputInstability[GroupIndex] = instability;
+#if DDGI_PROBE_UPDATE_IRRADIANCE && DDGI_DEBUG_INSTABILITY
+    RWOutputInstability[outputCoords] = instability;
+    //RWOutputInstability[outputCoords] = probeAttention; // Debug test probe attention visualization
+#endif
+#endif
+
+    // Blend current value with the previous probe data
+    float historyWeightFast = DDGI.ProbeHistoryWeight;
+    float historyWeightSlow = 0.97f;
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    float3 irradianceDelta = result.rgb - previous;
+    float irradianceDeltaMax = Max3(abs(irradianceDelta));
+    float irradianceDeltaLen = length(irradianceDelta);
+    if (irradianceDeltaMax > 0.5f)
+    {
+        // Reduce history weight after significant lighting change
+        historyWeightFast *= 0.5f;
+    }
+#endif
+    float historyWeight = lerp(historyWeightSlow, historyWeightFast, probeAttention * probeAttention * probeAttention);
+    //historyWeight = 1.0f; // Debug full-blend
+    //historyWeight = 0.0f; // Debug no-blend
+#if DDGI_PROBE_UPDATE_DEPTH
+    // Reduce blending when the distance changes too much to avoid ghosting artifacts
+    float instability = abs(previous.x - result.x) / previous.x;
+    if (instability > 0.5f) historyWeight *= 0.5f;
+#endif
+    if (wasActivated)
+        historyWeight = 0.0f;
+    result.rgb = max(result.rgb, 0);
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    result *= DDGI.IndirectLightingIntensity;
+#if DDGI_SRGB_BLENDING == 1
+    result.rgb = pow(result.rgb, 0.5f / DDGI_SRGB_BLENDING_GAMMA);
+#endif
+    if (irradianceDeltaLen > 2.0f)
+    {
+        // Reduce flickering during rapid brightness changes
+        //result.rgb = previous + (irradianceDelta * 0.25f);
+    }
+    result = float4(lerp(result.rgb, previous.rgb, historyWeight), 1.0f);
+#elif DDGI_PROBE_UPDATE_RADIANCE
+    historyWeightSlow = 0.98f;
+    historyWeight = lerp(historyWeightSlow, min(historyWeightFast * 1.1f, historyWeightSlow), probeAttention * probeAttention);
+    result.rgb = lerp(result.rgb, previous, historyWeight);
+#elif DDGI_PROBE_UPDATE_DEPTH
+    result = float4(lerp(result.rg, previous.rg, historyWeight), 0.0f, 1.0f);
+#endif
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE || DDGI_PROBE_UPDATE_RADIANCE
+    // Apply quantization error to reduce yellowish artifacts due to R11G11B10 format
+    float noise = InterleavedGradientNoise(octahedralCoords * 10, FrameIndexMod8);
+    result.rgb = QuantizeColor(result.rgb, noise, QuantizationError);
+#endif
+
+    RWOutput[outputCoords] = result;
+#ifdef BorderOffsetsSize
+    GroupMemoryBarrierWithGroupSync();
+#endif
+
+    uint2 baseCoords = GetDDGIProbeTexelCoords(DDGI, CascadeIndex, probeIndex) * (DDGI_PROBE_RESOLUTION + 2);
+
+#if DDGI_PROBE_UPDATE_IRRADIANCE
+    // The first thread updates the probe attention based on the instability of all texels
+    BRANCH
+    if (GroupIndex == 0 && probeState != DDGI_PROBE_STATE_INACTIVE)
+    {
+        // Calculate instability statistics for a whole probe
+        float instabilityAvg = 0;
+        for (uint i = 0; i < DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION; i++)
+            instabilityAvg += OutputInstability[i];
+        instabilityAvg *= 1.0f / float(DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION);
+        instabilityAvg = saturate(instabilityAvg);
+        instability = instabilityAvg;
+
+        // Calculate probe attention
+        float taregAttention = lerp(0.5f, DDGI_PROBE_ATTENTION_MAX, instability); // Use some base level
+        if (taregAttention >= probeAttention)
+            probeAttention = taregAttention; // Quick jump up
+        else
+            probeAttention = lerp(probeAttention, taregAttention, 0.2f); // Slow blend down
+        if (probeState == DDGI_PROBE_STATE_ACTIVATED)
+            probeAttention = DDGI_PROBE_ATTENTION_MAX;
+
+        // Update probe data for the next frame
+        probeState = DDGI_PROBE_STATE_ACTIVE;
+        ProbesData[probeDataCoords] = EncodeDDGIProbeData(probeData.xyz, probeState, probeAttention);
+    }
+
+#if DDGI_DEBUG_INSTABILITY && defined(BorderOffsetsSize)
+	// Copy border pixels
+	for (uint borderIndex = GroupIndex; borderIndex < BorderOffsetsSize; borderIndex += DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION)
+	{
+        uint4 borderOffsets = BorderOffsets[borderIndex];
+		RWOutputInstability[baseCoords + borderOffsets.zw] = RWOutputInstability[baseCoords + borderOffsets.xy];
+	}
+#endif
+#endif
+
+    // Copy border pixels
+#ifdef BorderOffsetsSize
+	for (uint borderIndex = GroupIndex; borderIndex < BorderOffsetsSize; borderIndex += DDGI_PROBE_RESOLUTION * DDGI_PROBE_RESOLUTION)
+	{
+        uint4 borderOffsets = BorderOffsets[borderIndex];
+		RWOutput[baseCoords + borderOffsets.zw] = RWOutput[baseCoords + borderOffsets.xy];
+	}
+#else
+    bool isEdgeX = GroupThreadId.x == 0 || GroupThreadId.x == DDGI_PROBE_RESOLUTION - 1;
+    bool isEdgeY = GroupThreadId.y == 0 || GroupThreadId.y == DDGI_PROBE_RESOLUTION - 1;
+    if (isEdgeX)
+    {
+        outputCoords.x = baseCoords.x + (GroupThreadId.x == 0 ? 0 : (DDGI_PROBE_RESOLUTION + 1));
+        outputCoords.y = baseCoords.y + DDGI_PROBE_RESOLUTION - GroupThreadId.y;
+        RWOutput[outputCoords] = result;
+    }
+    if (isEdgeY)
+    {
+        outputCoords.x = baseCoords.x + DDGI_PROBE_RESOLUTION - GroupThreadId.x;
+        outputCoords.y = baseCoords.y + (GroupThreadId.y == 0 ? 0 : (DDGI_PROBE_RESOLUTION + 1));
+        RWOutput[outputCoords] = result;
+    }
+    if (isEdgeX && isEdgeY)
+    {
+        outputCoords.x = baseCoords.x + (GroupThreadId.x == 0 ? DDGI_PROBE_RESOLUTION + 1 : 0);
+        outputCoords.y = baseCoords.y + (GroupThreadId.y == 0 ? DDGI_PROBE_RESOLUTION + 1 : 0);
+        RWOutput[outputCoords] = result;
+    }
+#endif
+}
+
+#endif
+
+#if defined(_PS_IndirectLighting) || defined(_PS_SpecularLighting)
+
+#include "./Flax/GBuffer.hlsl"
+#include "./Flax/Math/Random.hlsl"
+#include "./Flax/Lighting/LightingCommon.hlsl"
+
+Texture2D<snorm float4> ProbesData : register(t4);
+Texture2D<float4> ProbesDistance : register(t5);
+
+// Shared code for both irradiance and specular sampling
+#define DDGI_GET_DITHER (RandN2(input.TexCoord + TemporalTime).x)
+#define DDGI_GET_SAMPLE_POS gBuffer.WorldPos + gBuffer.Normal * (dither * 0.1f + 0.1f)
+
+#endif
+
+#ifdef _PS_IndirectLighting
+
+Texture2D<float4> ProbesIrradiance : register(t6);
+
+// Pixel shader for drawing indirect lighting in fullscreen
+META_PS(true, FEATURE_LEVEL_SM5)
+META_PERMUTATION_1(DDGI_CASCADE_BLEND_SMOOTH=0)
+META_PERMUTATION_1(DDGI_CASCADE_BLEND_SMOOTH=1)
+float4 PS_IndirectLighting(Quad_VS2PS input) : SV_Target0
+{
+    // Sample GBuffer
+    GBufferSample gBuffer = SampleGBuffer(GBuffer, input.TexCoord);
+    BRANCH
+    if (gBuffer.ShadingModel == SHADING_MODEL_UNLIT)
+        return float4(0, 0, 0, 0);
+
+    // Sample irradiance
+    float dither = DDGI_GET_DITHER * ResolveDitherScale.x;
+    float3 samplePos = DDGI_GET_SAMPLE_POS;
+    float3 irradiance = SampleDDGIIrradiance(DDGI, ProbesData, ProbesDistance, ProbesIrradiance, samplePos, gBuffer.Normal, DDGI_DEFAULT_BIAS, dither);
+
+    // Calculate lighting
+    float3 diffuseColor = GetDiffuseColor(gBuffer);
+    float3 diffuse = Diffuse_Lambert(diffuseColor);
+    return float4(diffuse * irradiance * gBuffer.AO, 1);
+}
+
+#endif
+
+#ifdef _PS_SpecularLighting
+
+Texture2D<float4> ProbesRadiance : register(t6);
+
+// Pixel shader for drawing specular lighting in fullscreen
+META_PS(true, FEATURE_LEVEL_SM5)
+float4 PS_SpecularLighting(Quad_VS2PS input) : SV_Target0
+{
+    // Sample GBuffer
+    GBufferSample gBuffer = SampleGBuffer(GBuffer, input.TexCoord);
+    BRANCH
+    if (gBuffer.ShadingModel == SHADING_MODEL_UNLIT)
+        return float4(0, 0, 0, 0);
+
+    // Sample specular reflection
+    float dither = DDGI_GET_DITHER * ResolveDitherScale.y;
+    float3 samplePos = DDGI_GET_SAMPLE_POS;
+    float3 specular = SampleDDGISpecular(DDGI, ProbesData, ProbesDistance, ProbesRadiance, samplePos, gBuffer.Normal, gBuffer.Roughness, DDGI_DEFAULT_BIAS, dither);
+
+    return float4(specular, 1);
+}
+
+#endif

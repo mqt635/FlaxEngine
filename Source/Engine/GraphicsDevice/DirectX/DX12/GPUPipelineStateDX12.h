@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,14 +7,22 @@
 #include "Engine/Graphics/GPUPipelineState.h"
 #include "GPUDeviceDX12.h"
 #include "Types.h"
+#include "Engine/Core/Collections/Dictionary.h"
 #include "../IncludeDirectXHeaders.h"
+#ifdef __ID3D12Device2_FWD_DEFINED__
+#define GPU_D3D12_PSO_STREAM 1
+#else
+#define GPU_D3D12_PSO_STREAM 0
+#endif
 
 class GPUTextureViewDX12;
+class GPUVertexLayoutDX12;
 
 struct GPUPipelineStateKeyDX12
 {
     int32 RTsCount;
     MSAALevel MSAA;
+    GPUVertexLayout* VertexLayout;
     PixelFormat DepthFormat;
     PixelFormat RTVsFormats[GPU_MAX_RT_BINDED];
 
@@ -28,6 +36,7 @@ struct GPUPipelineStateKeyDX12
         uint32 hash = (int32)key.MSAA * 11;
         CombineHash(hash, (uint32)key.DepthFormat * 93473262);
         CombineHash(hash, key.RTsCount * 136);
+        CombineHash(hash, GetHash(key.VertexLayout));
         CombineHash(hash, (uint32)key.RTVsFormats[0]);
         CombineHash(hash, (uint32)key.RTVsFormats[1]);
         CombineHash(hash, (uint32)key.RTVsFormats[2]);
@@ -45,18 +54,32 @@ struct GPUPipelineStateKeyDX12
 class GPUPipelineStateDX12 : public GPUResourceDX12<GPUPipelineState>
 {
 private:
-
     Dictionary<GPUPipelineStateKeyDX12, ID3D12PipelineState*> _states;
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC _desc;
+    //GraphicsPipelineStateStreamDX12 _desc;
+#if GPU_D3D12_PSO_STREAM
+    D3D12_DEPTH_STENCIL_DESC1 _depthStencil;
+#else
+    D3D12_DEPTH_STENCIL_DESC _depthStencil;
+#endif
+    D3D12_RASTERIZER_DESC _rasterizer;
+    D3D12_BLEND_DESC _blend;
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE _primitiveTopology;
+#if GPU_ALLOW_TESSELLATION_SHADERS
+    D3D12_SHADER_BYTECODE _shaderHS, _shaderDS;
+#endif
+#if GPU_ALLOW_GEOMETRY_SHADERS
+    D3D12_SHADER_BYTECODE _shaderGS;
+#endif
+    D3D12_SHADER_BYTECODE _shaderVS, _shaderPS;
 
 public:
-
     GPUPipelineStateDX12(GPUDeviceDX12* device);
 
 public:
-
-    D3D_PRIMITIVE_TOPOLOGY PrimitiveTopologyType = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    D3D_PRIMITIVE_TOPOLOGY PrimitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     DxShaderHeader Header;
+    GPUVertexLayoutDX12* VertexBufferLayout = nullptr;
+    GPUVertexLayoutDX12* VertexInputLayout = nullptr;
 
     /// <summary>
     /// Gets DirectX 12 graphics pipeline state object for the given rendering state. Uses depth buffer and render targets formats and multi-sample levels to setup a proper PSO. Uses caching.
@@ -64,17 +87,16 @@ public:
     /// <param name="depth">The depth buffer (can be null).</param>
     /// <param name="rtCount">The render targets count (can be 0).</param>
     /// <param name="rtHandles">The render target handles array.</param>
+    /// <param name="vertexLayout">The vertex buffers layout.</param>
     /// <returns>DirectX 12 graphics pipeline state object</returns>
-    ID3D12PipelineState* GetState(GPUTextureViewDX12* depth, int32 rtCount, GPUTextureViewDX12** rtHandles);
+    ID3D12PipelineState* GetState(GPUTextureViewDX12* depth, int32 rtCount, GPUTextureViewDX12** rtHandles, GPUVertexLayoutDX12* vertexLayout);
 
 public:
-
     // [GPUPipelineState]
     bool IsValid() const override;
     bool Init(const Description& desc) override;
 
 protected:
-
     // [GPUResourceDX12]
     void OnReleaseGPU() override;
 };

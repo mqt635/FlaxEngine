@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -17,11 +17,11 @@ namespace FlaxEditor.Surface
         {
             AutoFocus = false;
             ClipChildren = false;
-            Pivot = Vector2.Zero;
+            Pivot = Float2.Zero;
         }
 
         /// <inheritdoc />
-        public override bool IntersectsContent(ref Vector2 locationParent, out Vector2 location)
+        public override bool IntersectsContent(ref Float2 locationParent, out Float2 location)
         {
             location = PointFromParent(ref locationParent);
             return true;
@@ -46,10 +46,10 @@ namespace FlaxEditor.Surface
             {
                 var child = _children[i];
 
-                if (child is SurfaceComment && child.Visible)
+                if (child is ResizableSurfaceNode.ResizeBorder border && border.ResizableNode is SurfaceComment comment2 && comment2.Visible)
                 {
-                    Render2D.PushTransform(ref child._cachedTransform);
-                    child.Draw();
+                    Render2D.PushTransform(ref comment2._cachedTransform);
+                    comment2.Draw();
                     Render2D.PopTransform();
                 }
             }

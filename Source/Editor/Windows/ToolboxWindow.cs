@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.GUI.Tabs;
 using FlaxEditor.GUI.Tree;
 using FlaxEditor.Scripting;
@@ -54,8 +55,7 @@ namespace FlaxEditor.Windows
                 // Draw all highlights
                 if (_highlights != null)
                 {
-                    var style = Style.Current;
-                    var color = style.ProgressNormal * 0.6f;
+                    var color = Style.Current.SearchHighlight;
                     for (int i = 0; i < _highlights.Count; i++)
                         Render2D.FillRectangle(_highlights[i], color);
                 }
@@ -78,8 +78,42 @@ namespace FlaxEditor.Windows
             }
         }
 
+        private sealed class ScriptTypeItem : Item
+        {
+            private ScriptType _type;
+
+            public ScriptTypeItem(string text, ScriptType type, DragData dragData = null)
+            : base(text, dragData)
+            {
+                _type = type;
+            }
+
+            protected override bool ShowTooltip => true;
+
+            public override bool OnShowTooltip(out string text, out Float2 location, out Rectangle area)
+            {
+                if (TooltipText == null)
+                    TooltipText = Editor.Instance.CodeDocs.GetTooltip(_type);
+                return base.OnShowTooltip(out text, out location, out area);
+            }
+        }
+
+        [Flags]
+        private enum SearchFilter
+        {
+            UI = 1,
+            Actors = 2,
+            Primitives = 4,
+            [HideInEditor]
+            Default = UI | Actors | Primitives,
+        }
+
         private TextBox _searchBox;
         private ContainerControl _groupSearch;
+        private Tabs _actorGroups;
+        private ContainerControl groupPrimitives;
+        private Button _viewDropdown;
+        private int _searchFilterMask = (int)SearchFilter.Default;
 
         /// <summary>
         /// The editor instance.
@@ -94,96 +128,239 @@ namespace FlaxEditor.Windows
         public SpawnTab(SpriteHandle icon, Editor editor)
         : base(string.Empty, icon)
         {
+            TooltipText = "Quick object spawning tool via drag&drop.";
             Editor = editor;
-            Selected += tab => Editor.Windows.EditWin.Viewport.SetActiveMode<TransformGizmoMode>();
+            Selected += tab => Editor.Windows.EditWin.Viewport.Gizmos.SetActiveMode<TransformGizmoMode>();
             ScriptsBuilder.ScriptsReload += OnScriptsReload;
+            ScriptsBuilder.ScriptsReloadEnd += OnScriptsReloadEnd;
 
-            var actorGroups = new Tabs
+            _actorGroups = new Tabs
             {
                 Orientation = Orientation.Vertical,
                 UseScroll = true,
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
-                TabsSize = new Vector2(120, 32),
+                TabsSize = new Float2(90, 32),
                 Parent = this,
             };
 
-            _groupSearch = CreateGroupWithList(actorGroups, "Search", 26);
-            _searchBox = new TextBox
+            _groupSearch = CreateGroupWithList(_actorGroups, "Search", "Search for any actor or object type to spawn.", 26);
+
+            var margin = Constants.UIMargin;
+            var parent = _groupSearch.Parent.Parent;
+            _viewDropdown = new Button(margin, margin, 45.0f, TextBoxBase.DefaultHeight)
+            {
+                TooltipText = "Change search filter options.",
+                Text = "Filters",
+                Parent = parent,
+            };
+            _viewDropdown.Clicked += OnViewButtonClicked;
+
+            var x = _viewDropdown.Right + margin;
+            _searchBox = new SearchBox
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
-                WatermarkText = "Search...",
-                Parent = _groupSearch.Parent.Parent,
-                Bounds = new Rectangle(4, 4, actorGroups.Width - 8, 18),
+                Parent = parent,
+                Bounds = new Rectangle(x, margin, parent.Width - x - margin, TextBoxBase.DefaultHeight),
             };
             _searchBox.TextChanged += OnSearchBoxTextChanged;
 
-            var groupBasicModels = CreateGroupWithList(actorGroups, "Basic Models");
-            groupBasicModels.AddChild(CreateEditorAssetItem("Cube", "Primitives/Cube.flax"));
-            groupBasicModels.AddChild(CreateEditorAssetItem("Sphere", "Primitives/Sphere.flax"));
-            groupBasicModels.AddChild(CreateEditorAssetItem("Plane", "Primitives/Plane.flax"));
-            groupBasicModels.AddChild(CreateEditorAssetItem("Cylinder", "Primitives/Cylinder.flax"));
-            groupBasicModels.AddChild(CreateEditorAssetItem("Cone", "Primitives/Cone.flax"));
-            groupBasicModels.AddChild(CreateEditorAssetItem("Capsule", "Primitives/Capsule.flax"));
+            RefreshActorTabs();
 
-            var groupLights = CreateGroupWithList(actorGroups, "Lights");
-            groupLights.AddChild(CreateActorItem("Directional Light", typeof(DirectionalLight)));
-            groupLights.AddChild(CreateActorItem("Point Light", typeof(PointLight)));
-            groupLights.AddChild(CreateActorItem("Spot Light", typeof(SpotLight)));
-            groupLights.AddChild(CreateActorItem("Sky Light", typeof(SkyLight)));
+            _actorGroups.SelectedTabIndex = 1;
+        }
 
-            var groupVisuals = CreateGroupWithList(actorGroups, "Visuals");
-            groupVisuals.AddChild(CreateActorItem("Camera", typeof(Camera)));
-            groupVisuals.AddChild(CreateActorItem("Environment Probe", typeof(EnvironmentProbe)));
-            groupVisuals.AddChild(CreateActorItem("Skybox", typeof(Skybox)));
-            groupVisuals.AddChild(CreateActorItem("Sky", typeof(Sky)));
-            groupVisuals.AddChild(CreateActorItem("Exponential Height Fog", typeof(ExponentialHeightFog)));
-            groupVisuals.AddChild(CreateActorItem("PostFx Volume", typeof(PostFxVolume)));
-            groupVisuals.AddChild(CreateActorItem("Decal", typeof(Decal)));
-            groupVisuals.AddChild(CreateActorItem("Particle Effect", typeof(ParticleEffect)));
+        private void OnViewButtonClicked()
+        {
+            var menu = new ContextMenu();
+            AddSearchFilterButton(menu, SearchFilter.UI, "UI");
+            AddSearchFilterButton(menu, SearchFilter.Actors, "Actors");
+            AddSearchFilterButton(menu, SearchFilter.Primitives, "Primitives");
+            menu.Show(_viewDropdown.Parent, _viewDropdown.BottomLeft);
+        }
 
-            var groupPhysics = CreateGroupWithList(actorGroups, "Physics");
-            groupPhysics.AddChild(CreateActorItem("Rigid Body", typeof(RigidBody)));
-            groupPhysics.AddChild(CreateActorItem("Character Controller", typeof(CharacterController)));
-            groupPhysics.AddChild(CreateActorItem("Box Collider", typeof(BoxCollider)));
-            groupPhysics.AddChild(CreateActorItem("Sphere Collider", typeof(SphereCollider)));
-            groupPhysics.AddChild(CreateActorItem("Capsule Collider", typeof(CapsuleCollider)));
-            groupPhysics.AddChild(CreateActorItem("Mesh Collider", typeof(MeshCollider)));
-            groupPhysics.AddChild(CreateActorItem("Fixed Joint", typeof(FixedJoint)));
-            groupPhysics.AddChild(CreateActorItem("Distance Joint", typeof(DistanceJoint)));
-            groupPhysics.AddChild(CreateActorItem("Slider Joint", typeof(SliderJoint)));
-            groupPhysics.AddChild(CreateActorItem("Spherical Joint", typeof(SphericalJoint)));
-            groupPhysics.AddChild(CreateActorItem("Hinge Joint", typeof(HingeJoint)));
-            groupPhysics.AddChild(CreateActorItem("D6 Joint", typeof(D6Joint)));
+        private void AddSearchFilterButton(ContextMenu menu, SearchFilter value, string name)
+        {
+            var button = menu.AddButton(name);
+            button.AutoCheck = true;
+            button.Checked = (_searchFilterMask & (int)value) != 0;
+            button.Clicked += () =>
+            {
+                _searchFilterMask ^= (int)value;
+                OnSearchBoxTextChanged();
+            };
+        }
 
-            var groupOther = CreateGroupWithList(actorGroups, "Other");
-            groupOther.AddChild(CreateActorItem("Animated Model", typeof(AnimatedModel)));
-            groupOther.AddChild(CreateActorItem("Bone Socket", typeof(BoneSocket)));
-            groupOther.AddChild(CreateActorItem("CSG Box Brush", typeof(BoxBrush)));
-            groupOther.AddChild(CreateActorItem("Audio Source", typeof(AudioSource)));
-            groupOther.AddChild(CreateActorItem("Audio Listener", typeof(AudioListener)));
-            groupOther.AddChild(CreateActorItem("Empty Actor", typeof(EmptyActor)));
-            groupOther.AddChild(CreateActorItem("Scene Animation", typeof(SceneAnimationPlayer)));
-            groupOther.AddChild(CreateActorItem("Nav Mesh Bounds Volume", typeof(NavMeshBoundsVolume)));
-            groupOther.AddChild(CreateActorItem("Nav Link", typeof(NavLink)));
-            groupOther.AddChild(CreateActorItem("Nav Modifier Volume", typeof(NavModifierVolume)));
-            groupOther.AddChild(CreateActorItem("Spline", typeof(Spline)));
+        /// <inheritdoc/>
+        protected override void PerformLayoutBeforeChildren()
+        {
+            base.PerformLayoutBeforeChildren();
 
-            var groupGui = CreateGroupWithList(actorGroups, "GUI");
-            groupGui.AddChild(CreateActorItem("UI Control", typeof(UIControl)));
-            groupGui.AddChild(CreateActorItem("UI Canvas", typeof(UICanvas)));
-            groupGui.AddChild(CreateActorItem("Text Render", typeof(TextRender)));
-            groupGui.AddChild(CreateActorItem("Sprite Render", typeof(SpriteRender)));
-
-            actorGroups.SelectedTabIndex = 1;
+            _searchBox.Width = _groupSearch.Width - _viewDropdown.Right - 4;
         }
 
         private void OnScriptsReload()
         {
             // Prevent any references to actor types from the game assemblies that will be reloaded
-            _searchBox.Clear();
             _groupSearch.DisposeChildren();
             _groupSearch.PerformLayout();
+
+            // Remove tabs
+            var tabs = new List<Tab>();
+            foreach (var child in _actorGroups.Children)
+            {
+                if (child is Tab tab)
+                {
+                    if (tab.Text != "Search")
+                        tabs.Add(tab);
+                }
+            }
+            foreach (var tab in tabs)
+            {
+                var group = _actorGroups.Children.Find(T => T == tab);
+                group.Dispose();
+            }
+        }
+
+        private void OnScriptsReloadEnd()
+        {
+            RefreshActorTabs();
+            OnSearchBoxTextChanged();
+        }
+
+        private void RefreshActorTabs()
+        {
+            // Remove tabs
+            var tabs = new List<Tab>();
+            foreach (var child in _actorGroups.Children)
+            {
+                if (child is Tab tab)
+                {
+                    if (tab.Text != "Search")
+                        tabs.Add(tab);
+                }
+            }
+            foreach (var tab in tabs)
+            {
+                var group = _actorGroups.Children.Find(T => T == tab);
+                group.Dispose();
+            }
+
+            // Add primitives to primtives and search tab
+            groupPrimitives = CreateGroupWithList(_actorGroups, "Primitives", "In-built primitive object types to place on a scene.");
+
+            groupPrimitives.AddChild(CreateEditorAssetItem("Cube", "Primitives/Cube.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Cube", "Primitives/Cube.flax"));
+            groupPrimitives.AddChild(CreateEditorAssetItem("Sphere", "Primitives/Sphere.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Sphere", "Primitives/Sphere.flax"));
+            groupPrimitives.AddChild(CreateEditorAssetItem("Plane", "Primitives/Plane.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Plane", "Primitives/Plane.flax"));
+            groupPrimitives.AddChild(CreateEditorAssetItem("Cylinder", "Primitives/Cylinder.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Cylinder", "Primitives/Cylinder.flax"));
+            groupPrimitives.AddChild(CreateEditorAssetItem("Cone", "Primitives/Cone.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Cone", "Primitives/Cone.flax"));
+            groupPrimitives.AddChild(CreateEditorAssetItem("Capsule", "Primitives/Capsule.flax"));
+            _groupSearch.AddChild(CreateEditorAssetItem("Capsule", "Primitives/Capsule.flax"));
+
+            // Created first to order specific tabs
+            CreateGroupWithList(_actorGroups, "Lights", "Different light types to add on a scene.");
+            CreateGroupWithList(_actorGroups, "Visuals", "Common visual objects to add on a scene.");
+            CreateGroupWithList(_actorGroups, "Physics", "Physics colliders and actors.");
+            CreateGroupWithList(_actorGroups, "UI", "User-Interface controls.");
+            CreateGroupWithList(_actorGroups, "Other", "Other commonly used objects to spawn.");
+
+            // Add control types to tabs
+            foreach (var controlType in Editor.Instance.CodeEditing.Controls.Get())
+            {
+                if (controlType.IsAbstract)
+                    continue;
+                _groupSearch.AddChild(CreateControlItem(Utilities.Utils.GetPropertyNameUI(controlType.Name), controlType));
+                ActorToolboxAttribute attribute = null;
+                foreach (var e in controlType.GetAttributes(false))
+                {
+                    if (e is ActorToolboxAttribute actorToolboxAttribute)
+                    {
+                        attribute = actorToolboxAttribute;
+                        break;
+                    }
+                }
+                if (attribute == null)
+                    continue;
+                var groupName = attribute.Group.Trim();
+
+                // Check if tab already exists and add it to the tab
+                var actorTabExists = false;
+                foreach (var child in _actorGroups.Children)
+                {
+                    if (child is Tab tab)
+                    {
+                        if (string.Equals(tab.Text, groupName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var tree = tab.GetChild<Panel>().GetChild<Tree>();
+                            if (tree != null)
+                            {
+                                tree.AddChild(string.IsNullOrEmpty(attribute.Name) ? CreateControlItem(Utilities.Utils.GetPropertyNameUI(controlType.Name), controlType) : CreateControlItem(attribute.Name, controlType));
+                                tree.SortChildren();
+                            }
+                            actorTabExists = true;
+                            break;
+                        }
+                    }
+                }
+                if (actorTabExists)
+                    continue;
+
+                var group = CreateGroupWithList(_actorGroups, groupName);
+                group.AddChild(string.IsNullOrEmpty(attribute.Name) ? CreateControlItem(Utilities.Utils.GetPropertyNameUI(controlType.Name), controlType) : CreateControlItem(attribute.Name, controlType));
+                group.SortChildren();
+            }
+
+            // Add other actor types to respective tab based on attribute
+            foreach (var actorType in Editor.CodeEditing.Actors.Get())
+            {
+                if (actorType.IsAbstract)
+                    continue;
+                _groupSearch.AddChild(CreateActorItem(Utilities.Utils.GetPropertyNameUI(actorType.Name), actorType));
+                ActorToolboxAttribute attribute = null;
+                foreach (var e in actorType.GetAttributes(false))
+                {
+                    if (e is ActorToolboxAttribute actorToolboxAttribute)
+                    {
+                        attribute = actorToolboxAttribute;
+                        break;
+                    }
+                }
+                if (attribute == null)
+                    continue;
+                var groupName = attribute.Group.Trim();
+
+                // Check if tab already exists and add it to the tab
+                var actorTabExists = false;
+                foreach (var child in _actorGroups.Children)
+                {
+                    if (child is Tab tab)
+                    {
+                        if (string.Equals(tab.Text, groupName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var tree = tab.GetChild<Panel>().GetChild<Tree>();
+                            if (tree != null)
+                            {
+                                tree.AddChild(string.IsNullOrEmpty(attribute.Name) ? CreateActorItem(Utilities.Utils.GetPropertyNameUI(actorType.Name), actorType) : CreateActorItem(attribute.Name, actorType));
+                                tree.SortChildren();
+                            }
+                            actorTabExists = true;
+                            break;
+                        }
+                    }
+                }
+                if (actorTabExists)
+                    continue;
+
+                var group = CreateGroupWithList(_actorGroups, groupName);
+                group.AddChild(string.IsNullOrEmpty(attribute.Name) ? CreateActorItem(Utilities.Utils.GetPropertyNameUI(actorType.Name), actorType) : CreateActorItem(attribute.Name, actorType));
+                group.SortChildren();
+            }
+            _groupSearch.SortChildren();
         }
 
         private void OnSearchBoxTextChanged()
@@ -196,53 +373,158 @@ namespace FlaxEditor.Windows
             _groupSearch.LockChildrenRecursive();
             _groupSearch.DisposeChildren();
 
-            foreach (var actorType in Editor.CodeEditing.Actors.Get())
+            if (((int)SearchFilter.Actors & _searchFilterMask) != 0)
             {
-                var text = actorType.Name;
-
-                if (!QueryFilterHelper.Match(filterText, text, out QueryFilterHelper.Range[] ranges))
-                    continue;
-
-                var item = _groupSearch.AddChild(CreateActorItem(CustomEditors.CustomEditorsUtil.GetPropertyNameUI(text), actorType));
-                item.TooltipText = Surface.SurfaceUtils.GetVisualScriptTypeDescription(actorType);
-
-                var highlights = new List<Rectangle>(ranges.Length);
-                var style = Style.Current;
-                var font = style.FontSmall;
-                var textRect = item.TextRect;
-                for (int i = 0; i < ranges.Length; i++)
+                foreach (var actorType in Editor.CodeEditing.Actors.Get())
                 {
-                    var start = font.GetCharPosition(text, ranges[i].StartIndex);
-                    var end = font.GetCharPosition(text, ranges[i].EndIndex);
-                    highlights.Add(new Rectangle(start.X + textRect.X, textRect.Y, end.X - start.X, textRect.Height));
+                    ActorToolboxAttribute attribute = null;
+                    foreach (var e in actorType.GetAttributes(false))
+                    {
+                        if (e is ActorToolboxAttribute actorToolboxAttribute)
+                        {
+                            attribute = actorToolboxAttribute;
+                            break;
+                        }
+                    }
+
+                    var text = (attribute == null) ? actorType.Name : string.IsNullOrEmpty(attribute.Name) ? actorType.Name : attribute.Name;
+
+                    // Display all actors on no search
+                    if (string.IsNullOrEmpty(filterText))
+                        _groupSearch.AddChild(CreateActorItem(Utilities.Utils.GetPropertyNameUI(text), actorType));
+
+                    if (!QueryFilterHelper.Match(filterText, text, out QueryFilterHelper.Range[] ranges))
+                        continue;
+
+                    var item = CreateActorItem(Utilities.Utils.GetPropertyNameUI(text), actorType);
+                    SearchFilterHighlights(filterText, item, text, ranges);
                 }
-                item.SetHighlights(highlights);
             }
+
+            if (((int)SearchFilter.Primitives & _searchFilterMask) != 0)
+            {
+                // Hack primitive models into the search results
+                foreach (var child in groupPrimitives.Children)
+                {
+                    if (child is Item primitiveAssetItem)
+                    {
+                        var text = primitiveAssetItem.Text;
+
+                        // Rebuild the path based on item name (it would be better to convert the drag data back to a string somehow)
+                        string path = $"Primitives/{text}.flax";
+
+                        // Display all primitives on no search
+                        if (string.IsNullOrEmpty(filterText))
+                            _groupSearch.AddChild(CreateEditorAssetItem(text, path));
+
+                        if (!QueryFilterHelper.Match(filterText, text, out QueryFilterHelper.Range[] ranges))
+                            continue;
+
+                        var item = CreateEditorAssetItem(text, path);
+                        SearchFilterHighlights(filterText, item, text, ranges);
+                    }
+                }
+            }
+
+            if (((int)SearchFilter.UI & _searchFilterMask) != 0)
+            { 
+                foreach (var controlType in Editor.Instance.CodeEditing.Controls.Get())
+                {
+                    if (controlType.IsAbstract)
+                        continue;
+
+                    ActorToolboxAttribute attribute = null;
+                    foreach (var e in controlType.GetAttributes(false))
+                    {
+                        if (e is ActorToolboxAttribute actorToolboxAttribute)
+                        {
+                            attribute = actorToolboxAttribute;
+                            break;
+                        }
+                    }
+
+                    var text = (attribute == null) ? controlType.Name : string.IsNullOrEmpty(attribute.Name) ? controlType.Name : attribute.Name;
+
+                    // Display all controls on no search
+                    if (string.IsNullOrEmpty(filterText))
+                        _groupSearch.AddChild(CreateControlItem(Utilities.Utils.GetPropertyNameUI(controlType.Name), controlType));
+
+                    if (!QueryFilterHelper.Match(filterText, text, out QueryFilterHelper.Range[] ranges))
+                        continue;
+
+                    var item = CreateControlItem(Utilities.Utils.GetPropertyNameUI(controlType.Name), controlType);
+                    SearchFilterHighlights(filterText, item, text, ranges);
+                }
+            }
+
+            // Sort the search results alphabetically
+            _groupSearch.SortChildren();
 
             _groupSearch.UnlockChildrenRecursive();
             PerformLayout();
             PerformLayout();
         }
 
-        private Item CreateEditorAssetItem(string name, string path)
+        /// <inheritdoc/>
+        public override void Draw()
         {
-            path = StringUtils.CombinePaths(Globals.EngineContentFolder, "Editor", path);
-            return new Item(name, GUI.Drag.DragItems.GetDragData(path));
+            base.Draw();
+
+            // Show a text to hint the user that either no filter is active or the search does not return any results
+            bool noSearchResults = _groupSearch.Children.Count == 0 && !string.IsNullOrEmpty(_searchBox.Text);
+            bool showHint = _searchFilterMask == 0 || noSearchResults;
+            if (showHint)
+            {
+                string hint = noSearchResults ? "No results" : "No search filter active, please enable at least one filter";
+                var textRect = _groupSearch.Parent.Parent.Bounds;
+                var style = Style.Current;
+                Render2D.DrawText(style.FontMedium, hint, textRect, style.ForegroundGrey, TextAlignment.Center, TextAlignment.Center, TextWrapping.WrapWords);
+            }
         }
 
-        private Item CreateActorItem(string name, Type type)
+        private void SearchFilterHighlights(string filterText, Item item, string text, QueryFilterHelper.Range[] ranges)
         {
-            return new Item(name, GUI.Drag.DragActorType.GetDragData(type));
+            if (item.Text.Contains(' ') && QueryFilterHelper.Match(filterText, item.Text, out QueryFilterHelper.Range[] fixedRanges))
+            {
+                // GetPropertyNameUI makes some searches look different so fix it
+                text = item.Text;
+                ranges = fixedRanges;
+            }
+            _groupSearch.AddChild(item);
+            var highlights = new List<Rectangle>(ranges.Length);
+            var font = Style.Current.FontSmall;
+            var textRect = item.TextRect;
+            for (int i = 0; i < ranges.Length; i++)
+            {
+                var start = font.GetCharPosition(text, ranges[i].StartIndex);
+                var end = font.GetCharPosition(text, ranges[i].EndIndex);
+                highlights.Add(new Rectangle(start.X + textRect.X, textRect.Y, end.X - start.X, textRect.Height));
+            }
+            item.SetHighlights(highlights);
+        }
+
+        private Item CreateEditorAssetItem(string name, string path)
+        {
+            string globalPath = StringUtils.CombinePaths(Globals.EngineContentFolder, "Editor", path);
+            Item item = new Item(name, GUI.Drag.DragItems.GetDragData(globalPath));
+            item.TooltipText = $"{path}\nActor with a {name} asset.";
+            return item;
         }
 
         private Item CreateActorItem(string name, ScriptType type)
         {
-            return new Item(name, GUI.Drag.DragActorType.GetDragData(type));
+            return new ScriptTypeItem(name, type, GUI.Drag.DragActorType.GetDragData(type));
         }
 
-        private ContainerControl CreateGroupWithList(Tabs parentTabs, string title, float topOffset = 0)
+        private Item CreateControlItem(string name, ScriptType type)
+        {
+            return new ScriptTypeItem(name, type, GUI.Drag.DragControlType.GetDragData(type));
+        }
+
+        private ContainerControl CreateGroupWithList(Tabs parentTabs, string title, string tooltip = null, float topOffset = 0)
         {
             var tab = parentTabs.AddTab(new Tab(title));
+            tab.TooltipText = tooltip;
             var panel = new Panel(ScrollBars.Both)
             {
                 AnchorPreset = AnchorPresets.StretchAll,
@@ -252,6 +534,7 @@ namespace FlaxEditor.Windows
             var tree = new Tree(false)
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Margin = new Margin(0, 0, 0, panel.ScrollBarsSize),
                 IsScrollable = true,
                 Parent = panel
             };
@@ -298,6 +581,9 @@ namespace FlaxEditor.Windows
         : base(editor, true, ScrollBars.None)
         {
             Title = "Toolbox";
+            Icon = editor.Icons.Toolbox96;
+
+            FlaxEditor.Utilities.Utils.SetupCommonInputActions(this);
         }
 
         /// <inheritdoc />
@@ -308,7 +594,7 @@ namespace FlaxEditor.Windows
             {
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
-                TabsSize = new Vector2(tabSize, tabSize),
+                TabsSize = new Float2(tabSize, tabSize),
                 Parent = this
             };
 

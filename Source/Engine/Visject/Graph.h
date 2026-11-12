@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,8 +11,6 @@
 #include "Engine/Serialization/WriteStream.h"
 
 // [Deprecated on 31.07.2020, expires on 31.07.2022]
-extern FLAXENGINE_API void ReadOldGraphParamValue_Deprecated(byte graphParamType, ReadStream* stream, GraphParameter* param);
-extern FLAXENGINE_API void ReadOldGraphNodeValue_Deprecated(ReadStream* stream, Variant& result);
 extern FLAXENGINE_API void ReadOldGraphBoxType_Deprecated(uint32 connectionType, VariantType& type);
 extern FLAXENGINE_API StringView GetGraphFunctionTypeName_Deprecated(const Variant& v);
 
@@ -23,14 +21,12 @@ template<class NodeType, class BoxType, class ParameterType>
 class Graph
 {
 public:
-
     typedef Graph<NodeType, BoxType, ParameterType> GraphType;
     typedef NodeType Node;
     typedef BoxType Box;
     typedef ParameterType Parameter;
 
 private:
-
     struct TmpConnectionHint
     {
         Node* Node;
@@ -56,7 +52,6 @@ public:
     VisjectMeta Meta;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Graph"/> class.
     /// </summary>
@@ -72,7 +67,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Save graph to the stream
     /// </summary>
@@ -105,11 +99,11 @@ public:
         for (int32 i = 0; i < Parameters.Count(); i++)
         {
             const Parameter* param = &Parameters[i];
-            stream->WriteVariantType(param->Type);
-            stream->Write(&param->Identifier);
-            stream->WriteString(param->Name, 97);
+            stream->Write(param->Type);
+            stream->Write(param->Identifier);
+            stream->Write(param->Name, 97);
             stream->WriteBool(param->IsPublic);
-            stream->WriteVariant(param->Value);
+            stream->Write(param->Value);
             if (param->Meta.Save(stream, saveMeta))
                 return true;
         }
@@ -123,7 +117,7 @@ public:
             // Values
             stream->WriteInt32(node->Values.Count());
             for (int32 j = 0; j < node->Values.Count(); j++)
-                stream->WriteVariant(node->Values[j]);
+                stream->Write(node->Values[j]);
 
             // Boxes
             node->GetBoxes(boxes);
@@ -132,7 +126,7 @@ public:
             {
                 const Box* box = boxes[j];
                 stream->WriteByte(box->ID);
-                stream->WriteVariantType(box->Type);
+                stream->Write(box->Type);
                 stream->WriteUint16(box->Connections.Count());
                 for (int32 k = 0; k < box->Connections.Count(); k++)
                 {
@@ -186,157 +180,10 @@ public:
         Array<TmpConnectionHint> tmpHints;
         if (version < 7000)
         {
-            // [Deprecated on 31.07.2020, expires on 31.07.2022]
-
-            // Time saved
-            int64 timeSaved;
-            stream->ReadInt64(&timeSaved);
-
-            // Nodes count
-            int32 nodesCount;
-            stream->ReadInt32(&nodesCount);
-            Nodes.Resize(nodesCount, false);
-
-            // Parameters count
-            int32 parametersCount;
-            stream->ReadInt32(&parametersCount);
-            Parameters.Resize(parametersCount, false);
-
-            // For each node
-            for (int32 i = 0; i < nodesCount; i++)
-            {
-                auto node = &Nodes[i];
-
-                // ID
-                stream->ReadUint32(&node->ID);
-
-                // Type
-                stream->ReadUint32(&node->Type);
-
-                if (onNodeCreated(node))
-                    return true;
-            }
-
-            // For each param
-            for (int32 i = 0; i < parametersCount; i++)
-            {
-                // Create param
-                auto param = &Parameters[i];
-
-                // Properties
-                auto type = stream->ReadByte();
-                stream->Read(&param->Identifier);
-                stream->ReadString(&param->Name, 97);
-                param->IsPublic = stream->ReadBool();
-                bool isStatic = stream->ReadBool();
-                bool isUIVisible = stream->ReadBool();
-                bool isUIEditable = stream->ReadBool();
-
-                // References [Deprecated]
-                int32 refsCount;
-                stream->ReadInt32(&refsCount);
-                for (int32 j = 0; j < refsCount; j++)
-                {
-                    uint32 refID;
-                    stream->ReadUint32(&refID);
-                }
-
-                // Value
-                ReadOldGraphParamValue_Deprecated(type, stream, param);
-
-                // Meta
-                if (param->Meta.Load(stream, loadMeta))
-                    return true;
-
-                if (onParamCreated(param))
-                    return true;
-            }
-
-            // For each node
-            for (int32 i = 0; i < nodesCount; i++)
-            {
-                auto node = &Nodes[i];
-
-                // Values
-                int32 valuesCnt;
-                stream->ReadInt32(&valuesCnt);
-                node->Values.Resize(valuesCnt);
-                for (int32 j = 0; j < valuesCnt; j++)
-                    ReadOldGraphNodeValue_Deprecated(stream, node->Values[j]);
-
-                // Boxes
-                uint16 boxesCount;
-                stream->ReadUint16(&boxesCount);
-                node->Boxes.Clear();
-                for (int32 j = 0; j < boxesCount; j++)
-                {
-                    byte boxID = stream->ReadByte();
-                    node->Boxes.Resize(node->Boxes.Count() > boxID + 1 ? node->Boxes.Count() : boxID + 1);
-                    Box* box = &node->Boxes[boxID];
-
-                    box->Parent = node;
-                    box->ID = boxID;
-                    uint32 connectionType;
-                    stream->ReadUint32((uint32*)&connectionType);
-                    ReadOldGraphBoxType_Deprecated(connectionType, box->Type);
-
-                    uint16 connectionsCount;
-                    stream->ReadUint16(&connectionsCount);
-                    box->Connections.Resize(connectionsCount);
-                    for (int32 k = 0; k < connectionsCount; k++)
-                    {
-                        uint32 targetNodeID;
-                        stream->ReadUint32(&targetNodeID);
-                        byte targetBoxID = stream->ReadByte();
-                        TmpConnectionHint hint;
-                        hint.Node = GetNode(targetNodeID);
-                        if (hint.Node == nullptr)
-                            return true;
-                        hint.BoxID = targetBoxID;
-                        box->Connections[k] = (Box*)(intptr)tmpHints.Count();
-                        tmpHints.Add(hint);
-                    }
-                }
-
-                // Meta
-                if (node->Meta.Load(stream, loadMeta))
-                    return true;
-
-                if (onNodeLoaded(node))
-                    return true;
-            }
-
-            // Visject Meta
-            if (Meta.Load(stream, loadMeta))
-                return true;
-
-            // Setup connections
-            for (int32 i = 0; i < Nodes.Count(); i++)
-            {
-                auto node = &Nodes[i];
-                for (int32 j = 0; j < node->Boxes.Count(); j++)
-                {
-                    Box* box = &node->Boxes[j];
-                    if (box->Parent == nullptr)
-                        continue;
-                    for (int32 k = 0; k < box->Connections.Count(); k++)
-                    {
-                        int32 hintIndex = (int32)(intptr)box->Connections[k];
-                        TmpConnectionHint hint = tmpHints[hintIndex];
-                        box->Connections[k] = hint.Node->GetBox(hint.BoxID);
-                    }
-                }
-            }
-
-            // Ending char
-            byte end;
-            stream->ReadByte(&end);
-            if (end != '\t')
-            {
-                return true;
-            }
+            LOG(Warning, "Not supported Visject Surface version. Open and re-save asset with Flax 1.11.");
+            return true;
         }
-        else if (version == 7000)
+        if (version == 7000)
         {
             // Nodes count
             int32 nodesCount;
@@ -362,11 +209,11 @@ public:
             for (int32 i = 0; i < parametersCount; i++)
             {
                 auto param = &Parameters[i];
-                stream->ReadVariantType(&param->Type);
-                stream->Read(&param->Identifier);
-                stream->ReadString(&param->Name, 97);
+                stream->Read(param->Type);
+                stream->Read(param->Identifier);
+                stream->Read(param->Name, 97);
                 param->IsPublic = stream->ReadBool();
-                stream->ReadVariant(&param->Value);
+                stream->Read(param->Value);
                 if (param->Meta.Load(stream, loadMeta))
                     return true;
                 if (onParamCreated(param))
@@ -383,7 +230,7 @@ public:
                 stream->ReadInt32(&valuesCnt);
                 node->Values.Resize(valuesCnt);
                 for (int32 j = 0; j < valuesCnt; j++)
-                    stream->ReadVariant(&node->Values[j]);
+                    stream->Read(node->Values[j]);
 
                 // Boxes
                 uint16 boxesCount;
@@ -396,7 +243,7 @@ public:
                     Box* box = &node->Boxes[boxID];
                     box->Parent = node;
                     box->ID = boxID;
-                    stream->ReadVariantType(&box->Type);
+                    stream->Read(box->Type);
                     uint16 connectionsCount;
                     stream->ReadUint16(&connectionsCount);
                     box->Connections.Resize(connectionsCount);
@@ -440,7 +287,11 @@ public:
                     {
                         int32 hintIndex = (int32)(intptr)box->Connections[k];
                         TmpConnectionHint hint = tmpHints[hintIndex];
-                        box->Connections[k] = hint.Node->GetBox(hint.BoxID);
+                        Box* hintBox = hint.Node->TryGetBox(hint.BoxID);
+                        if (hintBox == nullptr)
+                            box->Connections.RemoveAtKeepOrder(k--);
+                        else
+                            box->Connections[k] = hintBox;
                     }
                 }
             }
@@ -456,7 +307,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Find node by ID
     /// </summary>
@@ -528,22 +378,21 @@ public:
     }
 
 public:
-
 #if USE_EDITOR
 
     /// <summary>
     /// Gets the asset references.
     /// </summary>
     /// </remarks>
-    /// <param name="output">The output collection of the asset ids referenced by this object.</param>
-    virtual void GetReferences(Array<Guid>& output) const
+    /// <param name="assets">The output collection of the asset ids referenced by this object.</param>
+    virtual void GetReferences(Array<Guid>& assets) const
     {
         for (int32 i = 0; i < Parameters.Count(); i++)
         {
             const auto& p = Parameters[i];
             const Guid id = (Guid)p.Value;
             if (id.IsValid())
-                output.Add(id);
+                assets.Add(id);
         }
 
         for (int32 i = 0; i < Nodes.Count(); i++)
@@ -553,7 +402,7 @@ public:
             {
                 const Guid id = (Guid)n.Values[j];
                 if (id.IsValid())
-                    output.Add(id);
+                    assets.Add(id);
             }
         }
     }
@@ -561,7 +410,6 @@ public:
 #endif
 
 protected:
-
     virtual bool onNodeCreated(Node* n)
     {
         return false;

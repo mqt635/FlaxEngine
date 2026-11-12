@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -55,7 +55,7 @@ namespace FlaxEditor.Modules
         public event Action ImportingQueueBegin;
 
         /// <summary>
-        /// Occurs when file is being imported.
+        /// Occurs when file is being imported. Can be called on non-main thread.
         /// </summary>
         public event Action<IFileEntryAction> ImportFileBegin;
 
@@ -67,12 +67,12 @@ namespace FlaxEditor.Modules
         public delegate void ImportFileEndDelegate(IFileEntryAction entry, bool failed);
 
         /// <summary>
-        /// Occurs when file importing end.
+        /// Occurs when file importing end. Can be called on non-main thread.
         /// </summary>
         public event ImportFileEndDelegate ImportFileEnd;
 
         /// <summary>
-        /// Occurs when assets importing ends.
+        /// Occurs when assets importing ends. Can be called on non-main thread.
         /// </summary>
         public event Action ImportingQueueEnd;
 
@@ -126,27 +126,33 @@ namespace FlaxEditor.Modules
         {
             if (item != null && !item.GetImportPath(out string importPath))
             {
-                // Check if input file is missing
-                if (!System.IO.File.Exists(importPath))
-                {
-                    Editor.LogWarning(string.Format("Cannot reimport asset \'{0}\'. File \'{1}\' does not exist.", item.Path, importPath));
-                    if (skipSettingsDialog)
-                        return;
-
-                    // Ask user to select new file location
-                    var title = string.Format("Please find missing \'{0}\' file for asset \'{1}\'", importPath, item.ShortName);
-                    if (FileSystem.ShowOpenFileDialog(Editor.Windows.MainWindow, null, "All files (*.*)\0*.*\0", false, title, out var files))
-                        return;
-                    if (files != null && files.Length > 0)
-                        importPath = files[0];
-
-                    // Validate file path again
-                    if (!System.IO.File.Exists(importPath))
-                        return;
-                }
-
+                if (GetReimportPath(item.ShortName, ref importPath, skipSettingsDialog))
+                    return;
                 Import(importPath, item.Path, true, skipSettingsDialog, settings);
             }
+        }
+
+        internal bool GetReimportPath(string contextName, ref string importPath, bool skipSettingsDialog = false)
+        {
+            // Check if input file is missing
+            if (!System.IO.File.Exists(importPath))
+            {
+                Editor.LogWarning(string.Format("Cannot reimport asset \'{0}\'. File \'{1}\' does not exist.", contextName, importPath));
+                if (skipSettingsDialog)
+                    return true;
+
+                // Ask user to select new file location
+                var title = string.Format("Please find missing \'{0}\' file for asset \'{1}\'", importPath, contextName);
+                if (FileSystem.ShowOpenFileDialog(Editor.Windows.MainWindow, null, "All files (*.*)\0*.*\0", false, title, out var files))
+                    return true;
+                if (files != null && files.Length > 0)
+                    importPath = files[0];
+
+                // Validate file path again
+                if (!System.IO.File.Exists(importPath))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -216,7 +222,7 @@ namespace FlaxEditor.Modules
                 outputExtension = extension;
 
                 // Check if can place source files here
-                if (!targetLocation.CanHaveScripts && (extension == ".cs" || extension == ".cpp" || extension == ".h"))
+                if (!targetLocation.CanHaveScripts && (extension == ".cs" || extension == ".cpp" || extension == ".h" || extension == ".c" || extension == ".hpp"))
                 {
                     // Error
                     Editor.LogWarning(string.Format("Cannot import \'{0}\' to \'{1}\'. The target directory cannot have scripts.", inputPath, targetLocation.Node.Path));
@@ -246,6 +252,8 @@ namespace FlaxEditor.Modules
         /// <param name="settings">Import settings to override. Use null to skip this value.</param>
         private void Import(string inputPath, string outputPath, bool isInBuilt, bool skipSettingsDialog = false, object settings = null)
         {
+            inputPath = StringUtils.NormalizePath(inputPath);
+            outputPath = StringUtils.NormalizePath(outputPath);
             lock (_requests)
             {
                 _requests.Add(new Request
@@ -305,7 +313,9 @@ namespace FlaxEditor.Modules
                         }
 
                         _importBatchDone++;
+                        Profiler.BeginEvent("ImportFileEnd");
                         ImportFileEnd?.Invoke(entry, failed);
+                        Profiler.EndEvent();
                     }
                 }
                 else
@@ -375,7 +385,6 @@ namespace FlaxEditor.Modules
             Thread.Sleep(0);
 
             _workerThread.Join(1000);
-            _workerThread.Abort();
             _workerThread = null;
         }
 
@@ -383,6 +392,20 @@ namespace FlaxEditor.Modules
         public override void OnInit()
         {
             ImportFileEntry.RegisterDefaultTypes();
+            ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
+        }
+
+        private void OnScriptsReloadBegin()
+        {
+            // Remove import file types from scripting assemblies
+            List<string> removeFileTypes = new List<string>();
+            foreach (var pair in ImportFileEntry.FileTypes)
+            {
+                if (pair.Value.Method.IsCollectible || (pair.Value.Target != null && pair.Value.Target.GetType().IsCollectible))
+                    removeFileTypes.Add(pair.Key);
+            }
+            foreach (var fileType in removeFileTypes)
+                ImportFileEntry.FileTypes.Remove(fileType);
         }
 
         /// <inheritdoc />
@@ -443,6 +466,7 @@ namespace FlaxEditor.Modules
         /// <inheritdoc />
         public override void OnExit()
         {
+            ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
             EndWorker();
         }
     }

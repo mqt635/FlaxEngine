@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "JsonTools.h"
 #include "ISerializable.h"
 #include "Engine/Core/Collections/Dictionary.h"
-#include "Engine/Core/Types/CommonValue.h"
 #include "Engine/Core/Types/DateTime.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Scripting/ScriptingObjectReference.h"
@@ -28,7 +27,7 @@ void ChangeIds(rapidjson_flax::Value& obj, rapidjson_flax::Document& document, c
     else if (obj.IsString() && obj.GetStringLength() == 32)
     {
         auto value = JsonTools::GetGuid(obj);
-        if (mapping.TryGet(value, value))
+        if (value.IsValid() && mapping.TryGet(value, value))
         {
             // Unoptimized version:
             //obj.SetString(value.ToString(Guid::FormatType::N).ToSTD().c_str(), 32, document.GetAllocator());
@@ -73,12 +72,127 @@ void ChangeIds(rapidjson_flax::Value& obj, rapidjson_flax::Document& document, c
     }
 }
 
+void JsonTools::MergeObjects(Value& target, Value& source, Value::AllocatorType& allocator)
+{
+    ASSERT(target.IsObject() && source.IsObject());
+    for (auto itr = source.MemberBegin(); itr != source.MemberEnd(); ++itr)
+        target.AddMember(itr->name, itr->value, allocator);
+}
+
 void JsonTools::ChangeIds(Document& doc, const Dictionary<Guid, Guid>& mapping)
 {
     if (mapping.IsEmpty())
         return;
     PROFILE_CPU();
     ::ChangeIds(doc, doc, mapping);
+}
+
+Float2 JsonTools::GetFloat2(const Value& value)
+{
+    Float2 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    result.X = mX != value.MemberEnd() ? mX->value.GetFloat() : 0.0f;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetFloat() : 0.0f;
+    return result;
+}
+
+Float3 JsonTools::GetFloat3(const Value& value)
+{
+    Float3 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    const auto mZ = value.FindMember("Z");
+    result.X = mX != value.MemberEnd() ? mX->value.GetFloat() : 0.0f;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetFloat() : 0.0f;
+    result.Z = mZ != value.MemberEnd() ? mZ->value.GetFloat() : 0.0f;
+    return result;
+}
+
+Float4 JsonTools::GetFloat4(const Value& value)
+{
+    Float4 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    const auto mZ = value.FindMember("Z");
+    const auto mW = value.FindMember("W");
+    result.X = mX != value.MemberEnd() ? mX->value.GetFloat() : 0.0f;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetFloat() : 0.0f;
+    result.Z = mZ != value.MemberEnd() ? mZ->value.GetFloat() : 0.0f;
+    result.W = mW != value.MemberEnd() ? mW->value.GetFloat() : 0.0f;
+    return result;
+}
+
+Double2 JsonTools::GetDouble2(const Value& value)
+{
+    Double2 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    result.X = mX != value.MemberEnd() ? mX->value.GetDouble() : 0.0;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetDouble() : 0.0;
+    return result;
+}
+
+Double3 JsonTools::GetDouble3(const Value& value)
+{
+    Double3 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    const auto mZ = value.FindMember("Z");
+    result.X = mX != value.MemberEnd() ? mX->value.GetDouble() : 0.0;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetDouble() : 0.0;
+    result.Z = mZ != value.MemberEnd() ? mZ->value.GetDouble() : 0.0;
+    return result;
+}
+
+Double4 JsonTools::GetDouble4(const Value& value)
+{
+    Double4 result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    const auto mZ = value.FindMember("Z");
+    const auto mW = value.FindMember("W");
+    result.X = mX != value.MemberEnd() ? mX->value.GetDouble() : 0.0;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetDouble() : 0.0;
+    result.Z = mZ != value.MemberEnd() ? mZ->value.GetDouble() : 0.0;
+    result.W = mW != value.MemberEnd() ? mW->value.GetDouble() : 0.0;
+    return result;
+}
+
+Color JsonTools::GetColor(const Value& value)
+{
+    Color result;
+    const auto mR = value.FindMember("R");
+    const auto mG = value.FindMember("G");
+    const auto mB = value.FindMember("B");
+    const auto mA = value.FindMember("A");
+    result.R = mR != value.MemberEnd() ? mR->value.GetFloat() : 0.0f;
+    result.G = mG != value.MemberEnd() ? mG->value.GetFloat() : 0.0f;
+    result.B = mB != value.MemberEnd() ? mB->value.GetFloat() : 0.0f;
+    result.A = mA != value.MemberEnd() ? mA->value.GetFloat() : 0.0f;
+    return result;
+}
+
+Quaternion JsonTools::GetQuaternion(const Value& value)
+{
+    Quaternion result;
+    const auto mX = value.FindMember("X");
+    const auto mY = value.FindMember("Y");
+    const auto mZ = value.FindMember("Z");
+    const auto mW = value.FindMember("W");
+    result.X = mX != value.MemberEnd() ? mX->value.GetFloat() : 0.0f;
+    result.Y = mY != value.MemberEnd() ? mY->value.GetFloat() : 0.0f;
+    result.Z = mZ != value.MemberEnd() ? mZ->value.GetFloat() : 0.0f;
+    result.W = mW != value.MemberEnd() ? mW->value.GetFloat() : 0.0f;
+    return result;
+}
+
+Ray JsonTools::GetRay(const Value& value)
+{
+    return Ray(
+        GetVector3(value, "Position", Vector3::Zero),
+        GetVector3(value, "Direction", Vector3::Forward)
+    );
 }
 
 Matrix JsonTools::GetMatrix(const Value& value)
@@ -103,11 +217,60 @@ Matrix JsonTools::GetMatrix(const Value& value)
     return result;
 }
 
+Transform JsonTools::GetTransform(const Value& value)
+{
+    return Transform(
+        GetVector3(value, "Translation", Vector3::Zero),
+        GetQuaternion(value, "Orientation", Quaternion::Identity),
+        GetFloat3(value, "Scale", Float3::One)
+    );
+}
+
+void JsonTools::GetTransform(Transform& result, const Value& value)
+{
+    GetVector3(result.Translation, value, "Translation");
+    GetQuaternion(result.Orientation, value, "Orientation");
+    GetFloat3(result.Scale, value, "Scale");
+}
+
+Plane JsonTools::GetPlane(const Value& value)
+{
+    Plane result;
+    const auto mD = value.FindMember("D");
+    result.Normal = GetVector3(value, "Normal", Vector3::One);
+    result.D = (Real)(mD != value.MemberEnd() ? mD->value.GetDouble() : 0.0);
+    return result;
+}
+
+Rectangle JsonTools::GetRectangle(const Value& value)
+{
+    return Rectangle(
+        GetVector2(value, "Location", Vector2::Zero),
+        GetVector2(value, "Size", Vector2::Zero)
+    );
+}
+
+BoundingSphere JsonTools::GetBoundingSphere(const Value& value)
+{
+    BoundingSphere result;
+    const auto mRadius = value.FindMember("Radius");
+    result.Center = GetVector3(value, "Center", Vector3::Zero);
+    result.Radius = mRadius != value.MemberEnd() ? mRadius->value.GetFloat() : 0.0f;
+    return result;
+}
+
+BoundingBox JsonTools::GetBoundingBox(const Value& value)
+{
+    return BoundingBox(
+        GetVector3(value, "Minimum", Vector3::Zero),
+        GetVector3(value, "Maximum", Vector3::Zero)
+    );
+}
+
 Guid JsonTools::GetGuid(const Value& value)
 {
-    if (value.IsNull())
+    if (!value.IsString() || value.GetStringLength() != 32)
         return Guid::Empty;
-    CHECK_RETURN(value.GetStringLength() == 32, Guid::Empty);
 
     // Split
     const char* a = value.GetString();
@@ -117,13 +280,14 @@ Guid JsonTools::GetGuid(const Value& value)
 
     // Parse
     Guid result;
-    StringUtils::ParseHex(a, 8, &result.A);
-    StringUtils::ParseHex(b, 8, &result.B);
-    StringUtils::ParseHex(c, 8, &result.C);
-    StringUtils::ParseHex(d, 8, &result.D);
+    bool failed = StringUtils::ParseHex(a, 8, &result.A);
+    failed |= StringUtils::ParseHex(b, 8, &result.B);
+    failed |= StringUtils::ParseHex(c, 8, &result.C);
+    failed |= StringUtils::ParseHex(d, 8, &result.D);
+    if (failed)
+        return Guid::Empty;
     return result;
 }
-
 
 DateTime JsonTools::GetDate(const Value& value)
 {
@@ -135,81 +299,13 @@ DateTime JsonTools::GetDateTime(const Value& value)
     return DateTime(value.GetInt64());
 }
 
-CommonValue JsonTools::GetCommonValue(const Value& value)
+bool JsonTools::GetGuidIfValid(Guid& result, const Value& node, const char* name)
 {
-    CommonValue result;
-    const auto typeMember = value.FindMember("Type");
-    const auto valueMember = value.FindMember("Value");
-    if (typeMember != value.MemberEnd() && typeMember->value.IsInt() && valueMember != value.MemberEnd())
+    auto member = node.FindMember(name);
+    if (member != node.MemberEnd())
     {
-        const auto& v = valueMember->value;
-        switch ((CommonType)typeMember->value.GetInt())
-        {
-        case CommonType::Bool:
-            result = v.GetBool();
-            break;
-        case CommonType::Integer:
-            result = v.GetInt();
-            break;
-        case CommonType::Float:
-            result = v.GetFloat();
-            break;
-        case CommonType::Vector2:
-            result = GetVector2(v);
-            break;
-        case CommonType::Vector3:
-            result = GetVector3(v);
-            break;
-        case CommonType::Vector4:
-            result = GetVector4(v);
-            break;
-        case CommonType::Color:
-            result = GetColor(v);
-            break;
-        case CommonType::Guid:
-            result = GetGuid(v);
-            break;
-        case CommonType::String:
-            result = v.GetText();
-            break;
-        case CommonType::Box:
-            result = GetBoundingBox(v);
-            break;
-        case CommonType::Rotation:
-            result = GetQuaternion(v);
-            break;
-        case CommonType::Transform:
-            result = GetTransform(v);
-            break;
-        case CommonType::Sphere:
-            result = GetBoundingSphere(v);
-            break;
-        case CommonType::Rectangle:
-            result = GetRectangle(v);
-            break;
-        case CommonType::Ray:
-            result = GetRay(v);
-            break;
-        case CommonType::Pointer:
-            result = (void*)v.GetInt64();
-            break;
-        case CommonType::Matrix:
-            result = GetMatrix(v);
-            break;
-        case CommonType::Blob:
-        {
-            const int32 length = v.GetStringLength();
-            result.SetBlob(length);
-            Encryption::Base64Decode(v.GetString(), length, result.AsBlob.Data);
-            break;
-        }
-        case CommonType::Object:
-            result = FindObject(GetGuid(v), ScriptingObject::GetStaticClass());
-            break;
-        default:
-        CRASH;
-            break;
-        }
+        result = GetGuid(member->value);
+        return result.IsValid();
     }
-    return result;
+    return false;
 }

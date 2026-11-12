@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,22 +9,18 @@
 /// <summary>
 /// The GDK platform implementation and application management utilities.
 /// </summary>
+API_CLASS(Static, Tag="NoTypeInitializer")
 class FLAXENGINE_API GDKPlatform : public Win32Platform
 {
 public:
-
-    /// <summary>
-    /// Win32 application windows class name.
-    /// </summary>
-    static const Char* ApplicationWindowClass;
 
     /// <summary>
     /// Handle to Win32 application instance.
     /// </summary>
     static void* Instance;
 
-    static Delegate<> OnSuspend;
-    static Delegate<> OnResume;
+    static Delegate<> Suspended;
+    static Delegate<> Resumed;
 
 public:
 
@@ -42,31 +38,38 @@ public:
     /// <param name="hInstance">The Win32 application instance.</param>
     static void PreInit(void* hInstance);
 
-    static bool IsRunningOnDevKit();
+    // True, if game is running Xbox Devkit.
+    API_PROPERTY() static bool IsRunningOnDevKit();
+    // Signs in user without showing UI. If user is not signed in, it will fail and return false. Use SignInWithUI to show UI and let user sign in.
+    API_FUNCTION() static void SignInSilently();
+    // Signs in user with showing UI. If user is already signed in, it will succeed and return true. If user is not signed in, it will show UI and let user sign in.
+    API_FUNCTION() static void SignInWithUI(bool allowGuests = true);
+    // Searches for a user with a specific local ID.
+    static User* FindUser(const struct XUserLocalId& id);
 
 public:
 
     // [Win32Platform]
     static bool Init();
+    static void LogInfo();
     static void BeforeRun();
     static void Tick();
     static void BeforeExit();
     static void Exit();
 #if !BUILD_RELEASE
-    static void Log(const StringView& msg);
+    static void Log(const StringView& msg, int32 logType = 1);
     static bool IsDebuggerPresent();
 #endif
+    static String GetSystemName();
+    static Version GetSystemVersion();
     static BatteryInfo GetBatteryInfo();
     static int32 GetDpi();
     static String GetUserLocaleName();
     static String GetComputerName();
-    static String GetUserName();
     static bool GetHasFocus();
     static bool CanOpenUrl(const StringView& url);
     static void OpenUrl(const StringView& url);
-    static Rectangle GetMonitorBounds(const Vector2& screenPos);
-    static Vector2 GetDesktopSize();
-    static Rectangle GetVirtualDesktopBounds();
+    static Float2 GetDesktopSize();
     static void GetEnvironmentVariables(Dictionary<String, String, HeapAllocation>& result);
     static bool GetEnvironmentVariable(const String& name, String& value);
     static bool SetEnvironmentVariable(const String& name, const String& value);

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,14 +10,15 @@
 /// <summary>
 /// Game ticking and timing system.
 /// </summary>
-API_CLASS(Static) class FLAXENGINE_API Time
+API_CLASS(Static, Attributes="DebugCommand") class FLAXENGINE_API Time
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Time);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Time);
     friend class Engine;
     friend class TimeService;
     friend class PhysicsSettings;
-public:
+    friend Window;
 
+public:
     /// <summary>
     /// Engine subsystem updating data.
     /// Used to invoke game logic updates, physics updates and rendering with possibly different frequencies.
@@ -25,7 +26,6 @@ public:
     class FLAXENGINE_API TickData
     {
     public:
-
         virtual ~TickData() = default;
 
         /// <summary>
@@ -75,14 +75,12 @@ public:
         TimeSpan UnscaledTime;
 
     public:
-
-        virtual void OnBeforeRun(float targetFps, double currentTime);
+        virtual void Synchronize(float targetFps, double currentTime, bool resetTotalTime);
         virtual void OnReset(float targetFps, double currentTime);
-        virtual bool OnTickBegin(float targetFps, float maxDeltaTime);
+        virtual bool OnTickBegin(double time, float targetFps, float maxDeltaTime);
         virtual void OnTickEnd();
 
     protected:
-
         void Advance(double time, double deltaTime);
     };
 
@@ -92,25 +90,21 @@ public:
     class FixedStepTickData : public TickData
     {
     public:
-
         /// <summary>
         /// The last few ticks delta times. Used to check if can use fixed steps or whenever is running slowly so should use normal stepping.
         /// </summary>
         SamplesBuffer<double, 4> Samples;
 
     public:
-
         // [TickData]
-        bool OnTickBegin(float targetFps, float maxDeltaTime) override;
+        bool OnTickBegin(double time, float targetFps, float maxDeltaTime) override;
     };
 
 private:
-
     static bool _gamePaused;
     static float _physicsMaxDeltaTime;
 
 public:
-
     /// <summary>
     /// The time at which the game started (UTC local).
     /// </summary>
@@ -140,7 +134,6 @@ public:
     API_FIELD() static float TimeScale;
 
 public:
-
     /// <summary>
     /// The game logic updating data.
     /// </summary>
@@ -162,7 +155,6 @@ public:
     static TickData* Current;
 
 public:
-
     /// <summary>
     /// Gets the current tick data (safety so returns Update tick data if no active).
     /// </summary>
@@ -221,19 +213,22 @@ public:
     /// <summary>
     /// Sets the fixed FPS for game logic updates (draw and update).
     /// </summary>
-    /// <param name="enable">>True if enable this feature, otherwise false.</param>
-    /// <param name="value">>The fixed draw/update rate for the time.</param>
+    /// <param name="enable">True if enable this feature, otherwise false.</param>
+    /// <param name="value">The fixed draw/update rate for the time.</param>
     API_FUNCTION() static void SetFixedDeltaTime(bool enable, float value);
 
-private:
+    /// <summary>
+    /// Synchronizes update, fixed update and draw. Resets any pending deltas for fresh ticking in sync.
+    /// </summary>
+    /// <param name="resetTotalTime">True if reset total time, otherwise only delta time and ticking is reset.</param>
+    API_FUNCTION() static void Synchronize(bool resetTotalTime = false);
 
+private:
     // Methods used by the Engine class
 
-    static void OnBeforeRun();
-
-    static bool OnBeginUpdate();
-    static bool OnBeginPhysics();
-    static bool OnBeginDraw();
+    static bool OnBeginUpdate(double time);
+    static bool OnBeginPhysics(double time);
+    static bool OnBeginDraw(double time);
 
     static void OnEndUpdate();
     static void OnEndPhysics();

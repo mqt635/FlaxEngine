@@ -1,15 +1,19 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Math/BoundingFrustum.h"
 #include "Engine/Core/Math/Matrix.h"
 #include "Engine/Core/Math/Vector3.h"
+#if USE_LARGE_WORLDS
+#include "Engine/Core/Math/Double4x4.h"
+#endif
 #include "Engine/Core/Types/LayersMask.h"
 #include "Engine/Level/Types.h"
 #include "Enums.h"
 
 struct RenderContext;
+struct RenderContextBatch;
 struct Viewport;
 class Camera;
 class RenderList;
@@ -19,14 +23,24 @@ class SceneRenderTask;
 /// <summary>
 /// Rendering view description that defines how to render the objects (camera placement, rendering properties, etc.).
 /// </summary>
-API_STRUCT() struct FLAXENGINE_API RenderView
+API_STRUCT(NoDefault) struct FLAXENGINE_API RenderView
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(RenderView);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(RenderView);
 
     /// <summary>
-    /// The position of the view.
+    /// The position of the view origin (in world-units). Used for camera-relative rendering to achieve large worlds support with keeping 32-bit precision for coordinates in scene rendering.
     /// </summary>
-    API_FIELD() Vector3 Position;
+    API_FIELD() Vector3 Origin = Vector3::Zero;
+
+    /// <summary>
+    /// The global position of the view (Origin+Position).
+    /// </summary>
+    API_FIELD() Vector3 WorldPosition;
+
+    /// <summary>
+    /// The position of the view (relative to the origin).
+    /// </summary>
+    API_FIELD() Float3 Position;
 
     /// <summary>
     /// The far plane.
@@ -36,7 +50,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(RenderView);
     /// <summary>
     /// The direction of the view.
     /// </summary>
-    API_FIELD() Vector3 Direction;
+    API_FIELD() Float3 Direction;
 
     /// <summary>
     /// The near plane.
@@ -86,7 +100,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(RenderView);
     API_FIELD() BoundingFrustum CullingFrustum;
 
 public:
-
     /// <summary>
     /// The draw passes mask for the current view rendering.
     /// </summary>
@@ -98,9 +111,29 @@ public:
     API_FIELD() bool IsOfflinePass = false;
 
     /// <summary>
+    /// Flag used by single-frame rendering passes (eg. thumbnail rendering, model view caching) to reject LOD transitions animations and other temporal draw effects.
+    /// </summary>
+    API_FIELD() bool IsSingleFrame = false;
+
+    /// <summary>
+    /// Flag used by custom passes to skip any object culling when drawing.
+    /// </summary>
+    API_FIELD() bool IsCullingDisabled = false;
+
+    /// <summary>
+    /// True if TAA has been resolved when rendering view and frame doesn't contain jitter anymore. Rendering geometry after this point should not use jitter anymore (eg. editor gizmos or custom geometry as overlay).
+    /// </summary>
+    API_FIELD() bool IsTaaResolved = false;
+
+    /// <summary>
     /// The static flags mask used to hide objects that don't have a given static flags. Eg. use StaticFlags::Lightmap to render only objects that can use lightmap.
     /// </summary>
     API_FIELD() StaticFlags StaticFlagsMask = StaticFlags::None;
+
+    /// <summary>
+    /// The static flags mask comparision rhs. Allows to draw objects that don't pass the static flags mask. Objects are checked with the following formula: (ObjectStaticFlags and StaticFlagsMask) == StaticFlagsMaskCompare.
+    /// </summary>
+    API_FIELD() StaticFlags StaticFlagsCompare = StaticFlags::None;
 
     /// <summary>
     /// The view flags.
@@ -111,6 +144,11 @@ public:
     /// The view mode.
     /// </summary>
     API_FIELD() ViewMode Mode = ViewMode::Default;
+
+    /// <summary>
+    /// The viewport rectangle. See ViewportRect on Camera to learn more.
+    /// </summary>
+    API_FIELD() Float4 ViewportRect = Float4(0, 0, 1, 1);
 
     /// <summary>
     /// Maximum allowed shadows quality for this view
@@ -129,16 +167,18 @@ public:
 
     /// <summary>
     /// The model LOD bias. Default is 0. Applied to all the objects in the shadow maps render views. Can be used to improve shadows rendering performance or increase quality.
+    /// [Deprecated on 26.10.2022, expires on 26.10.2024]
     /// </summary>
-    API_FIELD() int32 ShadowModelLODBias = 0;
+    API_FIELD() DEPRECATED() int32 ShadowModelLODBias = 0;
 
     /// <summary>
     /// The model LOD distance scale factor. Default is 1. Applied to all the objects in the shadow maps render views. Higher values increase LODs quality. Can be used to improve shadows rendering performance or increase quality.
+    /// [Deprecated on 26.10.2022, expires on 26.10.2024]
     /// </summary>
-    API_FIELD() float ShadowModelLODDistanceFactor = 1.0f;
+    API_FIELD() DEPRECATED() float ShadowModelLODDistanceFactor = 1.0f;
 
     /// <summary>
-    /// The Temporal Anti-Aliasing jitter frame index.
+    /// Temporal Anti-Aliasing jitter frame index.
     /// </summary>
     API_FIELD() int32 TaaFrameIndex = 0;
 
@@ -148,21 +188,25 @@ public:
     API_FIELD() LayersMask RenderLayersMask;
 
 public:
-
     /// <summary>
     /// The view information vector with packed components to reconstruct linear depth and view position from the hardware depth buffer. Cached before rendering.
     /// </summary>
-    API_FIELD() Vector4 ViewInfo;
+    API_FIELD() Float4 ViewInfo;
 
     /// <summary>
     /// The screen size packed (x - width, y - height, zw - inv width, w - inv height). Cached before rendering.
     /// </summary>
-    API_FIELD() Vector4 ScreenSize;
+    API_FIELD() Float4 ScreenSize;
 
     /// <summary>
     /// The temporal AA jitter packed (xy - this frame jitter, zw - previous frame jitter). Cached before rendering. Zero if TAA is disabled. The value added to projection matrix (in clip space).
     /// </summary>
-    API_FIELD() Vector4 TemporalAAJitter;
+    API_FIELD() Float4 TemporalAAJitter;
+
+    /// <summary>
+    /// The previous frame rendering view origin.
+    /// </summary>
+    API_FIELD() Vector3 PrevOrigin;
 
     /// <summary>
     /// The previous frame view matrix.
@@ -178,6 +222,16 @@ public:
     /// The previous frame view * projection matrix.
     /// </summary>
     API_FIELD() Matrix PrevViewProjection;
+
+    /// <summary>
+    /// The main viewport view * projection matrix.
+    /// </summary>
+    API_FIELD() Matrix MainViewProjection;
+
+    /// <summary>
+    /// The main viewport screen size packed (x - width, y - height, zw - inv width, w - inv height).
+    /// </summary>
+    API_FIELD() Float4 MainScreenSize;
 
     /// <summary>
     /// Square of <see cref="ModelLODDistanceFactor"/>. Cached by rendering backend.
@@ -197,7 +251,8 @@ public:
     /// <param name="width">The rendering width.</param>
     /// <param name="height">The rendering height.</param>
     /// <param name="temporalAAJitter">The temporal jitter for this frame.</param>
-    void PrepareCache(RenderContext& renderContext, float width, float height, const Vector2& temporalAAJitter);
+    /// <param name="mainView">The main rendering viewport. Use null if it's top level view; pass pointer to main view for sub-passes like shadow depths.</param>
+    void PrepareCache(const RenderContext& renderContext, float width, float height, const Float2& temporalAAJitter, const RenderView* mainView = nullptr);
 
     /// <summary>
     /// Determines whether view is perspective projection or orthographic.
@@ -215,65 +270,51 @@ public:
         return Projection.M44 >= 1.0f;
     }
 
+    /// <summary>
+    /// Determines whether view Origin has been moved in this frame. Old history buffers/data might be invalid.
+    /// </summary>
+    FORCE_INLINE bool IsOriginTeleport() const
+    {
+        return Origin != PrevOrigin;
+    }
+
 public:
-
-    // Set up view with custom params
-    // @param viewProjection View * Projection matrix
-    void SetUp(const Matrix& viewProjection)
-    {
-        // Copy data
-        Matrix::Invert(viewProjection, IVP);
-        Frustum.SetMatrix(viewProjection);
-        CullingFrustum = Frustum;
-    }
-
-    // Set up view with custom params
-    // @param view View matrix
-    // @param projection Projection matrix
-    void SetUp(const Matrix& view, const Matrix& projection)
-    {
-        // Copy data
-        Projection = projection;
-        NonJitteredProjection = projection;
-        View = view;
-        Matrix::Invert(View, IV);
-        Matrix::Invert(Projection, IP);
-
-        // Compute matrix
-        Matrix viewProjection;
-        Matrix::Multiply(View, Projection, viewProjection);
-        Matrix::Invert(viewProjection, IVP);
-        Frustum.SetMatrix(viewProjection);
-        CullingFrustum = Frustum;
-    }
+    // Ignore deprecation warnings in defaults
+    PRAGMA_DISABLE_DEPRECATION_WARNINGS
+    RenderView() = default;
+    RenderView(const RenderView& other) = default;
+    RenderView(RenderView&& other) = default;
+    RenderView& operator=(const RenderView& other) = default;
+    PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
     /// <summary>
-    /// Set up view for cube rendering
+    /// Updates the cached data for the view (inverse matrices, etc.).
+    /// </summary>
+    void UpdateCachedData();
+
+    // Setups view with custom params.
+    void SetUp(const Matrix& viewProjection);
+
+    // Setups view with custom params.
+    void SetUp(const Matrix& view, const Matrix& projection);
+
+    /// <summary>
+    /// Setups view for cube rendering.
     /// </summary>
     /// <param name="nearPlane">Near plane</param>
     /// <param name="farPlane">Far plane</param>
     /// <param name="position">Camera's position</param>
-    void SetUpCube(float nearPlane, float farPlane, const Vector3& position)
-    {
-        // Copy data
-        Near = nearPlane;
-        Far = farPlane;
-        Position = position;
-
-        // Create projection matrix
-        Matrix::PerspectiveFov(PI_OVER_2, 1.0f, nearPlane, farPlane, Projection);
-        NonJitteredProjection = Projection;
-        Matrix::Invert(Projection, IP);
-    }
+    /// <param name="fov">Camera's field of view in radians (90 degrees by default)</param>
+    void SetUpCube(float nearPlane, float farPlane, const Float3& position, float fov = PI_OVER_2);
 
     /// <summary>
-    /// Set up view for given face of the cube rendering
+    /// Setups view for given face of the cube rendering.
     /// </summary>
     /// <param name="faceIndex">Face index(0-5)</param>
     void SetFace(int32 faceIndex);
 
     /// <summary>
-    /// Set up view for cube rendering
+    /// Setups view for cube rendering.
     /// </summary>
     /// <param name="nearPlane">Near plane</param>
     /// <param name="farPlane">Far plane</param>
@@ -281,53 +322,66 @@ public:
     /// <param name="direction">Camera's direction vector</param>
     /// <param name="up">Camera's up vector</param>
     /// <param name="angle">Camera's FOV angle (in degrees)</param>
-    void SetProjector(float nearPlane, float farPlane, const Vector3& position, const Vector3& direction, const Vector3& up, float angle)
+    void SetProjector(float nearPlane, float farPlane, const Float3& position, const Float3& direction, const Float3& up, float angle);
+
+    /// <summary>
+    /// Copies view data from camera to the view.
+    /// </summary>
+    /// <param name="camera">The camera to copy its data.</param>
+    /// <param name="viewport">The custom viewport to use for view/projection matrices override.</param>
+    void CopyFrom(const Camera* camera, const Viewport* viewport = nullptr);
+
+public:
+    FORCE_INLINE DrawPass GetShadowsDrawPassMask(ShadowsCastingMode shadowsMode) const
     {
-        // Copy data
-        Near = nearPlane;
-        Far = farPlane;
-        Position = position;
-
-        // Create projection matrix
-        Matrix::PerspectiveFov(angle * DegreesToRadians, 1.0f, nearPlane, farPlane, Projection);
-        NonJitteredProjection = Projection;
-        Matrix::Invert(Projection, IP);
-
-        // Create view matrix
-        Direction = direction;
-        Matrix::LookAt(Position, Position + Direction, up, View);
-        Matrix::Invert(View, IV);
-
-        // Compute frustum matrix
-        Frustum.SetMatrix(View, Projection);
-        Matrix::Invert(ViewProjection(), IVP);
-        CullingFrustum = Frustum;
+        switch (shadowsMode)
+        {
+        case ShadowsCastingMode::All:
+            return DrawPass::All;
+        case ShadowsCastingMode::DynamicOnly:
+            return IsOfflinePass ? ~DrawPass::Depth : DrawPass::All;
+        case ShadowsCastingMode::StaticOnly:
+            return IsOfflinePass ? DrawPass::All : ~DrawPass::Depth;
+        case ShadowsCastingMode::None:
+            return ~DrawPass::Depth;
+        default:
+            return DrawPass::All;
+        }
     }
 
-    // Copy view data from camera
-    // @param camera Camera to copy its data
-    void CopyFrom(Camera* camera);
-
-    // Copy view data from camera
-    // @param camera Camera to copy its data
-    // @param camera The custom viewport to use for view/projection matrices override.
-    void CopyFrom(Camera* camera, Viewport* viewport);
-
 public:
-
-    DrawPass GetShadowsDrawPassMask(ShadowsCastingMode shadowsMode) const;
-
-public:
-
     // Camera's View * Projection matrix
     FORCE_INLINE const Matrix& ViewProjection() const
     {
         return Frustum.GetMatrix();
     }
 
-    // Camera's View * Projection matrix
-    FORCE_INLINE Matrix ViewProjection()
+    // Calculates the world matrix for the given transformation instance rendering.
+    void GetWorldMatrix(const Transform& transform, Matrix& world) const;
+
+    // Applies the render origin to the transformation instance matrix.
+    FORCE_INLINE void GetWorldMatrix(Matrix& world) const
     {
-        return Frustum.GetMatrix();
+        world.M41 -= (float)Origin.X;
+        world.M42 -= (float)Origin.Y;
+        world.M43 -= (float)Origin.Z;
     }
+
+    // Applies the render origin to the transformation instance matrix.
+    void GetWorldMatrix(Double4x4& world) const;
+
+    // Gets the local origin-space frustum that is not relative to world but to the current rendering offset.
+    void GetLocalFrustum(BoundingFrustum& frustum) const;
+};
+
+// Removes TAA jitter from the RenderView when drawing geometry after TAA has been resolved to prevent unwanted jittering.
+struct TaaJitterRemoveContext
+{
+private:
+    RenderView* _view = nullptr;
+    Matrix _prevProjection, _prevNonJitteredProjection;
+
+public:
+    TaaJitterRemoveContext(const RenderView& view);
+    ~TaaJitterRemoveContext();
 };

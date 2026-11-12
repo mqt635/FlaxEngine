@@ -1,37 +1,41 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
 #include "GPUContextVulkan.h"
 #include "CmdBufferVulkan.h"
+#include "GPUAdapterVulkan.h"
 #include "RenderToolsVulkan.h"
 #include "Engine/Core/Math/Color.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "GPUBufferVulkan.h"
 #include "GPUShaderVulkan.h"
 #include "GPUSamplerVulkan.h"
+#include "GPUVertexLayoutVulkan.h"
 #include "GPUPipelineStateVulkan.h"
 #include "Engine/Profiler/RenderStats.h"
 #include "GPUShaderProgramVulkan.h"
 #include "GPUTextureVulkan.h"
+#include "QueueVulkan.h"
+#include "Engine/Graphics/GPUPass.h"
 #include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Debug/Exceptions/NotImplementedException.h"
 
 // Ensure to match the indirect commands arguments layout
 static_assert(sizeof(GPUDispatchIndirectArgs) == sizeof(VkDispatchIndirectCommand), "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountX) == OFFSET_OF(VkDispatchIndirectCommand, x), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountX");
-static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == OFFSET_OF(VkDispatchIndirectCommand, y),"Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
+static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == OFFSET_OF(VkDispatchIndirectCommand, y), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountZ) == OFFSET_OF(VkDispatchIndirectCommand, z), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountZ");
 //
 static_assert(sizeof(GPUDrawIndirectArgs) == sizeof(VkDrawIndirectCommand), "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, VerticesCount) == OFFSET_OF(VkDrawIndirectCommand, vertexCount), "Wrong offset for GPUDrawIndirectArgs::VerticesCount");
-static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(VkDrawIndirectCommand, instanceCount),"Wrong offset for GPUDrawIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(VkDrawIndirectCommand, instanceCount), "Wrong offset for GPUDrawIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartVertex) == OFFSET_OF(VkDrawIndirectCommand, firstVertex), "Wrong offset for GPUDrawIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartInstance) == OFFSET_OF(VkDrawIndirectCommand, firstInstance), "Wrong offset for GPUDrawIndirectArgs::StartInstance");
 //
 static_assert(sizeof(GPUDrawIndexedIndirectArgs) == sizeof(VkDrawIndexedIndirectCommand), "Wrong size of GPUDrawIndexedIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, IndicesCount) == OFFSET_OF(VkDrawIndexedIndirectCommand, indexCount), "Wrong offset for GPUDrawIndexedIndirectArgs::IndicesCount");
-static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(VkDrawIndexedIndirectCommand, instanceCount),"Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(VkDrawIndexedIndirectCommand, instanceCount), "Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartIndex) == OFFSET_OF(VkDrawIndexedIndirectCommand, firstIndex), "Wrong offset for GPUDrawIndexedIndirectArgs::StartIndex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartVertex) == OFFSET_OF(VkDrawIndexedIndirectCommand, vertexOffset), "Wrong offset for GPUDrawIndexedIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartInstance) == OFFSET_OF(VkDrawIndexedIndirectCommand, firstInstance), "Wrong offset for GPUDrawIndexedIndirectArgs::StartInstance");
@@ -72,55 +76,20 @@ const Char* ToString(VkImageLayout layout)
 
 #endif
 
-void PipelineBarrierVulkan::AddImageBarrier(VkImage image, const VkImageSubresourceRange& range, VkImageLayout srcLayout, VkImageLayout dstLayout, GPUTextureViewVulkan* handle)
-{
-#if VK_ENABLE_BARRIERS_DEBUG
-    ImageBarriersDebug.Add(handle);
-#endif
-    VkImageMemoryBarrier& imageBarrier = ImageBarriers.AddOne();
-    RenderToolsVulkan::ZeroStruct(imageBarrier, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-    imageBarrier.image = image;
-    imageBarrier.subresourceRange = range;
-    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.oldLayout = srcLayout;
-    imageBarrier.newLayout = dstLayout;
-    SourceStage |= RenderToolsVulkan::GetImageBarrierFlags(srcLayout, imageBarrier.srcAccessMask);
-    DestStage |= RenderToolsVulkan::GetImageBarrierFlags(dstLayout, imageBarrier.dstAccessMask);
-#if VK_ENABLE_BARRIERS_DEBUG
-    LOG(Warning, "Image Barrier: 0x{0:x}, {1} -> {2} for baseMipLevel: {3}, baseArrayLayer: {4}, levelCount: {5}, layerCount: {6} ({7})",
-        (uintptr)image,
-        ToString(srcLayout),
-        ToString(dstLayout),
-        range.baseMipLevel,
-        range.baseArrayLayer,
-        range.levelCount,
-        range.layerCount,
-        handle && handle->Owner->AsGPUResource() ? handle->Owner->AsGPUResource()->ToString() : String::Empty
-    );
-#endif
-}
-
-void PipelineBarrierVulkan::AddBufferBarrier(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size, VkAccessFlags srcAccess, VkAccessFlags dstAccess)
-{
-    VkBufferMemoryBarrier& bufferBarrier = BufferBarriers.AddOne();
-    RenderToolsVulkan::ZeroStruct(bufferBarrier, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER);
-    bufferBarrier.buffer = buffer;
-    bufferBarrier.offset = offset;
-    bufferBarrier.size = size;
-    bufferBarrier.srcAccessMask = srcAccess;
-    bufferBarrier.dstAccessMask = dstAccess;
-    bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    SourceStage |= RenderToolsVulkan::GetBufferBarrierFlags(srcAccess);
-    DestStage |= RenderToolsVulkan::GetBufferBarrierFlags(dstAccess);
-}
-
-void PipelineBarrierVulkan::Execute(CmdBufferVulkan* cmdBuffer)
+void PipelineBarrierVulkan::Execute(const CmdBufferVulkan* cmdBuffer)
 {
     ASSERT(cmdBuffer->IsOutsideRenderPass());
-    vkCmdPipelineBarrier(cmdBuffer->GetHandle(), SourceStage, DestStage, 0, 0, nullptr, BufferBarriers.Count(), BufferBarriers.Get(), ImageBarriers.Count(), ImageBarriers.Get());
-    Reset();
+    vkCmdPipelineBarrier(cmdBuffer->GetHandle(), SourceStage, DestStage, 0, MemoryBarriers.Count(), MemoryBarriers.Get(), BufferBarriers.Count(), BufferBarriers.Get(), ImageBarriers.Count(), ImageBarriers.Get());
+
+    // Reset
+    SourceStage = 0;
+    DestStage = 0;
+    ImageBarriers.Clear();
+    BufferBarriers.Clear();
+    MemoryBarriers.Clear();
+#if VK_ENABLE_BARRIERS_DEBUG
+	ImageBarriersDebug.Clear();
+#endif
 }
 
 GPUContextVulkan::GPUContextVulkan(GPUDeviceVulkan* device, QueueVulkan* queue)
@@ -135,10 +104,44 @@ GPUContextVulkan::GPUContextVulkan(GPUDeviceVulkan* device, QueueVulkan* queue)
     _handles[(int32)SpirvShaderResourceBindingType::SAMPLER] = nullptr;
     _handles[(int32)SpirvShaderResourceBindingType::SRV] = _srHandles;
     _handles[(int32)SpirvShaderResourceBindingType::UAV] = _uaHandles;
+#if ENABLE_ASSERTION
+    _handlesSizes[(int32)SpirvShaderResourceBindingType::INVALID] = 0;
+    _handlesSizes[(int32)SpirvShaderResourceBindingType::CB] = GPU_MAX_CB_BINDED;
+    _handlesSizes[(int32)SpirvShaderResourceBindingType::SAMPLER] = GPU_MAX_SAMPLER_BINDED;
+    _handlesSizes[(int32)SpirvShaderResourceBindingType::SRV] = GPU_MAX_SR_BINDED;
+    _handlesSizes[(int32)SpirvShaderResourceBindingType::UAV] = GPU_MAX_UA_BINDED;
+#endif
+
+#if VULKAN_USE_TRACY_GPU
+#if VK_EXT_calibrated_timestamps && VK_EXT_host_query_reset && !PLATFORM_SWITCH
+    // Use calibrated timestamps extension
+    if (vkResetQueryPoolEXT && vkGetCalibratedTimestampsEXT && _device->PhysicalDeviceFeatures12.hostQueryReset)
+    {
+        _tracyContext = tracy::CreateVkContext(_device->Adapter->Gpu, _device->Device, vkResetQueryPoolEXT, vkGetPhysicalDeviceCalibrateableTimeDomainsEXT, vkGetCalibratedTimestampsEXT);
+    }
+    else
+#endif
+    {
+        // Use immediate command buffer for timestamps calibration
+        VkCommandBufferAllocateInfo cmdInfo;
+        RenderToolsVulkan::ZeroStruct(cmdInfo, VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
+        cmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdInfo.commandPool = _cmdBufferManager->GetHandle();
+        cmdInfo.commandBufferCount = 1;
+        VkCommandBuffer tracyCmdBuffer;
+        vkAllocateCommandBuffers(_device->Device, &cmdInfo, &tracyCmdBuffer);
+        _tracyContext = tracy::CreateVkContext(_device->Adapter->Gpu, _device->Device, _queue->GetHandle(), tracyCmdBuffer, vkGetPhysicalDeviceCalibrateableTimeDomainsEXT, vkGetCalibratedTimestampsEXT);
+        vkQueueWaitIdle(_queue->GetHandle());
+        vkFreeCommandBuffers(_device->Device, _cmdBufferManager->GetHandle(), 1, &tracyCmdBuffer);
+    }
+#endif
 }
 
 GPUContextVulkan::~GPUContextVulkan()
 {
+#if VULKAN_USE_TRACY_GPU
+    tracy::DestroyVkContext(_tracyContext);
+#endif
     for (int32 i = 0; i < _descriptorPools.Count(); i++)
     {
         _descriptorPools[i].ClearDelete();
@@ -147,33 +150,50 @@ GPUContextVulkan::~GPUContextVulkan()
     Delete(_cmdBufferManager);
 }
 
-void GPUContextVulkan::AddImageBarrier(VkImage image, VkImageLayout srcLayout, VkImageLayout dstLayout, VkImageSubresourceRange& subresourceRange, GPUTextureViewVulkan* handle)
+void GPUContextVulkan::AddImageBarrier(VkImage image, VkImageLayout srcLayout, VkImageLayout dstLayout, const VkImageSubresourceRange& subresourceRange, GPUTextureViewVulkan* handle)
 {
 #if VK_ENABLE_BARRIERS_BATCHING
     // Auto-flush on overflow
     if (_barriers.IsFull())
-    {
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-        if (cmdBuffer->IsInsideRenderPass())
-            EndRenderPass();
-        _barriers.Execute(cmdBuffer);
-    }
+        FlushBarriers();
 #endif
 
     // Insert barrier
-    _barriers.AddImageBarrier(image, subresourceRange, srcLayout, dstLayout, handle);
+#if VK_ENABLE_BARRIERS_DEBUG
+    _barriers.ImageBarriersDebug.Add(handle);
+#endif
+    VkImageMemoryBarrier& imageBarrier = _barriers.ImageBarriers.AddOne();
+    RenderToolsVulkan::ZeroStruct(imageBarrier, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+    imageBarrier.image = image;
+    imageBarrier.subresourceRange = subresourceRange;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.oldLayout = srcLayout;
+    imageBarrier.newLayout = dstLayout;
+    _barriers.SourceStage |= RenderToolsVulkan::GetImageBarrierFlags(srcLayout, imageBarrier.srcAccessMask);
+    _barriers.DestStage |= RenderToolsVulkan::GetImageBarrierFlags(dstLayout, imageBarrier.dstAccessMask);
+#if VK_ENABLE_BARRIERS_DEBUG
+    LOG(Warning, "Image Barrier: 0x{0:x}, {1} -> {2} for baseMipLevel: {3}, baseArrayLayer: {4}, levelCount: {5}, layerCount: {6} ({7})",
+        (uintptr)image,
+        ::ToString(srcLayout),
+        ::ToString(dstLayout),
+        subresourceRange.baseMipLevel,
+        subresourceRange.baseArrayLayer,
+        subresourceRange.levelCount,
+        subresourceRange.layerCount,
+        handle && handle->Owner->AsGPUResource() ? handle->Owner->AsGPUResource()->ToString() : String::Empty
+    );
+#endif
 
 #if !VK_ENABLE_BARRIERS_BATCHING
     // Auto-flush without batching
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    if (cmdBuffer->IsInsideRenderPass())
-        EndRenderPass();
-    _barriers.Execute(cmdBuffer);
+    FlushBarriers();
 #endif
 }
 
 void GPUContextVulkan::AddImageBarrier(GPUTextureViewVulkan* handle, VkImageLayout dstLayout)
 {
+    ASSERT(handle->Owner);
     auto& state = handle->Owner->State;
     const auto subresourceIndex = handle->SubresourceIndex;
     if (subresourceIndex == -1)
@@ -190,7 +210,11 @@ void GPUContextVulkan::AddImageBarrier(GPUTextureViewVulkan* handle, VkImageLayo
                 range.baseMipLevel = 0;
                 range.levelCount = mipLevels;
                 range.baseArrayLayer = 0;
+#if VK_KHR_maintenance1
+                range.layerCount = VK_REMAINING_ARRAY_LAYERS; // maintenance9 could be enabled for per-layer masking
+#else
                 range.layerCount = handle->Owner->ArraySlices;
+#endif
                 AddImageBarrier(handle->Image, srcLayout, dstLayout, range, handle);
                 state.SetResourceState(dstLayout);
             }
@@ -209,6 +233,10 @@ void GPUContextVulkan::AddImageBarrier(GPUTextureViewVulkan* handle, VkImageLayo
                     range.levelCount = 1;
                     range.baseArrayLayer = i / mipLevels;
                     range.layerCount = 1;
+#if VK_KHR_maintenance1
+                    if (handle->Owner->ArraySlices == 1)
+                        range.layerCount = VK_REMAINING_ARRAY_LAYERS; // maintenance9 could be enabled for per-layer masking
+#endif
                     AddImageBarrier(handle->Image, srcLayout, dstLayout, range, handle);
                     state.SetSubresourceState(i, dstLayout);
                 }
@@ -244,6 +272,10 @@ void GPUContextVulkan::AddImageBarrier(GPUTextureVulkan* texture, int32 mipSlice
     range.levelCount = 1;
     range.baseArrayLayer = arraySlice;
     range.layerCount = 1;
+#if VK_KHR_maintenance1
+    if (texture->IsVolume())
+        range.layerCount = VK_REMAINING_ARRAY_LAYERS; // maintenance9 could be enabled for per-layer masking
+#endif
     AddImageBarrier(texture->GetHandle(), srcLayout, dstLayout, range, nullptr);
     state.SetSubresourceState(subresourceIndex, dstLayout);
 }
@@ -265,6 +297,10 @@ void GPUContextVulkan::AddImageBarrier(GPUTextureVulkan* texture, VkImageLayout 
         range.levelCount = texture->MipLevels();
         range.baseArrayLayer = 0;
         range.layerCount = texture->ArraySize();
+#if VK_KHR_maintenance1
+        if (texture->IsVolume())
+            range.layerCount = VK_REMAINING_ARRAY_LAYERS; // maintenance9 could be enabled for per-layer masking
+#endif
         AddImageBarrier(texture->GetHandle(), srcLayout, dstLayout, range, nullptr);
         state.SetResourceState(dstLayout);
     }
@@ -290,25 +326,55 @@ void GPUContextVulkan::AddBufferBarrier(GPUBufferVulkan* buffer, VkAccessFlags d
 #if VK_ENABLE_BARRIERS_BATCHING
     // Auto-flush on overflow
     if (_barriers.IsFull())
-    {
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-        if (cmdBuffer->IsInsideRenderPass())
-            EndRenderPass();
-        _barriers.Execute(cmdBuffer);
-    }
+        FlushBarriers();
 #endif
 
     // Insert barrier
-    _barriers.AddBufferBarrier(buffer->GetHandle(), 0, buffer->GetSize(), buffer->Access, dstAccess);
+    VkBufferMemoryBarrier& bufferBarrier = _barriers.BufferBarriers.AddOne();
+    RenderToolsVulkan::ZeroStruct(bufferBarrier, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER);
+    bufferBarrier.buffer = buffer->GetHandle();
+    bufferBarrier.offset = 0;
+    bufferBarrier.size = buffer->GetSize();
+    bufferBarrier.srcAccessMask = buffer->Access;
+    bufferBarrier.dstAccessMask = dstAccess;
+    bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    _barriers.SourceStage |= RenderToolsVulkan::GetBufferBarrierFlags(buffer->Access);
+    _barriers.DestStage |= RenderToolsVulkan::GetBufferBarrierFlags(dstAccess);
     buffer->Access = dstAccess;
 
 #if !VK_ENABLE_BARRIERS_BATCHING
     // Auto-flush without batching
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    if (cmdBuffer->IsInsideRenderPass())
-        EndRenderPass();
-    _barriers.Execute(cmdBuffer);
+    FlushBarriers();
 #endif
+}
+
+void GPUContextVulkan::AddMemoryBarrier()
+{
+#if VK_ENABLE_BARRIERS_BATCHING
+    // Auto-flush on overflow
+    if (_barriers.IsFull())
+        FlushBarriers();
+#endif
+
+    // Insert barrier
+    VkMemoryBarrier& memoryBarrier = _barriers.MemoryBarriers.AddOne();
+    RenderToolsVulkan::ZeroStruct(memoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+    memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    _barriers.SourceStage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    _barriers.DestStage |= VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+#if !VK_ENABLE_BARRIERS_BATCHING
+    // Auto-flush without batching
+    FlushBarriers();
+#endif
+}
+
+void GPUContextVulkan::AddUABarrier()
+{
+    _barriers.SourceStage |= VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    _barriers.DestStage |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 }
 
 void GPUContextVulkan::FlushBarriers()
@@ -330,13 +396,12 @@ DescriptorPoolVulkan* GPUContextVulkan::AllocateDescriptorSets(const VkDescripto
     VkDescriptorSetAllocateInfo allocateInfo = descriptorSetAllocateInfo;
     DescriptorPoolVulkan* pool = nullptr;
 
-    const uint32 hash = VULKAN_HASH_POOLS_WITH_TYPES_USAGE_ID ? layout.GetTypesUsageID() : GetHash(layout);
+    const uint32 hash = VULKAN_HASH_POOLS_WITH_LAYOUT_TYPES ? layout.SetLayoutsHash : GetHash(layout);
     DescriptorPoolArray* typedDescriptorPools = _descriptorPools.TryGet(hash);
 
     if (typedDescriptorPools != nullptr)
     {
         pool = typedDescriptorPools->HasItems() ? typedDescriptorPools->Last() : nullptr;
-
         if (pool && pool->CanAllocate(layout))
         {
             allocateInfo.descriptorPool = pool->GetHandle();
@@ -356,7 +421,6 @@ DescriptorPoolVulkan* GPUContextVulkan::AllocateDescriptorSets(const VkDescripto
         }
         else
         {
-            // Spec says any negative value could be due to fragmentation, so create a new Pool. If it fails here then we really are out of memory!
             pool = New<DescriptorPoolVulkan>(_device, layout);
             typedDescriptorPools->Add(pool);
             allocateInfo.descriptorPool = pool->GetHandle();
@@ -373,39 +437,79 @@ void GPUContextVulkan::BeginRenderPass()
 
     // Build render targets layout descriptor and framebuffer key
     FramebufferVulkan::Key framebufferKey;
+    Platform::MemoryClear(&framebufferKey, sizeof(framebufferKey));
     framebufferKey.AttachmentCount = _rtCount;
     RenderTargetLayoutVulkan layout;
+    Platform::MemoryClear(&layout, sizeof(layout));
+    layout.Flags = 0;
     layout.RTsCount = _rtCount;
-    layout.BlendEnable = _currentState && _currentState->BlendEnable;
     layout.DepthFormat = _rtDepth ? _rtDepth->GetFormat() : PixelFormat::Unknown;
-    for (int32 i = 0; i < GPU_MAX_RT_BINDED; i++)
+    VkClearValue clearValues[GPU_MAX_RT_BINDED + 1];
+    PendingClear clear;
+    for (int32 i = 0; i < _rtCount; i++)
     {
-        auto handle = _rtHandles[i];
+        auto handle = _rtTargets[i];
         if (handle)
         {
             layout.RTVsFormats[i] = handle->GetFormat();
             framebufferKey.Attachments[i] = handle->GetFramebufferView();
             AddImageBarrier(handle, handle->LayoutRTV);
-        }
-        else
-        {
-            layout.RTVsFormats[i] = PixelFormat::Unknown;
-            framebufferKey.Attachments[i] = VK_NULL_HANDLE;
+            uint64 mask = 1ull << i;
+            if (FindClear(handle, clear))
+            {
+                layout.LoadClear |= mask;
+                clearValues[i] = clear.Value;
+            }
+            if (_drawPass && _drawPass->RenderTargetsActions)
+            {
+                GPUDrawPassAction action = _drawPass->RenderTargetsActions[i];
+                if ((uint32)action & (uint32)GPUDrawPassAction::Clear && _drawPassCanClear)
+                    layout.LoadClear |= mask;
+                else if (((uint32)action & (uint32)GPUDrawPassAction::LoadMask) == 0)
+                    layout.LoadDontCare |= mask;
+                else if (((uint32)action & (uint32)GPUDrawPassAction::StoreMask) == 0)
+                    layout.StoreDontCare |= mask;
+            }
         }
     }
     GPUTextureViewVulkan* handle;
     if (_rtDepth)
     {
         handle = _rtDepth;
-        layout.ReadDepth = true; // TODO: use proper depthStencilAccess flags
-        layout.WriteDepth = handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; // TODO: do it in a proper way
+        layout.ReadDepth = true;
+        layout.ReadStencil = PixelFormatExtensions::HasStencil(handle->GetFormat());
+        layout.WriteDepth = handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL || handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL || handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        layout.WriteStencil = handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL || handle->LayoutRTV == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL || handle->LayoutRTV == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
         framebufferKey.AttachmentCount++;
         framebufferKey.Attachments[_rtCount] = handle->GetFramebufferView();
         AddImageBarrier(handle, handle->LayoutRTV);
+        uint64 mask = 1ull << _rtCount;
+        if (FindClear(handle, clear))
+        {
+            layout.LoadClear |= mask;
+            clearValues[_rtCount] = clear.Value;
+        }
+        if (_drawPass)
+        {
+            GPUDrawPassAction action = _drawPass->DepthAction;
+            if ((uint32)action & (uint32)GPUDrawPassAction::Clear && _drawPassCanClear)
+                layout.LoadClear |= mask;
+            else if (((uint32)action & (uint32)GPUDrawPassAction::LoadMask) == 0)
+                layout.LoadDontCare |= mask;
+            else if (((uint32)action & (uint32)GPUDrawPassAction::StoreMask) == 0)
+                layout.StoreDontCare |= mask;
+        }
     }
     else
     {
-        handle = _rtHandles[0];
+        handle = _rtTargets[0];
+#if !BUILD_RELEASE
+        if (!handle)
+        {
+            LOG(Error, "BeginRenderPass called with no render targets bound");
+            return;
+        }
+#endif
         layout.ReadDepth = false;
         layout.WriteDepth = false;
     }
@@ -414,16 +518,21 @@ void GPUContextVulkan::BeginRenderPass()
     layout.Extent.height = handle->Extent.height;
     layout.Layers = handle->Layers;
 
+    // Clear textures that are not bind to the render pass
+    if (_pendingClears.HasItems())
+        FlushManualClears();
+
     // Get or create objects
     auto renderPass = _device->GetOrCreateRenderPass(layout);
     framebufferKey.RenderPass = renderPass;
     auto framebuffer = _device->GetOrCreateFramebuffer(framebufferKey, layout.Extent, layout.Layers);
     _renderPass = renderPass;
+    _drawPassCanClear = false;
 
     FlushBarriers();
 
-    // TODO: use clear values for render pass begin to improve performance
-    cmdBuffer->BeginRenderPass(renderPass, framebuffer, 0, nullptr);
+    cmdBuffer->BeginRenderPass(renderPass, framebuffer, ARRAY_COUNT(clearValues), clearValues);
+    _rtDirtyFlag = false;
 }
 
 void GPUContextVulkan::EndRenderPass()
@@ -432,9 +541,55 @@ void GPUContextVulkan::EndRenderPass()
     cmdBuffer->EndRenderPass();
     _renderPass = nullptr;
 
-    // Place a barrier between RenderPasses, so that color / depth outputs can be read in subsequent passes
+    // Place a barrier between RenderPasses, so that color/depth outputs can be read in subsequent passes
     // TODO: remove it in future and use proper barriers without whole pipeline stalls
     vkCmdPipelineBarrier(cmdBuffer->GetHandle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
+}
+
+bool GPUContextVulkan::FindClear(const GPUTextureViewVulkan* view, PendingClear& clear)
+{
+    // Get last clear for render pass (the following ones will be done manually if the same resource was cleared twice)
+    for (int32 i = _pendingClears.Count() - 1; i >= 0; i--)
+    {
+        auto& e = _pendingClears.Get()[i];
+        if (e.View == view)
+        {
+            clear = e;
+            _pendingClears.RemoveAtKeepOrder(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+void GPUContextVulkan::ManualClear(const PendingClear& clear)
+{
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+    if (cmdBuffer->IsInsideRenderPass())
+        EndRenderPass();
+
+    AddImageBarrier(clear.View, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    FlushBarriers();
+
+    if (((GPUTextureVulkan*)clear.View->GetParent())->IsDepthStencil())
+    {
+        vkCmdClearDepthStencilImage(cmdBuffer->GetHandle(), clear.View->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear.Value.depthStencil, 1, &clear.View->Info.subresourceRange);
+    }
+    else
+    {
+        vkCmdClearColorImage(cmdBuffer->GetHandle(), clear.View->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear.Value.color, 1, &clear.View->Info.subresourceRange);
+    }
+}
+
+void GPUContextVulkan::FlushManualClears()
+{
+    // Batch barriers
+    for (auto& clear : _pendingClears)
+        AddImageBarrier(clear.View, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    for (auto& clear : _pendingClears)
+        ManualClear(clear);
+    _pendingClears.Clear();
 }
 
 void GPUContextVulkan::UpdateDescriptorSets(const SpirvShaderDescriptorInfo& descriptorInfo, DescriptorSetWriterVulkan& dsWriter, bool& needsWrite)
@@ -444,167 +599,128 @@ void GPUContextVulkan::UpdateDescriptorSets(const SpirvShaderDescriptorInfo& des
         const auto& descriptor = descriptorInfo.DescriptorTypes[i];
         const int32 descriptorIndex = descriptor.Binding;
         DescriptorOwnerResourceVulkan** handles = _handles[(int32)descriptor.BindingType];
-
-        switch (descriptor.DescriptorType)
+        for (uint32 index = 0; index < descriptor.Count; index++)
         {
-        case VK_DESCRIPTOR_TYPE_SAMPLER:
-        {
-            // Sampler
-            const VkSampler sampler = _samplerHandles[descriptor.Slot];
-            ASSERT(sampler);
-            needsWrite |= dsWriter.WriteSampler(descriptorIndex, sampler);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-        {
-            // Shader Resource (Texture)
-            auto handle = (GPUTextureViewVulkan*)handles[descriptor.Slot];
-            if (!handle)
+            const uint32 slot = descriptor.Slot + index;
+            ASSERT(slot < _handlesSizes[(int32)descriptor.BindingType]);
+            switch (descriptor.DescriptorType)
             {
-                const auto dummy = _device->HelperResources.GetDummyTexture(descriptor.ResourceType);
-                switch (descriptor.ResourceType)
+            case VK_DESCRIPTOR_TYPE_SAMPLER:
+            {
+                const VkSampler handle = _samplerHandles[slot];
+                ASSERT(handle);
+                needsWrite |= dsWriter.WriteSampler(descriptorIndex, handle, index);
+                break;
+            }
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            {
+                auto handle = (GPUTextureViewVulkan*)handles[slot];
+                if (!handle || !handle->Owner)
                 {
-                case SpirvShaderResourceType::Texture1D:
-                case SpirvShaderResourceType::Texture2D:
-                    handle = static_cast<GPUTextureViewVulkan*>(dummy->View(0));
-                    break;
-                case SpirvShaderResourceType::Texture3D:
-                    handle = static_cast<GPUTextureViewVulkan*>(dummy->ViewVolume());
-                    break;
-                case SpirvShaderResourceType::TextureCube:
-                case SpirvShaderResourceType::Texture1DArray:
-                case SpirvShaderResourceType::Texture2DArray:
-                    handle = static_cast<GPUTextureViewVulkan*>(dummy->ViewArray());
-                    break;
+                    const auto dummy = _device->HelperResources.GetDummyTexture(descriptor.ResourceType);
+                    switch (descriptor.ResourceType)
+                    {
+                    case SpirvShaderResourceType::Texture1D:
+                    case SpirvShaderResourceType::Texture2D:
+                        handle = static_cast<GPUTextureViewVulkan*>(dummy->View(0));
+                        break;
+                    case SpirvShaderResourceType::Texture3D:
+                        handle = static_cast<GPUTextureViewVulkan*>(dummy->ViewVolume());
+                        break;
+                    case SpirvShaderResourceType::TextureCube:
+                    case SpirvShaderResourceType::Texture1DArray:
+                    case SpirvShaderResourceType::Texture2DArray:
+                        handle = static_cast<GPUTextureViewVulkan*>(dummy->ViewArray());
+                        break;
+                    }
                 }
+                VkImageView imageView;
+                VkImageLayout layout;
+                handle->DescriptorAsImage(this, imageView, layout);
+                ASSERT(imageView != VK_NULL_HANDLE);
+                needsWrite |= dsWriter.WriteImage(descriptorIndex, imageView, layout, index);
+                break;
             }
-            VkImageView imageView;
-            VkImageLayout layout;
-            handle->DescriptorAsImage(this, imageView, layout);
-            ASSERT(imageView != VK_NULL_HANDLE);
-            needsWrite |= dsWriter.WriteImage(descriptorIndex, imageView, layout);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-        {
-            // Shader Resource (Buffer)
-            auto sr = handles[descriptor.Slot];
-            if (!sr)
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
             {
-                const auto dummy = _device->HelperResources.GetDummyBuffer();
-                sr = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                auto handle = handles[slot];
+                if (!handle)
+                {
+                    const auto dummy = _device->HelperResources.GetDummyBuffer(descriptor.ResourceFormat);
+                    handle = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                }
+                VkBufferView bufferView;
+                handle->DescriptorAsUniformTexelBuffer(this, bufferView);
+                ASSERT(bufferView != VK_NULL_HANDLE);
+                needsWrite |= dsWriter.WriteUniformTexelBuffer(descriptorIndex, bufferView, index);
+                break;
             }
-            const VkBufferView* bufferView;
-            sr->DescriptorAsUniformTexelBuffer(this, bufferView);
-            needsWrite |= dsWriter.WriteUniformTexelBuffer(descriptorIndex, bufferView);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-        {
-            // Unordered Access (Texture)
-            auto ua = handles[descriptor.Slot];
-            ASSERT(ua);
-            VkImageView imageView;
-            VkImageLayout layout;
-            ua->DescriptorAsStorageImage(this, imageView, layout);
-            needsWrite |= dsWriter.WriteStorageImage(descriptorIndex, imageView, layout);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-        {
-            // Unordered Access (Buffer)
-            auto ua = handles[descriptor.Slot];
-            if (!ua)
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
             {
-                const auto dummy = _device->HelperResources.GetDummyBuffer();
-                ua = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                auto handle = handles[slot];
+                ASSERT(handle);
+                VkImageView imageView;
+                VkImageLayout layout;
+                handle->DescriptorAsStorageImage(this, imageView, layout);
+                needsWrite |= dsWriter.WriteStorageImage(descriptorIndex, imageView, layout, index);
+                break;
             }
-            VkBuffer buffer;
-            VkDeviceSize offset, range;
-            ua->DescriptorAsStorageBuffer(this, buffer, offset, range);
-            needsWrite |= dsWriter.WriteStorageBuffer(descriptorIndex, buffer, offset, range);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-        {
-            // Unordered Access (Buffer)
-            auto ua = handles[descriptor.Slot];
-            if (!ua)
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
             {
-                const auto dummy = _device->HelperResources.GetDummyBuffer();
-                ua = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                auto handle = handles[slot];
+                if (!handle)
+                {
+                    if (descriptor.ResourceFormat == PixelFormat::Unknown)
+                        break;
+                    const auto dummy = _device->HelperResources.GetDummyBuffer(descriptor.ResourceFormat);
+                    handle = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                }
+                VkBuffer buffer;
+                VkDeviceSize offset, range;
+                handle->DescriptorAsStorageBuffer(this, buffer, offset, range);
+                needsWrite |= dsWriter.WriteStorageBuffer(descriptorIndex, buffer, offset, range, index);
+                break;
             }
-            const VkBufferView* bufferView;
-            ua->DescriptorAsStorageTexelBuffer(this, bufferView);
-            needsWrite |= dsWriter.WriteStorageTexelBuffer(descriptorIndex, bufferView);
-            break;
-        }
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-        {
-            // Constant Buffer
-            auto cb = handles[descriptor.Slot];
-            ASSERT(cb);
-            VkBuffer buffer;
-            VkDeviceSize offset, range;
-            uint32 dynamicOffset;
-            cb->DescriptorAsDynamicUniformBuffer(this, buffer, offset, range, dynamicOffset);
-            needsWrite |= dsWriter.WriteDynamicUniformBuffer(descriptorIndex, buffer, offset, range, dynamicOffset);
-            break;
-        }
-        default:
-            // Unknown or invalid descriptor type
-            CRASH;
-            break;
-        }
-    }
-}
-
-void GPUContextVulkan::UpdateDescriptorSets(GPUPipelineStateVulkan* pipelineState)
-{
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    const auto pipelineLayout = pipelineState->GetLayout();
-    ASSERT(pipelineLayout);
-    bool needsWrite = false;
-
-    // No current descriptor pools set - acquire one and reset
-    const bool newDescriptorPool = pipelineState->AcquirePoolSet(cmdBuffer);
-    needsWrite |= newDescriptorPool;
-
-    // Update descriptors for every used shader stage
-    uint32 remainingHasDescriptorsPerStageMask = pipelineState->HasDescriptorsPerStageMask;
-    for (int32 stage = 0; stage < DescriptorSet::GraphicsStagesCount && remainingHasDescriptorsPerStageMask; stage++)
-    {
-        // Only process stages that exist in this pipeline and use descriptors
-        if (remainingHasDescriptorsPerStageMask & 1)
-        {
-            UpdateDescriptorSets(*pipelineState->DescriptorInfoPerStage[stage], pipelineState->DSWriter[stage], needsWrite);
-        }
-
-        remainingHasDescriptorsPerStageMask >>= 1;
-    }
-
-    // Allocate sets if need to
-    //if (needsWrite) // TODO: write on change only?
-    {
-        if (!pipelineState->AllocateDescriptorSets())
-        {
-            return;
-        }
-        uint32 remainingStagesMask = pipelineState->HasDescriptorsPerStageMask;
-        uint32 stage = 0;
-        while (remainingStagesMask)
-        {
-            if (remainingStagesMask & 1)
+            case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
             {
-                const VkDescriptorSet descriptorSet = pipelineState->DescriptorSetHandles[stage];
-                pipelineState->DSWriter[stage].SetDescriptorSet(descriptorSet);
+                auto handle = handles[slot];
+                if (!handle)
+                {
+                    const auto dummy = _device->HelperResources.GetDummyBuffer(descriptor.ResourceFormat);
+                    handle = (DescriptorOwnerResourceVulkan*)dummy->View()->GetNativePtr();
+                }
+                VkBufferView bufferView;
+                handle->DescriptorAsStorageTexelBuffer(this, bufferView);
+                ASSERT(bufferView != VK_NULL_HANDLE);
+                needsWrite |= dsWriter.WriteStorageTexelBuffer(descriptorIndex, bufferView, index);
+                break;
             }
-
-            stage++;
-            remainingStagesMask >>= 1;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            {
+                auto handle = handles[slot];
+                VkBuffer buffer = VK_NULL_HANDLE;
+                VkDeviceSize offset = 0, range = 0;
+                uint32 dynamicOffset = 0;
+                if (!handle)
+                {
+                    auto cb = (GPUConstantBufferVulkan*)_device->HelperResources.GetDummyConstantBuffer();
+                    // TODO: cache this allocation within a frame
+                    const auto allocation = _device->UniformBufferUploader->Allocate(cb->GetSize(), 0, this);
+                    RENDER_STAT_DATA_UPLOAD(allocation.Size);
+                    Platform::MemoryClear(allocation.CPUAddress, allocation.Size);
+                    cb->Allocation = allocation;
+                    handle = cb;
+                }
+                handle->DescriptorAsDynamicUniformBuffer(this, buffer, offset, range, dynamicOffset);
+                needsWrite |= dsWriter.WriteDynamicUniformBuffer(descriptorIndex, buffer, offset, range, dynamicOffset, index);
+                break;
+            }
+            default:
+                // Unknown or invalid descriptor type
+                CRASH;
+                break;
+            }
         }
-
-        vkUpdateDescriptorSets(_device->Device, pipelineState->DSWriteContainer.DescriptorWrites.Count(), pipelineState->DSWriteContainer.DescriptorWrites.Get(), 0, nullptr);
     }
 }
 
@@ -637,29 +753,32 @@ void GPUContextVulkan::UpdateDescriptorSets(ComputePipelineStateVulkan* pipeline
     }
 }
 
-void GPUContextVulkan::BindPipeline()
-{
-    if (_psDirtyFlag && _currentState && (_rtDepth || _rtCount))
-    {
-        // Clear flag
-        _psDirtyFlag = false;
-
-        // Change state
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-        const auto pipeline = _currentState->GetState(_renderPass);
-        vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-        RENDER_STAT_PS_STATE_CHANGE();
-    }
-}
-
 void GPUContextVulkan::OnDrawCall()
 {
     GPUPipelineStateVulkan* pipelineState = _currentState;
     ASSERT(pipelineState && pipelineState->IsValid());
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    const auto pipelineLayout = pipelineState->GetLayout();
-    ASSERT(pipelineLayout);
+
+    // Flush pending image clears before binding descriptors but skip ones that are going to be used as render targets
+    // (they will be cleared in the render pass with proper loadOp and without extra barriers)
+    if (_pendingClears.HasItems())
+    {
+        auto rtHandles = ToSpan(_rtHandles, ARRAY_COUNT(_rtHandles));
+        for (auto& clear : _pendingClears)
+        {
+            if (!SpanContains(rtHandles, clear.View))
+                AddImageBarrier(clear.View, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        }
+        for (int32 i = 0; i < _pendingClears.Count(); i++)
+        {
+            auto& clear = _pendingClears.Get()[i];
+            if (!SpanContains(rtHandles, clear.View))
+            {
+                ManualClear(clear);
+                _pendingClears.RemoveAtKeepOrder(i--);
+            }
+        }
+    }
 
     // End previous render pass if render targets layout was modified
     if (_rtDirtyFlag && cmdBuffer->IsInsideRenderPass())
@@ -667,20 +786,45 @@ void GPUContextVulkan::OnDrawCall()
 
     if (pipelineState->HasDescriptorsPerStageMask)
     {
-        UpdateDescriptorSets(pipelineState);
+        // Get descriptor pools set
+        bool needsWrite = pipelineState->AcquirePoolSet(cmdBuffer);
+
+        // Update descriptors for every used shader stage
+        uint32 remainingHasDescriptorsPerStageMask = pipelineState->HasDescriptorsPerStageMask;
+        for (int32 stage = 0; stage < DescriptorSet::GraphicsStagesCount && remainingHasDescriptorsPerStageMask; stage++)
+        {
+            if (remainingHasDescriptorsPerStageMask & 1)
+                UpdateDescriptorSets(*pipelineState->DescriptorInfoPerStage[stage], pipelineState->DSWriter[stage], needsWrite);
+            remainingHasDescriptorsPerStageMask >>= 1;
+        }
+
+        // Allocate sets if need to
+        if (needsWrite)
+        {
+            if (!pipelineState->CurrentTypedDescriptorPoolSet->AllocateDescriptorSets(*pipelineState->DescriptorSetsLayout, pipelineState->DescriptorSetHandles.Get()))
+                return;
+            uint32 remainingStagesMask = pipelineState->HasDescriptorsPerStageMask;
+            uint32 stage = 0;
+            while (remainingStagesMask)
+            {
+                if (remainingStagesMask & 1)
+                    pipelineState->DSWriter[stage].SetDescriptorSet(pipelineState->DescriptorSetHandles[stage]);
+                remainingStagesMask >>= 1;
+                stage++;
+            }
+
+            vkUpdateDescriptorSets(_device->Device, pipelineState->DSWriteContainer.DescriptorWrites.Count(), pipelineState->DSWriteContainer.DescriptorWrites.Get(), 0, nullptr);
+        }
     }
 
-    // Bind any missing vertex buffers to null if required by the current state
-    const auto vertexInputState = pipelineState->GetVertexInputState();
-    const int32 missingVBs = vertexInputState->vertexBindingDescriptionCount - _vbCount;
-    if (missingVBs > 0)
+#if GPU_ENABLE_ASSERTION_LOW_LAYERS
+    // Check for missing vertex buffers layout
+    GPUVertexLayoutVulkan* vertexLayout = _vertexLayout ? _vertexLayout : pipelineState->VertexBufferLayout;
+    if (!vertexLayout && pipelineState && !pipelineState->VertexBufferLayout && (pipelineState->UsedStagesMask & (1 << (int32)DescriptorSet::Vertex)) != 0 && !_vertexLayout && _vbCount)
     {
-        VkBuffer buffers[GPU_MAX_VB_BINDED];
-        VkDeviceSize offsets[GPU_MAX_VB_BINDED] = {};
-        for (int32 i = 0; i < missingVBs; i++)
-            buffers[i] = _device->HelperResources.GetDummyVertexBuffer()->GetHandle();
-        vkCmdBindVertexBuffers(cmdBuffer->GetHandle(), _vbCount, missingVBs, buffers, offsets);
+        LOG(Error, "Missing Vertex Layout (not assigned to GPUBuffer). Vertex Shader won't read valid data resulting incorrect visuals.");
     }
+#endif
 
     // Start render pass if not during one
     if (cmdBuffer->IsOutsideRenderPass())
@@ -692,18 +836,28 @@ void GPUContextVulkan::OnDrawCall()
         BeginRenderPass();
     }
 
-    BindPipeline();
-
-    //UpdateDynamicStates();
+    // Bind pipeline
+    if (_psDirtyFlag && pipelineState && (_rtDepth || _rtCount))
+    {
+        _psDirtyFlag = false;
+        const auto pipeline = pipelineState->GetState(_renderPass, _vertexLayout);
+        vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        RENDER_STAT_PS_STATE_CHANGE();
+        if (_depthBoundsEnable && (!_currentState || !_currentState->DepthBoundsEnable))
+        {
+            // Auto-disable depth bounds
+            _depthBoundsEnable = false;
+            //vkCmdSetDepthBoundsTestEnable(cmdBuffer, false);
+        }
+    }
 
     // Bind descriptors sets to the graphics pipeline
     if (pipelineState->HasDescriptorsPerStageMask)
     {
-        pipelineState->Bind(cmdBuffer);
+        auto& descriptorSets = pipelineState->DescriptorSetHandles;
+        auto& dynamicOffsets = pipelineState->DynamicOffsets;
+        vkCmdBindDescriptorSets(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineState->GetLayout()->Handle, 0, descriptorSets.Count(), descriptorSets.Get(), dynamicOffsets.Count(), dynamicOffsets.Get());
     }
-
-    // Clear flag
-    _rtDirtyFlag = false;
 
 #if VK_ENABLE_BARRIERS_DEBUG
     LOG(Warning, "Draw");
@@ -721,23 +875,32 @@ void GPUContextVulkan::FrameBegin()
     _cbDirtyFlag = 0;
     _rtCount = 0;
     _vbCount = 0;
+    _stencilRef = 0;
     _renderPass = nullptr;
     _currentState = nullptr;
-    _rtDepth = nullptr;
+    _currentCompute = nullptr;
+    _vertexLayout = nullptr;
     Platform::MemoryClear(_rtHandles, sizeof(_rtHandles));
     Platform::MemoryClear(_cbHandles, sizeof(_cbHandles));
     Platform::MemoryClear(_srHandles, sizeof(_srHandles));
     Platform::MemoryClear(_uaHandles, sizeof(_uaHandles));
     Platform::MemoryCopy(_samplerHandles, _device->HelperResources.GetStaticSamplers(), sizeof(VkSampler) * GPU_STATIC_SAMPLERS_COUNT);
     Platform::MemoryClear(_samplerHandles + GPU_STATIC_SAMPLERS_COUNT, sizeof(_samplerHandles) - sizeof(VkSampler) * GPU_STATIC_SAMPLERS_COUNT);
+    _pendingClears.Clear();
+
+    // Init command buffer
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+    vkCmdSetStencilReference(cmdBuffer->GetHandle(), VK_STENCIL_FRONT_AND_BACK, _stencilRef);
+    VkBuffer buffers[1] = { _device->HelperResources.GetDummyVertexBuffer()->GetHandle() };
+    VkDeviceSize offsets[1] = {};
+    vkCmdBindVertexBuffers(cmdBuffer->GetHandle(), GPU_MAX_VB_BINDED, 1, buffers, offsets);
 
 #if VULKAN_RESET_QUERY_POOLS
     // Reset pending queries
     if (_device->QueriesToReset.HasItems())
     {
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
         for (auto query : _device->QueriesToReset)
-            query->Reset(cmdBuffer);
+            query->Reset(this);
         _device->QueriesToReset.Clear();
     }
 #endif
@@ -754,6 +917,11 @@ void GPUContextVulkan::FrameEnd()
     // Execute any queued layout transitions that weren't already handled by the render pass
     FlushBarriers();
 
+#if VULKAN_USE_TRACY_GPU
+    if (cmdBuffer)
+        tracy::CollectVkContext(_tracyContext, cmdBuffer->GetHandle());
+#endif
+
     // Base
     GPUContext::FrameEnd();
 }
@@ -763,7 +931,12 @@ void GPUContextVulkan::FrameEnd()
 void GPUContextVulkan::EventBegin(const Char* name)
 {
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    cmdBuffer->BeginEvent(name);
+#if VULKAN_USE_TRACY_GPU
+    void* tracyContext = _tracyContext;
+#else
+    void* tracyContext = nullptr;
+#endif
+    cmdBuffer->BeginEvent(name, tracyContext);
 }
 
 void GPUContextVulkan::EventEnd()
@@ -777,7 +950,7 @@ void GPUContextVulkan::EventEnd()
 void* GPUContextVulkan::GetNativePtr() const
 {
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    return (void*)cmdBuffer;
+    return (void*)cmdBuffer->GetHandle();
 }
 
 bool GPUContextVulkan::IsDepthBufferBinded()
@@ -787,59 +960,102 @@ bool GPUContextVulkan::IsDepthBufferBinded()
 
 void GPUContextVulkan::Clear(GPUTextureView* rt, const Color& color)
 {
-    auto rtVulkan = static_cast<GPUTextureViewVulkan*>(rt);
-
-    if (rtVulkan)
+    for (auto& e : _pendingClears)
     {
-        // TODO: detect if inside render pass and use ClearAttachments
-        // TODO: delay clear for attachments before render pass to use render pass clear values for faster clearing
-
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-        if (cmdBuffer->IsInsideRenderPass())
-            EndRenderPass();
-
-        AddImageBarrier(rtVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        FlushBarriers();
-
-        vkCmdClearColorImage(cmdBuffer->GetHandle(), rtVulkan->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (const VkClearColorValue*)color.Raw, 1, &rtVulkan->Info.subresourceRange);
+        if (e.View == rt)
+        {
+            // Use existing slot
+            Platform::MemoryCopy(e.Value.color.float32, color.Raw, sizeof(color.Raw));
+            return;
+        }
     }
+
+    // Add a new entry
+    auto& clear = _pendingClears.AddOne();
+    clear.View = (GPUTextureViewVulkan*)rt;
+    Platform::MemoryCopy(clear.Value.color.float32, color.Raw, sizeof(color.Raw));
 }
 
-void GPUContextVulkan::ClearDepth(GPUTextureView* depthBuffer, float depthValue)
+void GPUContextVulkan::ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue)
 {
-    const auto rtVulkan = static_cast<GPUTextureViewVulkan*>(depthBuffer);
-
-    if (rtVulkan)
+    for (auto& e : _pendingClears)
     {
-        // TODO: detect if inside render pass and use ClearAttachments
-        // TODO: delay clear for attachments before render pass to use render pass clear values for faster clearing
-
-        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-        if (cmdBuffer->IsInsideRenderPass())
-            EndRenderPass();
-
-        AddImageBarrier(rtVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        FlushBarriers();
-
-        VkClearDepthStencilValue clear;
-        clear.depth = depthValue;
-        clear.stencil = 0;
-        vkCmdClearDepthStencilImage(cmdBuffer->GetHandle(), rtVulkan->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &rtVulkan->Info.subresourceRange);
+        if (e.View == depthBuffer)
+        {
+            // Use existing slot
+            e.Value.depthStencil.depth = depthValue;
+            e.Value.depthStencil.stencil = stencilValue;
+            return;
+        }
     }
+
+    // Add a new entry
+    auto& clear = _pendingClears.AddOne();
+    clear.View = (GPUTextureViewVulkan*)depthBuffer;
+    clear.Value.depthStencil.depth = depthValue;
+    clear.Value.depthStencil.stencil = stencilValue;
 }
 
-void GPUContextVulkan::ClearUA(GPUBuffer* buf, const Vector4& value)
+void GPUContextVulkan::ClearUA(GPUBuffer* buf, const Float4& value)
 {
     const auto bufVulkan = static_cast<GPUBufferVulkan*>(buf);
-
     if (bufVulkan)
     {
         const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
         if (cmdBuffer->IsInsideRenderPass())
             EndRenderPass();
 
+        // TODO: add support for other components if buffer has them
         uint32_t* data = (uint32_t*)&value;
         vkCmdFillBuffer(cmdBuffer->GetHandle(), bufVulkan->GetHandle(), 0, bufVulkan->GetSize(), *data);
+    }
+}
+
+void GPUContextVulkan::ClearUA(GPUBuffer* buf, const uint32 value[4])
+{
+    const auto bufVulkan = static_cast<GPUBufferVulkan*>(buf);
+    if (bufVulkan)
+    {
+        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+        if (cmdBuffer->IsInsideRenderPass())
+            EndRenderPass();
+
+        // TODO: add support for other components if buffer has them
+        vkCmdFillBuffer(cmdBuffer->GetHandle(), bufVulkan->GetHandle(), 0, bufVulkan->GetSize(), value[0]);
+    }
+}
+
+void GPUContextVulkan::ClearUA(GPUTexture* texture, const uint32 value[4])
+{
+    const auto texVulkan = static_cast<GPUTextureVulkan*>(texture);
+    if (texVulkan)
+    {
+        auto rtVulkan = static_cast<GPUTextureViewVulkan*>(texVulkan->View(0));
+        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+        if (cmdBuffer->IsInsideRenderPass())
+            EndRenderPass();
+
+        AddImageBarrier(rtVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        FlushBarriers();
+
+        vkCmdClearColorImage(cmdBuffer->GetHandle(), rtVulkan->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (const VkClearColorValue*)value, 1, &rtVulkan->Info.subresourceRange);
+    }
+}
+
+void GPUContextVulkan::ClearUA(GPUTexture* texture, const Float4& value)
+{
+    const auto texVulkan = static_cast<GPUTextureVulkan*>(texture);
+    if (texVulkan)
+    {
+        auto rtVulkan = ((GPUTextureViewVulkan*)(texVulkan->IsVolume() ? texVulkan->ViewVolume() : texVulkan->View(0)));
+        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+        if (cmdBuffer->IsInsideRenderPass())
+            EndRenderPass();
+
+        AddImageBarrier(rtVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        FlushBarriers();
+
+        vkCmdClearColorImage(cmdBuffer->GetHandle(), rtVulkan->Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (const VkClearColorValue*)value.Raw, 1, &rtVulkan->Info.subresourceRange);
     }
 }
 
@@ -850,7 +1066,6 @@ void GPUContextVulkan::ResetRenderTarget()
         _rtDirtyFlag = true;
         _psDirtyFlag = true;
         _rtCount = 0;
-        _rtDepth = nullptr;
         Platform::MemoryClear(_rtHandles, sizeof(_rtHandles));
 
         const auto cmdBuffer = _cmdBufferManager->GetActiveCmdBuffer();
@@ -863,13 +1078,13 @@ void GPUContextVulkan::SetRenderTarget(GPUTextureView* rt)
 {
     const auto rtVulkan = static_cast<GPUTextureViewVulkan*>(rt);
 
-    if (_rtDepth != nullptr || _rtCount != 1 || _rtHandles[0] != rtVulkan)
+    if (_rtDepth != nullptr || _rtCount != 1 || _rtTargets[0] != rtVulkan)
     {
         _rtDirtyFlag = true;
         _psDirtyFlag = true;
         _rtCount = 1;
         _rtDepth = nullptr;
-        _rtHandles[0] = rtVulkan;
+        _rtTargets[0] = rtVulkan;
     }
 }
 
@@ -879,19 +1094,19 @@ void GPUContextVulkan::SetRenderTarget(GPUTextureView* depthBuffer, GPUTextureVi
     const auto depthBufferVulkan = static_cast<GPUTextureViewVulkan*>(depthBuffer);
     const auto rtCount = rtVulkan ? 1 : 0;
 
-    if (_rtDepth != depthBufferVulkan || _rtCount != rtCount || _rtHandles[0] != rtVulkan)
+    if (_rtDepth != depthBufferVulkan || _rtCount != rtCount || _rtTargets[0] != rtVulkan)
     {
         _rtDirtyFlag = true;
         _psDirtyFlag = true;
         _rtCount = rtCount;
         _rtDepth = depthBufferVulkan;
-        _rtHandles[0] = rtVulkan;
+        _rtTargets[0] = rtVulkan;
     }
 }
 
 void GPUContextVulkan::SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts)
 {
-    ASSERT(Math::IsInRange(rts.Length(), 1, GPU_MAX_RT_BINDED));
+    ASSERT(Math::IsInRange(rts.Length(), 0, GPU_MAX_RT_BINDED));
 
     const auto depthBufferVulkan = static_cast<GPUTextureViewVulkan*>(depthBuffer);
 
@@ -902,20 +1117,30 @@ void GPUContextVulkan::SetRenderTarget(GPUTextureView* depthBuffer, const Span<G
     }
     const int32 rtvsSize = sizeof(GPUTextureViewVulkan*) * rts.Length();
 
-    if (_rtDepth != depthBufferVulkan || _rtCount != rts.Length() || Platform::MemoryCompare(_rtHandles, rtvs, rtvsSize) != 0)
+    if (_rtDepth != depthBufferVulkan || _rtCount != rts.Length() || Platform::MemoryCompare(_rtTargets, rtvs, rtvsSize) != 0)
     {
         _rtDirtyFlag = true;
         _psDirtyFlag = true;
         _rtCount = rts.Length();
         _rtDepth = depthBufferVulkan;
-        Platform::MemoryCopy(_rtHandles, rtvs, rtvsSize);
+        Platform::MemoryCopy(_rtTargets, rtvs, rtvsSize);
     }
 }
 
-void GPUContextVulkan::SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput)
+void GPUContextVulkan::SetBlendFactor(const Float4& value)
 {
-    // TODO: implement Draw Indirect and Pixel Shader write to UAV on Vulkan
-    MISSING_CODE("GPUContextVulkan::SetRenderTarget with UA output");
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+    vkCmdSetBlendConstants(cmdBuffer->GetHandle(), value.Raw);
+}
+
+void GPUContextVulkan::SetStencilRef(uint32 value)
+{
+    if (_stencilRef != value)
+    {
+        _stencilRef = value;
+        const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+        vkCmdSetStencilReference(cmdBuffer->GetHandle(), VK_STENCIL_FRONT_AND_BACK, _stencilRef);
+    }
 }
 
 void GPUContextVulkan::ResetSR()
@@ -937,9 +1162,7 @@ void GPUContextVulkan::ResetCB()
 void GPUContextVulkan::BindCB(int32 slot, GPUConstantBuffer* cb)
 {
     ASSERT(slot >= 0 && slot < GPU_MAX_CB_BINDED);
-
     const auto cbVulkan = static_cast<GPUConstantBufferVulkan*>(cb);
-
     if (_cbHandles[slot] != cbVulkan)
     {
         _cbDirtyFlag = true;
@@ -949,7 +1172,11 @@ void GPUContextVulkan::BindCB(int32 slot, GPUConstantBuffer* cb)
 
 void GPUContextVulkan::BindSR(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_SR_BINDED);
+    if (view && ((DescriptorOwnerResourceVulkan*)view->GetNativePtr())->HasSRV() == false)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::SRV);
+#endif
     const auto handle = view ? (DescriptorOwnerResourceVulkan*)view->GetNativePtr() : nullptr;
     if (_srHandles[slot] != handle)
     {
@@ -961,7 +1188,11 @@ void GPUContextVulkan::BindSR(int32 slot, GPUResourceView* view)
 
 void GPUContextVulkan::BindUA(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_UA_BINDED);
+    if (view && ((DescriptorOwnerResourceVulkan*)view->GetNativePtr())->HasUAV() == false)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::UAV);
+#endif
     const auto handle = view ? (DescriptorOwnerResourceVulkan*)view->GetNativePtr() : nullptr;
     if (_uaHandles[slot] != handle)
     {
@@ -971,9 +1202,16 @@ void GPUContextVulkan::BindUA(int32 slot, GPUResourceView* view)
     }
 }
 
-void GPUContextVulkan::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets)
+void GPUContextVulkan::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets, GPUVertexLayout* vertexLayout)
 {
     _vbCount = vertexBuffers.Length();
+    if (!vertexLayout)
+         vertexLayout = GPUVertexLayout::Get(vertexBuffers);
+    if (_vertexLayout != vertexLayout)
+    {
+        _vertexLayout = (GPUVertexLayoutVulkan*)vertexLayout;
+        _psDirtyFlag = true;
+    }
     if (vertexBuffers.Length() == 0)
         return;
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
@@ -1000,7 +1238,7 @@ void GPUContextVulkan::BindIB(GPUBuffer* indexBuffer)
 void GPUContextVulkan::BindSampler(int32 slot, GPUSampler* sampler)
 {
     ASSERT(slot >= GPU_STATIC_SAMPLERS_COUNT && slot < GPU_MAX_SAMPLER_BINDED);
-    const auto handle = sampler ? ((GPUSamplerVulkan*)sampler)->Sampler : nullptr;
+    const auto handle = sampler ? ((GPUSamplerVulkan*)sampler)->Sampler : VK_NULL_HANDLE;
     _samplerHandles[slot] = handle;
 }
 
@@ -1011,10 +1249,10 @@ void GPUContextVulkan::UpdateCB(GPUConstantBuffer* cb, const void* data)
     const uint32 size = cbVulkan->GetSize();
     if (size == 0)
         return;
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
 
     // Allocate bytes for the buffer
     const auto allocation = _device->UniformBufferUploader->Allocate(size, 0, this);
+    RENDER_STAT_DATA_UPLOAD(size);
 
     // Copy data
     Platform::MemoryCopy(allocation.CPUAddress, data, allocation.Size);
@@ -1044,14 +1282,16 @@ void GPUContextVulkan::Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCo
         EndRenderPass();
 
     auto pipelineState = shaderVulkan->GetOrCreateState();
-
     UpdateDescriptorSets(pipelineState);
-
     FlushBarriers();
 
     // Bind pipeline
-    vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_COMPUTE, pipelineState->GetHandle());
-    RENDER_STAT_PS_STATE_CHANGE();
+    if (_currentCompute != shaderVulkan)
+    {
+        _currentCompute = shaderVulkan;
+        vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_COMPUTE, pipelineState->GetHandle());
+        RENDER_STAT_PS_STATE_CHANGE();
+    }
 
     // Bind descriptors sets to the compute pipeline
     pipelineState->Bind(cmdBuffer);
@@ -1059,6 +1299,10 @@ void GPUContextVulkan::Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCo
     // Dispatch
     vkCmdDispatch(cmdBuffer->GetHandle(), threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     RENDER_STAT_DISPATCH_CALL();
+
+    // Place a barrier between dispatches, so that UAVs can be read+write in subsequent passes
+    if (_pass == 0)
+        AddUABarrier();
 
 #if VK_ENABLE_BARRIERS_DEBUG
     LOG(Warning, "Dispatch");
@@ -1077,15 +1321,17 @@ void GPUContextVulkan::DispatchIndirect(GPUShaderProgramCS* shader, GPUBuffer* b
         EndRenderPass();
 
     auto pipelineState = shaderVulkan->GetOrCreateState();
-
     UpdateDescriptorSets(pipelineState);
     AddBufferBarrier(bufferForArgsVulkan, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
-
     FlushBarriers();
 
     // Bind pipeline
-    vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_COMPUTE, pipelineState->GetHandle());
-    RENDER_STAT_PS_STATE_CHANGE();
+    if (_currentCompute != shaderVulkan)
+    {
+        _currentCompute = shaderVulkan;
+        vkCmdBindPipeline(cmdBuffer->GetHandle(), VK_PIPELINE_BIND_POINT_COMPUTE, pipelineState->GetHandle());
+        RENDER_STAT_PS_STATE_CHANGE();
+    }
 
     // Bind descriptors sets to the compute pipeline
     pipelineState->Bind(cmdBuffer);
@@ -1093,6 +1339,10 @@ void GPUContextVulkan::DispatchIndirect(GPUShaderProgramCS* shader, GPUBuffer* b
     // Dispatch
     vkCmdDispatchIndirect(cmdBuffer->GetHandle(), bufferForArgsVulkan->GetHandle(), offsetForArgs);
     RENDER_STAT_DISPATCH_CALL();
+
+    // Place a barrier between dispatches, so that UAVs can be read+write in subsequent passes
+    if (_pass == 0)
+        AddUABarrier();
 
 #if VK_ENABLE_BARRIERS_DEBUG
     LOG(Warning, "DispatchIndirect");
@@ -1143,40 +1393,110 @@ void GPUContextVulkan::ResolveMultisample(GPUTexture* sourceMultisampleTexture, 
 
 void GPUContextVulkan::DrawInstanced(uint32 verticesCount, uint32 instanceCount, int32 startInstance, int32 startVertex)
 {
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     OnDrawCall();
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     vkCmdDraw(cmdBuffer->GetHandle(), verticesCount, instanceCount, startVertex, startInstance);
     RENDER_STAT_DRAW_CALL(verticesCount * instanceCount, verticesCount * instanceCount / 3);
 }
 
 void GPUContextVulkan::DrawIndexedInstanced(uint32 indicesCount, uint32 instanceCount, int32 startInstance, int32 startVertex, int32 startIndex)
 {
-    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     OnDrawCall();
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     vkCmdDrawIndexed(cmdBuffer->GetHandle(), indicesCount, instanceCount, startIndex, startVertex, startInstance);
-    RENDER_STAT_DRAW_CALL(0, indicesCount / 3 * instanceCount);
+    RENDER_STAT_DRAW_CALL(indicesCount * instanceCount, indicesCount / 3 * instanceCount);
 }
 
 void GPUContextVulkan::DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
-
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
+    OnDrawCall();
     auto bufferForArgsVK = (GPUBufferVulkan*)bufferForArgs;
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    OnDrawCall();
     vkCmdDrawIndirect(cmdBuffer->GetHandle(), bufferForArgsVK->GetHandle(), (VkDeviceSize)offsetForArgs, 1, sizeof(VkDrawIndirectCommand));
     RENDER_STAT_DRAW_CALL(0, 0);
 }
 
 void GPUContextVulkan::DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
-
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
+    OnDrawCall();
     auto bufferForArgsVK = (GPUBufferVulkan*)bufferForArgs;
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
-    OnDrawCall();
     vkCmdDrawIndexedIndirect(cmdBuffer->GetHandle(), bufferForArgsVK->GetHandle(), (VkDeviceSize)offsetForArgs, 1, sizeof(VkDrawIndexedIndirectCommand));
     RENDER_STAT_DRAW_CALL(0, 0);
+}
+
+uint64 GPUContextVulkan::BeginQuery(GPUQueryType type)
+{
+    // Check if timer queries are supported
+    if (type == GPUQueryType::Timer && _device->PhysicalDeviceLimits.timestampComputeAndGraphics != VK_TRUE)
+        return 0;
+
+    // Allocate query
+    auto poolIndex = _device->GetOrCreateQueryPool(type);
+    auto pool = _device->QueryPools[poolIndex];
+    uint32 index = 0;
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+    if (!pool->AcquireQuery(this, index))
+        return 0;
+    GPUQueryVulkan query;
+    query.PoolIndex = (uint16)poolIndex;
+    query.QueryIndex = (uint16)index;
+    query.SecondQueryIndex = 0;
+    query.Dummy = 1; // Ensure Raw is never 0, even for the first query
+
+    // Begin query
+    switch (type)
+    {
+    case GPUQueryType::Timer:
+        // Timer queries need 2 slots (begin + end)
+        pool->AcquireQuery(this, index);
+        query.SecondQueryIndex = (uint16)index;
+        vkCmdWriteTimestamp(cmdBuffer->GetHandle(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool->GetHandle(), query.QueryIndex);
+#if GPU_VULKAN_PAUSE_QUERIES
+        _cmdBufferManager->OnTimerQueryBegin(query.Raw);
+#endif
+        break;
+    case GPUQueryType::Occlusion:
+    case GPUQueryType::BinaryOcclusion:
+        // Flush render pass when starting occlusion query
+        if (_rtDirtyFlag && cmdBuffer->IsInsideRenderPass())
+            EndRenderPass();
+        if (cmdBuffer->IsOutsideRenderPass())
+            BeginRenderPass();
+        vkCmdBeginQuery(cmdBuffer->GetHandle(), pool->GetHandle(), query.QueryIndex, type == GPUQueryType::Occlusion ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+        break;
+    }
+    pool->MarkQueryAsStarted(query.QueryIndex);
+
+    return query.Raw;
+}
+
+void GPUContextVulkan::EndQuery(uint64 queryID)
+{
+    if (!queryID)
+        return;
+    GPUQueryVulkan query;
+    query.Raw = queryID;
+    auto pool = _device->QueryPools[query.PoolIndex];
+
+    // End query
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
+    switch (pool->Type)
+    {
+    case GPUQueryType::Timer:
+        vkCmdWriteTimestamp(cmdBuffer->GetHandle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool->GetHandle(), query.SecondQueryIndex);
+        pool->MarkQueryAsStarted(query.SecondQueryIndex);
+#if GPU_VULKAN_PAUSE_QUERIES
+        _cmdBufferManager->OnTimerQueryEnd(query.Raw);
+#endif
+        break;
+    case GPUQueryType::Occlusion:
+    case GPUQueryType::BinaryOcclusion:
+        vkCmdEndQuery(cmdBuffer->GetHandle(), pool->GetHandle(), query.QueryIndex);
+        break;
+    }
 }
 
 void GPUContextVulkan::SetViewport(const Viewport& viewport)
@@ -1194,6 +1514,17 @@ void GPUContextVulkan::SetScissor(const Rectangle& scissorRect)
     vkCmdSetScissor(_cmdBufferManager->GetCmdBuffer()->GetHandle(), 0, 1, &rect);
 }
 
+void GPUContextVulkan::SetDepthBounds(float minDepth, float maxDepth)
+{
+    const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer()->GetHandle();
+    if (!_depthBoundsEnable)
+    {
+        _depthBoundsEnable = true;
+        //vkCmdSetDepthBoundsTestEnable(cmdBuffer, true);
+    }
+    vkCmdSetDepthBounds(cmdBuffer, minDepth, maxDepth);
+}
+
 GPUPipelineState* GPUContextVulkan::GetState() const
 {
     return _currentState;
@@ -1208,7 +1539,7 @@ void GPUContextVulkan::SetState(GPUPipelineState* state)
     }
 }
 
-void GPUContextVulkan::ClearState()
+void GPUContextVulkan::ResetState()
 {
     ResetRenderTarget();
     ResetSR();
@@ -1223,10 +1554,9 @@ void GPUContextVulkan::FlushState()
 {
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     if (cmdBuffer->IsInsideRenderPass())
-    {
         EndRenderPass();
-    }
 
+    FlushManualClears();
     FlushBarriers();
 }
 
@@ -1235,17 +1565,18 @@ void GPUContextVulkan::Flush()
     // Flush remaining and buffered commands
     FlushState();
     _currentState = nullptr;
+    _currentCompute = nullptr;
 
     // Execute commands
     _cmdBufferManager->SubmitActiveCmdBuffer();
-    _cmdBufferManager->PrepareForNewActiveCommandBuffer();
+    _cmdBufferManager->GetNewActiveCommandBuffer();
     ASSERT(_cmdBufferManager->HasPendingActiveCmdBuffer() && _cmdBufferManager->GetActiveCmdBuffer()->GetState() == CmdBufferVulkan::State::IsInsideBegin);
 }
 
 void GPUContextVulkan::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 size, uint32 offset)
 {
     ASSERT(data);
-    ASSERT(buffer && buffer->GetSize() >= size);
+    ASSERT(buffer && buffer->GetSize() >= size + offset);
 
     const auto cmdBuffer = _cmdBufferManager->GetCmdBuffer();
     if (cmdBuffer->IsInsideRenderPass())
@@ -1253,28 +1584,33 @@ void GPUContextVulkan::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 
 
     const auto bufferVulkan = static_cast<GPUBufferVulkan*>(buffer);
 
-    // Use direct update for small buffers
-    if (size <= 16 * 1024)
-    {
-        //AddBufferBarrier(bufferVulkan, VK_ACCESS_TRANSFER_WRITE_BIT);
-        //FlushBarriers();
+    // Transition resource
+    if (_pass == 0)
+        AddMemoryBarrier();
+    AddBufferBarrier(bufferVulkan, VK_ACCESS_TRANSFER_WRITE_BIT);
+    FlushBarriers();
 
-        size = Math::AlignUp<uint32>(size, 4);
-        vkCmdUpdateBuffer(cmdBuffer->GetHandle(), bufferVulkan->GetHandle(), offset, size, data);
+    // Use direct update for small buffers
+    const uint32 alignedSize = Math::AlignUp<uint32>(size, 4);
+    if (size <= 4 * 1024 && alignedSize <= buffer->GetSize())
+    {
+        vkCmdUpdateBuffer(cmdBuffer->GetHandle(), bufferVulkan->GetHandle(), offset, alignedSize, data);
     }
     else
     {
-        auto staging = _device->StagingManager.AcquireBuffer(size, GPUResourceUsage::StagingUpload);
-        staging->SetData(data, size);
+        auto allocation = _device->UploadBuffer.Upload(data, size, PLATFORM_MEMORY_ALIGNMENT);
 
         VkBufferCopy region;
         region.size = size;
-        region.srcOffset = 0;
+        region.srcOffset = allocation.Offset;
         region.dstOffset = offset;
-        vkCmdCopyBuffer(cmdBuffer->GetHandle(), ((GPUBufferVulkan*)staging)->GetHandle(), ((GPUBufferVulkan*)buffer)->GetHandle(), 1, &region);
-
-        _device->StagingManager.ReleaseBuffer(cmdBuffer, staging);
+        vkCmdCopyBuffer(cmdBuffer->GetHandle(), allocation.Buffer, ((GPUBufferVulkan*)buffer)->GetHandle(), 1, &region);
     }
+    RENDER_STAT_DATA_UPLOAD(size);
+
+    // Memory transfer barrier to ensure buffer is ready to read (eg. by Draw or Dispatch)
+    if (_pass == 0)
+        AddMemoryBarrier();
 }
 
 void GPUContextVulkan::CopyBuffer(GPUBuffer* dstBuffer, GPUBuffer* srcBuffer, uint32 size, uint32 dstOffset, uint32 srcOffset)
@@ -1299,6 +1635,10 @@ void GPUContextVulkan::CopyBuffer(GPUBuffer* dstBuffer, GPUBuffer* srcBuffer, ui
     bufferCopy.dstOffset = dstOffset;
     bufferCopy.size = size;
     vkCmdCopyBuffer(cmdBuffer->GetHandle(), srcBufferVulkan->GetHandle(), dstBufferVulkan->GetHandle(), 1, &bufferCopy);
+
+    // Memory transfer barrier to ensure buffer is ready to read (eg. by Draw or Dispatch)
+    if (_pass == 0)
+        AddMemoryBarrier();
 }
 
 void GPUContextVulkan::UpdateTexture(GPUTexture* texture, int32 arrayIndex, int32 mipIndex, const void* data, uint32 rowPitch, uint32 slicePitch)
@@ -1314,14 +1654,15 @@ void GPUContextVulkan::UpdateTexture(GPUTexture* texture, int32 arrayIndex, int3
     AddImageBarrier(textureVulkan, mipIndex, arrayIndex, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     FlushBarriers();
 
-    auto buffer = _device->StagingManager.AcquireBuffer(slicePitch, GPUResourceUsage::StagingUpload);
-    buffer->SetData(data, slicePitch);
+    auto allocation = _device->UploadBuffer.Upload(data, slicePitch, 512);
+    RENDER_STAT_DATA_UPLOAD(slicePitch);
 
     // Setup buffer copy region
     int32 mipWidth, mipHeight, mipDepth;
     texture->GetMipSize(mipIndex, mipWidth, mipHeight, mipDepth);
     VkBufferImageCopy bufferCopyRegion;
     Platform::MemoryClear(&bufferCopyRegion, sizeof(bufferCopyRegion));
+    bufferCopyRegion.bufferOffset = allocation.Offset;
     bufferCopyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     bufferCopyRegion.imageSubresource.mipLevel = mipIndex;
     bufferCopyRegion.imageSubresource.baseArrayLayer = arrayIndex;
@@ -1331,9 +1672,7 @@ void GPUContextVulkan::UpdateTexture(GPUTexture* texture, int32 arrayIndex, int3
     bufferCopyRegion.imageExtent.depth = static_cast<uint32_t>(mipDepth);
 
     // Copy mip level from staging buffer
-    vkCmdCopyBufferToImage(cmdBuffer->GetHandle(), ((GPUBufferVulkan*)buffer)->GetHandle(), textureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bufferCopyRegion);
-
-    _device->StagingManager.ReleaseBuffer(cmdBuffer, buffer);
+    vkCmdCopyBufferToImage(cmdBuffer->GetHandle(), allocation.Buffer, textureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bufferCopyRegion);
 }
 
 void GPUContextVulkan::CopyTexture(GPUTexture* dstResource, uint32 dstSubresource, uint32 dstX, uint32 dstY, uint32 dstZ, GPUTexture* srcResource, uint32 srcSubresource)
@@ -1348,37 +1687,77 @@ void GPUContextVulkan::CopyTexture(GPUTexture* dstResource, uint32 dstSubresourc
     const auto dstTextureVulkan = static_cast<GPUTextureVulkan*>(dstResource);
     const auto srcTextureVulkan = static_cast<GPUTextureVulkan*>(srcResource);
 
-    // Transition resources
-    AddImageBarrier(dstTextureVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    AddImageBarrier(srcTextureVulkan, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    FlushBarriers();
-
-    // Prepare
-    const int32 dstMipIndex = dstSubresource % dstTextureVulkan->MipLevels();
-    const int32 dstArrayIndex = dstSubresource / dstTextureVulkan->MipLevels();
-    const int32 srcMipIndex = srcSubresource % srcTextureVulkan->MipLevels();
-    const int32 srcArrayIndex = srcSubresource / srcTextureVulkan->MipLevels();
+    const int32 dstMipIndex = (int32)dstSubresource % dstTextureVulkan->MipLevels();
+    const int32 dstArrayIndex = (int32)dstSubresource / dstTextureVulkan->MipLevels();
+    const int32 srcMipIndex = (int32)srcSubresource % srcTextureVulkan->MipLevels();
+    const int32 srcArrayIndex = (int32)srcSubresource / srcTextureVulkan->MipLevels();
     int32 mipWidth, mipHeight, mipDepth;
     srcTextureVulkan->GetMipSize(srcMipIndex, mipWidth, mipHeight, mipDepth);
 
-    // Copy
-    VkImageCopy region;
-    Platform::MemoryClear(&region, sizeof(VkBufferImageCopy));
-    region.extent.width = mipWidth;
-    region.extent.height = mipHeight;
-    region.extent.depth = mipDepth;
-    region.dstOffset.x = dstX;
-    region.dstOffset.y = dstY;
-    region.dstOffset.z = dstZ;
-    region.srcSubresource.baseArrayLayer = srcArrayIndex;
-    region.srcSubresource.layerCount = 1;
-    region.srcSubresource.mipLevel = srcMipIndex;
-    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.dstSubresource.baseArrayLayer = dstArrayIndex;
-    region.dstSubresource.layerCount = 1;
-    region.dstSubresource.mipLevel = dstMipIndex;
-    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vkCmdCopyImage(cmdBuffer->GetHandle(), srcTextureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstTextureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    if (dstTextureVulkan->IsStaging())
+    {
+        // Staging Texture -> Staging Texture
+        if (srcTextureVulkan->IsStaging())
+        {
+            ASSERT(dstTextureVulkan->StagingBuffer && srcTextureVulkan->StagingBuffer);
+            CopyResource(dstTextureVulkan->StagingBuffer, srcTextureVulkan->StagingBuffer);
+        }
+        // Texture -> Staging Texture
+        else
+        {
+            // Transition resources
+            ASSERT(dstTextureVulkan->StagingBuffer);
+            AddBufferBarrier(dstTextureVulkan->StagingBuffer, VK_ACCESS_TRANSFER_WRITE_BIT);
+            AddImageBarrier(srcTextureVulkan, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            FlushBarriers();
+
+            // Copy
+            VkBufferImageCopy region;
+            Platform::MemoryClear(&region, sizeof(VkBufferImageCopy));
+            region.bufferOffset = 0; // TODO: calculate it based on dstSubresource and dstX/dstY/dstZ
+            ASSERT(dstX == dstY == dstZ == 0);
+            ASSERT(dstSubresource == 0);
+            region.bufferRowLength = mipWidth;
+            region.bufferImageHeight = mipHeight;
+            region.imageOffset.x = 0;
+            region.imageOffset.y = 0;
+            region.imageOffset.z = 0;
+            region.imageExtent.width = mipWidth;
+            region.imageExtent.height = mipHeight;
+            region.imageExtent.depth = mipDepth;
+            region.imageSubresource.baseArrayLayer = srcArrayIndex;
+            region.imageSubresource.layerCount = 1;
+            region.imageSubresource.mipLevel = srcMipIndex;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            vkCmdCopyImageToBuffer(cmdBuffer->GetHandle(), srcTextureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstTextureVulkan->StagingBuffer->GetHandle(), 1, &region);
+        }
+    }
+    else
+    {
+        // Transition resources
+        AddImageBarrier(dstTextureVulkan, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        AddImageBarrier(srcTextureVulkan, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        FlushBarriers();
+
+        // Copy
+        VkImageCopy region;
+        Platform::MemoryClear(&region, sizeof(VkBufferImageCopy));
+        region.extent.width = mipWidth;
+        region.extent.height = mipHeight;
+        region.extent.depth = mipDepth;
+        region.dstOffset.x = (int32_t)dstX;
+        region.dstOffset.y = (int32_t)dstY;
+        region.dstOffset.z = (int32_t)dstZ;
+        region.srcSubresource.baseArrayLayer = srcArrayIndex;
+        region.srcSubresource.layerCount = 1;
+        region.srcSubresource.mipLevel = srcMipIndex;
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.dstSubresource.baseArrayLayer = dstArrayIndex;
+        region.dstSubresource.layerCount = 1;
+        region.dstSubresource.mipLevel = dstMipIndex;
+        region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vkCmdCopyImage(cmdBuffer->GetHandle(), srcTextureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstTextureVulkan->GetHandle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
 }
 
 void GPUContextVulkan::ResetCounter(GPUBuffer* buffer)
@@ -1427,17 +1806,13 @@ void GPUContextVulkan::CopyResource(GPUResource* dstResource, GPUResource* srcRe
     if (cmdBuffer->IsInsideRenderPass())
         EndRenderPass();
 
-    auto dstTextureVulkan = static_cast<GPUTextureVulkan*>(dstResource);
-    auto srcTextureVulkan = static_cast<GPUTextureVulkan*>(srcResource);
-
-    auto dstBufferVulkan = static_cast<GPUBufferVulkan*>(dstResource);
-    auto srcBufferVulkan = static_cast<GPUBufferVulkan*>(srcResource);
-
-    const auto srcType = srcResource->GetObjectType();
-    const auto dstType = dstResource->GetObjectType();
+    auto dstTextureVulkan = dynamic_cast<GPUTextureVulkan*>(dstResource);
+    auto srcTextureVulkan = dynamic_cast<GPUTextureVulkan*>(srcResource);
+    auto dstBufferVulkan = dynamic_cast<GPUBufferVulkan*>(dstResource);
+    auto srcBufferVulkan = dynamic_cast<GPUBufferVulkan*>(srcResource);
 
     // Buffer -> Buffer
-    if (srcType == GPUResource::ObjectType::Buffer && dstType == GPUResource::ObjectType::Buffer)
+    if (srcBufferVulkan && dstBufferVulkan)
     {
         // Transition resources
         AddBufferBarrier(dstBufferVulkan, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -1452,8 +1827,8 @@ void GPUContextVulkan::CopyResource(GPUResource* dstResource, GPUResource* srcRe
         ASSERT(bufferCopy.size == dstBufferVulkan->GetSize());
         vkCmdCopyBuffer(cmdBuffer->GetHandle(), srcBufferVulkan->GetHandle(), dstBufferVulkan->GetHandle(), 1, &bufferCopy);
     }
-        // Texture -> Texture
-    else if (srcType == GPUResource::ObjectType::Texture && dstType == GPUResource::ObjectType::Texture)
+    // Texture -> Texture
+    else if (srcTextureVulkan && dstTextureVulkan)
     {
         if (dstTextureVulkan->IsStaging())
         {
@@ -1463,7 +1838,7 @@ void GPUContextVulkan::CopyResource(GPUResource* dstResource, GPUResource* srcRe
                 ASSERT(dstTextureVulkan->StagingBuffer && srcTextureVulkan->StagingBuffer);
                 CopyResource(dstTextureVulkan->StagingBuffer, srcTextureVulkan->StagingBuffer);
             }
-                // Texture -> Staging Texture
+            // Texture -> Staging Texture
             else
             {
                 // Transition resources
@@ -1566,17 +1941,13 @@ void GPUContextVulkan::CopySubresource(GPUResource* dstResource, uint32 dstSubre
     if (cmdBuffer->IsInsideRenderPass())
         EndRenderPass();
 
-    auto dstTextureVulkan = static_cast<GPUTextureVulkan*>(dstResource);
-    auto srcTextureVulkan = static_cast<GPUTextureVulkan*>(srcResource);
-
-    auto dstBufferVulkan = static_cast<GPUBufferVulkan*>(dstResource);
-    auto srcBufferVulkan = static_cast<GPUBufferVulkan*>(srcResource);
-
-    auto srcType = srcResource->GetObjectType();
-    auto dstType = dstResource->GetObjectType();
+    auto dstTextureVulkan = dynamic_cast<GPUTextureVulkan*>(dstResource);
+    auto srcTextureVulkan = dynamic_cast<GPUTextureVulkan*>(srcResource);
+    auto dstBufferVulkan = dynamic_cast<GPUBufferVulkan*>(dstResource);
+    auto srcBufferVulkan = dynamic_cast<GPUBufferVulkan*>(srcResource);
 
     // Buffer -> Buffer
-    if (srcType == GPUResource::ObjectType::Buffer && dstType == GPUResource::ObjectType::Buffer)
+    if (srcBufferVulkan && dstBufferVulkan)
     {
         ASSERT(dstSubresource == 0 && srcSubresource == 0);
 
@@ -1593,8 +1964,8 @@ void GPUContextVulkan::CopySubresource(GPUResource* dstResource, uint32 dstSubre
         ASSERT(bufferCopy.size == dstBufferVulkan->GetSize());
         vkCmdCopyBuffer(cmdBuffer->GetHandle(), srcBufferVulkan->GetHandle(), dstBufferVulkan->GetHandle(), 1, &bufferCopy);
     }
-        // Texture -> Texture
-    else if (srcType == GPUResource::ObjectType::Texture && dstType == GPUResource::ObjectType::Texture)
+    // Texture -> Texture
+    else if (srcTextureVulkan && dstTextureVulkan)
     {
         const int32 dstMipMaps = dstTextureVulkan->MipLevels();
         const int32 dstMipIndex = dstSubresource % dstMipMaps;
@@ -1611,7 +1982,7 @@ void GPUContextVulkan::CopySubresource(GPUResource* dstResource, uint32 dstSubre
                 ASSERT(dstTextureVulkan->StagingBuffer && srcTextureVulkan->StagingBuffer);
                 CopyResource(dstTextureVulkan->StagingBuffer, srcTextureVulkan->StagingBuffer);
             }
-                // Texture -> Staging Texture
+            // Texture -> Staging Texture
             else
             {
                 // Transition resources
@@ -1674,6 +2045,45 @@ void GPUContextVulkan::CopySubresource(GPUResource* dstResource, uint32 dstSubre
     {
         Log::NotImplementedException(TEXT("Cannot copy data between buffer and texture."));
     }
+}
+
+void GPUContextVulkan::Transition(GPUResource* resource, GPUResourceAccess access)
+{
+    if (auto buffer = dynamic_cast<GPUBufferVulkan*>(resource))
+    {
+        AddBufferBarrier(buffer, RenderToolsVulkan::GetAccess(access));
+    }
+    else if (auto texture = dynamic_cast<GPUTextureVulkan*>(resource))
+    {
+        AddImageBarrier(texture, RenderToolsVulkan::GetImageLayout(access));
+    }
+}
+
+void GPUContextVulkan::MemoryBarrier()
+{
+    AddMemoryBarrier();
+}
+
+void GPUContextVulkan::OverlapUA(bool end)
+{
+    if (end)
+        AddUABarrier();
+}
+
+void GPUContextVulkan::BeginDrawPass(GPUDrawPass& pass)
+{
+    _drawPass = &pass;
+    _rtDirtyFlag = true;
+    _psDirtyFlag = true;
+    _drawPassCanClear = true;
+    _rtCount = pass.RenderTargetsCount;
+    _rtDepth = (GPUTextureViewVulkan*)pass.DepthBuffer;
+    Platform::MemoryCopy(_rtTargets, pass.RenderTargets, pass.RenderTargetsCount * sizeof(void*));
+}
+
+void GPUContextVulkan::EndDrawPass()
+{
+    _drawPass = nullptr;
 }
 
 #endif

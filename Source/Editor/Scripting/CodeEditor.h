@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -58,6 +58,16 @@ API_ENUM(Namespace="FlaxEditor", Attributes="HideInEditor") enum class CodeEdito
     VS2019,
 
     /// <summary>
+    /// Visual Studio 2022
+    /// </summary>
+    VS2022,
+
+    /// <summary>
+    /// Visual Studio 2026
+    /// </summary>
+    VS2026,
+
+    /// <summary>
     /// Visual Studio Code
     /// </summary>
     VSCode,
@@ -71,6 +81,11 @@ API_ENUM(Namespace="FlaxEditor", Attributes="HideInEditor") enum class CodeEdito
     /// Rider
     /// </summary>
     Rider,
+
+    /// <summary>
+    /// CLion
+    /// </summary>
+    CLion,
 
     MAX
 };
@@ -99,8 +114,17 @@ public:
     /// <summary>
     /// Gets the name of the editor.
     /// </summary>
-    /// <returns>The name</returns>
+    /// <returns>The name.</returns>
     virtual String GetName() const = 0;
+
+    /// <summary>
+    /// Gets the custom arguments for the Flax.Build tool to add when generating project files for this code editor.
+    /// </summary>
+    /// <returns>The custom arguments to generate project files.</returns>
+    virtual String GetGenerateProjectCustomArgs() const
+    {
+        return String::Empty;
+    }
 
     /// <summary>
     /// Opens the file.
@@ -160,6 +184,20 @@ public:
     static CodeEditor* GetCodeEditor(CodeEditorTypes editorType);
 
     /// <summary>
+    /// Gets the name of the editor.
+    /// </summary>
+    /// <param name="editorType">The code editor type.</param>
+    /// <returns>The name.</returns>
+    API_FUNCTION() static String GetName(CodeEditorTypes editorType);
+
+    /// <summary>
+    /// Gets the custom arguments for the Flax.Build tool to add when generating project files for this code editor.
+    /// </summary>
+    /// <param name="editorType">The code editor type.</param>
+    /// <returns>The custom arguments to generate project files.</returns>
+    API_FUNCTION() static String GetGenerateProjectCustomArgs(CodeEditorTypes editorType);
+
+    /// <summary>
     /// Opens the file. Handles async opening.
     /// </summary>
     /// <param name="editorType">The code editor type.</param>
@@ -187,12 +225,6 @@ public:
     /// <param name="editorType">The code editor type.</param>
     /// <param name="path">The path.</param>
     API_FUNCTION() static void OnFileAdded(CodeEditorTypes editorType, const String& path);
-
-    /// <summary>
-    /// Opens the solution project. Handles async opening.
-    /// </summary>
-    /// <param name="editor">The code editor.</param>
-    static void OpenSolution(CodeEditor* editor);
 
     /// <summary>
     /// The asynchronous open begins.

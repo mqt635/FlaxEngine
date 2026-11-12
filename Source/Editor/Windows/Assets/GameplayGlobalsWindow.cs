@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -11,6 +11,7 @@ using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Windows.Assets
 {
@@ -156,6 +157,7 @@ namespace FlaxEditor.Windows.Assets
 
             private void Setter(object instance, int index, object value)
             {
+                CheckForNullValue(ref value, _proxy.DefaultValues[_name].GetType());
                 if (_isDefault)
                     _proxy.DefaultValues[_name] = value;
                 else
@@ -236,9 +238,12 @@ namespace FlaxEditor.Windows.Assets
                 typeof(float),
                 typeof(bool),
                 typeof(int),
-                typeof(Vector2),
-                typeof(Vector3),
-                typeof(Vector4),
+                typeof(Float2),
+                typeof(Float3),
+                typeof(Float4),
+                typeof(Double2),
+                typeof(Double3),
+                typeof(Double4),
                 typeof(Color),
                 typeof(Quaternion),
                 typeof(Transform),
@@ -247,6 +252,8 @@ namespace FlaxEditor.Windows.Assets
                 typeof(Rectangle),
                 typeof(Matrix),
                 typeof(string),
+                typeof(Texture),
+                typeof(CubeTexture),
             };
 
             public override void Initialize(LayoutElementsContainer layout)
@@ -268,7 +275,6 @@ namespace FlaxEditor.Windows.Assets
                     {
                         var name = e.Key;
                         var value = _proxy.Asset.GetValue(name);
-                        var valueContainer = new VariableValueContainer(_proxy, name, value, false);
                         var propertyLabel = new PropertyNameLabel(name)
                         {
                             Tag = name,
@@ -276,7 +282,15 @@ namespace FlaxEditor.Windows.Assets
                         string tooltip = null;
                         if (_proxy.DefaultValues.TryGetValue(name, out var defaultValue))
                             tooltip = "Default value: " + defaultValue;
-                        layout.Object(propertyLabel, valueContainer, null, tooltip);
+                        var property = layout.AddPropertyItem(propertyLabel, tooltip);
+                        if (value == null)
+                        {
+                            property.Label("null").Label.TextColor = FlaxEngine.GUI.Style.Current.ProgressError;
+                            continue;
+                        }
+                        var valueContainer = new VariableValueContainer(_proxy, name, value, false);
+                        valueContainer.SetDefaultValue(defaultValue);
+                        property.Object(valueContainer);
                     }
                 }
                 else
@@ -285,23 +299,50 @@ namespace FlaxEditor.Windows.Assets
                     {
                         var name = e.Key;
                         var value = e.Value;
-                        var valueContainer = new VariableValueContainer(_proxy, name, value, true);
                         var propertyLabel = new ClickablePropertyNameLabel(name)
                         {
                             Tag = name,
                         };
                         propertyLabel.MouseLeftDoubleClick += (label, location) => StartParameterRenaming(name, label);
                         propertyLabel.SetupContextMenu += OnPropertyLabelSetupContextMenu;
-                        layout.Object(propertyLabel, valueContainer, null, "Type: " + CustomEditorsUtil.GetTypeNameUI(value.GetType()));
+                        var tooltip = value != null ? "Type: " + CustomEditorsUtil.GetTypeNameUI(value.GetType()) : string.Empty;
+                        var property = layout.AddPropertyItem(propertyLabel, tooltip);
+                        if (value == null)
+                        {
+                            property.Label("null").Label.TextColor = FlaxEngine.GUI.Style.Current.ProgressError;
+                            continue;
+                        }
+                        var valueContainer = new VariableValueContainer(_proxy, name, value, true);
+                        property.Object(valueContainer);
+                    }
+                    if (_proxy.DefaultValues.Count == 0)
+                    {
+                        var emptyLabel = layout.Label("Empty", TextAlignment.Center).Label;
+                        emptyLabel.TextColor = emptyLabel.TextColorHighlighted = FlaxEngine.GUI.Style.Current.ForegroundDisabled;
                     }
 
-                    // TODO: improve the UI
                     layout.Space(40);
-                    var addParamType = layout.ComboBox().ComboBox;
-                    addParamType.Items = AllowedTypes.Select(CustomEditorsUtil.GetTypeNameUI).ToList();
-                    addParamType.SelectedIndex = 0;
+                    var addPanel = layout.HorizontalPanel();
+                    addPanel.Panel.Size = new Float2(0, TextBox.DefaultHeight);
+                    addPanel.Panel.Margin = Margin.Zero;
+                    addPanel.Panel.Spacing = Utilities.Constants.UIMargin;
+
+                    addPanel.Label("New value type:");
+
+                    var addParamType = addPanel.ComboBox().ComboBox;
+                    object lastValue = null;
+                    foreach (var e in _proxy.DefaultValues)
+                        lastValue = e.Value;
+
+                    var allowedTypes = AllowedTypes.Select(CustomEditorsUtil.GetTypeNameUI).ToList();
+                    int index = 0;
+                    if (lastValue != null)
+                        index = allowedTypes.FindIndex(x => x.Equals(CustomEditorsUtil.GetTypeNameUI(lastValue.GetType()), StringComparison.Ordinal));
+
+                    addParamType.Items = allowedTypes;
+                    addParamType.SelectedIndex = index;
                     _addParamType = addParamType;
-                    var addParamButton = layout.Button("Add").Button;
+                    var addParamButton = addPanel.Button("Add").Button;
                     addParamButton.Clicked += OnAddParamButtonClicked;
                 }
             }
@@ -328,9 +369,10 @@ namespace FlaxEditor.Windows.Assets
                 {
                     Proxy = _proxy,
                     IsAdd = true,
-                    Name = StringUtils.IncrementNameNumber("New parameter", x => OnParameterRenameValidate(null, x)),
+                    Name = Utilities.Utils.IncrementNameNumber("New parameter", x => OnParameterRenameValidate(null, x)),
                     DefaultValue = TypeUtils.GetDefaultValue(new ScriptType(type)),
                 };
+                CheckForNullValue(ref action.DefaultValue, type);
                 _proxy.Window.Undo.AddAction(action);
                 action.Do();
             }
@@ -374,6 +416,26 @@ namespace FlaxEditor.Windows.Assets
             }
         }
 
+        private static void CheckForNullValue(ref object value, Type type)
+        {
+            if (value == null)
+            {
+                // Default values are invalid as Variant type is used in C++ to properly bind the value
+                if (typeof(CubeTexture).IsAssignableFrom(type))
+                {
+                    // Default cube texture
+                    value = FlaxEngine.Content.LoadAsyncInternal<CubeTexture>(EditorAssets.DefaultSkyCubeTexture);
+                }
+                else if (typeof(Texture).IsAssignableFrom(type))
+                {
+                    // Default texture
+                    value = FlaxEngine.Content.LoadAsyncInternal<Texture>("Engine/Textures/BlackTexture");
+                }
+                else
+                    throw new Exception("Null values are not allowed in Gameplay Globals");
+            }
+        }
+
         private CustomEditorPresenter _propertiesEditor;
         private PropertiesProxy _proxy;
         private ToolStripButton _saveButton;
@@ -391,6 +453,8 @@ namespace FlaxEditor.Windows.Assets
         public GameplayGlobalsWindow(Editor editor, AssetItem item)
         : base(editor, item)
         {
+            var inputOptions = Editor.Options.Options.Input;
+
             _undo = new Undo();
             _undo.ActionDone += OnUndo;
             _undo.UndoDone += OnUndo;
@@ -407,10 +471,10 @@ namespace FlaxEditor.Windows.Assets
             _proxy = new PropertiesProxy();
             _propertiesEditor.Select(_proxy);
 
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save asset");
+            _saveButton = _toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save", ref inputOptions.Save);
             _toolstrip.AddSeparator();
-            _undoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo (Ctrl+Z)");
-            _redoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo (Ctrl+Y)");
+            _undoButton = _toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo", ref inputOptions.Undo);
+            _redoButton = _toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo", ref inputOptions.Redo);
             _toolstrip.AddSeparator();
             _resetButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Rotate32, Reset).LinkTooltip("Resets the variables values to the default values");
 
@@ -488,6 +552,7 @@ namespace FlaxEditor.Windows.Assets
             _undo.Enabled = false;
             _undo.Clear();
             _propertiesEditor.BuildLayoutOnUpdate();
+            UpdateToolstrip();
         }
 
         /// <inheritdoc />
@@ -498,6 +563,7 @@ namespace FlaxEditor.Windows.Assets
             _undo.Enabled = true;
             _undo.Clear();
             _propertiesEditor.BuildLayoutOnUpdate();
+            UpdateToolstrip();
         }
 
         /// <inheritdoc />

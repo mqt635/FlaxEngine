@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,9 +12,8 @@
 /// <seealso cref="FlaxEngine.BinaryAsset" />
 API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API MaterialBase : public BinaryAsset, public IMaterial
 {
-DECLARE_ASSET_HEADER(MaterialBase);
+    DECLARE_ASSET_HEADER(MaterialBase);
 public:
-
     /// <summary>
     /// The material parameters collection.
     /// </summary>
@@ -26,13 +25,11 @@ public:
     Action ParamsChanged;
 
     /// <summary>
-    /// Returns true if material is an material instance.
+    /// Returns true if material is a material instance.
     /// </summary>
-    /// <returns>True if it's a material instance, otherwise false.</returns>
     virtual bool IsMaterialInstance() const = 0;
 
 public:
-
     /// <summary>
     /// Gets the material parameters collection.
     /// </summary>
@@ -60,6 +57,8 @@ public:
     /// <summary>
     /// Gets the material parameter value.
     /// </summary>
+    /// <remarks>For material instances that inherit a base material, returned value might come from base material if the current one doesn't override it.</remarks>
+    /// <param name="name">The parameter name.</param>
     /// <returns>The parameter value.</returns>
     API_FUNCTION() Variant GetParameterValue(const StringView& name);
 
@@ -68,7 +67,7 @@ public:
     /// </summary>
     /// <param name="name">The parameter name.</param>
     /// <param name="value">The value to set.</param>
-    /// <param name="warnIfMissing">True if warn if parameter is missing, otherwise will do nothing.</param>
+    /// <param name="warnIfMissing">True to warn if parameter is missing, otherwise will do nothing.</param>
     API_FUNCTION() void SetParameterValue(const StringView& name, const Variant& value, bool warnIfMissing = true);
 
     /// <summary>
@@ -78,15 +77,8 @@ public:
     API_FUNCTION() MaterialInstance* CreateVirtualInstance();
 
 public:
-
     // [BinaryAsset]
 #if USE_EDITOR
-    void GetReferences(Array<Guid>& output) const override
-    {
-        // Base
-        BinaryAsset::GetReferences(output);
-
-        Params.GetReferences(output);
-    }
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override;
 #endif
 };

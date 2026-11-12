@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -53,11 +53,20 @@ public class ShadersCompilation : EngineModule
         case TargetPlatform.Linux:
             options.PrivateDependencies.Add("ShaderCompilerVulkan");
             break;
+        case TargetPlatform.Mac:
+            options.PrivateDependencies.Add("ShaderCompilerVulkan");
+            break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }
 
+        if (ShaderCompilerWebGPU.Use(options))
+            options.PrivateDependencies.Add("ShaderCompilerWebGPU");
         if (Sdk.HasValid("PS4Sdk"))
             options.PrivateDependencies.Add("ShaderCompilerPS4");
+        if (Sdk.HasValid("PS5Sdk"))
+            options.PrivateDependencies.Add("ShaderCompilerPS5");
+        if (Flax.Build.Platform.GetPlatform(TargetPlatform.XboxScarlett, true) != null)
+            options.PrivateDependencies.Add("ShaderCompilerXboxScarlett");
     }
 
     /// <inheritdoc />

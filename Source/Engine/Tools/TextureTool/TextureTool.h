@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,148 +7,149 @@
 #include "Engine/Render2D/SpriteAtlas.h"
 #include "Engine/Graphics/Textures/Types.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
-#include "Engine/Serialization/ISerializable.h"
+#include "Engine/Core/ISerializable.h"
 
 class JsonWriter;
 
 /// <summary>
 /// Textures importing, processing and exporting utilities.
 /// </summary>
-class FLAXENGINE_API TextureTool
+API_CLASS(Namespace="FlaxEngine.Tools", Static) class FLAXENGINE_API TextureTool
 {
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(TextureTool);
 
     /// <summary>
-    /// Importing texture options
+    /// Texture import options.
     /// </summary>
-    struct Options : public ISerializable
+    API_STRUCT(Attributes="HideInEditor") struct FLAXENGINE_API Options : public ISerializable
     {
-        /// <summary>
-        /// Texture format type
-        /// </summary>
-        TextureFormatType Type;
+        DECLARE_SCRIPTING_TYPE_MINIMAL(Options);
 
-        /// <summary>
-        /// True if texture should be imported as a texture atlas resource
-        /// </summary>
-        bool IsAtlas;
+        // Texture format type.
+        API_FIELD(Attributes="EditorOrder(0)")
+        TextureFormatType Type = TextureFormatType::ColorRGB;
 
-        /// <summary>
-        /// True if disable dynamic texture streaming
-        /// </summary>
-        bool NeverStream;
+        // True if texture should be imported as a texture atlas (with sprites).
+        API_FIELD(Attributes="EditorOrder(10)")
+        bool IsAtlas = false;
 
-        /// <summary>
-        /// Enables/disables texture data compression.
-        /// </summary>
-        bool Compress;
+        // True if disable dynamic texture streaming.
+        API_FIELD(Attributes="EditorOrder(20)")
+        bool NeverStream = false;
 
-        /// <summary>
-        /// True if texture channels have independent data
-        /// </summary>
-        bool IndependentChannels;
+        // True if texture should be compressed.
+        API_FIELD(Attributes="EditorOrder(30)")
+        bool Compress = true;
 
-        /// <summary>
-        /// True if use sRGB format for texture data. Recommended for color maps and diffuse color textures.
-        /// </summary>
-        bool sRGB;
+        // True if texture channels have independent data (for compression methods).
+        API_FIELD(Attributes="EditorOrder(40)")
+        bool IndependentChannels = false;
 
-        /// <summary>
-        /// True if generate mip maps chain for the texture.
-        /// </summary>
-        bool GenerateMipMaps;
+        // If checked, indicates that input file should be loaded as an sRGB image. Common for color maps and diffuse/albedo textures.
+        API_FIELD(Attributes="EditorOrder(50), EditorDisplay(null, \"sRGB\")")
+        bool sRGB = false;
 
-        /// <summary>
-        /// True if flip Y coordinate of the texture.
-        /// </summary>
-        bool FlipY;
+        // True if generate mip maps chain for the texture.
+        API_FIELD(Attributes="EditorOrder(60)")
+        bool GenerateMipMaps = true;
 
-        /// <summary>
-        /// True if resize the texture.
-        /// </summary>
-        bool Resize;
+        // True if flip Y coordinate of the texture (Flips over X axis).
+        API_FIELD(Attributes="EditorOrder(70)")
+        bool FlipY = false;
 
-        /// <summary>
-        /// True if preserve alpha coverage in generated mips for alpha test reference. Scales mipmap alpha values to preserve alpha coverage based on an alpha test reference value.
-        /// </summary>
-        bool PreserveAlphaCoverage;
+        // True if flip X coordinate of the texture (Flips over Y axis).
+        API_FIELD(Attributes="EditorOrder(71)")
+        bool FlipX = false;
 
-        /// <summary>
-        /// The reference value for the alpha coverage preserving.
-        /// </summary>
-        float PreserveAlphaCoverageReference;
+        // Invert the red channel.
+        API_FIELD(Attributes="EditorOrder(72), EditorDisplay(\"Invert Channels\")")
+        bool InvertRedChannel = false;
 
-        /// <summary>
-        /// Texture group for streaming (negative if unused). See Streaming Settings.
-        /// </summary>
-        int32 TextureGroup;
+        // Invert the green channel. Good for OpenGL to DirectX conversion.
+        API_FIELD(Attributes="EditorOrder(73), EditorDisplay(\"Invert Channels\")")
+        bool InvertGreenChannel = false;
 
-        /// <summary>
-        /// The import texture scale.
-        /// </summary>
-        float Scale;
+        // Invert the blue channel.
+        API_FIELD(Attributes="EditorOrder(74), EditorDisplay(\"Invert Channels\")")
+        bool InvertBlueChannel = false;
 
-        /// <summary>
-        /// Custom texture size X, use only if Resize texture flag is set.
-        /// </summary>
-        int32 SizeX;
+        // Invert the alpha channel.
+        API_FIELD(Attributes="EditorOrder(75), EditorDisplay(\"Invert Channels\")")
+        bool InvertAlphaChannel = false;
 
-        /// <summary>
-        /// Custom texture size Y, use only if Resize texture flag is set.
-        /// </summary>
-        int32 SizeY;
+        // Rebuild Z (blue) channel assuming X/Y are normals.
+        API_FIELD(Attributes="EditorOrder(76)")
+        bool ReconstructZChannel = false;
 
-        /// <summary>
-        /// Maximum size of the texture (for both width and height).
-        /// Higher resolution textures will be resized during importing process.
-        /// </summary>
-        int32 MaxSize;
+        // Texture size scale. Allows increasing or decreasing the imported texture resolution. Default is 1.
+        API_FIELD(Attributes="EditorOrder(80), Limit(0.0001f, 1000.0f, 0.01f)")
+        float Scale = 1.0f;
 
-        /// <summary>
-        /// Function used for fast importing textures used by internal parts of the engine
-        /// </summary>
-        Function<bool(TextureData&)> InternalLoad;
+        // Maximum size of the texture (for both width and height). Higher resolution textures will be resized during importing process. Used to clip textures that are too big.
+        API_FIELD(Attributes="HideInEditor")
+        int32 MaxSize = 8192;
 
-        /// <summary>
-        /// The sprites for the sprite sheet import mode.
-        /// </summary>
+        // True if resize texture on import. Use SizeX/SizeY properties to define texture width and height. Texture scale property will be ignored.
+        API_FIELD(Attributes="EditorOrder(100)")
+        bool Resize = false;
+
+        // Keeps the aspect ratio when resizing.
+        API_FIELD(Attributes="EditorOrder(101), VisibleIf(nameof(Resize))")
+        bool KeepAspectRatio = false;
+
+        // The width of the imported texture. If Resize property is set to true then texture will be resized during the import to this value during the import, otherwise it will be ignored.
+        API_FIELD(Attributes="HideInEditor")
+        int32 SizeX = 1024;
+
+        // The height of the imported texture. If Resize property is set to true then texture will be resized during the import to this value during the import, otherwise it will be ignored.
+        API_FIELD(Attributes="HideInEditor")
+        int32 SizeY = 1024;
+
+        // Check to preserve alpha coverage in generated mips for alpha test reference. Scales mipmap alpha values to preserve alpha coverage based on an alpha test reference value.
+        API_FIELD(Attributes="EditorOrder(200)")
+        bool PreserveAlphaCoverage = false;
+
+        // The reference value for the alpha coverage preserving.
+        API_FIELD(Attributes="EditorOrder(210), VisibleIf(\"PreserveAlphaCoverage\")")
+        float PreserveAlphaCoverageReference = 0.5f;
+
+        // The texture group for streaming (negative if unused). See Streaming Settings.
+        API_FIELD(Attributes="EditorOrder(300), CustomEditorAlias(\"FlaxEditor.CustomEditors.Dedicated.TextureGroupEditor\")")
+        int32 TextureGroup = -1;
+
+        // The sprites for the sprite sheet import mode.
+        API_FIELD(Attributes="HideInEditor")
         Array<Sprite> Sprites;
 
+        // The custom format to use. Can be used to override default format from texture Type.
+        API_FIELD(Attributes="HideInEditor")
+        PixelFormat InternalFormat = PixelFormat::Unknown;
+
+        // Function used for fast importing textures used by internal parts of the engine
+        Function<bool(TextureData&)> InternalLoad;
+
     public:
-
-        /// <summary>
-        /// Init
-        /// </summary>
-        Options();
-
-        /// <summary>
-        /// Gets string that contains information about options
-        /// </summary>
-        /// <returns>String</returns>
         String ToString() const;
-
-    public:
 
         // [ISerializable]
         void Serialize(SerializeStream& stream, const void* otherObj) override;
         void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     };
 
+    typedef ImageFormat ImageType;
+
 public:
-
 #if USE_EDITOR
-
     /// <summary>
-    /// Checks whenever the given texture file contains alpha channel data with values different than solid fill of 1 (non fully opaque).
+    /// Checks whenever the given texture file contains alpha channel data with values different from solid fill of 1 (non fully opaque).
     /// </summary>
     /// <param name="path">The file path.</param>
     /// <returns>True if has alpha channel, otherwise false.</returns>
     static bool HasAlpha(const StringView& path);
-
 #endif
 
     /// <summary>
-    /// Imports the texture.
+    /// Imports the texture from file.
     /// </summary>
     /// <param name="path">The file path.</param>
     /// <param name="textureData">The output data.</param>
@@ -156,7 +157,7 @@ public:
     static bool ImportTexture(const StringView& path, TextureData& textureData);
 
     /// <summary>
-    /// Imports the texture.
+    /// Imports the texture from file with custom options.
     /// </summary>
     /// <param name="path">The file path.</param>
     /// <param name="textureData">The output data.</param>
@@ -164,6 +165,15 @@ public:
     /// <param name="errorMsg">The error message container.</param>
     /// <returns>True if fails, otherwise false.</returns>
     static bool ImportTexture(const StringView& path, TextureData& textureData, Options options, String& errorMsg);
+
+    /// <summary>
+    /// Imports the texture from memory.
+    /// </summary>
+    /// <param name="data">The file data.</param>
+    /// <param name="type">The file type.</param>
+    /// <param name="textureData">The output data.</param>
+    /// <returns>True if fails, otherwise false.</returns>
+    static bool ImportTexture(const Span<byte>& data, ImageType type, TextureData& textureData);
 
     /// <summary>
     /// Exports the texture.
@@ -174,7 +184,7 @@ public:
     static bool ExportTexture(const StringView& path, const TextureData& textureData);
 
     /// <summary>
-    /// Converts the specified source texture data into an another format.
+    /// Converts the specified source texture data into another format.
     /// </summary>
     /// <param name="dst">The destination data.</param>
     /// <param name="src">The source data.</param>
@@ -183,7 +193,7 @@ public:
     static bool Convert(TextureData& dst, const TextureData& src, const PixelFormat dstFormat);
 
     /// <summary>
-    /// Resizes the specified source texture data into an another dimensions.
+    /// Resizes the specified source texture data into another dimensions.
     /// </summary>
     /// <param name="dst">The destination data.</param>
     /// <param name="src">The source data.</param>
@@ -192,114 +202,61 @@ public:
     /// <returns>True if fails, otherwise false.</returns>
     static bool Resize(TextureData& dst, const TextureData& src, int32 dstWidth, int32 dstHeight);
 
+    /// <summary>
+    /// Updates the texture data. Supports transcoding source data (eg. Basis).
+    /// </summary>
+    /// <param name="context">The GPU context.</param>
+    /// <param name="texture">The destination GPU texture. It has to be allocated.</param>
+    /// <param name="arrayIndex">The destination surface index in the texture array.</param>
+    /// <param name="mipIndex">The absolute index of the mip map to update.</param>
+    /// <param name="data">The buffer with texture the data.</param>
+    /// <param name="rowPitch">The row pitch (in bytes) of the input data.</param>
+    /// <param name="slicePitch">The slice pitch (in bytes) of the input data.</param>
+    /// <param name="dataFormat">The format of the data. If different then GPU texture format then runtime conversion might happen.</param>
+    static bool UpdateTexture(GPUContext* context, GPUTexture* texture, int32 arrayIndex, int32 mipIndex, Span<byte> data, uint32 rowPitch, uint32 slicePitch, PixelFormat dataFormat);
+
+    /// <summary>
+    /// Calculates the runtime format for the texture pixels based on the texture type and input texture data (format and size). Checks the current GPUDevice formats support.
+    /// </summary>
+    /// <param name="textureType">Type fo the texture that hints it's usage.</param>
+    /// <param name="dataFormat">The existing texture data format (ideally to preserve to avoid conversions).</param>
+    /// <param name="width">Width of the texture (in pixels).</param>
+    /// <param name="height">Height of the texture (in pixels).</param>
+    /// <param name="sRGB">Indicates that texture data is stored in sRGB color space.</param>
+    /// <returns>Resolved pixel format for the GPU Texture.</returns>
+    static PixelFormat GetTextureFormat(TextureFormatType textureType, PixelFormat dataFormat, int32 width, int32 height, bool sRGB);
+
 public:
-
-    typedef Color (*ReadPixel)(const void*);
-    typedef void (*WritePixel)(const void*, const Color&);
-
-    struct PixelFormatSampler
-    {
-        PixelFormat Format;
-        int32 PixelSize;
-        ReadPixel Sample;
-        WritePixel Store;
-    };
-
-    /// <summary>
-    /// Determines whether this tool can sample the specified format to read texture samples and returns the sampler object.
-    /// </summary>
-    /// <param name="format">The format.</param>
-    /// <returns>The pointer to the sampler object or null if cannot sample the given format.</returns>
-    static const PixelFormatSampler* GetSampler(PixelFormat format);
-
-    /// <summary>
-    /// Stores the color into the specified texture data (uses no interpolation).
-    /// </summary>
-    /// <remarks>
-    /// Use GetSampler for the texture sampler.
-    /// </remarks>
-    /// <param name="sampler">The texture data sampler.</param>
-    /// <param name="x">The X texture coordinates (normalized to range 0-width).</param>
-    /// <param name="y">The Y texture coordinates (normalized to range 0-height).</param>
-    /// <param name="data">The data pointer for the texture slice (1D or 2D image).</param>
-    /// <param name="rowPitch">The row pitch (in bytes). The offset between each image rows.</param>
-    /// <param name="color">The color to store (linear).</param>
-    static void Store(const PixelFormatSampler* sampler, int32 x, int32 y, const void* data, int32 rowPitch, const Color& color);
-
-    /// <summary>
-    /// Samples the specified texture data (uses no interpolation).
-    /// </summary>
-    /// <remarks>
-    /// Use GetSampler for the texture sampler.
-    /// </remarks>
-    /// <param name="sampler">The texture data sampler.</param>
-    /// <param name="uv">The texture coordinates (normalized to range 0-1).</param>
-    /// <param name="data">The data pointer for the texture slice (1D or 2D image).</param>
-    /// <param name="size">The size of the input texture (in pixels).</param>
-    /// <param name="rowPitch">The row pitch (in bytes). The offset between each image rows.</param>
-    /// <returns>The sampled color (linear).</returns>
-    static Color SamplePoint(const PixelFormatSampler* sampler, const Vector2& uv, const void* data, const Int2& size, int32 rowPitch);
-
-    /// <summary>
-    /// Samples the specified texture data (uses no interpolation).
-    /// </summary>
-    /// <remarks>
-    /// Use GetSampler for the texture sampler.
-    /// </remarks>
-    /// <param name="sampler">The texture data sampler.</param>
-    /// <param name="x">The X texture coordinates (normalized to range 0-width).</param>
-    /// <param name="y">The Y texture coordinates (normalized to range 0-height).</param>
-    /// <param name="data">The data pointer for the texture slice (1D or 2D image).</param>
-    /// <param name="rowPitch">The row pitch (in bytes). The offset between each image rows.</param>
-    /// <returns>The sampled color (linear).</returns>
-    static Color SamplePoint(const PixelFormatSampler* sampler, int32 x, int32 y, const void* data, int32 rowPitch);
-
-    /// <summary>
-    /// Samples the specified texture data (uses linear interpolation).
-    /// </summary>
-    /// <remarks>
-    /// Use GetSampler for the texture sampler.
-    /// </remarks>
-    /// <param name="sampler">The texture data sampler.</param>
-    /// <param name="uv">The texture coordinates (normalized to range 0-1).</param>
-    /// <param name="data">The data pointer for the texture slice (1D or 2D image).</param>
-    /// <param name="size">The size of the input texture (in pixels).</param>
-    /// <param name="rowPitch">The row pitch (in bytes). The offset between each image rows.</param>
-    /// <returns>The sampled color (linear).</returns>
-    static Color SampleLinear(const PixelFormatSampler* sampler, const Vector2& uv, const void* data, const Int2& size, int32 rowPitch);
+    static PixelFormat ToPixelFormat(TextureFormatType format, int32 width, int32 height, bool canCompress = true);
+#if USE_EDITOR
+    static bool WriteTextureData(BytesContainer& result, const TextureData& textureData, int32 mipIndex);
+#endif
 
 private:
-
-    enum class ImageType
-    {
-        DDS,
-        TGA,
-        PNG,
-        BMP,
-        GIF,
-        TIFF,
-        JPEG,
-        HDR,
-        RAW,
-        Internal,
-    };
-
     static bool GetImageType(const StringView& path, ImageType& type);
+    static bool Transform(TextureData& texture, const Function<void(Color&)>& transformation);
 
 #if COMPILE_WITH_DIRECTXTEX
     static bool ExportTextureDirectXTex(ImageType type, const StringView& path, const TextureData& textureData);
-    static bool ImportTextureDirectXTex(ImageType type, const StringView& path, TextureData& textureData, bool& hasAlpha);
-    static bool ImportTextureDirectXTex(ImageType type, const StringView& path, TextureData& textureData, const Options& options, String& errorMsg, bool& hasAlpha);
+    static bool ImportTextureDirectXTex(ImageType type, Span<byte> bytes, TextureData& textureData, bool& hasAlpha);
+    static bool ImportTextureDirectXTex(ImageType type, Span<byte> bytes, TextureData& textureData, const Options& options, String& errorMsg, bool& hasAlpha);
     static bool ConvertDirectXTex(TextureData& dst, const TextureData& src, const PixelFormat dstFormat);
     static bool ResizeDirectXTex(TextureData& dst, const TextureData& src, int32 dstWidth, int32 dstHeight);
 #endif
 #if COMPILE_WITH_STB
     static bool ExportTextureStb(ImageType type, const StringView& path, const TextureData& textureData);
-    static bool ImportTextureStb(ImageType type, const StringView& path, TextureData& textureData, bool& hasAlpha);
-    static bool ImportTextureStb(ImageType type, const StringView& path, TextureData& textureData, const Options& options, String& errorMsg, bool& hasAlpha);
+    static bool ImportTextureStb(ImageType type, Span<byte> bytes, TextureData& textureData, bool& hasAlpha);
+    static bool ImportTextureStb(ImageType type, Span<byte> bytes, TextureData& textureData, const Options& options, String& errorMsg, bool& hasAlpha);
     static bool ConvertStb(TextureData& dst, const TextureData& src, const PixelFormat dstFormat);
     static bool ResizeStb(PixelFormat format, TextureMipData& dstMip, const TextureMipData& srcMip, int32 dstMipWidth, int32 dstMipHeight);
     static bool ResizeStb(TextureData& dst, const TextureData& src, int32 dstWidth, int32 dstHeight);
+#endif
+#if COMPILE_WITH_ASTC
+    static bool ConvertAstc(TextureData& dst, const TextureData& src, PixelFormat dstFormat);
+#endif
+#if COMPILE_WITH_BASISU
+    static bool ConvertBasisUniversal(TextureData& dst, const TextureData& src);
+    static bool UpdateTextureBasisUniversal(GPUContext* context, GPUTexture* texture, int32 arrayIndex, int32 mipIndex, Span<byte> data, uint32 rowPitch, uint32 slicePitch, PixelFormat dataFormat);
 #endif
 };
 

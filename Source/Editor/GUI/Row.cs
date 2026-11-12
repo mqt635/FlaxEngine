@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -14,6 +15,11 @@ namespace FlaxEditor.GUI
         private Table _table;
 
         /// <summary>
+        /// True if row is selected by the user.
+        /// </summary>
+        public bool IsSelected;
+
+        /// <summary>
         /// Gets the parent table that owns this row.
         /// </summary>
         public Table Table => _table;
@@ -22,6 +28,11 @@ namespace FlaxEditor.GUI
         /// Gets or sets the cell values.
         /// </summary>
         public object[] Values { get; set; }
+
+        /// <summary>
+        /// Gets or sets the cell background colors. Null if unused, transparent values are ignored.
+        /// </summary>
+        public Color[] BackgroundColors { get; set; }
 
         /// <summary>
         /// Gets or sets the row depth level.
@@ -36,6 +47,10 @@ namespace FlaxEditor.GUI
         : base(0, 0, 100, height)
         {
             Depth = -1;
+
+            var fontHeight = Style.Current.FontMedium.Height;
+            if (Height < fontHeight)
+                Height = fontHeight + 4;
         }
 
         /// <inheritdoc />
@@ -45,15 +60,20 @@ namespace FlaxEditor.GUI
 
             var style = Style.Current;
 
-            if (IsMouseOver)
+            if (IsSelected)
             {
-                Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), style.BackgroundHighlighted * 0.7f);
+                Render2D.FillRectangle(new Rectangle(Float2.Zero, Size), style.BackgroundSelected);
+            }
+            else if (IsMouseOver)
+            {
+                Render2D.FillRectangle(new Rectangle(Float2.Zero, Size), style.BackgroundHighlighted * 0.7f);
             }
 
             if (Values != null && _table?.Columns != null)
             {
                 float x = 0;
                 int end = Mathf.Min(Values.Length, _table.Columns.Length);
+                var backgroundColors = BackgroundColors;
                 for (int i = 0; i < end; i++)
                 {
                     var column = _table.Columns[i];
@@ -94,7 +114,9 @@ namespace FlaxEditor.GUI
                     rect.Width -= leftDepthMargin;
 
                     Render2D.PushClip(rect);
-                    Render2D.DrawText(style.FontMedium, text, rect, Color.White, column.CellAlignment, TextAlignment.Center);
+                    if (backgroundColors != null && backgroundColors[i].A > 0)
+                        Render2D.FillRectangle(rect, backgroundColors[i]);
+                    Render2D.DrawText(style.FontMedium, text, rect, style.Foreground, column.CellAlignment, TextAlignment.Center);
                     Render2D.PopClip();
 
                     x += width;
@@ -111,7 +133,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left && Values != null && _table?.Columns != null)
             {
@@ -190,6 +212,97 @@ namespace FlaxEditor.GUI
                         break;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// The table row that contains events for mouse interaction.
+    /// </summary>
+    [HideInEditor]
+    public class ClickableRow : Row
+    {
+        private bool _leftClick;
+        private bool _isRightDown;
+
+        /// <summary>
+        /// The double click event.
+        /// </summary>
+        public Action DoubleClick;
+
+        /// <summary>
+        /// The left mouse button click event.
+        /// </summary>
+        public Action LeftClick;
+
+        /// <summary>
+        /// The right mouse button click event.
+        /// </summary>
+        public Action RightClick;
+
+        /// <summary>
+        /// The double click event.
+        /// </summary>
+        public Action<ClickableRow> RowDoubleClick;
+
+        /// <summary>
+        /// The left mouse button click event.
+        /// </summary>
+        public Action<ClickableRow> RowLeftClick;
+
+        /// <summary>
+        /// The right mouse button click event.
+        /// </summary>
+        public Action<ClickableRow> RowRightClick;
+
+        /// <inheritdoc />
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left)
+            {
+                DoubleClick?.Invoke();
+                RowDoubleClick?.Invoke(this);
+            }
+
+            return base.OnMouseDoubleClick(location, button);
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseDown(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left)
+                _leftClick = true;
+            else if (button == MouseButton.Right)
+                _isRightDown = true;
+
+            return base.OnMouseDown(location, button);
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left && _leftClick)
+            {
+                _leftClick = false;
+                LeftClick?.Invoke();
+                RowLeftClick?.Invoke(this);
+            }
+            else if (button == MouseButton.Right && _isRightDown)
+            {
+                _isRightDown = false;
+                RightClick?.Invoke();
+                RowRightClick?.Invoke(this);
+            }
+
+            return base.OnMouseUp(location, button);
+        }
+
+        /// <inheritdoc />
+        public override void OnMouseLeave()
+        {
+            _leftClick = false;
+            _isRightDown = false;
+
+            base.OnMouseLeave();
         }
     }
 }

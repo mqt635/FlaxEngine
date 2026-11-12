@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "DirectionalLight.h"
 #include "Engine/Graphics/RenderTask.h"
-#include "Engine/Graphics/RenderView.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Renderer/RenderList.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Level/Scene/SceneRendering.h"
@@ -10,34 +10,56 @@
 DirectionalLight::DirectionalLight(const SpawnParams& params)
     : LightWithShadow(params)
 {
+    ShadowsDepthBias = 0.002f;
+    ShadowsNormalOffsetScale = 20.0f;
+
+    _drawNoCulling = 1;
     Brightness = 8.0f;
 }
 
-void DirectionalLight::Draw(RenderContext& renderContext)
+void DirectionalLight::Draw(RenderContextBatch& renderContextBatch)
 {
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
     float brightness = Brightness;
     AdjustBrightness(renderContext.View, brightness);
-    if (Brightness > ZeroTolerance
-        && (renderContext.View.Flags & ViewFlags::DirectionalLights) != 0
-        && (ViewDistance < ZeroTolerance || Vector3::DistanceSquared(renderContext.View.Position, GetPosition()) < ViewDistance * ViewDistance))
+    Float3 color = Color.ToFloat3() * (Color.A * brightness);
+    Float3 position;
+    if (color.SumValues() > ZeroTolerance
+        && EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::DirectionalLights)
+        && EnumHasAnyFlags(renderContext.View.Pass, DrawPass::GBuffer)
+        && CheckViewDistance(renderContext.View.Position, renderContext.View.Origin, position, brightness))
     {
-        RendererDirectionalLightData data;
-        data.Position = GetPosition();
+        RenderDirectionalLightData data;
+        data.Position = position;
         data.MinRoughness = MinRoughness;
         data.ShadowsDistance = ShadowsDistance;
-        data.Color = Color.ToVector3() * (Color.A * brightness);
+        data.Color = color;
         data.ShadowsStrength = ShadowsStrength;
-        data.Direction = GetDirection();
+        data.Direction = GetForward();
         data.ShadowsFadeDistance = ShadowsFadeDistance;
         data.ShadowsNormalOffsetScale = ShadowsNormalOffsetScale;
         data.ShadowsDepthBias = ShadowsDepthBias;
         data.ShadowsSharpness = ShadowsSharpness;
         data.VolumetricScatteringIntensity = VolumetricScatteringIntensity;
+        data.IndirectLightingIntensity = IndirectLightingIntensity;
         data.CastVolumetricShadow = CastVolumetricShadow;
-        data.RenderedVolumetricFog = 0;
+        data.ShadowsUpdateRate = ShadowsUpdateRate;
+        data.ShadowFrame = _invalidateShadowFrame;
+        data.ShadowsResolution = (int32)ShadowsResolution;
+        data.ShadowsUpdateRateAtDistance = ShadowsUpdateRateAtDistance;
         data.ShadowsMode = ShadowsMode;
         data.CascadeCount = CascadeCount;
+        data.Cascade1Spacing = Cascade1Spacing;
+        data.Cascade2Spacing = Cascade2Spacing;
+        data.Cascade3Spacing = Cascade3Spacing;
+        data.Cascade4Spacing = Cascade4Spacing;
+        data.CascadeBlendSize = CascadeBlendSize;
+        data.SourceAngle = Math::Tan(SourceAngle * DegreesToRadians * 0.5f);
+        data.PartitionMode = PartitionMode;
         data.ContactShadowsLength = ContactShadowsLength;
+        data.StaticFlags = GetStaticFlags();
+        data.ID = GetID();
+        data.ScreenSize = 1.0f;
         renderContext.List->DirectionalLights.Add(data);
     }
 }
@@ -49,7 +71,14 @@ void DirectionalLight::Serialize(SerializeStream& stream, const void* otherObj)
 
     SERIALIZE_GET_OTHER_OBJ(DirectionalLight);
 
+    SERIALIZE(SourceAngle);
     SERIALIZE(CascadeCount);
+    SERIALIZE(Cascade1Spacing);
+    SERIALIZE(Cascade2Spacing);
+    SERIALIZE(Cascade3Spacing);
+    SERIALIZE(Cascade4Spacing);
+    SERIALIZE(CascadeBlendSize);
+    SERIALIZE(PartitionMode);
 }
 
 void DirectionalLight::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
@@ -57,34 +86,19 @@ void DirectionalLight::Deserialize(DeserializeStream& stream, ISerializeModifier
     // Base
     LightWithShadow::Deserialize(stream, modifier);
 
+    DESERIALIZE(SourceAngle);
     DESERIALIZE(CascadeCount);
+    DESERIALIZE(Cascade1Spacing);
+    DESERIALIZE(Cascade2Spacing);
+    DESERIALIZE(Cascade3Spacing);
+    DESERIALIZE(Cascade4Spacing);
+    DESERIALIZE(CascadeBlendSize);
+    DESERIALIZE(PartitionMode);
 }
 
-bool DirectionalLight::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool DirectionalLight::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return false;
-}
-
-void DirectionalLight::OnEnable()
-{
-    GetSceneRendering()->AddCommonNoCulling(this);
-#if USE_EDITOR
-    GetSceneRendering()->AddViewportIcon(this);
-#endif
-
-    // Base
-    LightWithShadow::OnEnable();
-}
-
-void DirectionalLight::OnDisable()
-{
-#if USE_EDITOR
-    GetSceneRendering()->RemoveViewportIcon(this);
-#endif
-    GetSceneRendering()->RemoveCommonNoCulling(this);
-
-    // Base
-    LightWithShadow::OnDisable();
 }
 
 void DirectionalLight::OnTransformChanged()

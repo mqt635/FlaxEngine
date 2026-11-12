@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS && !USE_EDITOR
 
@@ -9,8 +9,6 @@
 
 void WindowsGame::InitMainWindowSettings(CreateWindowSettings& settings)
 {
-    // TODO: restore window size and fullscreen mode from the cached local settings saved after previous session
-
     const auto platformSettings = WindowsPlatformSettings::Get();
     auto windowMode = platformSettings->WindowMode;
 
@@ -28,14 +26,13 @@ void WindowsGame::InitMainWindowSettings(CreateWindowSettings& settings)
         windowMode == GameWindowMode::Fullscreen)
     {
         settings.Size = Platform::GetDesktopSize();
-        settings.Position = Vector2::Zero;
+        settings.Position = Float2::Zero;
     }
-        // Not fullscreen - put window in the middle of the screen
-    else if (windowMode == GameWindowMode::Windowed ||
-        windowMode == GameWindowMode::Borderless)
+    // Not fullscreen - put window in the middle of the screen
+    else if (windowMode == GameWindowMode::Windowed || windowMode == GameWindowMode::Borderless)
     {
-        settings.Size = Vector2((float)platformSettings->ScreenWidth, (float)platformSettings->ScreenHeight);
-        settings.Position = (Platform::GetDesktopSize() - settings.Size) / 2;
+        settings.Size = Float2((float)platformSettings->ScreenWidth, (float)platformSettings->ScreenHeight);
+        settings.Position = (Platform::GetDesktopSize() - settings.Size) * 0.5f;
     }
 
     // Windowed mode

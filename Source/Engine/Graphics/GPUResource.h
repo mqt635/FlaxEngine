@@ -1,8 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Core/Enums.h"
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Config.h"
 
@@ -13,26 +12,46 @@
 #define SAFE_DELETE_GPU_RESOURCES(x) for (auto& e : (x)) if (e) { e->DeleteObjectNow(); e = nullptr; }
 
 /// <summary>
+/// GPU resources types.
+/// </summary>
+API_ENUM() enum class GPUResourceType
+{
+    // GPU render target texture
+    RenderTarget = 0,
+    // GPU texture
+    Texture,
+    // GPU cube texture (cubemap)
+    CubeTexture,
+    // GPU volume texture (3D)
+    VolumeTexture,
+    // GPU buffer
+    Buffer,
+    // GPU shader
+    Shader,
+    // GPU pipeline state object (PSO)
+    PipelineState,
+    // GPU binding descriptor
+    Descriptor,
+    // GPU timer or occlusion query
+    Query,
+    // GPU texture sampler
+    Sampler,
+
+    MAX
+};
+
+/// <summary>
 /// The base class for all GPU resources.
 /// </summary>
-API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API GPUResource : public PersistentScriptingObject
+API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API GPUResource : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUResource);
-public:
-
-    /// <summary>
-    /// GPU Resources types.
-    /// </summary>
-    DECLARE_ENUM_10(ResourceType, RenderTarget, Texture, CubeTexture, VolumeTexture, Buffer, Shader, PipelineState, Descriptor, Query, Sampler);
-
-    /// <summary>
-    /// GPU Resources object types. Used to detect Texture objects from subset of Types:  RenderTarget, Texture, CubeTexture, VolumeTexture which use the same API object.
-    /// </summary>
-    DECLARE_ENUM_3(ObjectType, Texture, Buffer, Other);
-
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUResource);
 protected:
-
     uint64 _memoryUsage = 0;
+#if GPU_ENABLE_RESOURCE_NAMING
+    Char* _namePtr = nullptr;
+    int32 _nameSize = 0, _nameCapacity = 0;
+#endif
 
 public:
     NON_COPYABLE(GPUResource);
@@ -54,7 +73,6 @@ public:
     virtual ~GPUResource();
 
 public:
-
     // Points to the cache used by the resource for the resource visibility/usage detection. Written during rendering when resource is used.
     double LastRenderTime = -1;
 
@@ -64,29 +82,28 @@ public:
     Action Releasing;
 
 public:
-
     /// <summary>
-    /// Gets the resource type.
+    /// Gets the GPU resource type.
     /// </summary>
-    virtual ResourceType GetResourceType() const = 0;
-
-    /// <summary>
-    /// Gets resource object type.
-    /// </summary>
-    virtual ObjectType GetObjectType() const;
+    API_PROPERTY() virtual GPUResourceType GetResourceType() const = 0;
 
     /// <summary>
     /// Gets amount of GPU memory used by this resource (in bytes). It's a rough estimation. GPU memory may be fragmented, compressed or sub-allocated so the actual memory pressure from this resource may vary (also depends on the current graphics backend).
     /// </summary>
     API_PROPERTY() uint64 GetMemoryUsage() const;
 
-#if GPU_ENABLE_RESOURCE_NAMING
-
+#if !BUILD_RELEASE
     /// <summary>
     /// Gets the resource name.
     /// </summary>
-    virtual String GetName() const;
+    /// <remarks>Only available in Development and Debug builds.</remarks>
+    API_PROPERTY() StringView GetName() const;
 
+    /// <summary>
+    /// Sets the resource name.
+    /// </summary>
+    /// <remarks>Only available in Development and Debug builds.</remarks>
+    API_PROPERTY() void SetName(const StringView& name);
 #endif
 
     /// <summary>
@@ -100,15 +117,17 @@ public:
     virtual void OnDeviceDispose();
 
 protected:
-
     /// <summary>
     /// Releases GPU resource data (implementation).
     /// </summary>
     virtual void OnReleaseGPU();
 
-public:
+#if !BUILD_RELEASE
+    virtual void OnRenamed();
+#endif
 
-    // [PersistentScriptingObject]
+public:
+    // [ScriptingObject]
     String ToString() const override;
     void OnDeleteObject() override;
 };
@@ -123,29 +142,23 @@ template<class DeviceType, class BaseType>
 class GPUResourceBase : public BaseType
 {
 protected:
-
     DeviceType* _device;
 
-private:
-
-#if GPU_ENABLE_RESOURCE_NAMING
-    String _name;
-#endif
-
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUResourceBase"/> class.
     /// </summary>
     /// <param name="device">The graphics device.</param>
     /// <param name="name">The resource name.</param>
     GPUResourceBase(DeviceType* device, const StringView& name) noexcept
-        : _device(device)
-#if GPU_ENABLE_RESOURCE_NAMING
-        , _name(name.Get(), name.Length())
-#endif
+        : BaseType()
+        , _device(device)
     {
-        device->Resources.Add(this);
+#if GPU_ENABLE_RESOURCE_NAMING
+        if (name.HasChars())
+            GPUResource::SetName(name);
+#endif
+        device->AddResource(this);
     }
 
     /// <summary>
@@ -154,11 +167,10 @@ public:
     virtual ~GPUResourceBase()
     {
         if (_device)
-            _device->Resources.Remove(this);
+            _device->RemoveResource(this);
     }
 
 public:
-
     /// <summary>
     /// Gets the graphics device.
     /// </summary>
@@ -168,14 +180,7 @@ public:
     }
 
 public:
-
     // [GPUResource]
-#if GPU_ENABLE_RESOURCE_NAMING
-    String GetName() const override
-    {
-        return _name;
-    }
-#endif
     void OnDeviceDispose() override
     {
         GPUResource::OnDeviceDispose();
@@ -186,22 +191,30 @@ public:
 /// <summary>
 /// Interface for GPU resources views. Shared base class for texture and buffer views.
 /// </summary>
-API_CLASS(Abstract, NoSpawn, Attributes="HideInEditor") class FLAXENGINE_API GPUResourceView : public PersistentScriptingObject
+API_CLASS(Abstract, NoSpawn, Attributes="HideInEditor") class FLAXENGINE_API GPUResourceView : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUResourceView);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUResourceView);
 protected:
     static double DummyLastRenderTime;
+    GPUResource* _parent = nullptr;
 
     explicit GPUResourceView(const SpawnParams& params)
-        : PersistentScriptingObject(params)
+        : ScriptingObject(params)
         , LastRenderTime(&DummyLastRenderTime)
     {
     }
 
 public:
-
     // Points to the cache used by the resource for the resource visibility/usage detection. Written during rendering when resource view is used.
     double* LastRenderTime;
+
+    /// <summary>
+    /// Gets parent GPU resource owning that view.
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE GPUResource* GetParent() const
+    {
+        return _parent;
+    }
 
     /// <summary>
     /// Gets the native pointer to the underlying view. It's a platform-specific handle.

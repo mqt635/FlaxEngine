@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/BaseTypes.h"
+
+#ifndef DOXYGEN
 
 // @formatter:off
 
@@ -10,7 +12,7 @@
 
 namespace THelpers
 {
-	template <typename T, bool bIsTriviallyTriviallyDestructible = __is_enum(T)>
+	template <typename T, bool IsTriviallyDestructible = __is_enum(T)>
 	struct TIsTriviallyDestructibleImpl
 	{
 		enum { Value = true };
@@ -19,7 +21,11 @@ namespace THelpers
 	template <typename T>
 	struct TIsTriviallyDestructibleImpl<T, false>
 	{
-		enum { Value = __has_trivial_destructor(T) };
+#if defined(__clang__) && __clang_major__ >= 15
+        enum { Value = __is_trivially_destructible(T) };
+#else
+        enum { Value = __has_trivial_destructor(T) };
+#endif
 	};
 }
 
@@ -90,7 +96,7 @@ struct TOr<>
 template<typename Type>
 struct TNot
 {
-	enum { Value = !Type::Value };
+    enum { Value = !Type::Value };
 };
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -138,30 +144,6 @@ struct TIsEnum
 {
 	enum { Value = __is_enum(T) };
 };
-
-////////////////////////////////////////////////////////////////////////////////////
-
-// Checks if a type is arithmetic.
-
-template<typename T> struct TIsArithmetic    { enum { Value = false }; };
-template<> struct TIsArithmetic<float>       { enum { Value = true }; };
-template<> struct TIsArithmetic<double>      { enum { Value = true }; };
-template<> struct TIsArithmetic<long double> { enum { Value = true }; };
-template<> struct TIsArithmetic<uint8>       { enum { Value = true }; };
-template<> struct TIsArithmetic<uint16>      { enum { Value = true }; };
-template<> struct TIsArithmetic<uint32>      { enum { Value = true }; };
-template<> struct TIsArithmetic<uint64>      { enum { Value = true }; };
-template<> struct TIsArithmetic<int8>        { enum { Value = true }; };
-template<> struct TIsArithmetic<int16>       { enum { Value = true }; };
-template<> struct TIsArithmetic<int32>       { enum { Value = true }; };
-template<> struct TIsArithmetic<int64>       { enum { Value = true }; };
-template<> struct TIsArithmetic<bool>        { enum { Value = true }; };
-template<> struct TIsArithmetic<char>        { enum { Value = true }; };
-template<> struct TIsArithmetic<Char>        { enum { Value = true }; };
-
-template<typename T> struct TIsArithmetic<const          T> { enum { Value = TIsArithmetic<T>::Value }; };
-template<typename T> struct TIsArithmetic<      volatile T> { enum { Value = TIsArithmetic<T>::Value }; };
-template<typename T> struct TIsArithmetic<const volatile T> { enum { Value = TIsArithmetic<T>::Value }; };
 
 ////////////////////////////////////////////////////////////////////////////////////
 
@@ -252,6 +234,14 @@ struct TIsCopyConstructible
 	enum { Value = __is_constructible(T, typename TAddLValueReference<typename TAddConst<T>::Type>::Type) };
 };
 
+// Checks if a type has a move constructor.
+
+template<typename T>
+struct TIsMoveConstructible
+{
+    enum { Value = __is_constructible(T, typename TAddRValueReference<T>::Type) };
+};
+
 ////////////////////////////////////////////////////////////////////////////////////
 
 // Checks if a type has a trivial copy constructor.
@@ -259,7 +249,11 @@ struct TIsCopyConstructible
 template<typename T>
 struct TIsTriviallyCopyConstructible
 {
-	enum { Value = TOrValue<__has_trivial_copy(T), TIsPODType<T>>::Value };
+#if defined(__clang__) && __clang_major__ >= 15
+    enum { Value = TOrValue<__is_trivially_copyable(T), TIsPODType<T>>::Value };
+#else
+    enum { Value = TOrValue<__has_trivial_copy(T), TIsPODType<T>>::Value };
+#endif
 };
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -287,7 +281,11 @@ struct TIsTriviallyDestructible
 template<typename T>
 struct TIsTriviallyCopyAssignable
 {
-	enum { Value = TOrValue<__has_trivial_assign(T), TIsPODType<T>>::Value };
+#if defined(__clang__) && __clang_major__ >= 15
+    enum { Value = TOrValue<__is_trivially_assignable(T, const T), TIsPODType<T>>::Value };
+#else
+    enum { Value = TOrValue<__has_trivial_assign(T), TIsPODType<T>>::Value };
+#endif
 };
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -313,9 +311,9 @@ inline typename TRemoveReference<T>::Type&& MoveTemp(T&& obj)
 template<typename T>
 inline void Swap(T& a, T& b) noexcept
 {
-    T tmp = a;
-    a = b;
-    b = tmp;
+    T tmp = MoveTemp(a);
+    a = MoveTemp(b);
+    b = MoveTemp(tmp);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////
@@ -329,7 +327,6 @@ inline T&& Forward(typename TRemoveReference<T>::Type& t) noexcept
 template<typename T>
 inline T&& Forward(typename TRemoveReference<T>::Type&& t) noexcept
 {
-    static_assert(!TIsLValueReference<T>::Value, "Can not forward an rvalue as an lvalue.");
     return static_cast<T&&>(t);
 }
 
@@ -435,3 +432,14 @@ template<> struct TIsBitwiseConstructible<uint64, int64> { enum { Value = true }
 template<> struct TIsBitwiseConstructible<int64, uint64> { enum { Value = true }; };
 
 // @formatter:on
+
+////////////////////////////////////////////////////////////////////////////////////
+
+// Utility to select double for float type or float otherwise
+
+template<typename T>
+struct TOtherFloat { typedef float Type; };
+template<>
+struct TOtherFloat<float> { typedef double Type; };
+
+#endif

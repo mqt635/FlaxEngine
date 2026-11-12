@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,7 +8,9 @@
 #include "Types.h"
 #include "Defines.h"
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_SDL
+#include "SDL/SDLPlatform.h"
+#elif PLATFORM_WINDOWS
 #include "Windows/WindowsPlatform.h"
 #elif PLATFORM_UWP
 #include "UWP/UWPPlatform.h"
@@ -16,6 +18,8 @@
 #include "Linux/LinuxPlatform.h"
 #elif PLATFORM_PS4
 #include "Platforms/PS4/Engine/Platform/PS4Platform.h"
+#elif PLATFORM_PS5
+#include "Platforms/PS5/Engine/Platform/PS5Platform.h"
 #elif PLATFORM_XBOX_ONE
 #include "Platforms/XboxOne/Engine/Platform/XboxOnePlatform.h"
 #elif PLATFORM_XBOX_SCARLETT
@@ -24,12 +28,18 @@
 #include "Android/AndroidPlatform.h"
 #elif PLATFORM_SWITCH
 #include "Platforms/Switch/Engine/Platform/SwitchPlatform.h"
+#elif PLATFORM_MAC
+#include "Mac/MacPlatform.h"
+#elif PLATFORM_IOS
+#include "iOS/iOSPlatform.h"
+#elif PLATFORM_WEB
+#include "Web/WebPlatform.h"
 #else
 #error Missing Platform implementation!
 #endif
 
 #if ENABLE_ASSERTION
-// Performs hard assertion of the expression. Crashes the engine and inserts debugger break in case of expression fail.
+// Performs a hard assertion of the expression. Crashes the engine and triggers a debugger break if the expression fails.
 #define ASSERT(expression) \
     if (!(expression)) \
     { \
@@ -40,24 +50,46 @@
         Platform::Assert(#expression, __FILE__, __LINE__); \
     }
 #else
+// Performs a hard assertion of the expression. Crashes the engine and triggers a debugger break if the expression fails.
 #define ASSERT(expression) ((void)0)
 #endif
 #if ENABLE_ASSERTION_LOW_LAYERS
+// Performs a hard assertion of the expression. Crashes the engine and triggers a debugger break if the expression fails.
 #define ASSERT_LOW_LAYER(x) ASSERT(x)
 #else
+// Performs a hard assertion of the expression. Crashes the engine and triggers a debugger break if the expression fails.
 #define ASSERT_LOW_LAYER(x)
 #endif
 
-// Performs soft check of the expression. Logs the expression fail to log and returns the function call.
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call.
 #define CHECK(expression) \
     if (!(expression)) \
     { \
         Platform::CheckFailed(#expression, __FILE__, __LINE__); \
         return; \
     }
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call using the given return value.
 #define CHECK_RETURN(expression, returnValue) \
     if (!(expression)) \
     { \
         Platform::CheckFailed(#expression, __FILE__, __LINE__); \
         return returnValue; \
     }
+// Performs a soft check of the expression. Logs the expression failure and continues execution.
+#define CHECK_NO_RETURN(expression) \
+    if (!(expression)) \
+    { \
+        Platform::CheckFailed(#expression, __FILE__, __LINE__); \
+    }
+
+#if ENABLE_ASSERTION
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call.
+#define CHECK_DEBUG(expression) CHECK(expression)
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call using the given return value.
+#define CHECK_RETURN_DEBUG(expression, returnValue) CHECK_RETURN(expression, returnValue)
+#else
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call.
+#define CHECK_DEBUG(expression) ((void)0)
+// Performs a soft check of the expression. Logs the expression failure and returns from the function call using the given return value.
+#define CHECK_RETURN_DEBUG(expression, returnValue) ((void)0)
+#endif

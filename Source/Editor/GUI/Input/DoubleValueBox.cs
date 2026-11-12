@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Globalization;
 using FlaxEditor.Utilities;
 using FlaxEngine;
+using Utils = FlaxEngine.Utils;
 
 namespace FlaxEditor.GUI.Input
 {
@@ -14,14 +14,16 @@ namespace FlaxEditor.GUI.Input
     [HideInEditor]
     public class DoubleValueBox : ValueBox<double>
     {
+        private Utils.ValueCategory _category = Utils.ValueCategory.None;
+
         /// <inheritdoc />
         public override double Value
         {
             get => _value;
             set
             {
-                value = Mathf.Clamp(value, _min, _max);
-                if (Math.Abs(_value - value) > Mathf.Epsilon)
+                value = Mathd.Clamp(value, _min, _max);
+                if (Math.Abs(_value - value) > Mathd.Epsilon)
                 {
                     // Set value
                     _value = value;
@@ -39,7 +41,7 @@ namespace FlaxEditor.GUI.Input
             get => _min;
             set
             {
-                if (!Mathf.NearEqual(_min, value))
+                if (_min != value)
                 {
                     if (value > _max)
                         throw new ArgumentException();
@@ -56,7 +58,7 @@ namespace FlaxEditor.GUI.Input
             get => _max;
             set
             {
-                if (!Mathf.NearEqual(_max, value))
+                if (_max != value)
                 {
                     if (value < _min)
                         throw new ArgumentException();
@@ -78,7 +80,7 @@ namespace FlaxEditor.GUI.Input
         /// <param name="max">The maximum value.</param>
         /// <param name="slideSpeed">The slide speed.</param>
         public DoubleValueBox(double value, float x = 0, float y = 0, float width = 120, double min = double.MinValue, double max = double.MaxValue, float slideSpeed = 1)
-        : base(Mathf.Clamp(value, min, max), x, y, width, min, max, slideSpeed)
+        : base(Mathd.Clamp(value, min, max), x, y, width, min, max, slideSpeed)
         {
             UpdateText();
         }
@@ -130,18 +132,25 @@ namespace FlaxEditor.GUI.Input
             Value = Value;
         }
 
+        /// <summary>
+        /// Gets or sets the category of the value. This can be none for just a number or a more specific one like a distance.
+        /// </summary>
+        public Utils.ValueCategory Category
+        {
+            get => _category;
+            set
+            {
+                if (_category == value)
+                    return;
+                _category = value;
+                UpdateText();
+            }
+        }
+
         /// <inheritdoc />
         protected sealed override void UpdateText()
         {
-            string text;
-            if (double.IsPositiveInfinity(_value) || _value == double.MaxValue)
-                text = "Infinity";
-            else if (double.IsNegativeInfinity(_value) || _value == double.MinValue)
-                text = "-Infinity";
-            else
-                text = _value.ToString(CultureInfo.InvariantCulture);
-
-            SetText(text);
+            SetText(Utilities.Utils.FormatFloat(_value, Category));
         }
 
         /// <inheritdoc />

@@ -1,10 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CustomEditorsUtil.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Types/TimeSpan.h"
+#include "Engine/Core/Types/Stopwatch.h"
 #include "Engine/Core/Collections/Dictionary.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/BinaryModule.h"
@@ -13,7 +16,6 @@
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
 #include "FlaxEngine.Gen.h"
-#include <ThirdParty/mono-2.0/mono/metadata/reflection.h>
 
 #define TRACK_ASSEMBLY(assembly) \
 	if (assembly->IsLoaded()) \
@@ -39,41 +41,36 @@ CustomEditorsUtilService CustomEditorsUtilServiceInstance;
 
 struct Entry
 {
-    MClass* DefaultEditor;
-    MClass* CustomEditor;
-
-    Entry()
-    {
-        DefaultEditor = nullptr;
-        CustomEditor = nullptr;
-    }
+    MClass* DefaultEditor = nullptr;
+    MClass* CustomEditor = nullptr;
+    MType* CustomEditorType = nullptr;
 };
 
-Dictionary<MonoType*, Entry> Cache(512);
+Dictionary<MType*, Entry> Cache(512);
 
 void OnAssemblyLoaded(MAssembly* assembly);
 void OnAssemblyUnloading(MAssembly* assembly);
 void OnBinaryModuleLoaded(BinaryModule* module);
 
-MonoReflectionType* CustomEditorsUtil::GetCustomEditor(MonoReflectionType* refType)
+MType* CustomEditorsUtil::GetCustomEditor(MType* type)
 {
-    MonoType* type = mono_reflection_type_get_type(refType);
-
+    if (!type)
+        return nullptr;
     Entry result;
     if (Cache.TryGet(type, result))
     {
-        const auto editor = result.CustomEditor ? result.CustomEditor : result.DefaultEditor;
+        if (result.CustomEditorType)
+            return result.CustomEditorType;
+        MClass* editor = result.CustomEditor ? result.CustomEditor : result.DefaultEditor;
         if (editor)
-        {
-            return MUtils::GetType(editor->GetNative());
-        }
+            return MUtils::GetType(editor);
     }
-
     return nullptr;
 }
 
 bool CustomEditorsUtilService::Init()
 {
+    PROFILE_MEM(Editor);
     TRACK_ASSEMBLY(((NativeBinaryModule*)GetBinaryModuleFlaxEngine())->Assembly);
     Scripting::BinaryModuleLoaded.Bind(&OnBinaryModuleLoaded);
 
@@ -82,7 +79,9 @@ bool CustomEditorsUtilService::Init()
 
 void OnAssemblyLoaded(MAssembly* assembly)
 {
-    const auto startTime = DateTime::NowUTC();
+    PROFILE_CPU_NAMED("CustomEditors.OnAssemblyLoaded");
+    PROFILE_MEM(Editor);
+    Stopwatch stopwatch;
 
     // Prepare FlaxEngine
     auto engineAssembly = ((NativeBinaryModule*)GetBinaryModuleFlaxEngine())->Assembly;
@@ -123,19 +122,15 @@ void OnAssemblyLoaded(MAssembly* assembly)
             continue;
 
         const auto attribute = mclass->GetAttribute(customEditorAttribute);
-        if (attribute == nullptr || mono_object_get_class(attribute) != customEditorAttribute->GetNative())
+        if (attribute == nullptr || MCore::Object::GetClass(attribute) != customEditorAttribute)
             continue;
 
         // Check if attribute references a valid class
-        MonoReflectionType* refType = nullptr;
-        customEditorTypeField->GetValue(attribute, &refType);
-        if (refType == nullptr)
-            continue;
-
-        MonoType* type = mono_reflection_type_get_type(refType);
+        MType* type = nullptr;
+        customEditorTypeField->GetValue(attribute, &type);
         if (type == nullptr)
             continue;
-        MonoClass* typeClass = mono_type_get_class(type);
+        MClass* typeClass = MCore::Type::GetClass(type);
 
         // Check if it's a custom editor class
         if (mclass->IsSubClassOf(customEditor))
@@ -152,23 +147,19 @@ void OnAssemblyLoaded(MAssembly* assembly)
                 entry.CustomEditor = mclass;
             }
 
-            //LOG(Info, "Custom Editor {0} for type {1} (default: {2})", String(mclass->GetFullName()), String(mono_type_get_name(type)), isDefault);
+            //LOG(Info, "Custom Editor {0} for type {1} (default: {2})", String(mclass->GetFullName()), MCore::Type::ToString(type), isDefault);
         }
         else if (typeClass)
         {
-            MClass* referencedClass = Scripting::FindClass(typeClass);
-            if (referencedClass)
-            {
-                auto& entry = Cache[mono_class_get_type(mclass->GetNative())];
-                entry.CustomEditor = referencedClass;
+            auto& entry = Cache[mclass->GetType()];
+            entry.CustomEditorType = type;
 
-                //LOG(Info, "Custom Editor {0} for type {1}", String(referencedClass->GetFullName()), String(mclass->GetFullName()));
-            }
+            //LOG(Info, "Custom Editor {0} for type {1}", String(typeClass->GetFullName()), String(mclass->GetFullName()));
         }
     }
 
-    const auto endTime = DateTime::NowUTC();
-    LOG(Info, "Assembly \'{0}\' scanned for custom editors in {1} ms", assembly->ToString(), (int32)(endTime - startTime).GetTotalMilliseconds());
+    stopwatch.Stop();
+    LOG(Info, "Assembly \'{0}\' scanned for custom editors in {1} ms", assembly->ToString(), stopwatch.GetMilliseconds());
 }
 
 void OnAssemblyUnloading(MAssembly* assembly)
@@ -183,17 +174,16 @@ void OnAssemblyUnloading(MAssembly* assembly)
     // Remove entries with user classes
     for (auto i = Cache.Begin(); i.IsNotEnd(); ++i)
     {
-        MonoClass* monoClass = (MonoClass*)(void*)i->Key;
-
-        if (assembly->GetClass(monoClass))
+        MClass* mClass = MCore::Type::GetClass(i->Key);
+        if (mClass && mClass->GetAssembly() == assembly)
         {
             Cache.Remove(i);
         }
         else
         {
-            if (i->Value.DefaultEditor && assembly->GetClass(i->Value.DefaultEditor->GetNative()))
+            if (i->Value.DefaultEditor && i->Value.DefaultEditor->GetAssembly() == assembly)
                 i->Value.DefaultEditor = nullptr;
-            if (i->Value.CustomEditor && assembly->GetClass(i->Value.CustomEditor->GetNative()))
+            if (i->Value.CustomEditor && i->Value.CustomEditor->GetAssembly() == assembly)
                 i->Value.CustomEditor = nullptr;
         }
     }

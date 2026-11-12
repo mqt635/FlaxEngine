@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "PreviewsCache.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Graphics/RenderTools.h"
+#include "Engine/Content/Content.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
 #include "Engine/Content/Upgraders/TextureAssetUpgrader.h"
@@ -92,15 +93,12 @@ SpriteHandle PreviewsCache::FindSlot(const Guid& id)
 {
     if (WaitForLoaded())
         return SpriteHandle::Invalid;
-
-    // Find entry
     int32 index;
     if (_assets.Find(id, index))
     {
         const String spriteName = StringUtils::ToString(index);
         return FindSprite(spriteName);
     }
-
     return SpriteHandle::Invalid;
 }
 
@@ -114,6 +112,17 @@ Asset::LoadResult PreviewsCache::load()
         return LoadResult::Failed;
     _assets.Set(previewsMetaChunk->Get<Guid>(), ASSETS_ICONS_PER_ATLAS);
 
+    // Verify if cached assets still exist (don't store thumbnails for removed files)
+    AssetInfo assetInfo;
+    for (Guid& id : _assets)
+    {
+        if (id.IsValid() && Content::GetAsset(id) == nullptr && !Content::GetAssetInfo(id, assetInfo))
+        {
+            // Free slot (no matter the texture contents)
+            id = Guid::Empty;
+        }
+    }
+
     // Setup atlas sprites array
     Sprite sprite;
     sprite.Area.Size = static_cast<float>(ASSET_ICON_SIZE) / ASSETS_ICONS_ATLAS_SIZE;
@@ -121,7 +130,7 @@ Asset::LoadResult PreviewsCache::load()
     const float positionOffset = static_cast<float>(ASSETS_ICONS_ATLAS_MARGIN) / ASSETS_ICONS_ATLAS_SIZE;
     for (int32 i = 0; i < ASSETS_ICONS_PER_ATLAS; i++)
     {
-        sprite.Area.Location = Vector2(static_cast<float>(i % ASSETS_ICONS_PER_ROW), static_cast<float>(i / ASSETS_ICONS_PER_ROW)) * positionScale + positionOffset;
+        sprite.Area.Location = Float2(static_cast<float>(i % ASSETS_ICONS_PER_ROW), static_cast<float>(i / ASSETS_ICONS_PER_ROW)) * positionScale + positionOffset;
         sprite.Name = StringUtils::ToString(i);
         Sprites.Add(sprite);
     }
@@ -162,7 +171,7 @@ SpriteHandle PreviewsCache::OccupySlot(GPUTexture* source, const Guid& id)
     if (WaitForLoaded())
         return SpriteHandle::Invalid;
 
-    // Find free slot and for that asset
+    // Find this asset slot or use the first empty
     int32 index = _assets.Find(id);
     if (index == INVALID_INDEX)
         index = _assets.Find(Guid::Empty);
@@ -201,14 +210,12 @@ bool PreviewsCache::ReleaseSlot(const Guid& id)
 {
     bool result = false;
     ScopeLock lock(Locker);
-
     int32 index = _assets.Find(id);
     if (index != INVALID_INDEX)
     {
         _assets[index] = Guid::Empty;
         result = true;
     }
-
     return result;
 }
 

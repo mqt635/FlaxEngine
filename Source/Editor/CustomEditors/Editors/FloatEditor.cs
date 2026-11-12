@@ -1,9 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Linq;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEngine;
+using Utils = FlaxEngine.Utils;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -27,41 +28,42 @@ namespace FlaxEditor.CustomEditors.Editors
         public override void Initialize(LayoutElementsContainer layout)
         {
             _element = null;
-
-            // Try get limit attribute for value min/max range setting and slider speed
             var attributes = Values.GetAttributes();
+            var range = (RangeAttribute)attributes?.FirstOrDefault(x => x is RangeAttribute);
+            if (range != null)
+            {
+                // Use slider
+                var slider = layout.Slider();
+                slider.Slider.SetLimits(range);
+                slider.Slider.ValueChanged += OnValueChanged;
+                slider.Slider.SlidingEnd += ClearToken;
+                _element = slider;
+                return;
+            }
+
+            var floatValue = layout.FloatValue();
+            floatValue.ValueBox.ValueChanged += OnValueChanged;
+            floatValue.ValueBox.SlidingEnd += ClearToken;
+            _element = floatValue;
             if (attributes != null)
             {
-                var range = attributes.FirstOrDefault(x => x is RangeAttribute);
-                if (range != null)
+                var limit = (LimitAttribute)attributes.FirstOrDefault(x => x is LimitAttribute);
+                floatValue.SetLimits(limit);
+                var valueCategory = ((ValueCategoryAttribute)attributes.FirstOrDefault(x => x is ValueCategoryAttribute))?.Category ?? Utils.ValueCategory.None;
+                if (valueCategory != Utils.ValueCategory.None)
                 {
-                    // Use slider
-                    var slider = layout.Slider();
-                    slider.SetLimits((RangeAttribute)range);
-                    slider.Slider.ValueChanged += OnValueChanged;
-                    slider.Slider.SlidingEnd += ClearToken;
-                    _element = slider;
-                    return;
+                    floatValue.SetCategory(valueCategory);
+                    if (LinkedLabel != null)
+                    {
+                        LinkedLabel.SetupContextMenu += (label, menu, editor) =>
+                        {
+                            menu.AddSeparator();
+                            var mb = menu.AddButton("Show formatted", bt => { floatValue.SetCategory(bt.Checked ? valueCategory : Utils.ValueCategory.None); });
+                            mb.AutoCheck = true;
+                            mb.Checked = floatValue.ValueBox.Category != Utils.ValueCategory.None;
+                        };
+                    }
                 }
-                var limit = attributes.FirstOrDefault(x => x is LimitAttribute);
-                if (limit != null)
-                {
-                    // Use float value editor with limit
-                    var floatValue = layout.FloatValue();
-                    floatValue.SetLimits((LimitAttribute)limit);
-                    floatValue.FloatValue.ValueChanged += OnValueChanged;
-                    floatValue.FloatValue.SlidingEnd += ClearToken;
-                    _element = floatValue;
-                    return;
-                }
-            }
-            if (_element == null)
-            {
-                // Use float value editor
-                var floatValue = layout.FloatValue();
-                floatValue.FloatValue.ValueChanged += OnValueChanged;
-                floatValue.FloatValue.SlidingEnd += ClearToken;
-                _element = floatValue;
             }
         }
 
@@ -88,6 +90,8 @@ namespace FlaxEditor.CustomEditors.Editors
                     _element.Value = asFloat;
                 else if (value is double asDouble)
                     _element.Value = (float)asDouble;
+                else if (value is int asInt)
+                    _element.Value = (float)asInt;
                 else
                     throw new Exception(string.Format("Invalid value type {0}.", value?.GetType().ToString() ?? "<null>"));
             }

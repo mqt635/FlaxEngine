@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,11 +11,9 @@
 class FLAXENGINE_API FlaxPackage : public FlaxStorage
 {
 protected:
-
     Dictionary<Guid, Entry> _entries;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="FlaxPackage"/> class.
     /// </summary>
@@ -23,20 +21,21 @@ public:
     FlaxPackage(const StringView& path);
 
 public:
-
     // [FlaxStorage]
     String ToString() const override;
     bool IsPackage() const override;
-    bool AllowDataModifications() const override;
+    bool IsReadOnly() const override;
     bool HasAsset(const Guid& id) const override;
     bool HasAsset(const AssetInfo& info) const override;
     int32 GetEntriesCount() const override;
-    void GetEntry(int32 index, Entry& output) const override;
+    void GetEntry(int32 index, Entry& value) const override;
+#if USE_EDITOR
+    void SetEntry(int32 index, const Entry& value) override;
+#endif
     void GetEntries(Array<Entry>& output) const override;
     void Dispose() override;
 
 protected:
-
     // [FlaxStorage]
     bool GetEntry(const Guid& id, Entry& e) override;
     void AddEntry(Entry& e) override;

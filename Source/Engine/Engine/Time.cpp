@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Time.h"
 #include "EngineService.h"
@@ -6,12 +6,29 @@
 #include "Engine/Platform/Platform.h"
 #include "Engine/Core/Config/TimeSettings.h"
 #include "Engine/Serialization/Serialization.h"
+#if !USE_EDITOR
+#include "Engine/Engine/Engine.h"
+#endif
 
 namespace
 {
     bool FixedDeltaTimeEnable;
     float FixedDeltaTimeValue;
     float MaxUpdateDeltaTime = 0.1f;
+#if USE_EDITOR
+    constexpr bool _gamePausedUnfocsed = false;
+    #define GetFps(fps) fps
+#else
+    bool _gamePausedUnfocsed = false;
+    float UnfocusedMaxFPS = 0.0f;
+    bool UnfocusedPause = false;
+    float GetFps(float fps)
+    {
+        if (UnfocusedMaxFPS > 0 && !Engine::HasFocus && fps > UnfocusedMaxFPS)
+            fps = UnfocusedMaxFPS;
+        return fps;
+    }
+#endif
 }
 
 bool Time::_gamePaused = false;
@@ -52,39 +69,31 @@ void TimeSettings::Apply()
     Time::DrawFPS = DrawFPS;
     Time::TimeScale = TimeScale;
     ::MaxUpdateDeltaTime = MaxUpdateDeltaTime;
+#if !USE_EDITOR
+    ::UnfocusedMaxFPS = UnfocusedMaxFPS;
+    ::UnfocusedPause = UnfocusedPause;
+#endif
 }
 
-void TimeSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
+void Time::TickData::Synchronize(float targetFps, double currentTime, bool resetTotalTime)
 {
-    DESERIALIZE(UpdateFPS);
-    DESERIALIZE(PhysicsFPS);
-    DESERIALIZE(DrawFPS);
-    DESERIALIZE(TimeScale);
-    DESERIALIZE(MaxUpdateDeltaTime);
-}
-
-void Time::TickData::OnBeforeRun(float targetFps, double currentTime)
-{
-    Time = UnscaledTime = TimeSpan::Zero();
-    DeltaTime = UnscaledDeltaTime = targetFps > ZeroTolerance ? TimeSpan::FromSeconds(1.0f / targetFps) : TimeSpan::Zero();
-    LastLength = static_cast<double>(DeltaTime.Ticks) / Constants::TicksPerSecond;
-    LastBegin = currentTime - LastLength;
-    LastEnd = currentTime;
+    OnReset(targetFps, currentTime);
+    if (resetTotalTime)
+        Time = UnscaledTime = TimeSpan::Zero();
     NextBegin = targetFps > ZeroTolerance ? LastBegin + (1.0f / targetFps) : 0.0;
 }
 
 void Time::TickData::OnReset(float targetFps, double currentTime)
 {
     DeltaTime = UnscaledDeltaTime = targetFps > ZeroTolerance ? TimeSpan::FromSeconds(1.0f / targetFps) : TimeSpan::Zero();
-    LastLength = static_cast<double>(DeltaTime.Ticks) / Constants::TicksPerSecond;
+    LastLength = static_cast<double>(DeltaTime.Ticks) / TimeSpan::TicksPerSecond;
     LastBegin = currentTime - LastLength;
     LastEnd = currentTime;
 }
 
-bool Time::TickData::OnTickBegin(float targetFps, float maxDeltaTime)
+bool Time::TickData::OnTickBegin(double time, float targetFps, float maxDeltaTime)
 {
     // Check if can perform a tick
-    const double time = Platform::GetTimeSeconds();
     double deltaTime;
     if (FixedDeltaTimeEnable)
     {
@@ -103,7 +112,10 @@ bool Time::TickData::OnTickBegin(float targetFps, float maxDeltaTime)
         }
 
         if (targetFps > ZeroTolerance)
-            NextBegin += (1.0 / targetFps);
+        {
+            int skip = (int)(1 + (time - NextBegin) * targetFps);
+            NextBegin += (1.0 / targetFps) * skip;
+        }
     }
 
     // Update data
@@ -122,7 +134,7 @@ void Time::TickData::OnTickEnd()
 void Time::TickData::Advance(double time, double deltaTime)
 {
     float timeScale = TimeScale;
-    if (_gamePaused)
+    if (_gamePaused || _gamePausedUnfocsed)
         timeScale = 0.0f;
     LastBegin = time;
     UnscaledDeltaTime = TimeSpan::FromSeconds(deltaTime);
@@ -132,10 +144,9 @@ void Time::TickData::Advance(double time, double deltaTime)
     TicksCount++;
 }
 
-bool Time::FixedStepTickData::OnTickBegin(float targetFps, float maxDeltaTime)
+bool Time::FixedStepTickData::OnTickBegin(double time, float targetFps, float maxDeltaTime)
 {
     // Check if can perform a tick
-    double time = Platform::GetTimeSeconds();
     double deltaTime, minDeltaTime;
     if (FixedDeltaTimeEnable)
     {
@@ -156,7 +167,10 @@ bool Time::FixedStepTickData::OnTickBegin(float targetFps, float maxDeltaTime)
         }
 
         if (targetFps > ZeroTolerance)
-            NextBegin += (1.0 / targetFps);
+        {
+            int skip = (int)(1 + (time - NextBegin) * targetFps);
+            NextBegin += (1.0 / targetFps) * skip;
+        }
     }
     Samples.Add(deltaTime);
 
@@ -183,11 +197,11 @@ double Time::GetNextTick()
     const double nextDraw = Time::Draw.NextBegin;
 
     double nextTick = MAX_double;
-    if (UpdateFPS > 0 && nextUpdate < nextTick)
+    if (UpdateFPS > ZeroTolerance && nextUpdate < nextTick)
         nextTick = nextUpdate;
-    if (PhysicsFPS > 0 && nextPhysics < nextTick)
+    if (PhysicsFPS > ZeroTolerance && nextPhysics < nextTick)
         nextTick = nextPhysics;
-    if (DrawFPS > 0 && nextDraw < nextTick)
+    if (DrawFPS > ZeroTolerance && nextDraw < nextTick)
         nextTick = nextDraw;
 
     if (nextTick == MAX_double)
@@ -199,9 +213,11 @@ void Time::SetGamePaused(bool value)
 {
     if (_gamePaused == value)
         return;
-
     _gamePaused = value;
+    if (_gamePausedUnfocsed)
+        return;
 
+    // Reset ticking
     const double time = Platform::GetTimeSeconds();
     Update.OnReset(UpdateFPS, time);
     Physics.OnReset(PhysicsFPS, time);
@@ -243,18 +259,35 @@ void Time::SetFixedDeltaTime(bool enable, float value)
     FixedDeltaTimeValue = value;
 }
 
-void Time::OnBeforeRun()
+void Time::Synchronize(bool resetTotalTime)
 {
     // Initialize tick data (based on a time settings)
     const double time = Platform::GetTimeSeconds();
-    Update.OnBeforeRun(UpdateFPS, time);
-    Physics.OnBeforeRun(PhysicsFPS, time);
-    Draw.OnBeforeRun(DrawFPS, time);
+    Update.Synchronize(UpdateFPS, time, resetTotalTime);
+    Physics.Synchronize(PhysicsFPS, time, resetTotalTime);
+    Draw.Synchronize(DrawFPS, time, resetTotalTime);
 }
 
-bool Time::OnBeginUpdate()
+bool Time::OnBeginUpdate(double time)
 {
-    if (Update.OnTickBegin(UpdateFPS, MaxUpdateDeltaTime))
+#if !USE_EDITOR
+    // Pause game if window lost focus (based on game settings)
+    bool gamePausedUnfocsed = !Engine::HasFocus && UnfocusedPause;
+    if (gamePausedUnfocsed != _gamePausedUnfocsed)
+    {
+        _gamePausedUnfocsed = gamePausedUnfocsed;
+        if (!gamePausedUnfocsed)
+        {
+            // Reset ticking
+            const double time = Platform::GetTimeSeconds();
+            Update.OnReset(UpdateFPS, time);
+            Physics.OnReset(PhysicsFPS, time);
+            Draw.OnReset(DrawFPS, time);
+        }
+    }
+#endif
+
+    if (Update.OnTickBegin(time, GetFps(UpdateFPS), MaxUpdateDeltaTime))
     {
         Current = &Update;
         return true;
@@ -262,9 +295,9 @@ bool Time::OnBeginUpdate()
     return false;
 }
 
-bool Time::OnBeginPhysics()
+bool Time::OnBeginPhysics(double time)
 {
-    if (Physics.OnTickBegin(PhysicsFPS, _physicsMaxDeltaTime))
+    if (Physics.OnTickBegin(time, GetFps(PhysicsFPS), _physicsMaxDeltaTime))
     {
         Current = &Physics;
         return true;
@@ -272,9 +305,9 @@ bool Time::OnBeginPhysics()
     return false;
 }
 
-bool Time::OnBeginDraw()
+bool Time::OnBeginDraw(double time)
 {
-    if (Draw.OnTickBegin(DrawFPS, 1.0f))
+    if (Draw.OnTickBegin(time, GetFps(DrawFPS), 1.0f))
     {
         Current = &Draw;
         return true;

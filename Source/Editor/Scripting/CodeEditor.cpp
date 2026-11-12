@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CodeEditor.h"
 #include "CodeEditors/SystemDefaultCodeEditor.h"
@@ -6,6 +6,7 @@
 #include "ScriptsBuilder.h"
 #include "CodeEditors/VisualStudioCodeEditor.h"
 #include "CodeEditors/RiderCodeEditor.h"
+#include "CodeEditors/CLionCodeEditor.h"
 #if USE_VISUAL_STUDIO_DTE
 #include "CodeEditors/VisualStudio/VisualStudioEditor.h"
 #endif
@@ -13,6 +14,7 @@
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Platform/Thread.h"
 #include "Engine/Threading/IRunnable.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 void OnAsyncBegin(Thread* thread);
 void OnAsyncEnd();
@@ -138,6 +140,34 @@ CodeEditor* CodeEditingManager::GetCodeEditor(CodeEditorTypes editorType)
     return nullptr;
 }
 
+String CodeEditingManager::GetName(CodeEditorTypes editorType)
+{
+    const auto editor = GetCodeEditor(editorType);
+    if (editor)
+    {
+        return editor->GetName();
+    }
+    else
+    {
+        LOG(Warning, "Missing code editor type {0}", (int32)editorType);
+        return String::Empty;
+    }
+}
+
+String CodeEditingManager::GetGenerateProjectCustomArgs(CodeEditorTypes editorType)
+{
+    const auto editor = GetCodeEditor(editorType);
+    if (editor)
+    {
+        return editor->GetGenerateProjectCustomArgs();
+    }
+    else
+    {
+        LOG(Warning, "Missing code editor type {0}", (int32)editorType);
+        return String::Empty;
+    }
+}
+
 void CodeEditingManager::OpenFile(CodeEditorTypes editorType, const String& path, int32 line)
 {
     const auto editor = GetCodeEditor(editorType);
@@ -180,7 +210,22 @@ void CodeEditingManager::OpenSolution(CodeEditorTypes editorType)
     const auto editor = GetCodeEditor(editorType);
     if (editor)
     {
-        OpenSolution(editor);
+        // Ensure that no async task is running
+        if (IsAsyncOpenRunning())
+        {
+            // TODO: enqueue action and handle many actions in the queue
+            LOG(Warning, "Cannot use code editor during async open action.");
+            return;
+        }
+
+        if (editor->UseAsyncForOpen())
+        {
+            AsyncOpenTask::OpenSolution(editor);
+        }
+        else
+        {
+            editor->OpenSolution();
+        }
     }
     else
     {
@@ -201,26 +246,6 @@ void CodeEditingManager::OnFileAdded(CodeEditorTypes editorType, const String& p
     }
 }
 
-void CodeEditingManager::OpenSolution(CodeEditor* editor)
-{
-    // Ensure that no async task is running
-    if (IsAsyncOpenRunning())
-    {
-        // TODO: enqueue action and handle many actions in the queue
-        LOG(Warning, "Cannot use code editor during async open action.");
-        return;
-    }
-
-    if (editor->UseAsyncForOpen())
-    {
-        AsyncOpenTask::OpenSolution(editor);
-    }
-    else
-    {
-        editor->OpenSolution();
-    }
-}
-
 void OnAsyncBegin(Thread* thread)
 {
     ASSERT(AsyncOpenThread == nullptr);
@@ -237,12 +262,15 @@ void OnAsyncEnd()
 
 bool CodeEditingManagerService::Init()
 {
+    PROFILE_MEM(Editor);
+
     // Try get editors
 #if USE_VISUAL_STUDIO_DTE
     VisualStudioEditor::FindEditors(&CodeEditors);
 #endif
     VisualStudioCodeEditor::FindEditors(&CodeEditors);
     RiderCodeEditor::FindEditors(&CodeEditors);
+    CLionCodeEditor::FindEditors(&CodeEditors);
     CodeEditors.Add(New<SystemDefaultCodeEditor>());
 
     return false;

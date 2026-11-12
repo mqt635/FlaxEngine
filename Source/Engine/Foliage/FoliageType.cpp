@@ -1,18 +1,19 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FoliageType.h"
 #include "Engine/Core/Collections/ArrayExtensions.h"
 #include "Engine/Core/Random.h"
 #include "Engine/Serialization/Serialization.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Foliage.h"
 
 FoliageType::FoliageType()
-    : PersistentScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
+    : ScriptingObject(SpawnParams(Guid::New(), TypeInitializer))
     , Foliage(nullptr)
     , Index(-1)
 {
     _isReady = 0;
-    _canDraw = 0;
+    _drawModesDirty = 0;
 
     ReceiveDecals = true;
     UseDensityScaling = false;
@@ -32,7 +33,7 @@ FoliageType& FoliageType::operator=(const FoliageType& other)
     CullDistance = other.CullDistance;
     CullDistanceRandomRange = other.CullDistanceRandomRange;
     ScaleInLightmap = other.ScaleInLightmap;
-    DrawModes = other.DrawModes;
+    SetDrawModes(other._drawModes);
     ShadowsMode = other.ShadowsMode;
     PaintDensity = other.PaintDensity;
     PaintRadius = other.PaintRadius;
@@ -63,16 +64,29 @@ Array<MaterialBase*> FoliageType::GetMaterials() const
 
 void FoliageType::SetMaterials(const Array<MaterialBase*>& value)
 {
+    PROFILE_MEM(LevelFoliage);
     CHECK(value.Count() == Entries.Count());
     for (int32 i = 0; i < value.Count(); i++)
         Entries[i].Material = value[i];
 }
 
-Vector3 FoliageType::GetRandomScale() const
+DrawPass FoliageType::GetDrawModes() const
 {
-    Vector3 result;
-    float tmp;
+    return _drawModes;
+}
 
+void FoliageType::SetDrawModes(DrawPass value)
+{
+    if (_drawModes == value)
+        return;
+    _drawModes = value;
+    _drawModesDirty = 1;
+}
+
+Float3 FoliageType::GetRandomScale() const
+{
+    Float3 result;
+    float tmp;
     switch (PaintScaling)
     {
     case FoliageScalingModes::Uniform:
@@ -104,7 +118,6 @@ Vector3 FoliageType::GetRandomScale() const
         result.Z = Math::Lerp(PaintScaleMin.Z, PaintScaleMax.Z, tmp);
         break;
     }
-
     return result;
 }
 
@@ -117,6 +130,8 @@ void FoliageType::OnModelChanged()
 
 void FoliageType::OnModelLoaded()
 {
+    PROFILE_MEM(LevelFoliage);
+
     // Now it's ready
     _isReady = 1;
 
@@ -133,7 +148,7 @@ void FoliageType::Serialize(SerializeStream& stream, const void* otherObj)
 
     SERIALIZE(Model);
 
-    const std::function<bool(const ModelInstanceEntry&)> IsValidMaterial = [](const ModelInstanceEntry& e) -> bool
+    const Function<bool(const ModelInstanceEntry&)> IsValidMaterial = [](const ModelInstanceEntry& e) -> bool
     {
         return e.Material;
     };
@@ -149,7 +164,7 @@ void FoliageType::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE(CullDistance);
     SERIALIZE(CullDistanceRandomRange);
     SERIALIZE(ScaleInLightmap);
-    SERIALIZE(DrawModes);
+    SERIALIZE_MEMBER(DrawModes, _drawModes);
     SERIALIZE(ShadowsMode);
     SERIALIZE_BIT(ReceiveDecals);
     SERIALIZE_BIT(UseDensityScaling);
@@ -172,6 +187,7 @@ void FoliageType::Serialize(SerializeStream& stream, const void* otherObj)
 
 void FoliageType::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
 {
+    PROFILE_MEM(LevelFoliage);
     DESERIALIZE(Model);
 
     const auto member = stream.FindMember("Materials");
@@ -189,7 +205,7 @@ void FoliageType::Deserialize(DeserializeStream& stream, ISerializeModifier* mod
     DESERIALIZE(CullDistance);
     DESERIALIZE(CullDistanceRandomRange);
     DESERIALIZE(ScaleInLightmap);
-    DESERIALIZE(DrawModes);
+    DESERIALIZE_MEMBER(DrawModes, _drawModes);
     DESERIALIZE(ShadowsMode);
     DESERIALIZE_BIT(ReceiveDecals);
     DESERIALIZE_BIT(UseDensityScaling);

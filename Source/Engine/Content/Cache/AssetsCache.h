@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) 2012-2022 Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -16,10 +16,13 @@ struct AssetHeader;
 struct FlaxStorageReference;
 class FlaxStorage;
 
+// In cooked game all assets are there and all access to registry is read-only so can be multithreaded
+#define ASSETS_CACHE_EDITABLE (USE_EDITOR)
+
 /// <summary>
 /// Assets cache flags.
 /// </summary>
-enum class AssetsCacheFlags
+enum class AssetsCacheFlags : int32
 {
     /// <summary>
     /// The none.
@@ -40,7 +43,6 @@ DECLARE_ENUM_OPERATORS(AssetsCacheFlags);
 class FLAXENGINE_API AssetsCache
 {
 public:
-
     /// <summary>
     /// The registry entry structure.
     /// </summary>
@@ -56,6 +58,11 @@ public:
         /// The file modified date.
         /// </summary>
         DateTime FileModified;
+
+        /// <summary>
+        /// True if a warning about this entry being inaccessible has already been logged (prevents log spam). Runtime-only, not serialized.
+        /// </summary>
+        bool WarnedInaccessible = false;
 #endif
 
         Entry()
@@ -71,40 +78,49 @@ public:
         }
     };
 
+    /// <summary>
+    /// Result of validating an asset cache entry.
+    /// </summary>
+    enum class EntryValidation
+    {
+        /// <summary>
+        /// File verified, contains this asset.
+        /// </summary>
+        Valid,
+
+        /// <summary>
+        /// File missing or contains a different asset.
+        /// </summary>
+        Invalid,
+
+        /// <summary>
+        /// File exists but cannot be opened (locked by another process).
+        /// </summary>
+        Inaccessible,
+    };
+
     typedef Dictionary<Guid, Entry> Registry;
     typedef Dictionary<String, Guid> PathsMapping;
 
 private:
-
-    bool _isDirty;
+    bool _isDirty = false;
+#if ASSETS_CACHE_EDITABLE
     CriticalSection _locker;
+#endif
     Registry _registry;
     PathsMapping _pathsMapping;
+#if !USE_EDITOR && !BUILD_RELEASE
+    Dictionary<Guid, StringView> _pathsMappingInv;
+#endif
     String _path;
 
 public:
-
     /// <summary>
-    /// Initializes a new instance of the <see cref="AssetsCache"/> class.
+    /// Gets amount of registered assets.
     /// </summary>
-    AssetsCache();
+    int32 Size() const;
 
 public:
-
-    /// <summary>
-    /// Gets amount of registered assets
-    /// </summary>
-    /// <returns>Registry size</returns>
-    int32 Size() const
-    {
-        _locker.Lock();
-        const int32 result = _registry.Count();
-        _locker.Unlock();
-        return result;
-    }
-
-public:
-
     /// <summary>
     /// Init registry
     /// </summary>
@@ -127,13 +143,12 @@ public:
     static bool Save(const StringView& path, const Registry& entries, const PathsMapping& pathsMapping, const AssetsCacheFlags flags = AssetsCacheFlags::None);
 
 public:
-
     /// <summary>
-    /// Finds the asset path by id. In editor it returns the actual asset path, at runtime it returns the mapped asset path.
+    /// Finds the asset path by id. In editor, it returns the actual asset path, at runtime it returns the mapped asset path.
     /// </summary>
     /// <param name="id">The asset id.</param>
     /// <returns>The asset path, or empty if failed to find.</returns>
-    const String& GetEditorAssetPath(const Guid& id) const;
+    StringView GetEditorAssetPath(const Guid& id) const;
 
     /// <summary>
     /// Finds the asset info by path.
@@ -174,12 +189,19 @@ public:
     }
 
     /// <summary>
+    /// Gets the asset ids.
+    /// </summary>
+    /// <param name="result">The result array.</param>
+    void GetAll(Array<Guid, HeapAllocation>& result) const;
+
+    /// <summary>
     /// Gets the asset ids that match the given typename.
     /// </summary>
     /// <param name="typeName">The asset typename.</param>
     /// <param name="result">The result array.</param>
     void GetAllByTypeName(const StringView& typeName, Array<Guid, HeapAllocation>& result) const;
 
+#if ASSETS_CACHE_EDITABLE
     /// <summary>
     /// Register assets in the cache
     /// </summary>
@@ -230,11 +252,12 @@ public:
     /// <param name="newPath">New path</param>
     /// <returns>True if has been deleted, otherwise false</returns>
     bool RenameAsset(const StringView& oldPath, const StringView& newPath);
+#endif
 
     /// <summary>
     /// Determines whether cached asset entry is valid.
     /// </summary>
     /// <param name="e">The asset entry.</param>
-    /// <returns>True if is valid, otherwise false.</returns>
-    bool IsEntryValid(Entry& e);
+    /// <returns>The validation result.</returns>
+    EntryValidation IsEntryValid(Entry& e);
 };

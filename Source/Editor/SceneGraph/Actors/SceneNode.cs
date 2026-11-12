@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.SceneGraph.GUI;
+using FlaxEditor.Windows;
 using FlaxEngine;
 
 namespace FlaxEditor.SceneGraph.Actors
@@ -47,6 +48,9 @@ namespace FlaxEditor.SceneGraph.Actors
         }
 
         /// <inheritdoc />
+        public override bool CanSelectInViewport => false;
+
+        /// <inheritdoc />
         public override bool CanCreatePrefab => false;
 
         /// <inheritdoc />
@@ -65,7 +69,7 @@ namespace FlaxEditor.SceneGraph.Actors
         public override SceneNode ParentScene => this;
 
         /// <inheritdoc />
-        public override void OnContextMenu(ContextMenu contextMenu)
+        public override void OnContextMenu(ContextMenu contextMenu, EditorWindow window)
         {
             contextMenu.AddSeparator();
             var path = Scene.Path;
@@ -77,15 +81,18 @@ namespace FlaxEditor.SceneGraph.Actors
             }
             contextMenu.AddButton("Save scene", OnSave).LinkTooltip("Saves this scene.").Enabled = IsEdited && !Editor.IsPlayMode;
             contextMenu.AddButton("Unload scene", OnUnload).LinkTooltip("Unloads this scene.").Enabled = Editor.Instance.StateMachine.CurrentState.CanChangeScene;
+            if (Level.ScenesCount > 1)
+                contextMenu.AddButton("Unload all but this scene", OnUnloadAllButSelectedScene).LinkTooltip("Unloads all of the active scenes except for the selected scene.").Enabled = Editor.Instance.StateMachine.CurrentState.CanChangeScene;
 
-            base.OnContextMenu(contextMenu);
+            contextMenu.MaximumItemsInViewCount += 3;
+            base.OnContextMenu(contextMenu, window);
         }
 
         private void OnSelect()
         {
             Editor.Instance.Windows.ContentWin.Select(Editor.Instance.ContentDatabase.Find(Scene.Path));
         }
-        
+
         private void OnSave()
         {
             Editor.Instance.Scene.SaveScene(this);
@@ -94,6 +101,11 @@ namespace FlaxEditor.SceneGraph.Actors
         private void OnUnload()
         {
             Editor.Instance.Scene.CloseScene(Scene);
+        }
+
+        private void OnUnloadAllButSelectedScene()
+        {
+            Editor.Instance.Scene.CloseAllScenesExcept(Scene);
         }
     }
 }

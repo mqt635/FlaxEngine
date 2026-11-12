@@ -1,18 +1,31 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Types/StringView.h"
 
-// TODO: config RAPIDJSON_SSE2 for rapidjson
+#if PLATFORM_WEB && PLATFORM_SIMD_SSE2
+#define RAPIDJSON_SSE2
+#elif PLATFORM_SIMD_SSE4_2
+#define RAPIDJSON_SSE42
+#elif PLATFORM_SIMD_SSE2
+#define RAPIDJSON_SSE2
+#elif PLATFORM_SIMD_NEON
+#define RAPIDJSON_NEON
+#endif
 #define RAPIDJSON_ERROR_CHARTYPE Char
 #define RAPIDJSON_ERROR_STRING(x) TEXT(x)
 #define RAPIDJSON_ASSERT(x) ASSERT(x)
-#define RAPIDJSON_NEW(x) New<x>()
+#define RAPIDJSON_NEW(x) New<x>
 #define RAPIDJSON_DELETE(x) Delete(x)
 #define RAPIDJSON_NOMEMBERITERATORCLASS
-#include <ThirdParty/rapidjson/rapidjson.h>
+#define RAPIDJSON_PARSE_DEFAULT_FLAGS kParseTrailingCommasFlag
+//#define RAPIDJSON_MALLOC(size) ::malloc(size)
+//#define RAPIDJSON_REALLOC(ptr, new_size) ::realloc(ptr, new_size)
+//#define RAPIDJSON_FREE(ptr) ::free(ptr)
+#define RAPIDJSON_ALLOCATOR_DEFAULT_CHUNK_CAPACITY 65511 // Keep it smaller than default so it fits 64kB alloc INCLUDING headers/chunks from MemoryPoolAllocator
+
 #include <ThirdParty/rapidjson/writer.h>
 #include <ThirdParty/rapidjson/prettywriter.h>
 #include <ThirdParty/rapidjson/document.h>

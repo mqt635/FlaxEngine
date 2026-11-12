@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,6 +7,21 @@
 #include "Engine/Content/Assets/Texture.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
 #include "Engine/Utilities/RectPack.h"
+
+/// <summary>
+/// Contains information about single texture atlas slot.
+/// </summary>
+struct FontTextureAtlasSlot : RectPackNode<>
+{
+    FontTextureAtlasSlot(Size x, Size y, Size width, Size height)
+        : RectPackNode(x, y, width, height)
+    {
+    }
+
+    void OnInsert()
+    {
+    }
+};
 
 /// <summary>
 /// Texture resource that contains an atlas of cached font glyphs.
@@ -20,29 +35,14 @@ private:
     {
         const byte* SrcData;
         uint8* DstData;
-        uint32 SrcRow;
-        uint32 DstRow;
-        uint32 RowWidth;
-        uint32 SrcTextureWidth;
-        uint32 DstTextureWidth;
+        int32 SrcRow;
+        int32 DstRow;
+        int32 SrcWidth;
+        int32 DstWidth;
+        uint32 Padding;
     };
 
 public:
-
-    /// <summary>
-    /// Contains information about single texture atlas slot.
-    /// </summary>
-    struct Slot : RectPack<Slot>
-    {
-        Slot(uint32 x, uint32 y, uint32 width, uint32 height)
-            : RectPack<Slot>(x, y, width, height)
-        {
-        }
-
-        void OnInsert()
-        {
-        }
-    };
 
     /// <summary>
     /// Describes how to handle texture atlas padding
@@ -74,8 +74,8 @@ private:
     uint32 _bytesPerPixel;
     PaddingStyle _paddingStyle;
     bool _isDirty;
-    Slot* _root;
-    Array<Slot*> _freeSlots;
+    RectPackAtlas<FontTextureAtlasSlot> _atlas;
+    Array<FontTextureAtlasSlot*> _freeSlots;
 
 public:
 
@@ -106,11 +106,19 @@ public:
     }
 
     /// <summary>
+    /// Gets the atlas pixel format.
+    /// </summary>
+    FORCE_INLINE PixelFormat GetFormat() const
+    {
+        return _format;
+    }
+
+    /// <summary>
     /// Gets the atlas size.
     /// </summary>
-    FORCE_INLINE Vector2 GetSize() const
+    FORCE_INLINE Float2 GetSize() const
     {
-        return Vector2(static_cast<float>(_width), static_cast<float>(_height));
+        return Float2(static_cast<float>(_width), static_cast<float>(_height));
     }
 
     /// <summary>
@@ -153,11 +161,18 @@ public:
     /// <summary>
     /// Adds the new entry to the atlas
     /// </summary>
-    /// <param name="targetWidth">Width of the entry.</param>
-    /// <param name="targetHeight">Height of the entry.</param>
+    /// <param name="width">Width of the entry.</param>
+    /// <param name="height">Height of the entry.</param>
     /// <param name="data">The data.</param>
     /// <returns>The atlas slot occupied by the new entry.</returns>
-    Slot* AddEntry(uint32 targetWidth, uint32 targetHeight, const Array<byte>& data);
+    FontTextureAtlasSlot* AddEntry(uint32 width, uint32 height, const Array<byte>& data);
+
+    /// <summary>
+    /// Invalidates the cached dynamic entry from the atlas.
+    /// </summary>
+    /// <param name="slot">The slot to invalidate.</param>
+    /// <returns>True if slot has been freed, otherwise false.</returns>
+    bool Invalidate(const FontTextureAtlasSlot* slot);
 
     /// <summary>
     /// Invalidates the cached dynamic entry from the atlas.
@@ -174,17 +189,22 @@ public:
     /// </summary>
     /// <param name="slot">The slot.</param>
     /// <param name="data">The data.</param>
-    void CopyDataIntoSlot(const Slot* slot, const Array<byte>& data);
+    void CopyDataIntoSlot(const FontTextureAtlasSlot* slot, const Array<byte>& data);
+
+    /// <summary>
+    /// Returns glyph's bitmap data of the slot.
+    /// </summary>
+    /// <param name="slot">The slot in atlas.</param>
+    /// <param name="width">The width of the slot.</param>
+    /// <param name="height">The height of the slot.</param>
+    /// <param name="stride">The stride of the slot.</param>
+    /// <returns>The pointer to the bitmap data of the given slot.</returns>
+    byte* GetSlotData(const FontTextureAtlasSlot* slot, uint32& width, uint32& height, uint32& stride);
 
     /// <summary>
     /// Clears this atlas entries data (doesn't change size/texture etc.).
     /// </summary>
     void Clear();
-
-    /// <summary>
-    /// Disposed whole atlas data (texture, nodes etc.).
-    /// </summary>
-    void Dispose();
 
     /// <summary>
     /// Flushes this atlas data to the GPU
@@ -204,7 +224,6 @@ public:
 
 private:
 
-    Slot* invalidate(Slot* parent, uint32 x, uint32 y, uint32 width, uint32 height);
     void markAsDirty();
     void copyRow(const RowData& copyRowData) const;
     void zeroRow(const RowData& copyRowData) const;

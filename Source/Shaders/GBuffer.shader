@@ -1,14 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #define USE_GBUFFER_CUSTOM_DATA
 
 #include "./Flax/Common.hlsl"
 #include "./Flax/GBuffer.hlsl"
-#include "./Flax/BRDF.hlsl"
+#include "./Flax/Lighting/BRDF.hlsl"
+#include "./Flax/PostFX/GammaCorrectionCommon.hlsl"
 
 META_CB_BEGIN(0, Data)
 GBufferData GBuffer;
-float3 Dummy0;
+float2 Dummy0;
+int ViewLinear;
 int ViewMode;
 META_CB_END
 
@@ -57,7 +59,7 @@ float4 PS_DebugView(Quad_VS2PS input) : SV_Target
 	{
 		case View_Mode_Diffuse: result = gBuffer.Color; break;
 		case View_Mode_Normals: result = gBuffer.Normal * 0.5 + 0.5; break;
-		case View_Mode_Depth: result = gBuffer.ViewPos.z / GBuffer.ViewFar; break;
+		case View_Mode_Depth: result = pow(gBuffer.ViewPos.z / GBuffer.ViewFar, 0.6); break;
 		case View_Mode_AmbientOcclusion: result = gBuffer.AO; break;
 		case View_Mode_Metalness: result = gBuffer.Metalness; break;
 		case View_Mode_Rougness: result = gBuffer.Roughness; break;
@@ -67,5 +69,16 @@ float4 PS_DebugView(Quad_VS2PS input) : SV_Target
 		case View_Mode_SubsurfaceColor: result = gBuffer.CustomData.rgb; break;
 		case View_Mode_Unlit: result = gBuffer.Color * gBuffer.AO; break;
 	}
+    if (ViewLinear)
+        result = LinearToSrgb(result);
 	return float4(result, 1);
+}
+
+// Pixel shader for color space conversion
+META_PS(true, FEATURE_LEVEL_ES2)
+float4 PS_LinearToSrgb(Quad_VS2PS input) : SV_Target
+{
+	float4 result = SAMPLE_RT(GBuffer0, input.TexCoord);
+    result.rgb = LinearToSrgb(result.rgb);
+	return result;
 }

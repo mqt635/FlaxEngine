@@ -1,44 +1,26 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "JobSystem.h"
 #include "IRunnable.h"
 #include "Engine/Platform/CPUInfo.h"
 #include "Engine/Platform/Thread.h"
 #include "Engine/Platform/ConditionVariable.h"
+#include "Engine/Core/Types/Span.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#if USE_CSHARP
 #include "Engine/Scripting/ManagedCLR/MCore.h"
-#if USE_MONO
-#include "Engine/Scripting/ManagedCLR/MDomain.h"
-#include <ThirdParty/mono-2.0/mono/metadata/appdomain.h>
-#include <ThirdParty/mono-2.0/mono/metadata/threads.h>
 #endif
+#include "Engine/Scripting/Internal/InternalCalls.h"
 
-// Jobs storage perf info:
-// (500 jobs, i7 9th gen)
-// JOB_SYSTEM_USE_MUTEX=1, enqueue=130-280 cycles, dequeue=2-6 cycles
-// JOB_SYSTEM_USE_MUTEX=0, enqueue=300-700 cycles, dequeue=10-16 cycles
-// So using RingBuffer+Mutex+Signals is better than moodycamel::ConcurrentQueue
-
-#define JOB_SYSTEM_ENABLED 1
-#define JOB_SYSTEM_USE_MUTEX 1
-#define JOB_SYSTEM_USE_STATS 0
-
-#if JOB_SYSTEM_USE_STATS
-#include "Engine/Core/Log.h"
-#endif
-#if JOB_SYSTEM_USE_MUTEX
-#include "Engine/Core/Collections/RingBuffer.h"
-#else
-#include "ConcurrentQueue.h"
-#endif
+#define JOB_SYSTEM_ENABLED (PLATFORM_THREADS_LIMIT > 1)
 
 #if JOB_SYSTEM_ENABLED
 
 class JobSystemService : public EngineService
 {
 public:
-
     JobSystemService()
         : EngineService(TEXT("JobSystem"), -800)
     {
@@ -49,16 +31,25 @@ public:
     void Dispose() override;
 };
 
-struct JobData
+// Holds a single job dispatch data
+struct alignas(int64) JobContext
 {
+    // The next index of the job to process updated when picking a job by the thread.
+    volatile int64 JobIndex = 0;
+    // The number of jobs left to process updated after job completion by the thread.
+    volatile int64 JobsLeft = 0;
+    // The unique label of this job used to identify it. Set to -1 when job is done.
+    volatile int64 JobLabel = 0;
+    // Utility atomic counter used to indicate that any job is waiting for this one to finish. Then Dependants can be accessed within thread-safe JobsLocker.
+    volatile int64 DependantsCount = 0;
+    // The number of dependency jobs left to be finished before starting this job.
+    volatile int64 DependenciesLeft = 0;
+    // The total number of jobs to process (in this context).
+    int32 JobsCount = 0;
+    // The job function to execute.
     Function<void(int32)> Job;
-    int32 Index;
-};
-
-template<>
-struct TIsPODType<JobData>
-{
-    enum { Value = true };
+    // List of dependant jobs to signal when this job is done.
+    Array<int64> Dependants;
 };
 
 class JobSystemThread : public IRunnable
@@ -67,7 +58,6 @@ public:
     uint64 Index;
 
 public:
-
     // [IRunnable]
     String ToString() const override
     {
@@ -85,28 +75,36 @@ public:
 namespace
 {
     JobSystemService JobSystemInstance;
-    Thread* Threads[PLATFORM_THREADS_LIMIT] = {};
+    Thread* Threads[(PLATFORM_THREADS_LIMIT + 1) / 2] = {};
     int32 ThreadsCount = 0;
     bool JobStartingOnDispatch = true;
     volatile int64 ExitFlag = 0;
-    volatile int64 DoneLabel = 0;
-    volatile int64 NextLabel = 0;
+    volatile int64 JobLabel = 0;
+    volatile int64 JobEndLabel = 0;
+    volatile int64 JobStartLabel = 0;
+    volatile int64 JobContextsCount = 0;
+    uint32 JobContextsSize = 0;
+    uint32 JobContextsMask = 0;
+    JobContext* JobContexts = nullptr;
     ConditionVariable JobsSignal;
+    CriticalSection JobsMutex;
     ConditionVariable WaitSignal;
-#if JOB_SYSTEM_USE_MUTEX
+    CriticalSection WaitMutex;
     CriticalSection JobsLocker;
-    RingBuffer<JobData, InlinedAllocation<256>> Jobs;
-#else
-    ConcurrentQueue<JobData> Jobs;
-#endif
-#if JOB_SYSTEM_USE_STATS
-    int64 DequeueCount = 0;
-    int64 DequeueSum = 0;
-#endif
+#define GET_CONTEXT_INDEX(label) (uint32)((label) & (int64)JobContextsMask)
 }
 
 bool JobSystemService::Init()
 {
+    PROFILE_MEM(EngineThreading);
+
+    // Initialize job context storage (fixed-size ring buffer for active jobs tracking)
+    JobContextsSize = 256;
+    JobContextsMask = JobContextsSize - 1;
+    JobContexts = (JobContext*)Platform::Allocate(JobContextsSize * sizeof(JobContext), alignof(JobContext));
+    Memory::ConstructItems(JobContexts, (int32)JobContextsSize);
+
+    // Spawn threads
     ThreadsCount = Math::Min<int32>(Platform::GetCPUInfo().LogicalProcessorCount, ARRAY_COUNT(Threads));
     for (int32 i = 0; i < ThreadsCount; i++)
     {
@@ -117,6 +115,7 @@ bool JobSystemService::Init()
             return true;
         Threads[i] = thread;
     }
+
     return false;
 }
 
@@ -136,74 +135,127 @@ void JobSystemService::Dispose()
     {
         if (Threads[i])
         {
-            if (Threads[i]->IsRunning())
-                Threads[i]->Kill(true);
+            Threads[i]->Kill(true);
             Delete(Threads[i]);
             Threads[i] = nullptr;
         }
     }
+
+    Memory::DestructItems(JobContexts, (int32)JobContextsSize);
+    Platform::Free(JobContexts);
+    JobContexts = nullptr;
 }
 
 int32 JobSystemThread::Run()
 {
+    // Pin thread to the physical core
     Platform::SetThreadAffinityMask(1ull << Index);
 
-    JobData data;
-    CriticalSection mutex;
-    bool attachMonoThread = true;
-#if !JOB_SYSTEM_USE_MUTEX
-    moodycamel::ConsumerToken consumerToken(Jobs);
-#endif
+    bool attachCSharpThread = true;
+    MONO_THREAD_INFO_TYPE* monoThreadInfo = nullptr;
     while (Platform::AtomicRead(&ExitFlag) == 0)
     {
         // Try to get a job
-#if JOB_SYSTEM_USE_STATS
-        const auto start = Platform::GetTimeCycles();
-#endif
-#if JOB_SYSTEM_USE_MUTEX
-        JobsLocker.Lock();
-        if (Jobs.Count() != 0)
+        int32 jobIndex;
+        JobContext* jobContext = nullptr;
         {
-            data = Jobs.PeekFront();
-            Jobs.PopFront();
-        }
-        JobsLocker.Unlock();
-#else
-        if (!Jobs.try_dequeue(consumerToken, data))
-            data.Job.Unbind();
-#endif
-#if JOB_SYSTEM_USE_STATS
-        Platform::InterlockedIncrement(&DequeueCount);
-        Platform::InterlockedAdd(&DequeueSum, Platform::GetTimeCycles() - start);
-#endif
-
-        if (data.Job.IsBinded())
-        {
-#if USE_MONO
-            // Ensure to have C# thread attached to this thead (late init due to MCore being initialized after Job System)
-            if (attachMonoThread && !mono_domain_get())
+            int64 jobOffset = 0;
+        RETRY:
+            int64 jobStartLabel = Platform::AtomicRead(&JobStartLabel) + jobOffset;
+            int64 jobEndLabel = Platform::AtomicRead(&JobEndLabel);
+            if (jobStartLabel <= jobEndLabel && jobEndLabel > 0)
             {
-                const auto domain = MCore::Instance()->GetActiveDomain();
-                mono_thread_attach(domain->GetNative());
-                attachMonoThread = false;
+                jobContext = &JobContexts[GET_CONTEXT_INDEX(jobStartLabel)];
+                if (Platform::AtomicRead(&jobContext->DependenciesLeft) > 0)
+                {
+                    // This job still waits for dependency so skip it for now and try the next one
+                    jobOffset++;
+                    jobContext = nullptr;
+                    goto RETRY;
+                }
+
+                // Move forward with index for a job
+                jobIndex = (int32)(Platform::InterlockedIncrement(&jobContext->JobIndex) - 1);
+                if (jobIndex < jobContext->JobsCount)
+                {
+                    // Index is valid
+                }
+                else if (jobStartLabel < jobEndLabel && jobOffset == 0)
+                {
+                    // No more jobs inside this context, move to the next one
+                    Platform::InterlockedCompareExchange(&JobStartLabel, jobStartLabel + 1, jobStartLabel);
+                    jobContext = nullptr;
+                    goto RETRY;
+                }
+                else
+                {
+                    // No more jobs
+                    jobContext = nullptr;
+                    if (jobStartLabel < jobEndLabel)
+                    {
+                        // Try with a different one before going to sleep
+                        jobOffset++;
+                        goto RETRY;
+                    }
+                }
+            }
+        }
+
+        if (jobContext)
+        {
+#if USE_CSHARP
+            // Ensure to have C# thread attached to this thead (late init due to MCore being initialized after Job System)
+            if (attachCSharpThread)
+            {
+                MCore::Thread::Attach();
+                attachCSharpThread = false;
+                monoThreadInfo = mono_thread_info_attach();
             }
 #endif
 
             // Run job
-            data.Job(data.Index);
+            jobContext->Job(jobIndex);
 
             // Move forward with the job queue
-            Platform::InterlockedIncrement(&DoneLabel);
-            WaitSignal.NotifyAll();
+            if (Platform::InterlockedDecrement(&jobContext->JobsLeft) <= 0)
+            {
+                // Mark job as done before processing dependants
+                Platform::AtomicStore(&jobContext->JobLabel, -1);
 
-            data.Job.Unbind();
+                // Check if any other job waits on this one
+                if (Platform::AtomicRead(&jobContext->DependantsCount) != 0)
+                {
+                    // Update dependant jobs
+                    JobsLocker.Lock();
+                    for (int64 dependant : jobContext->Dependants)
+                    {
+                        JobContext& dependantContext = JobContexts[GET_CONTEXT_INDEX(dependant)];
+                        if (dependantContext.JobLabel == dependant)
+                            Platform::InterlockedDecrement(&dependantContext.DependenciesLeft);
+                    }
+                    JobsLocker.Unlock();
+                }
+
+                // Cleanup completed context
+                jobContext->Job.Unbind();
+                jobContext->Dependants.Clear();
+                Platform::AtomicStore(&jobContext->DependantsCount, 0);
+                Platform::AtomicStore(&jobContext->DependenciesLeft, -999); // Mark to indicate deleted context
+                Platform::AtomicStore(&jobContext->JobLabel, -1);
+                Platform::InterlockedDecrement(&JobContextsCount);
+
+                // Wakeup any thread waiting for the jobs to complete
+                WaitSignal.NotifyAll();
+            }
         }
         else
         {
             // Wait for signal
-            mutex.Lock();
-            JobsSignal.Wait(mutex);
-            mutex.Unlock();
+            MONO_ENTER_GC_SAFE_WITH_INFO(monoThreadInfo);
+            JobsMutex.Lock();
+            JobsSignal.Wait(JobsMutex);
+            JobsMutex.Unlock();
+            MONO_EXIT_GC_SAFE_WITH_INFO;
         }
     }
     return 0;
@@ -211,35 +263,121 @@ int32 JobSystemThread::Run()
 
 #endif
 
+void JobSystem::Execute(const Function<void(int32)>& job, int32 jobCount)
+{
+#if JOB_SYSTEM_ENABLED
+    // TODO: disable async if called on job thread? or maybe Wait should handle waiting in job thread to do the processing?
+    if (jobCount > 1)
+    {
+        // Async
+        const int64 label = Dispatch(job, jobCount);
+        Wait(label);
+    }
+    else
+#endif
+    {
+        // Sync
+        for (int32 i = 0; i < jobCount; i++)
+            job(i);
+    }
+}
+
 int64 JobSystem::Dispatch(const Function<void(int32)>& job, int32 jobCount)
 {
-    PROFILE_CPU();
     if (jobCount <= 0)
         return 0;
+    PROFILE_CPU();
 #if JOB_SYSTEM_ENABLED
-#if JOB_SYSTEM_USE_STATS
-    const auto start = Platform::GetTimeCycles();
-#endif
+    while (Platform::InterlockedIncrement(&JobContextsCount) >= JobContextsSize)
+    {
+        // Too many jobs in flight, wait for some to complete to free up contexts
+        PROFILE_CPU_NAMED("JOB SYSTEM OVERFLOW");
+        ZoneColor(TracyWaitZoneColor);
+        Platform::InterlockedDecrement(&JobContextsCount);
+        Platform::Sleep(1);
+    }
 
-    JobData data;
-    data.Job = job;
+    // Get a new label
+    const int64 label = Platform::InterlockedIncrement(&JobLabel);
 
-#if JOB_SYSTEM_USE_MUTEX
-    JobsLocker.Lock();
-    for (data.Index = 0; data.Index < jobCount; data.Index++)
-        Jobs.PushBack(data);
-    JobsLocker.Unlock();
-#else
-    for (data.Index = 0; data.Index < jobCount; data.Index++)
-        Jobs.enqueue(data);
-#endif
-    const auto label = Platform::InterlockedAdd(&NextLabel, (int64)jobCount) + jobCount;
+    // Build job
+    JobContext& context = JobContexts[GET_CONTEXT_INDEX(label)];
+    context.Job = job;
+    context.JobIndex = 0;
+    context.JobsLeft = jobCount;
+    context.JobLabel = label;
+    context.DependantsCount = 0;
+    context.DependenciesLeft = 0;
+    context.JobsCount = jobCount;
+    context.Dependants.Clear();
 
-#if JOB_SYSTEM_USE_STATS
-    LOG(Info, "Job enqueue time: {0} cycles", (int64)(Platform::GetTimeCycles() - start));
-#endif
+    // Move the job queue forward
+    Platform::InterlockedIncrement(&JobEndLabel);
 
     if (JobStartingOnDispatch)
+    {
+        if (jobCount == 1)
+            JobsSignal.NotifyOne();
+        else
+            JobsSignal.NotifyAll();
+    }
+
+    return label;
+#else
+    for (int32 i = 0; i < jobCount; i++)
+        job(i);
+    return 0;
+#endif
+}
+
+int64 JobSystem::Dispatch(const Function<void(int32)>& job, Span<int64> dependencies, int32 jobCount)
+{
+    if (jobCount <= 0)
+        return 0;
+    PROFILE_CPU();
+    PROFILE_MEM(EngineThreading);
+#if JOB_SYSTEM_ENABLED
+    while (Platform::InterlockedIncrement(&JobContextsCount) >= JobContextsSize)
+    {
+        // Too many jobs in flight, wait for some to complete to free up contexts
+        PROFILE_CPU_NAMED("JOB SYSTEM OVERFLOW");
+        ZoneColor(TracyWaitZoneColor);
+        Platform::InterlockedDecrement(&JobContextsCount);
+        Platform::Sleep(1);
+    }
+
+    // Get a new label
+    const int64 label = Platform::InterlockedIncrement(&JobLabel);
+
+    // Build job
+    JobContext& context = JobContexts[GET_CONTEXT_INDEX(label)];
+    context.Job = job;
+    context.JobIndex = 0;
+    context.JobsLeft = jobCount;
+    context.JobLabel = label;
+    context.DependantsCount = 0;
+    context.DependenciesLeft = 0;
+    context.JobsCount = jobCount;
+    context.Dependants.Clear();
+    {
+        JobsLocker.Lock();
+        for (int64 dependency : dependencies)
+        {
+            JobContext& dependencyContext = JobContexts[GET_CONTEXT_INDEX(dependency)];
+            if (Platform::AtomicRead(&dependencyContext.JobLabel) == dependency)
+            {
+                Platform::InterlockedIncrement(&dependencyContext.DependantsCount);
+                dependencyContext.Dependants.Add(label);
+                context.DependenciesLeft++;
+            }
+        }
+        JobsLocker.Unlock();
+    }
+
+    // Move the job queue forward
+    Platform::InterlockedIncrement(&JobEndLabel);
+
+    if (context.DependenciesLeft == 0 && JobStartingOnDispatch)
     {
         if (jobCount == 1)
             JobsSignal.NotifyOne();
@@ -258,7 +396,18 @@ int64 JobSystem::Dispatch(const Function<void(int32)>& job, int32 jobCount)
 void JobSystem::Wait()
 {
 #if JOB_SYSTEM_ENABLED
-    Wait(Platform::AtomicRead(&NextLabel));
+    PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
+
+    int64 numJobs = Platform::AtomicRead(&JobContextsCount);
+    while (numJobs > 0)
+    {
+        WaitMutex.Lock();
+        WaitSignal.Wait(WaitMutex, 1);
+        WaitMutex.Unlock();
+
+        numJobs = Platform::AtomicRead(&JobContextsCount);
+    }
 #endif
 }
 
@@ -266,24 +415,25 @@ void JobSystem::Wait(int64 label)
 {
 #if JOB_SYSTEM_ENABLED
     PROFILE_CPU();
+    ZoneColor(TracyWaitZoneColor);
 
-    // Early out
-    if (label <= Platform::AtomicRead(&DoneLabel))
-        return;
-
-    // Wait on signal until input label is not yet done
-    CriticalSection mutex;
-    do
+    while (Platform::AtomicRead(&ExitFlag) == 0)
     {
-        mutex.Lock();
-        WaitSignal.Wait(mutex, 1);
-        mutex.Unlock();
-    } while (label > Platform::AtomicRead(&DoneLabel) && Platform::AtomicRead(&ExitFlag) == 0);
+        const JobContext& context = JobContexts[GET_CONTEXT_INDEX(label)];
+        const bool finished = Platform::AtomicRead(&context.JobLabel) != label || Platform::AtomicRead(&context.JobsLeft) <= 0;
 
-#if JOB_SYSTEM_USE_STATS
-    LOG(Info, "Job average dequeue time: {0} cycles", DequeueSum / DequeueCount);
-    DequeueSum = DequeueCount = 0;
-#endif
+        // Skip if context has been already executed (last job removes it)
+        if (finished)
+            break;
+
+        // Wait on signal until input label is not yet done
+        WaitMutex.Lock();
+        WaitSignal.Wait(WaitMutex, 1);
+        WaitMutex.Unlock();
+
+        // Wake up any thread to prevent stalling in highly multi-threaded environment
+        JobsSignal.NotifyOne();
+    }
 #endif
 }
 
@@ -291,16 +441,19 @@ void JobSystem::SetJobStartingOnDispatch(bool value)
 {
 #if JOB_SYSTEM_ENABLED
     JobStartingOnDispatch = value;
-
-    if (value)
+    if (value && (Platform::AtomicRead(&JobEndLabel) - Platform::AtomicRead(&JobStartLabel)) > 0)
     {
-        JobsLocker.Lock();
-        const int32 count = Jobs.Count();
-        JobsLocker.Unlock();
-        if (count == 1)
-            JobsSignal.NotifyOne();
-        else if (count != 0)
-            JobsSignal.NotifyAll();
+        // Wake up threads to start processing jobs that may be already in the queue
+        JobsSignal.NotifyAll();
     }
+#endif
+}
+
+int32 JobSystem::GetThreadsCount()
+{
+#if JOB_SYSTEM_ENABLED
+    return ThreadsCount;
+#else
+    return 0;
 #endif
 }

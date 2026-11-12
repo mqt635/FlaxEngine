@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -23,14 +23,12 @@ class GPUShaderProgramCS;
 class GPUParticles
 {
 private:
-
     GPUShader* _shader = nullptr;
     GPUShaderProgramCS* _mainCS = nullptr;
     Array<byte> _cbData;
     MaterialParams _params;
 
 public:
-
     /// <summary>
     /// The custom data size (in bytes) required by the nodes to store the additional global state for the simulation in the particles buffer on a GPU.
     /// </summary>
@@ -81,15 +79,10 @@ public:
     /// <param name="dstOffset">The destination buffer offset from start (in bytes) to copy the counter (uint32).</param>
     void CopyParticlesCount(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, ParticleEmitterInstance& data, GPUBuffer* dstBuffer, uint32 dstOffset);
 
-    /// <summary>
-    /// Performs the GPU particles simulation update using the graphics device.
-    /// </summary>
-    /// <param name="context">The GPU context that supports Compute.</param>
-    /// <param name="emitter">The owning emitter.</param>
-    /// <param name="effect">The instance effect.</param>
-    /// <param name="emitterIndex">The index of the emitter in the particle system.</param>
-    /// <param name="data">The instance data.</param>
-    void Execute(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data);
+    bool CanSim(const ParticleEmitter* emitter, const ParticleEmitterInstance& data) const;
+    void PreSim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data);
+    void Sim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data);
+    void PostSim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data);
 };
 
 #endif

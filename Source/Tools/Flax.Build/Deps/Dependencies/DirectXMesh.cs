@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -29,37 +29,57 @@ namespace Flax.Deps.Dependencies
         }
 
         /// <inheritdoc />
+        public override TargetArchitecture[] Architectures
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
+                    return new[]
+                    {
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
+                    };
+                default: return new TargetArchitecture[0];
+                }
+            }
+        }
+
+        /// <inheritdoc />
         public override void Build(BuildOptions options)
         {
             var root = options.IntermediateFolder;
-            var solutionPath = Path.Combine(root, "DirectXMesh_Desktop_2015.sln");
+            var solutionPath = Path.Combine(root, "DirectXMesh_Desktop_2022_Win10.sln");
             var configuration = "Release";
             var outputFileNames = new[]
             {
                 "DirectXMesh.lib",
                 "DirectXMesh.pdb",
             };
-            var binFolder = Path.Combine(root, "DirectXMesh", "Bin", "Desktop_2015");
+            var binFolder = Path.Combine(root, "DirectXMesh", "Bin", "Desktop_2022_Win10");
 
             // Get the source
             CloneGitRepoFast(root, "https://github.com/Microsoft/DirectXMesh.git");
 
             foreach (var platform in options.Platforms)
             {
-                switch (platform)
+                foreach (var architecture in options.Architectures)
                 {
-                case TargetPlatform.Windows:
-                {
-                    // Build for Win64
-                    Deploy.VCEnvironment.BuildSolution(solutionPath, configuration, "x64");
-                    var depsFolder = GetThirdPartyFolder(options, TargetPlatform.Windows, TargetArchitecture.x64);
-                    foreach (var file in outputFileNames)
+                    BuildStarted(platform, architecture);
+                    switch (platform)
                     {
-                        Utilities.FileCopy(Path.Combine(binFolder, "x64", "Release", file), Path.Combine(depsFolder, file));
+                    case TargetPlatform.Windows:
+                    {
+                        Deploy.VCEnvironment.BuildSolution(solutionPath, configuration, architecture.ToString());
+                        var depsFolder = GetThirdPartyFolder(options, TargetPlatform.Windows, architecture);
+                        foreach (var file in outputFileNames)
+                        {
+                            Utilities.FileCopy(Path.Combine(binFolder, architecture.ToString(), "Release", file), Path.Combine(depsFolder, file));
+                        }
                     }
-
                     break;
-                }
+                    }
                 }
             }
 

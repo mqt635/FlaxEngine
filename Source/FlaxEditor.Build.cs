@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -14,7 +14,6 @@ public class FlaxEditor : EngineTarget
     {
         base.Init();
 
-        // Initialize
         IsEditor = true;
         OutputName = "FlaxEditor";
         ConfigurationName = "Editor";
@@ -23,13 +22,14 @@ public class FlaxEditor : EngineTarget
         {
             TargetPlatform.Windows,
             TargetPlatform.Linux,
+            TargetPlatform.Mac,
         };
         Architectures = new[]
         {
             TargetArchitecture.x64,
+            TargetArchitecture.ARM64,
         };
         GlobalDefinitions.Add("USE_EDITOR");
-        Win32ResourceFile = Path.Combine(Globals.EngineRoot, "Source", "FlaxEditor.rc");
 
         Modules.Add("Editor");
         Modules.Add("CSG");
@@ -44,6 +44,9 @@ public class FlaxEditor : EngineTarget
     {
         base.SetupTargetEnvironment(options);
 
+        // Uncomment to get console
+        //options.LinkEnv.LinkAsConsoleProgram = true;
+
         // Setup output folder for Editor binaries
         switch (options.Platform.Target)
         {
@@ -56,12 +59,19 @@ public class FlaxEditor : EngineTarget
             case TargetArchitecture.x86:
                 options.OutputFolder = Path.Combine(options.WorkingDirectory, "Binaries", "Editor", "Win32", options.Configuration.ToString());
                 break;
+            case TargetArchitecture.ARM64:
+                options.OutputFolder = Path.Combine(options.WorkingDirectory, "Binaries", "Editor", "ARM64", options.Configuration.ToString());
+                break;
             default: throw new InvalidArchitectureException(options.Architecture, "Not supported Editor architecture.");
             }
             break;
         case TargetPlatform.Linux:
             options.OutputFolder = Path.Combine(options.WorkingDirectory, "Binaries", "Editor", "Linux", options.Configuration.ToString());
             options.DependencyFiles.Add(Path.Combine(Globals.EngineRoot, "Source", "Logo.png"));
+            break;
+        case TargetPlatform.Mac:
+            options.OutputFolder = Path.Combine(options.WorkingDirectory, "Binaries", "Editor", "Mac", options.Configuration.ToString());
+            options.DependencyFiles.Add(Path.Combine(Globals.EngineRoot, "Source", "Platforms", "Mac", "Logo.png"));
             break;
         default: throw new InvalidPlatformException(options.Platform.Target, "Not supported Editor platform.");
         }

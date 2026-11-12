@@ -1,12 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Globalization;
-using System.IO;
-using System.Text;
 using FlaxEngine.GUI;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 
 namespace FlaxEngine
 {
@@ -40,36 +35,58 @@ namespace FlaxEngine
 
                 // Set value
                 _control = value;
+                if (_control == null)
+                    return;
 
-                // Link the new one (events and parent)
-                if (_control != null)
+                // Setup control
+                var isDuringPlay = IsDuringPlay;
+                _blockEvents = true;
+                var container = _control as ContainerControl;
+                if (container != null)
                 {
-                    // Setup control
-                    _blockEvents = true;
-                    var containerControl = _control as ContainerControl;
-                    if (containerControl != null)
-                        containerControl.UnlockChildrenRecursive();
-                    _control.Parent = GetParent();
-                    _control.IndexInParent = OrderInParent;
-                    _control.Location = new Vector2(LocalPosition);
-                    _control.LocationChanged += OnControlLocationChanged;
-
-                    // Link children UI controls
-                    if (containerControl != null && IsActiveInHierarchy)
+                    if (isDuringPlay)
+                        container.UnlockChildrenRecursive(); // Enable layout changes to any dynamically added UI
+                    else
+                        container.LockChildrenRecursive(); // Block layout changes during deserialization
+                }
+                _control.Visible = IsActive;
+                {
+                    var parent = GetParent();
+                    if (parent != null && !parent.IsLayoutLocked && !isDuringPlay)
                     {
-                        var children = ChildrenCount;
-                        for (int i = 0; i < children; i++)
+                        // Reparent but prevent layout if we're during pre-game setup (eg. deserialization) to avoid UI breaking during auto-layout resizing
+                        parent.IsLayoutLocked = true;
+                        _control.Parent = parent;
+                        parent.IsLayoutLocked = false;
+                    }
+                    else
+                    {
+                        _control.Parent = parent;
+                    }
+                }
+                _control.IndexInParent = OrderInParent;
+                _control.Location = new Float2(LocalPosition);
+                _control.LocationChanged += OnControlLocationChanged;
+
+                // Link children UI controls
+                if (container != null)
+                {
+                    var children = ChildrenCount;
+                    var parent = Parent;
+                    for (int i = 0; i < children; i++)
+                    {
+                        var child = GetChild(i) as UIControl;
+                        if (child != null && child.HasControl && child != parent)
                         {
-                            var child = GetChild(i) as UIControl;
-                            if (child != null && child.IsActiveInHierarchy && child.HasControl)
-                            {
-                                child.Control.Parent = containerControl;
-                            }
+                            child.Control.Parent = container;
                         }
                     }
+                }
 
-                    // Refresh
-                    _blockEvents = false;
+                // Refresh layout
+                _blockEvents = false;
+                if (isDuringPlay)
+                {
                     if (prevControl == null && _control.Parent != null)
                         _control.Parent.PerformLayout();
                     else
@@ -96,10 +113,10 @@ namespace FlaxEngine
                     return new OrientedBoundingBox();
 
                 // Find control bounds limit points in canvas-space
-                Vector2 p1 = Vector2.Zero;
-                Vector2 p2 = new Vector2(0, Control.Height);
-                Vector2 p3 = new Vector2(Control.Width, 0);
-                Vector2 p4 = Control.Size;
+                var p1 = Float2.Zero;
+                var p2 = new Float2(0, Control.Height);
+                var p3 = new Float2(Control.Width, 0);
+                var p4 = Control.Size;
                 Control c = Control;
                 while (c != canvasRoot)
                 {
@@ -107,22 +124,21 @@ namespace FlaxEngine
                     p2 = c.PointToParent(ref p2);
                     p3 = c.PointToParent(ref p3);
                     p4 = c.PointToParent(ref p4);
-
                     c = c.Parent;
                 }
-                Vector2 min = Vector2.Min(Vector2.Min(p1, p2), Vector2.Min(p3, p4));
-                Vector2 max = Vector2.Max(Vector2.Max(p1, p2), Vector2.Max(p3, p4));
-                Vector2 size = max - min;
+                var min = Float2.Min(Float2.Min(p1, p2), Float2.Min(p3, p4));
+                var max = Float2.Max(Float2.Max(p1, p2), Float2.Max(p3, p4));
+                var size = max - min;
 
                 // Calculate bounds
-                OrientedBoundingBox bounds = new OrientedBoundingBox
+                var bounds = new OrientedBoundingBox
                 {
                     Extents = new Vector3(size * 0.5f, Mathf.Epsilon)
                 };
-
                 canvasRoot.Canvas.GetWorldMatrix(out Matrix world);
                 Matrix.Translation(min.X + size.X * 0.5f, min.Y + size.Y * 0.5f, 0, out Matrix offset);
-                Matrix.Multiply(ref offset, ref world, out bounds.Transformation);
+                Matrix.Multiply(ref offset, ref world, out var boxWorld);
+                boxWorld.Decompose(out bounds.Transformation);
                 return bounds;
             }
         }
@@ -181,8 +197,110 @@ namespace FlaxEngine
             }
         }
 
+        #region Navigation
+
+        /// <summary>
+        /// The explicitly specified target navigation control for <see cref="NavDirection.Up"/> direction.
+        /// </summary>
+        [Tooltip("The explicitly specified target navigation control for Up direction. Leave empty to use automatic navigation.")]
+        [EditorDisplay("Navigation"), EditorOrder(1010), VisibleIf(nameof(HasControl))]
+        public UIControl NavTargetUp
+        {
+            get
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out _, out _, out _);
+                return up;
+            }
+            set
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                if (up == value)
+                    return;
+                up = value;
+                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                if (_control != null)
+                    _control.NavTargetUp = value != null ? value.Control : null;
+            }
+        }
+
+        /// <summary>
+        /// The explicitly specified target navigation control for <see cref="NavDirection.Down"/> direction.
+        /// </summary>
+        [Tooltip("The explicitly specified target navigation control for Down direction. Leave empty to use automatic navigation.")]
+        [EditorDisplay("Navigation"), EditorOrder(1020), VisibleIf(nameof(HasControl))]
+        public UIControl NavTargetDown
+        {
+            get
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out _, out UIControl down, out _, out _);
+                return down;
+            }
+            set
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                if (down == value)
+                    return;
+                down = value;
+                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                if (_control != null)
+                    _control.NavTargetDown = value != null ? value.Control : null;
+            }
+        }
+
+        /// <summary>
+        /// The explicitly specified target navigation control for <see cref="NavDirection.Left"/> direction.
+        /// </summary>
+        [Tooltip("The explicitly specified target navigation control for Left direction. Leave empty to use automatic navigation.")]
+        [EditorDisplay("Navigation"), EditorOrder(1030), VisibleIf(nameof(HasControl))]
+        public UIControl NavTargetLeft
+        {
+            get
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out _, out _, out UIControl left, out _);
+                return left;
+            }
+            set
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                if (left == value)
+                    return;
+                left = value;
+                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                if (_control != null)
+                    _control.NavTargetLeft = value != null ? value.Control : null;
+            }
+        }
+
+        /// <summary>
+        /// The explicitly specified target navigation control for <see cref="NavDirection.Right"/> direction.
+        /// </summary>
+        [Tooltip("The explicitly specified target navigation control for Right direction. Leave empty to use automatic navigation.")]
+        [EditorDisplay("Navigation"), EditorOrder(1040), VisibleIf(nameof(HasControl))]
+        public UIControl NavTargetRight
+        {
+            get
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out _, out _, out _, out UIControl right);
+                return right;
+            }
+            set
+            {
+                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                if (right == value)
+                    return;
+                right = value;
+                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                if (_control != null)
+                    _control.NavTargetRight = value != null ? value.Control : null;
+            }
+        }
+
+        #endregion
+
         private void OnControlLocationChanged(Control control)
         {
+            if (control == null || !this)
+                return;
             _blockEvents = true;
             LocalPosition = new Vector3(control.Location, LocalPosition.Z);
             _blockEvents = false;
@@ -195,15 +313,6 @@ namespace FlaxEngine
 
         private ContainerControl GetParent()
         {
-            // Don't link disabled actors
-            if (!IsActiveInHierarchy)
-                return null;
-#if FLAX_EDITOR
-            // Prefab editor doesn't fire BeginPlay so for disabled actors we don't unlink them so do it here
-            if (!IsActive)
-                return null;
-#endif
-
             var parent = Parent;
             if (parent is UIControl uiControl && uiControl.Control is ContainerControl uiContainerControl)
                 return uiContainerControl;
@@ -212,93 +321,40 @@ namespace FlaxEngine
             return FallbackParentGetDelegate?.Invoke(this);
         }
 
-        internal string Serialize(out string controlType)
+        internal string Serialize(out string controlType, UIControl other)
         {
             if (_control == null)
             {
+                // No control assigned
                 controlType = null;
                 return null;
             }
 
             var type = _control.GetType();
+            var prefabDiff = other != null && other._control != null && other._control.GetType() == type;
 
-            JsonSerializer jsonSerializer = JsonSerializer.CreateDefault(Json.JsonSerializer.Settings);
-            jsonSerializer.Formatting = Formatting.Indented;
+            // Serialize control type when not using prefab diff serialization
+            controlType = prefabDiff ? string.Empty : type.FullName;
 
-            StringBuilder sb = new StringBuilder(1024);
-            StringWriter sw = new StringWriter(sb, CultureInfo.InvariantCulture);
-            using (JsonTextWriter jsonWriter = new JsonTextWriter(sw))
-            {
-                // Prepare writer settings
-                jsonWriter.IndentChar = '\t';
-                jsonWriter.Indentation = 1;
-                jsonWriter.Formatting = jsonSerializer.Formatting;
-                jsonWriter.DateFormatHandling = jsonSerializer.DateFormatHandling;
-                jsonWriter.DateTimeZoneHandling = jsonSerializer.DateTimeZoneHandling;
-                jsonWriter.FloatFormatHandling = jsonSerializer.FloatFormatHandling;
-                jsonWriter.StringEscapeHandling = jsonSerializer.StringEscapeHandling;
-                jsonWriter.Culture = jsonSerializer.Culture;
-                jsonWriter.DateFormatString = jsonSerializer.DateFormatString;
-
-                JsonSerializerInternalWriter serializerWriter = new JsonSerializerInternalWriter(jsonSerializer);
-
-                serializerWriter.Serialize(jsonWriter, _control, type);
-            }
-
-            controlType = type.FullName;
-            return sw.ToString();
-        }
-
-        internal string SerializeDiff(out string controlType, UIControl other)
-        {
-            if (_control == null)
-            {
-                controlType = null;
-                return null;
-            }
-            var type = _control.GetType();
-            if (other._control == null || other._control.GetType() != type)
-            {
-                return Serialize(out controlType);
-            }
-
-            JsonSerializer jsonSerializer = JsonSerializer.CreateDefault(Json.JsonSerializer.Settings);
-            jsonSerializer.Formatting = Formatting.Indented;
-
-            StringBuilder sb = new StringBuilder(1024);
-            StringWriter sw = new StringWriter(sb, CultureInfo.InvariantCulture);
-            using (JsonTextWriter jsonWriter = new JsonTextWriter(sw))
-            {
-                // Prepare writer settings
-                jsonWriter.IndentChar = '\t';
-                jsonWriter.Indentation = 1;
-                jsonWriter.Formatting = jsonSerializer.Formatting;
-                jsonWriter.DateFormatHandling = jsonSerializer.DateFormatHandling;
-                jsonWriter.DateTimeZoneHandling = jsonSerializer.DateTimeZoneHandling;
-                jsonWriter.FloatFormatHandling = jsonSerializer.FloatFormatHandling;
-                jsonWriter.StringEscapeHandling = jsonSerializer.StringEscapeHandling;
-                jsonWriter.Culture = jsonSerializer.Culture;
-                jsonWriter.DateFormatString = jsonSerializer.DateFormatString;
-
-                JsonSerializerInternalWriter serializerWriter = new JsonSerializerInternalWriter(jsonSerializer);
-
-                serializerWriter.SerializeDiff(jsonWriter, _control, type, other._control);
-            }
-
-            controlType = string.Empty;
-            return sw.ToString();
+            string json;
+            if (prefabDiff)
+                json = Json.JsonSerializer.SerializeDiff(_control, other._control, true);
+            else
+                json = Json.JsonSerializer.Serialize(_control, type, true);
+            return json;
         }
 
         internal void Deserialize(string json, Type controlType)
         {
-            if (_control == null || _control.GetType() != controlType)
+            if ((_control == null || _control.GetType() != controlType) && controlType != null)
             {
-                if (controlType != null)
-                    Control = (Control)Activator.CreateInstance(controlType);
+                // Create a new control
+                Control = (Control)Activator.CreateInstance(controlType);
             }
 
             if (_control != null)
             {
+                // Populate control object with properties
                 Json.JsonSerializer.Deserialize(_control, json);
 
                 // Synchronize actor with control location
@@ -310,6 +366,7 @@ namespace FlaxEngine
         {
             if (_control != null && !_blockEvents)
             {
+                _control.Visible = IsActive;
                 _control.Parent = GetParent();
                 _control.IndexInParent = OrderInParent;
             }
@@ -319,23 +376,15 @@ namespace FlaxEngine
         {
             if (_control != null && !_blockEvents)
             {
-                _control.Location = new Vector2(LocalPosition);
+                _control.Location = new Float2(LocalPosition);
             }
         }
 
-        internal void ActiveInTreeChanged()
+        internal void ActiveChanged()
         {
             if (_control != null && !_blockEvents)
             {
-                // Skip if this control is inactive and it's parent too (parent will unlink from hierarchy but children will stay connected while being inactive)
-                if (!IsActiveInHierarchy && Parent && !Parent.IsActive)
-                {
-                    return;
-                }
-
-                // Link or unlink control (won't modify Enable/Visible state)
-                _control.Parent = GetParent();
-                _control.IndexInParent = OrderInParent;
+                _control.Visible = IsActive;
             }
         }
 
@@ -349,10 +398,32 @@ namespace FlaxEngine
 
         internal void BeginPlay()
         {
-            if (_control != null)
+            var control = _control;
+            if (control == null)
+                return;
+
+            // Setup control
+            control.Visible = IsActive && control.Visible;
+            control.Parent = GetParent();
+            control.IndexInParent = OrderInParent;
+
+            // Setup navigation (all referenced controls are now loaded)
+            Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+            control.NavTargetUp = up?.Control;
+            control.NavTargetDown = down?.Control;
+            control.NavTargetLeft = left?.Control;
+            control.NavTargetRight = right?.Control;
+
+            // Refresh layout (BeginPlay is called for parents first, then skip if already called by outer control)
+            var container = control as ContainerControl;
+            if (control.Parent == null || (container != null && container.IsLayoutLocked))
             {
-                _control.Parent = GetParent();
-                _control.IndexInParent = OrderInParent;
+                if (container != null)
+                {
+                    //container.UnlockChildrenRecursive();
+                    container.IsLayoutLocked = false; // Forces whole children tree lock/unlock sequence in PerformLayout
+                }
+                control.PerformLayout();
             }
         }
 

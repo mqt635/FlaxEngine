@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ImportShader.h"
 
@@ -14,7 +14,7 @@
 CreateAssetResult ImportShader::Import(CreateAssetContext& context)
 {
     // Base
-    IMPORT_SETUP(Shader, 19);
+    IMPORT_SETUP(Shader, 20);
     const int32 SourceCodeChunk = 15;
     context.SkipMetadata = true;
 
@@ -32,15 +32,24 @@ CreateAssetResult ImportShader::Import(CreateAssetContext& context)
         LOG(Warning, "Empty shader source file.");
         return CreateAssetResult::Error;
     }
-    context.Data.Header.Chunks[SourceCodeChunk]->Data.Allocate(sourceCodeSize + 1);
-    const auto sourceCode = context.Data.Header.Chunks[SourceCodeChunk]->Get();
+
+    // Ensure the source code has an empty line at the end (expected by glslang)
+    auto sourceCodeChunkSize = sourceCodeSize + 1;
+    if (sourceCodeText[sourceCodeSize - 1] != '\n')
+        sourceCodeChunkSize++;
+
+    const auto& sourceCodeChunk = context.Data.Header.Chunks[SourceCodeChunk];
+    sourceCodeChunk->Data.Allocate(sourceCodeChunkSize);
+    const auto sourceCode = sourceCodeChunk->Get();
     Platform::MemoryCopy(sourceCode, sourceCodeText.Get(), sourceCodeSize);
+    sourceCode[sourceCodeChunkSize - 2] = '\n';
 
     // Encrypt source code
-    Encryption::EncryptBytes(sourceCode, sourceCodeSize);
+    Encryption::EncryptBytes(sourceCode, sourceCodeChunkSize - 1);
+    sourceCode[sourceCodeChunkSize - 1] = 0;
 
     // Set Custom Data with Header
-    ShaderStorage::Header19 shaderHeader;
+    ShaderStorage::Header20 shaderHeader;
     Platform::MemoryClear(&shaderHeader, sizeof(shaderHeader));
     context.Data.CustomData.Copy(&shaderHeader);
 

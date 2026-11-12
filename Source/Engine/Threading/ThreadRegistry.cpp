@@ -1,12 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ThreadRegistry.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Platform/CriticalSection.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 namespace ThreadRegistryImpl
 {
-    Dictionary<uint64, Thread*> Registry(64);
+    Dictionary<uint64, Thread*> Registry;
     CriticalSection Locker;
 }
 
@@ -46,8 +47,8 @@ void ThreadRegistry::KillEmAll()
 
 void ThreadRegistry::Add(Thread* thread)
 {
+    PROFILE_MEM(EngineThreading);
     ASSERT(thread && thread->GetID() != 0);
-
     Locker.Lock();
     ASSERT(!Registry.ContainsKey(thread->GetID()) && !Registry.ContainsValue(thread));
     Registry.Add(thread->GetID(), thread);
@@ -57,9 +58,11 @@ void ThreadRegistry::Add(Thread* thread)
 void ThreadRegistry::Remove(Thread* thread)
 {
     ASSERT(thread && thread->GetID() != 0);
-
     Locker.Lock();
-    ASSERT_LOW_LAYER(Registry.ContainsKey(thread->GetID()) && Registry[thread->GetID()] == thread);
+#if ENABLE_ASSERTION_LOW_LAYERS
+    Thread** currentValue = Registry.TryGet(thread->GetID());
+    ASSERT_LOW_LAYER(!currentValue || *currentValue == thread);
+#endif
     Registry.Remove(thread->GetID());
     Locker.Unlock();
 }

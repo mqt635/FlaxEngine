@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "GPUDeviceVulkan.h"
 #include "Engine/Core/Types/BaseTypes.h"
 #include "Engine/Core/Collections/Array.h"
+#include <ThirdParty/tracy/tracy/TracyVulkan.hpp>
 
 #if GRAPHICS_API_VULKAN
 
@@ -21,7 +22,6 @@ class CmdBufferVulkan
     friend QueueVulkan;
 
 public:
-
     enum class State
     {
         ReadyForBegin,
@@ -32,7 +32,6 @@ public:
     };
 
 private:
-
     GPUDeviceVulkan* _device;
     VkCommandBuffer _commandBuffer;
     State _state;
@@ -44,6 +43,10 @@ private:
     FenceVulkan* _fence;
 #if GPU_ALLOW_PROFILE_EVENTS
     int32 _eventsBegin = 0;
+#if VULKAN_USE_TRACY_GPU
+    struct TracyZone { byte Data[TracyVulkanZoneSize]; };
+    Array<TracyZone, InlinedAllocation<32>> _tracyZones;
+#endif
 #endif
 
     // The latest value when command buffer was submitted.
@@ -57,13 +60,10 @@ private:
     DescriptorPoolSetContainerVulkan* _descriptorPoolSetContainer = nullptr;
 
 public:
-
     CmdBufferVulkan(GPUDeviceVulkan* device, CmdBufferPoolVulkan* pool);
-
     ~CmdBufferVulkan();
 
 public:
-
     CmdBufferPoolVulkan* GetOwner() const
     {
         return _commandBufferPool;
@@ -120,7 +120,6 @@ public:
     }
 
 public:
-
     void AddWaitSemaphore(VkPipelineStageFlags waitFlags, SemaphoreVulkan* waitSemaphore);
 
     void Begin();
@@ -129,18 +128,17 @@ public:
     void BeginRenderPass(RenderPassVulkan* renderPass, FramebufferVulkan* framebuffer, uint32 clearValueCount, VkClearValue* clearValues);
     void EndRenderPass();
 
-    DescriptorPoolSetContainerVulkan* GetDescriptorPoolSet() const
+    FORCE_INLINE DescriptorPoolSetContainerVulkan* GetDescriptorPoolSet() const
     {
         return _descriptorPoolSetContainer;
     }
 
-    void AcquirePoolSet();
-
 #if GPU_ALLOW_PROFILE_EVENTS
-    void BeginEvent(const Char* name);
+    void BeginEvent(const Char* name, void* tracyContext);
     void EndEvent();
 #endif
 
+    void Wait(float timeoutSeconds = VULKAN_WAIT_TIMEOUT);
     void RefreshFenceStatus();
 };
 
@@ -148,7 +146,6 @@ class CmdBufferPoolVulkan
 {
     friend class CmdBufferManagerVulkan;
 private:
-
     GPUDeviceVulkan* _device;
     VkCommandPool _handle;
     Array<CmdBufferVulkan*> _cmdBuffers;
@@ -158,37 +155,39 @@ private:
     void Create(uint32 queueFamilyIndex);
 
 public:
-
     CmdBufferPoolVulkan(GPUDeviceVulkan* device);
     ~CmdBufferPoolVulkan();
 
 public:
-
     inline VkCommandPool GetHandle() const
     {
-        ASSERT(_handle != VK_NULL_HANDLE);
         return _handle;
     }
 
-    void RefreshFenceStatus(CmdBufferVulkan* skipCmdBuffer = nullptr);
+    void RefreshFenceStatus(const CmdBufferVulkan* skipCmdBuffer = nullptr);
 };
 
 class CmdBufferManagerVulkan
 {
 private:
-
     GPUDeviceVulkan* _device;
+    GPUContextVulkan* _context;
     CmdBufferPoolVulkan _pool;
     QueueVulkan* _queue;
     CmdBufferVulkan* _activeCmdBuffer;
-    Array<GPUTimerQueryVulkan*> _queriesInProgress;
+#if VULKAN_USE_TIMER_QUERIES && GPU_VULKAN_PAUSE_QUERIES
+#if GPU_VULKAN_QUERY_NEW
+    typedef uint64 QueryType;
+#else
+    typedef GPUTimerQueryVulkan* QueryType;
+#endif
+    Array<QueryType> _activeTimerQueries;
+#endif
 
 public:
-
     CmdBufferManagerVulkan(GPUDeviceVulkan* device, GPUContextVulkan* context);
 
 public:
-
     FORCE_INLINE VkCommandPool GetHandle() const
     {
         return _pool.GetHandle();
@@ -204,33 +203,25 @@ public:
         return _activeCmdBuffer != nullptr;
     }
 
-    FORCE_INLINE bool HasQueriesInProgress() const
-    {
-        return _queriesInProgress.Count() != 0;
-    }
-
-    CmdBufferVulkan* GetCmdBuffer()
+    FORCE_INLINE CmdBufferVulkan* GetCmdBuffer()
     {
         if (!_activeCmdBuffer)
-            PrepareForNewActiveCommandBuffer();
+            GetNewActiveCommandBuffer();
         return _activeCmdBuffer;
     }
 
 public:
-
     void SubmitActiveCmdBuffer(SemaphoreVulkan* signalSemaphore = nullptr);
-
-    void WaitForCmdBuffer(CmdBufferVulkan* cmdBuffer, float timeInSecondsToWait = 1.0f);
-
     void RefreshFenceStatus(CmdBufferVulkan* skipCmdBuffer = nullptr)
     {
         _pool.RefreshFenceStatus(skipCmdBuffer);
     }
+    void GetNewActiveCommandBuffer();
 
-    void PrepareForNewActiveCommandBuffer();
-
-    void OnQueryBegin(GPUTimerQueryVulkan* query);
-    void OnQueryEnd(GPUTimerQueryVulkan* query);
+#if VULKAN_USE_TIMER_QUERIES && GPU_VULKAN_PAUSE_QUERIES
+    void OnTimerQueryBegin(QueryType query);
+    void OnTimerQueryEnd(QueryType query);
+#endif
 };
 
 #endif

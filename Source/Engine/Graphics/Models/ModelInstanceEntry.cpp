@@ -1,9 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ModelInstanceEntry.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Assets/SkinnedModel.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 bool ModelInstanceEntries::HasContentLoaded() const
 {
@@ -18,6 +19,13 @@ bool ModelInstanceEntries::HasContentLoaded() const
         }
     }
     return result;
+}
+
+bool ModelInstanceEntries::ShouldSerialize(const void* otherObj) const
+{
+    if (!otherObj)
+        return true;
+    return !(*this == *(const ModelInstanceEntries*)otherObj);
 }
 
 void ModelInstanceEntries::Serialize(SerializeStream& stream, const void* otherObj)
@@ -41,12 +49,14 @@ void ModelInstanceEntries::Serialize(SerializeStream& stream, const void* otherO
 
 void ModelInstanceEntries::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
 {
-    const DeserializeStream& entries = stream["Entries"];
-    ASSERT(entries.IsArray());
-    Resize(entries.Size());
-    for (rapidjson::SizeType i = 0; i < entries.Size(); i++)
+    PROFILE_MEM(Graphics);
+    const DeserializeStream& entriesData = stream[rapidjson_flax::Value(rapidjson::StringRef("Entries", 7))];
+    CHECK(entriesData.IsArray());
+    Resize(entriesData.Size());
+    ModelInstanceEntry* entries = Get();
+    for (int32 i = 0; i < Count(); i++)
     {
-        At(i).Deserialize((DeserializeStream&)entries[i], modifier);
+        entries[i].Deserialize((DeserializeStream&)entriesData[i], modifier);
     }
 }
 
@@ -85,6 +95,7 @@ void ModelInstanceEntries::Setup(const SkinnedModel* model)
 
 void ModelInstanceEntries::Setup(int32 slotsCount)
 {
+    PROFILE_MEM(Graphics);
     Clear();
     Resize(slotsCount);
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,7 +13,6 @@ class NavMeshBoundsVolume;
 class FLAXENGINE_API SceneNavigation
 {
 public:
-
     /// <summary>
     /// The list of registered navigation bounds volumes (on the scene).
     /// </summary>
@@ -23,6 +22,17 @@ public:
     /// The list of registered navigation meshes (on the scene).
     /// </summary>
     Array<NavMesh*> Meshes;
+
+    /// <summary>
+    /// The list of registered navigation-relevant actors (on the scene).
+    /// </summary>
+    Array<Actor*> Actors;
+
+public:
+    /// <summary>
+    /// Clears this instance data.
+    /// </summary>
+    void Clear();
 
     /// <summary>
     /// Gets the total navigation volumes bounds.

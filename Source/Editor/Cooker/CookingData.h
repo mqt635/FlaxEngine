@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,6 +11,14 @@
 
 class GameCooker;
 class PlatformTools;
+
+// Range of dotnet runtime versions
+#ifndef GAME_BUILD_DOTNET_RUNTIME_MIN_VER
+#define GAME_BUILD_DOTNET_RUNTIME_MIN_VER 8
+#endif
+#ifndef GAME_BUILD_DOTNET_RUNTIME_MAX_VER
+#define GAME_BUILD_DOTNET_RUNTIME_MAX_VER 9
+#endif
 
 /// <summary>
 /// Game building options. Used as flags.
@@ -26,6 +34,16 @@ API_ENUM(Attributes="Flags") enum class BuildOptions
     /// Shows the output directory folder on building end.
     /// </summary>
     ShowOutput = 1 << 0,
+
+    /// <summary>
+    /// Starts the cooked game build on building end.
+    /// </summary>
+    AutoRun = 1 << 1,
+
+    /// <summary>
+    /// Skips cooking logic and uses already cooked data (eg. to only use AutoRun or ShowOutput feature).
+    /// </summary>
+    NoCook = 1 << 2,
 };
 
 DECLARE_ENUM_OPERATORS(BuildOptions);
@@ -49,14 +67,16 @@ API_ENUM() enum class BuildPlatform
 
     /// <summary>
     /// Universal Windows Platform (UWP) (x86 architecture)
+    /// [Deprecated and unsupported platform]
     /// </summary>
-    API_ENUM(Attributes="EditorDisplay(null, \"Windows Store x86\")")
+    API_ENUM(Attributes="EditorDisplay(null, \"Windows Store x86\"), Obsolete")
     UWPx86 = 3,
 
     /// <summary>
     /// Universal Windows Platform (UWP) (x64 architecture)
+    /// [Deprecated and unsupported platform]
     /// </summary>
-    API_ENUM(Attributes="EditorDisplay(null, \"Windows Store x64\")")
+    API_ENUM(Attributes="EditorDisplay(null, \"Windows Store x64\"), Obsolete")
     UWPx64 = 4,
 
     /// <summary>
@@ -93,9 +113,42 @@ API_ENUM() enum class BuildPlatform
     /// Switch.
     /// </summary>
     Switch = 10,
-};
 
-extern FLAXENGINE_API const Char* ToString(const BuildPlatform platform);
+    /// <summary>
+    /// PlayStation 5
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"PlayStation 5\")")
+    PS5 = 11,
+
+    /// <summary>
+    /// MacOS (x86-64 Intel)
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"Mac x64\")")
+    MacOSx64 = 12,
+
+    /// <summary>
+    /// MacOS (ARM64 Apple Silicon)
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"Mac ARM64\")")
+    MacOSARM64 = 13,
+
+    /// <summary>
+    /// iOS (ARM64)
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"iOS ARM64\")")
+    iOSARM64 = 14,
+
+    /// <summary>
+    /// Windows (ARM64)
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"Windows ARM64\")")
+    WindowsARM64 = 15,
+
+    /// <summary>
+    /// Web
+    /// </summary>
+    Web = 16,
+};
 
 /// <summary>
 /// Game build configuration modes.
@@ -118,14 +171,47 @@ API_ENUM() enum class BuildConfiguration
     Release = 2,
 };
 
+/// <summary>
+/// .NET Ahead of Time Compilation (AOT) modes.
+/// </summary>
+enum class DotNetAOTModes
+{
+    /// <summary>
+    /// AOT is not used.
+    /// </summary>
+    None,
+
+    /// <summary>
+    /// Use .NET Native IL Compiler (shorten as ILC) to convert all C# assemblies in native platform executable binary.
+    /// </summary>
+    ILC,
+
+    /// <summary>
+    /// Use Mono AOT to cross-compile all used C# assemblies into native platform shared libraries.
+    /// </summary>
+    MonoAOTDynamic,
+
+    /// <summary>
+    /// Use Mono AOT to cross-compile all used C# assemblies into native platform static libraries which can be linked into a single shared library.
+    /// </summary>
+    MonoAOTStatic,
+
+    /// <summary>
+    /// Target platform doesn't support .NET or it has been disabled.
+    /// </summary>
+    NoDotnet,
+};
+
+extern FLAXENGINE_API const Char* ToString(const BuildPlatform platform);
 extern FLAXENGINE_API const Char* ToString(const BuildConfiguration configuration);
+extern FLAXENGINE_API const Char* ToString(const DotNetAOTModes mode);
 
 #define BUILD_STEP_CANCEL_CHECK if (GameCooker::IsCancelRequested()) return true
 
 /// <summary>
 /// Game cooking temporary data.
 /// </summary>
-API_CLASS(Sealed, Namespace="FlaxEditor") class FLAXENGINE_API CookingData : public PersistentScriptingObject
+API_CLASS(Sealed, Namespace="FlaxEditor") class FLAXENGINE_API CookingData : public ScriptingObject
 {
 DECLARE_SCRIPTING_TYPE(CookingData);
 public:
@@ -166,7 +252,7 @@ public:
     API_FIELD(ReadOnly) String OriginalOutputPath;
 
     /// <summary>
-    /// The output path for data files (Content, Mono, etc.).
+    /// The output path for data files (Content, Dotnet, Mono, etc.).
     /// </summary>
     API_FIELD(ReadOnly) String DataOutputPath;
 
@@ -218,24 +304,22 @@ public:
         /// <summary>
         /// The total assets amount in the build.
         /// </summary>
-        int32 TotalAssets;
+        int32 TotalAssets = 0;
 
         /// <summary>
         /// The cooked assets (TotalAssets - CookedAssets is amount of reused cached assets).
         /// </summary>
-        int32 CookedAssets;
+        int32 CookedAssets = 0;
 
         /// <summary>
-        /// The final output content size in MB.
+        /// The final output content size (in bytes).
         /// </summary>
-        int32 ContentSizeMB;
+        uint64 ContentSize = 0;
 
         /// <summary>
         /// The asset type stats. Key is the asset typename, value is the stats container.
         /// </summary>
         Dictionary<String, AssetTypeStatistics> AssetStats;
-
-        Statistics();
     };
 
     /// <summary>
@@ -261,6 +345,11 @@ public:
     /// </summary>
     HashSet<Guid> Assets;
 
+    /// <summary>
+    /// The final files collection to include in build (valid only after CollectAssetsStep).
+    /// </summary>
+    HashSet<String> Files;
+
     struct BinaryModuleInfo
     {
         String Name;
@@ -273,19 +362,29 @@ public:
     /// </summary>
     Array<BinaryModuleInfo, InlinedAllocation<64>> BinaryModules;
 
+    /// <summary>
+    /// Cached version of the built binaries from project Version Control.
+    /// </summary>
+    String VersionControlInfo;
+
 public:
 
     /// <summary>
     /// Gets the absolute path to the Platform Data folder that contains the binary files used by the current build configuration.
     /// </summary>
-    /// <returns>The platform data folder path.</returns>
     String GetGameBinariesPath() const;
 
     /// <summary>
     /// Gets the absolute path to the platform folder that contains the dependency files used by the current build configuration.
     /// </summary>
-    /// <returns>The platform deps folder path.</returns>
     String GetPlatformBinariesRoot() const;
+
+    /// <summary>
+    /// Gets the name of the platform and architecture for the current BuildPlatform.
+    /// </summary>
+    void GetBuildPlatformName(const Char*& platform, const Char*& architecture) const;
+
+    String GetDotnetCommandArg() const;
 
 public:
 
@@ -346,17 +445,15 @@ public:
 
 public:
 
-    void Error(const String& msg);
+    void Error(const StringView& msg);
+
+    void Error(const String& msg)
+    {
+        Error(StringView(msg));
+    }
 
     void Error(const Char* msg)
     {
-        Error(String(msg));
-    }
-
-    template<typename... Args>
-    void Error(const Char* format, const Args& ... args)
-    {
-        const String msg = String::Format(format, args...);
-        Error(msg);
+        Error(StringView(msg));
     }
 };

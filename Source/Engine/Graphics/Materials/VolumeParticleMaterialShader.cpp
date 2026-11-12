@@ -1,37 +1,31 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "VolumeParticleMaterialShader.h"
 #include "MaterialShaderFeatures.h"
 #include "MaterialParams.h"
+#include "Engine/Core/Math/Matrix3x4.h"
 #include "Engine/Renderer/DrawCall.h"
-#include "Engine/Renderer/VolumetricFogPass.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Renderer/Lighting/VolumetricFogPass.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Particles/Graph/CPU/ParticleEmitterGraph.CPU.h"
 
 PACK_STRUCT(struct VolumeParticleMaterialShaderData {
-    Matrix ViewProjectionMatrix;
     Matrix InverseViewProjectionMatrix;
-    Matrix ViewMatrix;
-    Matrix WorldMatrix;
-    Matrix WorldMatrixInverseTransposed;
-    Vector3 ViewPos;
-    float ViewFar;
-    Vector3 ViewDir;
-    float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector3 GridSize;
+    Matrix3x4 WorldMatrix;
+    Matrix3x4 WorldMatrixInverseTransposed;
+    Float3 GridSize;
     float PerInstanceRandom;
     float Dummy0;
     float VolumetricFogMaxDistance;
-    int ParticleStride;
-    int ParticleIndex;
+    int32 ParticleStride;
+    int32 ParticleIndex;
+    Float4 GridSliceParameters;
     });
 
 DrawPass VolumeParticleMaterialShader::GetDrawModes() const
@@ -43,12 +37,12 @@ void VolumeParticleMaterialShader::Bind(BindParameters& params)
 {
     // Prepare
     auto context = params.GPUContext;
-    auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
+    const RenderView& view = params.RenderContext.View;
+    auto& drawCall = *params.DrawCall;
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(VolumeParticleMaterialShaderData));
     auto materialData = reinterpret_cast<VolumeParticleMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(VolumeParticleMaterialShaderData), cb.Length() - sizeof(VolumeParticleMaterialShaderData));
+    cb = cb.Slice(sizeof(VolumeParticleMaterialShaderData));
     int32 srv = 1;
     auto customData = (VolumetricFogPass::CustomData*)params.CustomData;
 
@@ -75,7 +69,7 @@ void VolumeParticleMaterialShader::Bind(BindParameters& params)
             {
                 const StringView name(param.GetName().Get() + 9, param.GetName().Length() - 9);
                 const int32 offset = drawCall.Particle.Particles->Layout->FindAttributeOffset(name);
-                ASSERT_LOW_LAYER(bindMeta.Constants.Get() && bindMeta.Constants.Length() >= (int32)param.GetBindOffset() + sizeof(int32));
+                ASSERT_LOW_LAYER(bindMeta.Constants.Get() && bindMeta.Constants.Length() >= (int32)(param.GetBindOffset() + sizeof(int32)));
                 *((int32*)(bindMeta.Constants.Get() + param.GetBindOffset())) = offset;
             }
         }
@@ -83,22 +77,17 @@ void VolumeParticleMaterialShader::Bind(BindParameters& params)
 
     // Setup material constants
     {
-        Matrix::Transpose(view.Frustum.GetMatrix(), materialData->ViewProjectionMatrix);
         Matrix::Transpose(view.IVP, materialData->InverseViewProjectionMatrix);
-        Matrix::Transpose(view.View, materialData->ViewMatrix);
-        Matrix::Transpose(drawCall.World, materialData->WorldMatrix);
-        Matrix::Invert(drawCall.World, materialData->WorldMatrixInverseTransposed);
-        materialData->ViewPos = view.Position;
-        materialData->ViewFar = view.Far;
-        materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = view.ViewInfo;
-        materialData->ScreenSize = view.ScreenSize;
+        materialData->WorldMatrix.SetMatrixTranspose(drawCall.World);
+        Matrix worldMatrixInverseTransposed;
+        Matrix::Invert(drawCall.World, worldMatrixInverseTransposed);
+        materialData->WorldMatrixInverseTransposed.SetMatrix(worldMatrixInverseTransposed);
         materialData->GridSize = customData->GridSize;
         materialData->PerInstanceRandom = drawCall.PerInstanceRandom;
         materialData->VolumetricFogMaxDistance = customData->VolumetricFogMaxDistance;
         materialData->ParticleStride = drawCall.Particle.Particles->Stride;
         materialData->ParticleIndex = customData->ParticleIndex;
+        materialData->GridSliceParameters = customData->GridSliceParameters;
     }
 
     // Bind constants

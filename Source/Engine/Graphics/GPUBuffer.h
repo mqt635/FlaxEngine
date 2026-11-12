@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,9 +15,8 @@ typedef DataContainer<byte> BytesContainer;
 /// </summary>
 API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API GPUBufferView : public GPUResourceView
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUBufferView);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUBufferView);
 protected:
-
     GPUBufferView();
 };
 
@@ -27,19 +26,17 @@ protected:
 /// <seealso cref="GPUResource" />
 API_CLASS(Sealed) class FLAXENGINE_API GPUBuffer : public GPUResource
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUBuffer);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUBuffer);
     static GPUBuffer* Spawn(const SpawnParams& params);
     static GPUBuffer* New();
 
 protected:
-
     GPUBufferDescription _desc;
     bool _isLocked = false;
 
     GPUBuffer();
 
 public:
-
     /// <summary>
     /// Gets a value indicating whether this buffer has been allocated. 
     /// </summary>
@@ -77,8 +74,7 @@ public:
     /// </summary>
     API_PROPERTY() FORCE_INLINE uint32 GetElementsCount() const
     {
-        ASSERT(_desc.Stride > 0);
-        return _desc.Size / _desc.Stride;
+        return _desc.Stride > 0 ? _desc.Size / _desc.Stride : 0;
     }
 
     /// <summary>
@@ -89,21 +85,23 @@ public:
         return _desc.Flags;
     }
 
-    /// <summary>
-    /// Checks if buffer is a staging buffer (supports CPU readback).
+    /// <summary>	
+    /// Gets vertex elements layout used by vertex buffers only.
     /// </summary>
-    API_PROPERTY() FORCE_INLINE bool IsStaging() const
+    API_PROPERTY() FORCE_INLINE GPUVertexLayout* GetVertexLayout() const
     {
-        return _desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::StagingUpload;
+        return _desc.VertexLayout;
     }
 
     /// <summary>
-    /// Checks if buffer is a staging buffer (supports CPU readback).
+    /// Checks if buffer is a staging buffer (supports CPU access).
     /// </summary>
-    API_PROPERTY() FORCE_INLINE bool IsDynamic() const
-    {
-        return _desc.Usage == GPUResourceUsage::Dynamic;
-    }
+    API_PROPERTY() bool IsStaging() const;
+
+    /// <summary>
+    /// Checks if buffer is a dynamic buffer.
+    /// </summary>
+    API_PROPERTY() bool IsDynamic() const;
 
     /// <summary>
     /// Gets a value indicating whether this buffer is a shader resource.
@@ -135,7 +133,6 @@ public:
     API_FUNCTION() virtual GPUBufferView* View() const = 0;
 
 public:
-
     /// <summary>
     /// Creates new buffer.
     /// </summary>
@@ -163,7 +160,6 @@ public:
     API_FUNCTION() bool Resize(uint32 newSize);
 
 public:
-
     /// <summary>
     /// Stops current thread execution to gather buffer data from the GPU. Cannot be called from main thread if the buffer is not a dynamic nor staging readback.
     /// </summary>
@@ -179,7 +175,7 @@ public:
     Task* DownloadDataAsync(BytesContainer& result);
 
     /// <summary>
-    /// Gets the buffer data via map/memcpy/unmap sequence. Always supported for dynamic and staging readback buffers (other types support depends on graphics backend implementation).
+    /// Gets the buffer data via map/memcpy/unmap sequence. Always supported for dynamic and staging buffers (other types support depends on graphics backend implementation).
     /// </summary>
     /// <param name="output">The output data container.</param>
     /// <returns>True if failed, otherwise false.</returns>
@@ -195,6 +191,7 @@ public:
     /// <summary>
     /// Gets a CPU pointer to the resource by mapping its contents. Denies the GPU access to that resource.
     /// </summary>
+    /// <remarks>Always call Unmap if the returned pointer is valid to release resources.</remarks>
     /// <param name="mode">The map operation mode.</param>
     /// <returns>The pointer of the mapped CPU buffer with resource data or null if failed.</returns>
     API_FUNCTION() virtual void* Map(GPUResourceMapMode mode) = 0;
@@ -205,18 +202,14 @@ public:
     API_FUNCTION() virtual void Unmap() = 0;
 
 protected:
-
     virtual bool OnInit() = 0;
 
 public:
-
     // [GPUResource]
     String ToString() const override;
-    ResourceType GetResourceType() const final override;
-    ObjectType GetObjectType() const final override;
+    GPUResourceType GetResourceType() const final override;
 
 protected:
-
     // [GPUResource]
     void OnReleaseGPU() override;
 };

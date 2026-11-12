@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) 2012-2022 Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/BaseTypes.h"
-#include "Engine/Core/Enums.h"
 #include "Engine/Graphics/Config.h"
 #include "Engine/Graphics/Materials/MaterialInfo.h"
 #include "../Config.h"
@@ -28,11 +27,15 @@ class MemoryReadStream;
 class ShaderStorage
 {
 public:
-
     /// <summary>
     /// Different shader cache storage modes (disabled, inside asset and in project cache)
     /// </summary>
-    DECLARE_ENUM_3(CachingMode, Disabled, AssetInternal, ProjectCache);
+    enum class CachingMode
+    {
+        Disabled = 0,
+        AssetInternal,
+        ProjectCache
+    };
 
     /// <summary>
     /// Current shaders caching mode to use
@@ -46,14 +49,12 @@ public:
     static CachingMode GetCachingMode();
 
 public:
-
     /// <summary>
     /// Packed version of the Magic Code for shader files
     /// </summary>
     static const int32 MagicCode;
 
 public:
-
     /// <summary>
     /// File header, version 18
     /// [Deprecated on 24.07.2019, expires on 10.05.2021]
@@ -72,9 +73,9 @@ public:
         /// </summary>
         MaterialInfo8 MaterialInfo;
     };
-
     /// <summary>
     /// File header, version 19
+    /// [Deprecated on 13.07.2022, expires on 13.07.2024]
     /// </summary>
     struct Header19
     {
@@ -119,7 +120,52 @@ public:
     };
 
     /// <summary>
+    /// File header, version 20
+    /// </summary>
+    struct Header20
+    {
+        static const int32 Version = 20;
+
+        union
+        {
+            struct
+            {
+            } Shader;
+
+            struct
+            {
+                /// <summary>
+                /// The material graph version.
+                /// </summary>
+                int32 GraphVersion;
+
+                /// <summary>
+                /// The material additional information.
+                /// </summary>
+                MaterialInfo10 Info;
+            } Material;
+
+            struct
+            {
+                /// <summary>
+                /// The particle emitter graph version.
+                /// </summary>
+                int32 GraphVersion;
+
+                /// <summary>
+                /// The custom particles data size (in bytes).
+                /// </summary>
+                int32 CustomDataSize;
+            } ParticleEmitter;
+        };
+
+        Header20()
+        {
+        }
+    };
+
+    /// <summary>
     /// Current header type
     /// </summary>
-    typedef Header19 Header;
+    typedef Header20 Header;
 };

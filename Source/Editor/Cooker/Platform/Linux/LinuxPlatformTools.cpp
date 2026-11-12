@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2019 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_TOOLS_LINUX
 
@@ -12,7 +12,7 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Content/JsonAsset.h"
 
-IMPLEMENT_SETTINGS_GETTER(LinuxPlatformSettings, LinuxPlatform);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(LinuxPlatformSettings, LinuxPlatform);
 
 const Char* LinuxPlatformTools::GetDisplayName() const
 {
@@ -32,6 +32,11 @@ PlatformType LinuxPlatformTools::GetPlatform() const
 ArchitectureType LinuxPlatformTools::GetArchitecture() const
 {
     return ArchitectureType::x64;
+}
+
+bool LinuxPlatformTools::UseSystemDotnet() const
+{
+    return true;
 }
 
 bool LinuxPlatformTools::OnDeployBinaries(CookingData& data)
@@ -97,6 +102,21 @@ bool LinuxPlatformTools::OnDeployBinaries(CookingData& data)
     }
 
     return false;
+}
+
+void LinuxPlatformTools::OnRun(CookingData& data, String& executableFile, String& commandLineFormat, String& workingDir)
+{
+    // Pick the first executable file
+    Array<String> files;
+    FileSystem::DirectoryGetFiles(files, data.NativeCodeOutputPath, TEXT("*"), DirectorySearchOption::TopDirectoryOnly);
+    for (auto& file : files)
+    {
+        if (FileSystem::GetExtension(file).IsEmpty())
+        {
+            executableFile = file;
+            break;
+        }
+    }
 }
 
 #endif

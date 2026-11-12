@@ -1,7 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Collections;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -14,6 +13,8 @@ namespace FlaxEditor.GUI.Tabs
     [HideInEditor]
     public class Tabs : ContainerControl
     {
+        internal const float MinSize = 26;
+
         /// <summary>
         /// Tab header control. Draw the tab title and handles selecting it.
         /// </summary>
@@ -26,11 +27,6 @@ namespace FlaxEditor.GUI.Tabs
             protected Tabs Tabs;
 
             /// <summary>
-            /// The index of the tab.
-            /// </summary>
-            protected int Index;
-
-            /// <summary>
             /// The tab.
             /// </summary>
             protected Tab Tab;
@@ -39,21 +35,24 @@ namespace FlaxEditor.GUI.Tabs
             /// Initializes a new instance of the <see cref="TabHeader"/> class.
             /// </summary>
             /// <param name="tabs">The tabs.</param>
-            /// <param name="index">The tab index.</param>
             /// <param name="tab">The tab.</param>
-            public TabHeader(Tabs tabs, int index, Tab tab)
-            : base(Vector2.Zero, tabs._tabsSize)
+            public TabHeader(Tabs tabs, Tab tab)
+            : base(Float2.Zero, tabs._tabsSize)
             {
                 Tabs = tabs;
-                Index = index;
                 Tab = tab;
+                TooltipText = tab.TooltipText;
             }
 
             /// <inheritdoc />
-            public override bool OnMouseUp(Vector2 location, MouseButton button)
+            public override bool OnMouseUp(Float2 location, MouseButton button)
             {
-                Tabs.SelectedTabIndex = Index;
-                Tabs.Focus();
+                if (EnabledInHierarchy && Tab.Enabled)
+                {
+                    Tabs.SelectedTab = Tab;
+                    Tab.PerformLayout(true);
+                    Tabs.Focus();
+                }
                 return true;
             }
 
@@ -62,35 +61,25 @@ namespace FlaxEditor.GUI.Tabs
             {
                 base.Draw();
 
-                // Cache data
                 var style = Style.Current;
-                var tabRect = new Rectangle(Vector2.Zero, Size);
-                bool isTabSelected = Tabs._selectedIndex == Index;
-                bool isMouseOverTab = IsMouseOver;
+                var enabled = EnabledInHierarchy && Tab.EnabledInHierarchy;
+                var tabRect = new Rectangle(Float2.Zero, Size);
                 var textOffset = Tabs._orientation == Orientation.Horizontal ? 0 : 8;
 
                 // Draw bar
-                if (isTabSelected)
-                {
-                    if (Tabs._orientation == Orientation.Horizontal)
-                    {
-                        Render2D.FillRectangle(tabRect, style.BackgroundSelected);
-                    }
-                    else
-                    {
-                        const float lefEdgeWidth = 4;
-                        var leftEdgeRect = tabRect;
-                        leftEdgeRect.Size.X = lefEdgeWidth;
-                        var fillRect = tabRect;
-                        fillRect.Size.X -= lefEdgeWidth;
-                        fillRect.Location.X += lefEdgeWidth;
-                        Render2D.FillRectangle(fillRect, style.Background);
-                        Render2D.FillRectangle(leftEdgeRect, style.BackgroundSelected);
-                    }
-                }
-                else if (isMouseOverTab)
-                {
+                if (IsMouseOver)
                     Render2D.FillRectangle(tabRect, style.BackgroundHighlighted);
+                if (Tabs.SelectedTab == Tab)
+                {
+                    var color = style.BackgroundSelected;
+                    if (!enabled)
+                        color *= 0.6f;
+                    var leftEdgeRect = tabRect;
+                    if (Tabs._orientation == Orientation.Horizontal)
+                        leftEdgeRect.Size.Y = Utilities.Constants.UIAccent;
+                    else
+                        leftEdgeRect.Size.X = Utilities.Constants.UIAccent;
+                    Render2D.FillRectangle(leftEdgeRect, color);
                 }
 
                 // Draw icon
@@ -132,20 +121,15 @@ namespace FlaxEditor.GUI.Tabs
             {
                 base.PerformLayoutBeforeChildren();
 
-                // Cache data
-                var tabsSize = Tabs._tabsSize;
-                var clientSize = GetClientArea();
-                tabsSize = Vector2.Min(tabsSize, clientSize.Size);
-                var tabRect = new Rectangle(Vector2.Zero, tabsSize);
-                var tabStripOffset = Tabs._orientation == Orientation.Horizontal ? new Vector2(tabsSize.X, 0) : new Vector2(0, tabsSize.Y);
-
                 // Arrange tab header controls
+                var pos = Float2.Zero;
+                var sizeMask = Tabs._orientation == Orientation.Horizontal ? Float2.UnitX : Float2.UnitY;
                 for (int i = 0; i < Children.Count; i++)
                 {
                     if (Children[i] is TabHeader tabHeader)
                     {
-                        tabHeader.Bounds = tabRect;
-                        tabRect.Offset(tabStripOffset);
+                        tabHeader.Location = pos;
+                        pos += tabHeader.Size * sizeMask;
                     }
                 }
             }
@@ -159,7 +143,12 @@ namespace FlaxEditor.GUI.Tabs
         /// <summary>
         /// The tabs size.
         /// </summary>
-        protected Vector2 _tabsSize;
+        protected Float2 _tabsSize;
+
+        /// <summary>
+        /// Automatic tab size based on the fill axis.
+        /// </summary>
+        protected bool _autoTabsSizeAuto;
 
         /// <summary>
         /// The orientation.
@@ -169,19 +158,35 @@ namespace FlaxEditor.GUI.Tabs
         /// <summary>
         /// Gets the size of the tabs.
         /// </summary>
-        public Vector2 TabsSize
+        public Float2 TabsSize
         {
             get => _tabsSize;
             set
             {
                 _tabsSize = value;
-
-                for (int i = 0; i < TabsPanel.ChildrenCount; i++)
+                if (!_autoTabsSizeAuto)
                 {
-                    if (TabsPanel.Children[i] is TabHeader tabHeader)
-                        tabHeader.Size = value;
+                    for (int i = 0; i < TabsPanel.ChildrenCount; i++)
+                    {
+                        if (TabsPanel.Children[i] is TabHeader tabHeader)
+                            tabHeader.Size = value;
+                    }
                 }
+                PerformLayout();
+            }
+        }
 
+        /// <summary>
+        /// Enables automatic tabs size to fill the space.
+        /// </summary>
+        public bool AutoTabsSize
+        {
+            get => _autoTabsSizeAuto;
+            set
+            {
+                if (_autoTabsSizeAuto == value)
+                    return;
+                _autoTabsSizeAuto = value;
                 PerformLayout();
             }
         }
@@ -194,11 +199,11 @@ namespace FlaxEditor.GUI.Tabs
             get => _orientation;
             set
             {
+                if (_orientation == value)
+                    return;
                 _orientation = value;
-
                 if (UseScroll)
                     TabsPanel.ScrollBars = _orientation == Orientation.Horizontal ? ScrollBars.Horizontal : ScrollBars.Vertical;
-
                 PerformLayout();
             }
         }
@@ -227,8 +232,8 @@ namespace FlaxEditor.GUI.Tabs
         /// </summary>
         public Tab SelectedTab
         {
-            get => _selectedIndex == -1 ? null : Children[_selectedIndex + 1] as Tab;
-            set => SelectedTabIndex = Children.IndexOf(value) - 1;
+            get => _selectedIndex < 0 || Children.Count <= (_selectedIndex+1) ? null : Children[_selectedIndex + 1] as Tab;
+            set => SelectedTabIndex = value != null ? Children.IndexOf(value) - 1 : -1;
         }
 
         /// <summary>
@@ -251,7 +256,12 @@ namespace FlaxEditor.GUI.Tabs
                 // Check if index will change
                 if (_selectedIndex != index)
                 {
-                    SelectedTab?.OnDeselected();
+                    var prev = SelectedTab;
+                    if (prev != null)
+                    {
+                        prev._selectedInTabs = null;
+                        prev.OnDeselected();
+                    }
                     _selectedIndex = index;
                     PerformLayout();
                     OnSelectedTabChanged();
@@ -293,12 +303,12 @@ namespace FlaxEditor.GUI.Tabs
             BackgroundColor = Style.Current.Background;
 
             _selectedIndex = -1;
-            _tabsSize = new Vector2(70, 16);
+            _tabsSize = new Float2(70, 16);
             _orientation = Orientation.Horizontal;
 
             TabsPanel = new TabsHeader(this);
 
-            TabStripColor = Style.Current.LightBackground;
+            TabStripColor = Style.Current.Background;
 
             TabsPanel.Parent = this;
         }
@@ -330,8 +340,13 @@ namespace FlaxEditor.GUI.Tabs
         /// </summary>
         protected virtual void OnSelectedTabChanged()
         {
+            var selectedTab = SelectedTab;
             SelectedTabChanged?.Invoke(this);
-            SelectedTab?.OnSelected();
+            if (selectedTab != null)
+            {
+                selectedTab._selectedInTabs = this;
+                selectedTab.OnSelected();
+            }
         }
 
         /// <inheritdoc />
@@ -342,14 +357,10 @@ namespace FlaxEditor.GUI.Tabs
 
             // Update tabs headers
             TabsPanel.DisposeChildren();
-            int index = 0;
             for (int i = 0; i < Children.Count; i++)
             {
                 if (Children[i] is Tab tab)
-                {
-                    var tabHeader = new TabHeader(this, index++, tab);
-                    TabsPanel.AddChild(tabHeader);
-                }
+                    TabsPanel.AddChild(tab.CreateHeader());
             }
 
             TabsPanel.IsLayoutLocked = wasLocked;
@@ -374,23 +385,58 @@ namespace FlaxEditor.GUI.Tabs
         /// <inheritdoc />
         protected override void PerformLayoutBeforeChildren()
         {
+            var tabsSize = _tabsSize;
+            if (_autoTabsSizeAuto)
+            {
+                // Horizontal is default for Toolbox so tabs go to the right
+                int tabsCount = 0;
+                for (int i = 0; i < TabsPanel.ChildrenCount; i++)
+                {
+                    if (TabsPanel.Children[i] is TabHeader)
+                        tabsCount++;
+                }
+                if (tabsCount == 0)
+                    tabsCount = 1;
+                if (_orientation == Orientation.Horizontal)
+                    tabsSize.X = Width / tabsCount;
+                else
+                    tabsSize.Y = Height / tabsCount;
+                for (int i = 0; i < TabsPanel.ChildrenCount; i++)
+                {
+                    if (TabsPanel.Children[i] is TabHeader tabHeader)
+                        tabHeader.Size = tabsSize;
+                }
+            }
+            else if (UseScroll)
+            {
+                // If scroll bar is visible it covers part of the tab header so include this in tab size to improve usability
+                if (_orientation == Orientation.Horizontal && TabsPanel.HScrollBar.Visible)
+                {
+                    tabsSize.Y += TabsPanel.HScrollBar.Height;
+                }
+                else if (_orientation == Orientation.Vertical && TabsPanel.VScrollBar.Visible)
+                {
+                    tabsSize.X += TabsPanel.VScrollBar.Width;
+                }
+            }
+
             // Fit the tabs panel
-            TabsPanel.Size = _orientation == Orientation.Horizontal ? new Vector2(Width, _tabsSize.Y) : new Vector2(_tabsSize.X, Height);
+            TabsPanel.Size = _orientation == Orientation.Horizontal
+                             ? new Float2(Width, tabsSize.Y)
+                             : new Float2(tabsSize.X, Height);
 
             // Hide all pages except selected one
-            var clientArea = _orientation == Orientation.Horizontal
-                             ? new Rectangle(0, _tabsSize.Y, Width, Height - _tabsSize.Y)
-                             : new Rectangle(_tabsSize.X, 0, Width - _tabsSize.X, Height);
             for (int i = 0; i < Children.Count; i++)
             {
                 if (Children[i] is Tab tab)
                 {
-                    // Check if is selected or not
                     if (i - 1 == _selectedIndex)
                     {
                         // Show and fit size
                         tab.Visible = true;
-                        tab.Bounds = clientArea;
+                        tab.Bounds = _orientation == Orientation.Horizontal
+                                     ? new Rectangle(0, tabsSize.Y, Width, Height - tabsSize.Y)
+                                     : new Rectangle(tabsSize.X, 0, Width - tabsSize.X, Height);
                     }
                     else
                     {

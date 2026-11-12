@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_ANDROID
 
@@ -45,7 +45,7 @@ void AndroidWindow::Hide()
 
 void AndroidWindow::SetClientBounds(const Rectangle& clientArea)
 {
-    if (Vector2::NearEqual(_clientSize, clientArea.Size))
+    if (Float2::NearEqual(_clientSize, clientArea.Size))
         return;
 
     const int32 width = static_cast<int32>(clientArea.GetWidth());

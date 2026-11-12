@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,6 +10,8 @@
 #include "Linux/LinuxFileSystem.h"
 #elif PLATFORM_PS4
 #include "Platforms/PS4/Engine/Platform/PS4FileSystem.h"
+#elif PLATFORM_PS5
+#include "Platforms/PS5/Engine/Platform/PS5FileSystem.h"
 #elif PLATFORM_XBOX_ONE
 #include "Platforms/XboxOne/Engine/Platform/XboxOneFileSystem.h"
 #elif PLATFORM_XBOX_SCARLETT
@@ -18,6 +20,12 @@
 #include "Android/AndroidFileSystem.h"
 #elif PLATFORM_SWITCH
 #include "Platforms/Switch/Engine/Platform/SwitchFileSystem.h"
+#elif PLATFORM_MAC
+#include "Mac/MacFileSystem.h"
+#elif PLATFORM_IOS
+#include "iOS/iOSFileSystem.h"
+#elif PLATFORM_WEB
+#include "Web/WebFileSystem.h"
 #else
 #error Missing File System implementation!
 #endif

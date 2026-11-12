@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content.Thumbnails;
@@ -21,6 +21,20 @@ namespace FlaxEditor.Content
         /// Gets the full name of the asset type (stored data format).
         /// </summary>
         public abstract string TypeName { get; }
+
+        /// <summary>
+        /// Gets a value indicating whether this instance is virtual Proxy not linked to any asset.
+        /// </summary>
+        protected virtual bool IsVirtual { get; }
+
+        /// <summary>
+        /// Determines whether [is virtual proxy].
+        /// </summary>
+        /// <returns><c>true</c> if [is virtual proxy]; otherwise, <c>false</c>.</returns>
+        public bool IsVirtualProxy()
+        {
+            return IsVirtual && CanExport == false;
+        }
 
         /// <summary>
         /// Checks if this proxy supports the given asset type id at the given path.
@@ -92,6 +106,35 @@ namespace FlaxEditor.Content
         /// <param name="request">The request.</param>
         public virtual void OnThumbnailDrawCleanup(ThumbnailRequest request)
         {
+        }
+
+        /// <summary>
+        /// Initializes rendering settings for asset preview drawing for a thumbnail.
+        /// </summary>
+        /// <param name="preview">The asset preview.</param>
+        protected void InitAssetPreview(Viewport.Previews.AssetPreview preview)
+        {
+            preview.RenderOnlyWithWindow = false;
+            preview.UseAutomaticTaskManagement = false;
+            preview.AnchorPreset = AnchorPresets.StretchAll;
+            preview.Offsets = Margin.Zero;
+
+            var task = preview.Task;
+            task.Enabled = false;
+
+            var view = task.View;
+            view.IsSingleFrame = true; // Disable LOD transitions
+            task.View = view;
+
+            var eyeAdaptation = preview.PostFxVolume.EyeAdaptation;
+            eyeAdaptation.Mode = EyeAdaptationMode.None;
+            eyeAdaptation.OverrideFlags |= EyeAdaptationSettingsOverride.Mode;
+            preview.PostFxVolume.EyeAdaptation = eyeAdaptation;
+
+            var antiAliasing = preview.PostFxVolume.AntiAliasing;
+            antiAliasing.Mode = AntialiasingMode.FastApproximateAntialiasing;
+            antiAliasing.OverrideFlags |= AntiAliasingSettingsOverride.Mode;
+            preview.PostFxVolume.AntiAliasing = antiAliasing;
         }
     }
 }

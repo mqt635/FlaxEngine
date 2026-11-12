@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "AudioClip.h"
 #include "Audio.h"
@@ -7,109 +7,73 @@
 #include "Engine/Core/Log.h"
 #include "Engine/Content/Upgraders/AudioClipUpgrader.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
 #include "Engine/Streaming/StreamingGroup.h"
 #include "Engine/Serialization/MemoryReadStream.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Tools/AudioTool/OggVorbisDecoder.h"
 #include "Engine/Tools/AudioTool/AudioTool.h"
 #include "Engine/Threading/Threading.h"
 
 REGISTER_BINARY_ASSET_WITH_UPGRADER(AudioClip, "FlaxEngine.AudioClip", AudioClipUpgrader, false);
 
+AudioClip::StreamingTask::StreamingTask(AudioClip* asset)
+    : _asset(asset)
+    , _dataLock(asset->Storage->Lock())
+{
+}
+
+bool AudioClip::StreamingTask::HasReference(Object* resource) const
+{
+    return _asset == resource;
+}
+
 bool AudioClip::StreamingTask::Run()
 {
-    AssetReference<AudioClip> ref = _asset.Get();
-    if (ref == nullptr)
-    {
+    PROFILE_CPU_NAMED("AudioStreaming");
+    PROFILE_MEM(Audio);
+    AssetReference<AudioClip> clip = _asset.Get();
+    if (clip == nullptr || AudioBackend::Instance == nullptr)
         return true;
-    }
-    const auto& queue = ref->StreamingQueue;
-    auto clip = ref.Get();
+#if TRACY_ENABLE
+    const StringView name(clip->GetPath());
+    ZoneName(*name, name.Length());
+#endif
 
-    // Update the buffers
+    // Process the loading queue (hold the asset lock)
+    clip->Locker.Lock();
+    const auto& queue = clip->StreamingQueue;
+    Array<int32, FixedAllocation<ASSET_FILE_DATA_CHUNKS>> loadQueue;
     for (int32 i = 0; i < queue.Count(); i++)
     {
-        const auto idx = queue[i];
-        uint32& bufferId = clip->Buffers[idx];
-
-        if (bufferId == AUDIO_BUFFER_ID_INVALID)
+        const int32 idx = queue[i];
+        uint32& bufferID = clip->Buffers[idx];
+        if (bufferID == 0)
         {
-            AudioBackend::Buffer::Create(bufferId);
+            // Load buffers outside the asset lock to prevent lock contention
+            loadQueue.Add(idx);
         }
         else
         {
-            // Release unused data
-            AudioBackend::Buffer::Delete(bufferId);
-            bufferId = 0;
+            // Release unused buffer
+            AudioBackend::Buffer::Delete(bufferID);
+            bufferID = 0;
         }
     }
+    clip->Locker.Unlock();
 
-    // Load missing buffers data
-    const auto format = clip->Format();
-    AudioDataInfo info = clip->AudioHeader.Info;
-    const uint32 bytesPerSample = info.BitDepth / 8;
-    for (int32 i = 0; i < queue.Count(); i++)
+    // Load missing buffers data (from asset chunks)
+    for (int32 i = 0; i < loadQueue.Count(); i++)
     {
-        const auto idx = queue[i];
-        const uint32 bufferId = clip->Buffers[idx];
-        if (bufferId == AUDIO_BUFFER_ID_INVALID)
-            continue;
-
-        byte* data;
-        uint32 dataSize;
-        Array<byte> outTmp;
-
-        const auto chunk = clip->GetChunk(idx);
-        if (chunk == nullptr || chunk->IsMissing())
-        {
-            LOG(Warning, "Missing audio streaming data chunk.");
+        if (clip->WriteBuffer(loadQueue[i]))
             return true;
-        }
-
-        // Get raw data or decompress it
-        switch (format)
-        {
-        case AudioFormat::Vorbis:
-        {
-#if COMPILE_WITH_OGG_VORBIS
-            OggVorbisDecoder decoder;
-            MemoryReadStream stream(chunk->Get(), chunk->Size());
-            AudioDataInfo outInfo;
-            if (decoder.Convert(&stream, outInfo, outTmp))
-            {
-                LOG(Warning, "Audio data decode failed (OggVorbisDecoder).");
-                return true;
-            }
-            // TODO: validate decompressed data header info?
-            data = outTmp.Get();
-            dataSize = outTmp.Count();
-#else
-			LOG(Warning, "OggVorbisDecoder is disabled.");
-			return true;
-#endif
-        }
-        break;
-        case AudioFormat::Raw:
-        {
-            data = chunk->Get();
-            dataSize = chunk->Size();
-        }
-        break;
-        default:
-        CRASH;
-            return true;
-        }
-
-        // Write samples to the audio buffer
-        info.NumSamples = dataSize / bytesPerSample;
-        AudioBackend::Buffer::Write(bufferId, data, info);
     }
 
     // Update the sources
     for (int32 sourceIndex = 0; sourceIndex < Audio::Sources.Count(); sourceIndex++)
     {
         // TODO: collect refs to audio clip from sources and use faster iteration (but do it thread-safe)
-
         const auto src = Audio::Sources[sourceIndex];
         if (src->Clip == clip && src->GetState() == AudioSource::States::Playing)
         {
@@ -125,6 +89,7 @@ void AudioClip::StreamingTask::OnEnd()
     // Unlink
     if (_asset)
     {
+        ScopeLock lock(_asset->Locker);
         ASSERT(_asset->_streamingTask == this);
         _asset->_streamingTask = nullptr;
         _asset = nullptr;
@@ -151,11 +116,6 @@ AudioClip::~AudioClip()
     ASSERT(_streamingTask == nullptr);
 }
 
-float AudioClip::GetLength() const
-{
-    return AudioHeader.Info.NumSamples / static_cast<float>(Math::Max(1U, AudioHeader.Info.SampleRate * AudioHeader.Info.NumChannels));
-}
-
 float AudioClip::GetBufferStartTime(int32 bufferIndex) const
 {
     ASSERT(IsLoaded());
@@ -165,16 +125,14 @@ float AudioClip::GetBufferStartTime(int32 bufferIndex) const
 int32 AudioClip::GetFirstBufferIndex(float time, float& offset) const
 {
     ASSERT(IsLoaded());
-    ASSERT(time >= 0 && time <= GetLength());
+    time = Math::Clamp(time, 0.0f, GetLength());
 
     for (int32 i = 0; i < _totalChunks; i++)
     {
         if (_buffersStartTimes[i + 1] > time)
         {
             offset = time - _buffersStartTimes[i];
-#if BUILD_DEBUG
-            ASSERT(Math::Abs(GetBufferStartTime(i) + offset - time) < 0.001f);
-#endif
+            ASSERT_LOW_LAYER(Math::Abs(GetBufferStartTime(i) + offset - time) < 0.001f);
             return i;
         }
     }
@@ -206,6 +164,8 @@ bool AudioClip::ExtractData(Array<byte>& resultData, AudioDataInfo& resultDataIn
     ASSERT(!IsVirtual());
     if (WaitForLoaded())
         return true;
+    ScopeLock lock(Locker);
+    auto storageLock = Storage->LockSafe();
 
     // Allocate memory
     ASSERT(_totalChunksSize > 0);
@@ -234,6 +194,7 @@ bool AudioClip::ExtractData(Array<byte>& resultData, AudioDataInfo& resultDataIn
 
 bool AudioClip::ExtractDataFloat(Array<float>& resultData, AudioDataInfo& resultDataInfo)
 {
+#if COMPILE_WITH_AUDIO_TOOL
     // Extract PCM data
     Array<byte> data;
     if (ExtractDataRaw(data, resultDataInfo))
@@ -245,12 +206,16 @@ bool AudioClip::ExtractDataFloat(Array<float>& resultData, AudioDataInfo& result
     resultDataInfo.BitDepth = 32;
 
     return false;
+#else
+    return true;
+#endif
 }
 
 bool AudioClip::ExtractDataRaw(Array<byte>& resultData, AudioDataInfo& resultDataInfo)
 {
     if (WaitForLoaded())
         return true;
+    ScopeLock lock(Locker);
     switch (Format())
     {
     case AudioFormat::Raw:
@@ -276,6 +241,12 @@ bool AudioClip::ExtractDataRaw(Array<byte>& resultData, AudioDataInfo& resultDat
     }
 
     return true;
+}
+
+void AudioClip::CancelStreaming()
+{
+    Asset::CancelStreaming();
+    CancelStreamingTasks();
 }
 
 int32 AudioClip::GetMaxResidency() const
@@ -316,7 +287,7 @@ Task* AudioClip::CreateStreamingTask(int32 residency)
     for (int32 i = 0; i < StreamingQueue.Count(); i++)
     {
         const int32 idx = StreamingQueue[i];
-        if (Buffers[idx] == AUDIO_BUFFER_ID_INVALID)
+        if (Buffers[idx] == 0)
         {
             const auto task = (Task*)RequestChunkDataAsync(idx);
             if (task)
@@ -339,17 +310,22 @@ Task* AudioClip::CreateStreamingTask(int32 residency)
     return result;
 }
 
+void AudioClip::CancelStreamingTasks()
+{
+    ScopeLock lock(Locker);
+    if (_streamingTask)
+    {
+        _streamingTask->Cancel();
+        ASSERT_LOW_LAYER(_streamingTask == nullptr);
+    }
+}
+
 bool AudioClip::init(AssetInitData& initData)
 {
     // Validate
-    if (initData.SerializedVersion != SerializedVersion)
-    {
-        LOG(Warning, "Invalid audio clip serialized version.");
-        return true;
-    }
     if (initData.CustomData.Length() != sizeof(AudioHeader))
     {
-        LOG(Warning, "Missing audio clip header.");
+        LOG(Warning, "Missing audio data.");
         return true;
     }
 
@@ -361,6 +337,7 @@ bool AudioClip::init(AssetInitData& initData)
 
 Asset::LoadResult AudioClip::load()
 {
+    PROFILE_MEM(Audio);
 #if !COMPILE_WITH_OGG_VORBIS
     if (AudioHeader.Format == AudioFormat::Vorbis)
     {
@@ -389,7 +366,7 @@ Asset::LoadResult AudioClip::load()
 
 #if !BUILD_RELEASE
     // Validate buffer start times
-    if (Math::NotNearEqual(_buffersStartTimes[_totalChunks], GetLength()))
+    if (!Math::NearEqual(_buffersStartTimes[_totalChunks], GetLength(), 1.0f / 60.0f))
     {
         LOG(Warning, "Invalid audio buffers data size. Expected length: {0}s", GetLength());
         for (int32 i = 0; i < _totalChunks + 1; i++)
@@ -409,64 +386,120 @@ Asset::LoadResult AudioClip::load()
     // Load the whole audio at once
     if (LoadChunk(0))
         return LoadResult::CannotLoadData;
-    auto chunk0 = GetChunk(0);
-    if (chunk0 == nullptr || chunk0->IsMissing())
-        return LoadResult::MissingDataChunk;
 
     // Create single buffer
-    if (!AudioBackend::Instance)
-        return LoadResult::Failed;
-    uint32 bufferId;
-    AudioBackend::Buffer::Create(bufferId);
-    Buffers[0] = bufferId;
+    Buffers[0] = AudioBackend::Buffer::Create();
 
-    // Write samples to the audio buffer
-    switch (AudioHeader.Format)
-    {
-    case AudioFormat::Vorbis:
-    {
-#if COMPILE_WITH_OGG_VORBIS
-        OggVorbisDecoder decoder;
-        MemoryReadStream stream(chunk0->Get(), chunk0->Size());
-        AudioDataInfo outInfo;
-        Array<byte> outTmp;
-        if (decoder.Convert(&stream, outInfo, outTmp))
-        {
-            LOG(Warning, "Audio data decode failed (OggVorbisDecoder).");
-            return LoadResult::InvalidData;
-        }
-        AudioBackend::Buffer::Write(bufferId, outTmp.Get(), AudioHeader.Info);
-#endif
-        break;
-    }
-    case AudioFormat::Raw:
-    {
-        AudioBackend::Buffer::Write(bufferId, chunk0->Get(), AudioHeader.Info);
-        break;
-    }
-    default:
-        return LoadResult::InvalidData;
-    }
+    // Write data to audio buffer
+    if (WriteBuffer(0))
+        return LoadResult::Failed;
 
     return LoadResult::Ok;
 }
 
 void AudioClip::unload(bool isReloading)
 {
-    StopStreaming();
-    StreamingQueue.Clear();
-    if (Buffers.HasItems())
+    bool hasAnyBuffer = false;
+    for (const uint32 bufferID : Buffers)
+        hasAnyBuffer |= bufferID != 0;
+
+    // Stop any audio sources that are using this clip right now
+    // TODO: find better way to collect audio sources using audio clip and impl it for AudioStreamingHandler too
+    for (int32 sourceIndex = 0; sourceIndex < Audio::Sources.Count(); sourceIndex++)
     {
-        for (int32 i = 0; i < Buffers.Count(); i++)
-        {
-            auto bufferId = Buffers[i];
-            if (bufferId != AUDIO_BUFFER_ID_INVALID)
-            {
-                AudioBackend::Buffer::Delete(bufferId);
-            }
-        }
-        Buffers.Clear();
+        const auto src = Audio::Sources[sourceIndex];
+        if (src->Clip == this)
+            src->Stop();
     }
+
+    StopStreaming();
+    CancelStreamingTasks();
+    StreamingQueue.Clear();
+    if (hasAnyBuffer && AudioBackend::Instance)
+    {
+        for (uint32 bufferID : Buffers)
+        {
+            if (bufferID != 0)
+                AudioBackend::Buffer::Delete(bufferID);
+        }
+    }
+    Buffers.Clear();
     _totalChunks = 0;
     Platform::MemoryClear(&AudioHeader, sizeof(AudioHeader));
+}
+
+bool AudioClip::WriteBuffer(int32 chunkIndex)
+{
+    // Ensure audio backend exists
+    if (AudioBackend::Instance == nullptr)
+        return true;
+    PROFILE_CPU();
+    PROFILE_MEM(Audio);
+
+    const auto chunk = GetChunk(chunkIndex);
+    if (chunk == nullptr || chunk->IsMissing())
+    {
+        LOG(Warning, "Missing audio data.");
+        return true;
+    }
+    Span<byte> data;
+    Array<byte> tmp1, tmp2;
+    AudioDataInfo info = AudioHeader.Info;
+    const uint32 bytesPerSample = info.BitDepth / 8;
+    ZoneValue(chunk->Size() / 1024); // Audio data size (in kB)
+
+    // Get raw data or decompress it
+    switch (Format())
+    {
+    case AudioFormat::Vorbis:
+    {
+#if COMPILE_WITH_OGG_VORBIS
+        PROFILE_CPU_NAMED("OggVorbisDecode");
+        OggVorbisDecoder decoder;
+        MemoryReadStream stream(chunk->Get(), chunk->Size());
+        AudioDataInfo tmpInfo;
+        if (decoder.Convert(&stream, tmpInfo, tmp1))
+        {
+            LOG(Warning, "Audio data decode failed (OggVorbisDecoder).");
+            return true;
+        }
+        // TODO: validate decompressed data header info?
+        data = Span<byte>(tmp1.Get(), tmp1.Count());
+#else
+		LOG(Warning, "OggVorbisDecoder is disabled.");
+		return true;
+#endif
+    }
+    break;
+    case AudioFormat::Raw:
+        data = Span<byte>(chunk->Get(), chunk->Size());
+        break;
+    default:
+        return true;
+    }
+    info.NumSamples = Math::AlignDown(data.Length() / bytesPerSample, info.NumChannels * bytesPerSample);
+
+#if COMPILE_WITH_AUDIO_TOOL
+    // Convert to Mono if used as 3D source and backend doesn't support it
+    if (Is3D() && info.NumChannels > 1 && EnumHasNoneFlags(AudioBackend::Features(), AudioBackend::FeatureFlags::SpatialMultiChannel))
+    {
+        const uint32 samplesPerChannel = info.NumSamples / info.NumChannels;
+        const uint32 monoBufferSize = samplesPerChannel * bytesPerSample;
+        tmp2.Resize(monoBufferSize);
+        AudioTool::ConvertToMono(data.Get(), tmp2.Get(), info.BitDepth, samplesPerChannel, info.NumChannels);
+        info.NumChannels = 1;
+        info.NumSamples = samplesPerChannel;
+        data = Span<byte>(tmp2.Get(), tmp2.Count());
+    }
+#endif
+
+    // Write samples to the audio buffer (create one if missing)
+    Locker.Lock(); // StreamingTask loads buffers without lock so do it here
+    uint32& bufferID = Buffers[chunkIndex];
+    if (bufferID == 0)
+        bufferID = AudioBackend::Buffer::Create();
+    AudioBackend::Buffer::Write(bufferID, data.Get(), info);
+    Locker.Unlock();
+
+    return false;
 }

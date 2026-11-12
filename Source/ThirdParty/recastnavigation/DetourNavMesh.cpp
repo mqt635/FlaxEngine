@@ -208,21 +208,13 @@ dtNavMesh::dtNavMesh() :
 
 dtNavMesh::~dtNavMesh()
 {
-	for (int i = 0; i < m_maxTiles; ++i)
-	{
-		if (m_tiles[i].flags & DT_TILE_FREE_DATA)
-		{
-			dtFree(m_tiles[i].data);
-			m_tiles[i].data = 0;
-			m_tiles[i].dataSize = 0;
-		}
-	}
-	dtFree(m_posLookup);
-	dtFree(m_tiles);
+	purge();
 }
 		
 dtStatus dtNavMesh::init(const dtNavMeshParams* params)
 {
+    if (m_tiles)
+        purge();
 	memcpy(&m_params, params, sizeof(dtNavMeshParams));
 	dtVcopy(m_orig, params->orig);
 	m_tileWidth = params->tileWidth;
@@ -240,8 +232,8 @@ dtStatus dtNavMesh::init(const dtNavMeshParams* params)
 	m_posLookup = (dtMeshTile**)dtAlloc(sizeof(dtMeshTile*)*m_tileLutSize, DT_ALLOC_PERM);
 	if (!m_posLookup)
 		return DT_FAILURE | DT_OUT_OF_MEMORY;
-	memset(m_tiles, 0, sizeof(dtMeshTile)*m_maxTiles);
-	memset(m_posLookup, 0, sizeof(dtMeshTile*)*m_tileLutSize);
+	memset((void*)m_tiles, 0, sizeof(dtMeshTile)*m_maxTiles);
+	memset((void*)m_posLookup, 0, sizeof(dtMeshTile*)*m_tileLutSize);
 	m_nextFree = 0;
 	for (int i = m_maxTiles-1; i >= 0; --i)
 	{
@@ -433,8 +425,8 @@ void dtNavMesh::connectExtLinks(dtMeshTile* tile, dtMeshTile* target, int side)
 						float tmax = (neia[k*2+1]-va[2]) / (vb[2]-va[2]);
 						if (tmin > tmax)
 							dtSwap(tmin,tmax);
-						link->bmin = (unsigned char)(dtClamp(tmin, 0.0f, 1.0f)*255.0f);
-						link->bmax = (unsigned char)(dtClamp(tmax, 0.0f, 1.0f)*255.0f);
+						link->bmin = (unsigned char)roundf(dtClamp(tmin, 0.0f, 1.0f)*255.0f);
+						link->bmax = (unsigned char)roundf(dtClamp(tmax, 0.0f, 1.0f)*255.0f);
 					}
 					else if (dir == 2 || dir == 6)
 					{
@@ -442,8 +434,8 @@ void dtNavMesh::connectExtLinks(dtMeshTile* tile, dtMeshTile* target, int side)
 						float tmax = (neia[k*2+1]-va[0]) / (vb[0]-va[0]);
 						if (tmin > tmax)
 							dtSwap(tmin,tmax);
-						link->bmin = (unsigned char)(dtClamp(tmin, 0.0f, 1.0f)*255.0f);
-						link->bmax = (unsigned char)(dtClamp(tmax, 0.0f, 1.0f)*255.0f);
+						link->bmin = (unsigned char)roundf(dtClamp(tmin, 0.0f, 1.0f)*255.0f);
+						link->bmax = (unsigned char)roundf(dtClamp(tmax, 0.0f, 1.0f)*255.0f);
 					}
 				}
 			}
@@ -1176,6 +1168,24 @@ const dtMeshTile* dtNavMesh::getTileByRef(dtTileRef ref) const
 int dtNavMesh::getMaxTiles() const
 {
 	return m_maxTiles;
+}
+
+void dtNavMesh::purge()
+{
+	for (int i = 0; i < m_maxTiles; ++i)
+	{
+		if (m_tiles[i].flags & DT_TILE_FREE_DATA)
+		{
+			dtFree(m_tiles[i].data);
+			m_tiles[i].data = 0;
+			m_tiles[i].dataSize = 0;
+		}
+	}
+    m_maxTiles = 0;
+	dtFree(m_posLookup);
+    m_posLookup = 0;
+	dtFree(m_tiles);
+    m_tiles = 0;
 }
 
 dtMeshTile* dtNavMesh::getTile(int i)

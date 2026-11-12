@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,9 +14,10 @@ class JsonAsset;
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Engine
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Engine);
-public:
+    friend class PlatformMain;
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Engine);
 
+public:
     /// <summary>
     /// The engine start time (local time).
     /// </summary>
@@ -28,12 +29,16 @@ public:
     API_FIELD(ReadOnly) static bool HasFocus;
 
     /// <summary>
-    /// Gets the current frame count since the start of the game.
+    /// Gets the current update counter since the start of the game.
+    /// </summary>
+    API_FIELD(ReadOnly) static uint64 UpdateCount;
+
+    /// <summary>
+    /// Gets the current frame (drawing) count since the start of the game.
     /// </summary>
     API_FIELD(ReadOnly) static uint64 FrameCount;
 
 public:
-
     /// <summary>
     /// Event called on engine fixed update.
     /// </summary>
@@ -55,6 +60,11 @@ public:
     static Action LateUpdate;
 
     /// <summary>
+    /// Event called after engine update.
+    /// </summary>
+    static Action LateFixedUpdate;
+
+    /// <summary>
     /// Event called during frame rendering and can be used to invoke custom rendering with GPUDevice.
     /// </summary>
     static Action Draw;
@@ -69,8 +79,32 @@ public:
     /// </summary>
     static Action Unpause;
 
-public:
+    /// <summary>
+    /// Event called when the engine is requesting exit.
+    /// </summary>
+    API_EVENT() static Action RequestingExit;
 
+    /// <summary>
+    /// The custom handler for engine crash handling and reporting. Can be used to override default message box with a custom one or send crash report to telemetry service. Args are: error message and context pointer (for stack-trace access).
+    /// </summary>
+    API_EVENT() static Delegate<StringView, void*> ReportCrash;
+
+    /// <summary>
+    /// The current state of the fatal error. Set to None if no error occurred yet.
+    /// </summary>
+    API_FIELD(ReadOnly) static FatalErrorType FatalError;
+
+    /// <summary>
+    /// Flags set to true if engine needs to be closed (exit is pending). Use FatalError to determinate the exit reason (specific error or normal shutdown).
+    /// </summary>
+    API_FIELD(ReadOnly) static bool IsRequestingExit;
+    
+    /// <summary>
+    /// The current process exit code (pending to return).
+    /// </summary>
+    static int32 ExitCode;
+
+public:
     /// <summary>
     /// The main engine function (must be called from platform specific entry point).
     /// </summary>
@@ -82,16 +116,25 @@ public:
     /// Exits the engine.
     /// </summary>
     /// <param name="exitCode">The exit code.</param>
-    static void Exit(int32 exitCode = -1);
+    /// <param name="error">The fatal error type (or None on graceful exit).</param>
+    API_FUNCTION(Attributes="DebugCommand") static void Exit(int32 exitCode = -1, FatalErrorType error = FatalErrorType::None);
 
     /// <summary>
     /// Requests normal engine exit.
     /// </summary>
     /// <param name="exitCode">The exit code.</param>
-    API_FUNCTION() static void RequestExit(int32 exitCode = 0);
+    /// <param name="error">The fatal error type (or None on graceful exit).</param>
+    API_FUNCTION() static void RequestExit(int32 exitCode = 0, FatalErrorType error = FatalErrorType::None);
+
+#if !BUILD_SHIPPING
+    /// <summary>
+    /// Crashes the engine. Utility used to test crash reporting or game stability monitoring systems.
+    /// </summary>
+    /// <param name="error">The fatal error type.</param>
+    API_FUNCTION(Attributes="DebugCommand") static void Crash(FatalErrorType error = FatalErrorType::Exception);
+#endif
 
 public:
-
     /// <summary>
     /// Fixed update callback used by the physics simulation (fixed stepping).
     /// </summary>
@@ -108,6 +151,11 @@ public:
     static void OnLateUpdate();
 
     /// <summary>
+    /// Late fixed update callback.
+    /// </summary>
+    static void OnLateFixedUpdate();
+
+    /// <summary>
     /// Draw callback.
     /// </summary>
     static void OnDraw();
@@ -118,7 +166,6 @@ public:
     static void OnExit();
 
 public:
-
     // Returns true if engine is running without main window (aka headless mode).
     API_PROPERTY() static bool IsHeadless();
 
@@ -131,6 +178,11 @@ public:
     /// Returns true if the game is running in the Flax Editor; false if run from any deployment target. Use this property to perform Editor-related actions.
     /// </summary>
     API_PROPERTY() static bool IsEditor();
+
+    /// <summary>
+    /// Returns whether the editor is in play mode or will always return true in a shipped applications.
+    /// </summary>
+    API_PROPERTY() static bool IsPlayMode();
 
     /// <summary>
     /// Gets the amount of frames rendered during last second known as Frames Per Second. User scripts updates or fixed updates for physics may run at a different frequency than scene rendering. Use this property to get an accurate amount of frames rendered during the last second.
@@ -154,12 +206,18 @@ public:
     static Window* MainWindow;
 
     /// <summary>
+    /// Brings focused to the game viewport (game can receive input).
+    /// </summary>
+    API_FUNCTION() static void FocusGameViewport();
+
+    /// <summary>
     /// Checks whenever the game viewport is focused by the user (eg. can receive input).
     /// </summary>
     API_PROPERTY() static bool HasGameViewportFocus();
 
 private:
-
+    static int32 OnInit(const Char* cmdLine);
+    static void OnLoop();
     static void OnPause();
     static void OnUnpause();
 };

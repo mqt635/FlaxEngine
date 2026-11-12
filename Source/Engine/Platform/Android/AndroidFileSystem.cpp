@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2019 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_ANDROID
 
@@ -7,6 +7,7 @@
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Types/TimeSpan.h"
+#include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Utilities/StringConverter.h"
@@ -166,18 +167,18 @@ bool AndroidFileSystem::DirectoryGetFiles(Array<String>& results, const String& 
     return getFilesFromDirectoryAll(results, pathANSI.Get(), searchPatternANSI.Get());
 }
 
-bool AndroidFileSystem::GetChildDirectories(Array<String>& results, const String& directory)
+bool AndroidFileSystem::GetChildDirectories(Array<String>& results, const String& path)
 {
     size_t pathLength;
     struct stat statPath, statEntry;
     struct dirent* entry;
-    const StringAsANSI<> pathANSI(*directory, directory.Length());
-    const char* path = pathANSI.Get();
+    const StringAsANSI<> pathANSI(*path, path.Length());
+    const char* pathStr = pathANSI.Get();
 
     // Stat for the path
-    stat(path, &statPath);
+    stat(pathStr, &statPath);
 
-    // If path does not exists or is not dir - exit with status -1
+    // If path does not exist or is not dir - exit with status -1
     if (S_ISDIR(statPath.st_mode) == 0)
     {
         // Is not directory
@@ -185,7 +186,7 @@ bool AndroidFileSystem::GetChildDirectories(Array<String>& results, const String
     }
 
     // If not possible to read the directory for this user
-    DIR* dir = opendir(path);
+    DIR* dir = opendir(pathStr);
     if (dir == nullptr)
     {
         // Cannot open directory
@@ -193,7 +194,7 @@ bool AndroidFileSystem::GetChildDirectories(Array<String>& results, const String
     }
 
     // The length of the path
-    pathLength = strlen(path);
+    pathLength = strlen(pathStr);
 
     // Iteration through entries in the directory
     while ((entry = readdir(dir)) != nullptr)
@@ -203,20 +204,20 @@ bool AndroidFileSystem::GetChildDirectories(Array<String>& results, const String
             continue;
 
         // Determinate a full path of an entry
-        char full_path[256];
-        ASSERT(pathLength + strlen(entry->d_name) < ARRAY_COUNT(full_path));
-        strcpy(full_path, path);
-        strcat(full_path, "/");
-        strcat(full_path, entry->d_name);
+        char fullPath[256];
+        ASSERT(pathLength + strlen(entry->d_name) < ARRAY_COUNT(fullPath));
+        strcpy(fullPath, pathStr);
+        strcat(fullPath, "/");
+        strcat(fullPath, entry->d_name);
 
         // Stat for the entry
-        stat(full_path, &statEntry);
+        stat(fullPath, &statEntry);
 
         // Check for directory
         if (S_ISDIR(statEntry.st_mode) != 0)
         {
             // Add directory
-            results.Add(String(full_path));
+            results.Add(String(fullPath));
         }
     }
 
@@ -243,19 +244,19 @@ bool AndroidFileSystem::FileExists(const StringView& path)
 bool AndroidFileSystem::DeleteFile(const StringView& path)
 {
     const StringAsANSI<> pathANSI(*path, path.Length());
-    return unlink(pathANSI.Get()) == 0;
+    return unlink(pathANSI.Get()) != 0;
 }
 
 uint64 AndroidFileSystem::GetFileSize(const StringView& path)
 {
     struct stat fileInfo;
-    fileInfo.st_size = -1;
+    fileInfo.st_size = 0;
     const StringAsANSI<> pathANSI(*path, path.Length());
     if (stat(pathANSI.Get(), &fileInfo) != -1)
     {
         if (S_ISDIR(fileInfo.st_mode))
         {
-            fileInfo.st_size = -1;
+            fileInfo.st_size = 0;
         }
     }
     else
@@ -421,24 +422,8 @@ bool AndroidFileSystem::getFilesFromDirectoryTop(Array<String>& results, const c
         if (S_ISREG(statEntry.st_mode) != 0)
         {
             // Validate with filter
-            const int32 fullPathLength = StringUtils::Length(fullPath);
-            const int32 searchPatternLength = StringUtils::Length(searchPattern);
-            if (searchPatternLength == 0 || StringUtils::Compare(searchPattern, "*") == 0)
-            {
-                // All files
-            }
-            else if (searchPattern[0] == '*' && searchPatternLength < fullPathLength && StringUtils::Compare(fullPath + fullPathLength - searchPatternLength + 1, searchPattern + 1) == 0)
-            {
-                // Path ending
-            }
-            else
-            {
-                // TODO: implement all cases in a generic way
-                continue;
-            }
-
-            // Add file
-            results.Add(String(fullPath));
+            if (FileSystem::PathFilterHelper(fullPath, searchPattern))
+                results.Add(String(fullPath));
         }
     }
 
@@ -516,7 +501,7 @@ DateTime AndroidFileSystem::GetFileLastEditTime(const StringView& path)
     const StringAsANSI<> pathANSI(*path, path.Length());
     if (stat(pathANSI.Get(), &fileInfo) == -1)
         return DateTime::MinValue();
-    const TimeSpan timeSinceEpoch(0, 0, fileInfo.st_mtime);
+    const TimeSpan timeSinceEpoch(0, 0, 0, fileInfo.st_mtime);
     const DateTime UnixEpoch(1970, 1, 1);
     return UnixEpoch + timeSinceEpoch;
 }

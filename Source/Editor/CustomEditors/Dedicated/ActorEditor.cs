@@ -1,17 +1,21 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System;
-using System.Collections.Generic;
 using FlaxEditor.Actions;
+using FlaxEditor.Content;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.GUI.Tree;
 using FlaxEditor.Scripting;
+using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.GUI;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace FlaxEditor.CustomEditors.Dedicated
 {
@@ -20,7 +24,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
     /// </summary>
     /// <seealso cref="FlaxEditor.CustomEditors.Editors.GenericEditor" />
     [CustomEditor(typeof(Actor)), DefaultEditor]
-    public class ActorEditor : GenericEditor
+    public class ActorEditor : ScriptingObjectEditor
     {
         private Guid _linkedPrefabId;
 
@@ -47,13 +51,13 @@ namespace FlaxEditor.CustomEditors.Dedicated
         public override void Initialize(LayoutElementsContainer layout)
         {
             // Check for prefab link
-            if (Values.IsSingleObject && Values[0] is Actor actor && actor.HasPrefabLink)
+            var actor = Values.Count == 1 ? Values[0] as Actor : null;
+            if (actor != null && actor.HasPrefabLink)
             {
                 // TODO: consider editing more than one instance of the same prefab asset at once
 
-                var prefab = FlaxEngine.Content.LoadAsync<Prefab>(actor.PrefabID);
-                // TODO: don't stall here?
-                if (prefab && !prefab.WaitForLoaded())
+                var prefab = FlaxEngine.Content.Load<Prefab>(actor.PrefabID);
+                if (prefab)
                 {
                     var prefabObjectId = actor.PrefabObjectID;
                     var prefabInstance = prefab.GetDefaultInstance(ref prefabObjectId);
@@ -62,19 +66,37 @@ namespace FlaxEditor.CustomEditors.Dedicated
                         // Use default prefab instance as a reference for the editor
                         Values.SetReferenceValue(prefabInstance);
 
-                        // Add some UI
-                        var panel = layout.CustomContainer<UniformGridPanel>();
+                        // Display prefab UI (when displaying object inside Prefab Window then display only nested prefabs)
+                        prefab.GetNestedObject(ref prefabObjectId, out var nestedPrefabId, out var nestedPrefabObjectId);
+                        var nestedPrefab = FlaxEngine.Content.Load<Prefab>(nestedPrefabId);
+                        var panel = layout.UniformGrid();
                         panel.CustomControl.Height = 20.0f;
                         panel.CustomControl.SlotsVertically = 1;
-                        panel.CustomControl.SlotsHorizontally = 2;
+                        if (Presenter == Editor.Instance.Windows.PropertiesWin.Presenter || nestedPrefab)
+                        {
+                            var targetPrefab = nestedPrefab ?? prefab;
+                            panel.CustomControl.SlotsHorizontally = 3;
 
-                        // Selecting actor prefab asset
-                        var selectPrefab = panel.Button("Select Prefab");
-                        selectPrefab.Button.Clicked += () => Editor.Instance.Windows.ContentWin.Select(prefab);
+                            // Selecting actor prefab asset
+                            var selectPrefab = panel.Button("Select Prefab");
+                            selectPrefab.Button.Clicked += () =>
+                            {
+                                Editor.Instance.Windows.ContentWin.ClearItemsSearch();
+                                Editor.Instance.Windows.ContentWin.Select(targetPrefab);
+                            };
+
+                            // Edit selected prefab asset
+                            var editPrefab = panel.Button("Edit Prefab");
+                            editPrefab.Button.Clicked += () => Editor.Instance.Windows.ContentWin.Open(Editor.Instance.ContentDatabase.FindAsset(targetPrefab.ID));
+                        }
+                        else
+                        {
+                            panel.CustomControl.SlotsHorizontally = 1;
+                        }
 
                         // Viewing changes applied to this actor
                         var viewChanges = panel.Button("View Changes");
-                        viewChanges.Button.Clicked += () => ViewChanges(viewChanges.Button, new Vector2(0.0f, 20.0f));
+                        viewChanges.Button.Clicked += () => ViewChanges(viewChanges.Button, new Float2(0.0f, 20.0f));
 
                         // Link event to update editor on prefab apply
                         _linkedPrefabId = prefab.ID;
@@ -91,19 +113,9 @@ namespace FlaxEditor.CustomEditors.Dedicated
             {
                 if (layout.Children[i] is GroupElement group && group.Panel.HeaderText == "General")
                 {
-                    const float settingsButtonSize = 14;
-                    var settingsButton = new Image
-                    {
-                        TooltipText = "Settings",
-                        AutoFocus = true,
-                        AnchorPreset = AnchorPresets.TopRight,
-                        Parent = group.Panel,
-                        Bounds = new Rectangle(group.Panel.Width - settingsButtonSize, 0, settingsButtonSize, settingsButtonSize),
-                        IsScrollable = false,
-                        Color = FlaxEngine.GUI.Style.Current.ForegroundGrey,
-                        Margin = new Margin(1),
-                        Brush = new SpriteBrush(FlaxEngine.GUI.Style.Current.Settings),
-                    };
+                    if (actor != null)
+                        group.Panel.TooltipText = Surface.SurfaceUtils.GetVisualScriptTypeDescription(TypeUtils.GetObjectType(actor));
+                    var settingsButton = group.AddSettingsButton();
                     settingsButton.Clicked += OnSettingsButtonClicked;
                     break;
                 }
@@ -119,6 +131,25 @@ namespace FlaxEditor.CustomEditors.Dedicated
             var actor = (Actor)Values[0];
             var scriptType = TypeUtils.GetType(actor.TypeName);
             var item = scriptType.ContentItem;
+            if (Presenter.Owner != null)
+            {
+                var lockButton = cm.AddButton(Presenter.Owner.LockSelection ? "Unlock" : "Lock");
+                lockButton.ButtonClicked += button =>
+                {
+                    var owner = Presenter?.Owner;
+                    if (owner == null)
+                        return;
+                    owner.LockSelection = !owner.LockSelection;
+
+                    // Reselect current selection
+                    if (!owner.LockSelection && owner.Selection.Count > 0)
+                    {
+                        var cachedSelection = owner.Selection.ToList();
+                        owner.Select(null);
+                        owner.Select(cachedSelection);
+                    }
+                };
+            }
             cm.AddButton("Copy ID", OnClickCopyId);
             cm.AddButton("Edit actor type", OnClickEditActorType).Enabled = item != null;
             var showButton = cm.AddButton("Show in content window", OnClickShowActorType);
@@ -138,8 +169,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             var actor = (Actor)Values[0];
             var scriptType = TypeUtils.GetType(actor.TypeName);
             var item = scriptType.ContentItem;
-            if (item != null)
-                Editor.Instance.ContentEditing.Open(item);
+            Editor.Instance.ContentEditing.Open(item);
         }
 
         private void OnClickShowActorType()
@@ -147,8 +177,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             var actor = (Actor)Values[0];
             var scriptType = TypeUtils.GetType(actor.TypeName);
             var item = scriptType.ContentItem;
-            if (item != null)
-                Editor.Instance.Windows.ContentWin.Select(item);
+            Editor.Instance.Windows.ContentWin.Select(item);
         }
 
         /// <inheritdoc />
@@ -159,7 +188,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             if (_linkedPrefabId != Guid.Empty)
             {
                 _linkedPrefabId = Guid.Empty;
-                Editor.Instance.Prefabs.PrefabApplied -= OnPrefabApplying;
+                Editor.Instance.Prefabs.PrefabApplying -= OnPrefabApplying;
                 Editor.Instance.Prefabs.PrefabApplied -= OnPrefabApplied;
             }
         }
@@ -172,7 +201,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 //Presenter.BuildLayoutOnUpdate();
 
                 // Better way is to just update the reference value using the new default instance of the prefab, created after changes apply
-                if (prefab && !prefab.WaitForLoaded())
+                if (Values != null && (Actor)Values[0] && prefab && !prefab.WaitForLoaded())
                 {
                     var actor = (Actor)Values[0];
                     var prefabObjectId = actor.PrefabObjectID;
@@ -206,23 +235,44 @@ namespace FlaxEditor.CustomEditors.Dedicated
             if (editor is RemovedScriptDummy removed)
             {
                 node.TextColor = Color.OrangeRed;
-                node.Text = CustomEditorsUtil.GetPropertyNameUI(removed.PrefabObject.GetType().Name);
+                node.Text = Utilities.Utils.GetPropertyNameUI(removed.PrefabObject.GetType().Name);
+            }
+            // Removed Actor
+            else if (editor is RemovedActorDummy removedActor)
+            {
+                node.TextColor = Color.OrangeRed;
+                node.Text = $"{removedActor.PrefabObject.Name} ({Utilities.Utils.GetPropertyNameUI(removedActor.PrefabObject.GetType().Name)})";
             }
             // Actor or Script
             else if (editor.Values[0] is SceneObject sceneObject)
             {
-                node.TextColor = sceneObject.HasPrefabLink ? FlaxEngine.GUI.Style.Current.ProgressNormal : FlaxEngine.GUI.Style.Current.BackgroundSelected;
-                node.Text = CustomEditorsUtil.GetPropertyNameUI(sceneObject.GetType().Name);
+                node.TextColor = sceneObject.HasPrefabLink ? Color.FromRGB(Utilities.Constants.ColorPrefab) : FlaxEngine.GUI.Style.Current.BackgroundSelected;
+                if (editor.Values.Info != ScriptMemberInfo.Null)
+                {
+                    if (editor.Values.GetAttributes().FirstOrDefault(x => x is EditorDisplayAttribute) is EditorDisplayAttribute editorDisplayAttribute && !string.IsNullOrEmpty(editorDisplayAttribute.Name))
+                        node.Text = $"{Utilities.Utils.GetPropertyNameUI(editorDisplayAttribute.Name)} ({Utilities.Utils.GetPropertyNameUI(editor.Values.Info.Name)})";
+                    else
+                        node.Text = Utilities.Utils.GetPropertyNameUI(editor.Values.Info.Name);
+                }
+                else if (sceneObject is Actor actor)
+                    node.Text = $"{actor.Name} ({Utilities.Utils.GetPropertyNameUI(sceneObject.GetType().Name)})";
+                else
+                    node.Text = Utilities.Utils.GetPropertyNameUI(sceneObject.GetType().Name);
             }
             // Array Item
-            else if (editor.ParentEditor?.Values?.Type.IsArray ?? false)
+            else if (editor.ParentEditor is CollectionEditor)
             {
                 node.Text = "Element " + editor.ParentEditor.ChildrenEditors.IndexOf(editor);
             }
             // Common type
             else if (editor.Values.Info != ScriptMemberInfo.Null)
             {
-                node.Text = CustomEditorsUtil.GetPropertyNameUI(editor.Values.Info.Name);
+                if (editor.Values.GetAttributes().FirstOrDefault(x => x is EditorDisplayAttribute) is EditorDisplayAttribute editorDisplayAttribute
+                    && !string.IsNullOrEmpty(editorDisplayAttribute.Name)
+                    && !editorDisplayAttribute.Name.Contains("_inline"))
+                    node.Text = $"{Utilities.Utils.GetPropertyNameUI(editorDisplayAttribute.Name)} ({Utilities.Utils.GetPropertyNameUI(editor.Values.Info.Name)})";
+                else
+                    node.Text = Utilities.Utils.GetPropertyNameUI(editor.Values.Info.Name);
             }
             // Custom type
             else if (editor.Values[0] != null)
@@ -248,34 +298,60 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 // Not used
             }
         }
+        
+        private class RemovedActorDummy : CustomEditor
+        {
+            /// <summary>
+            /// The removed prefab object (from the prefab default instance).
+            /// </summary>
+            public Actor PrefabObject;
+
+            /// <summary>
+            /// The prefab instance's parent.
+            /// </summary>
+            public Actor ParentActor;
+
+            /// <summary>
+            /// The order of the removed actor in the parent.
+            /// </summary>
+            public int OrderInParent;
+
+            /// <inheritdoc />
+            public override void Initialize(LayoutElementsContainer layout)
+            {
+                // Not used
+            }
+        }
 
         private TreeNode ProcessDiff(CustomEditor editor, bool skipIfNotModified = true)
         {
-            // Special case for new Script added to actor
-            if (editor.Values[0] is Script script && !script.HasPrefabLink)
-            {
+            // Special case for new Script or child actor added to actor
+            if ((editor.Values[0] is Script script && !script.HasPrefabLink) || (editor.Values[0] is Actor a && !a.HasPrefabLink))
                 return CreateDiffNode(editor);
-            }
 
             // Skip if no change detected
-            if (!editor.Values.IsReferenceValueModified && skipIfNotModified)
+            var isRefEdited = editor.Values.IsReferenceValueModified;
+            if (!isRefEdited && skipIfNotModified && editor is not ScriptsEditor)
                 return null;
 
             TreeNode result = null;
-
-            if (editor.ChildrenEditors.Count == 0)
+            if (editor.ChildrenEditors.Count == 0 || (isRefEdited && editor is CollectionEditor))
                 result = CreateDiffNode(editor);
-
             bool isScriptEditorWithRefValue = editor is ScriptsEditor && editor.Values.HasReferenceValue;
-
+            bool isActorEditorInLevel = editor is ActorEditor && editor.Values[0] is Actor actor && actor.IsPrefabRoot && actor.HasScene;
             for (int i = 0; i < editor.ChildrenEditors.Count; i++)
             {
-                var child = ProcessDiff(editor.ChildrenEditors[i], !isScriptEditorWithRefValue);
+                var childEditor = editor.ChildrenEditors[i];
+
+                // Special case for root actor transformation (can be applied only in Prefab editor, not in Level)
+                if (isActorEditorInLevel && childEditor.Values.Info.Name is "LocalPosition" or "LocalOrientation" or "LocalScale" or "Name")
+                    continue;
+
+                var child = ProcessDiff(childEditor, !isScriptEditorWithRefValue);
                 if (child != null)
                 {
                     if (result == null)
                         result = CreateDiffNode(editor);
-
                     result.AddChild(child);
                 }
             }
@@ -287,7 +363,6 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 {
                     var prefabObjectScript = prefabObjectScripts[j];
                     bool isRemoved = true;
-
                     for (int i = 0; i < editor.ChildrenEditors.Count; i++)
                     {
                         if (editor.ChildrenEditors[i].Values is ScriptsEditor.ScriptsContainer container && container.PrefabObjectId == prefabObjectScript.PrefabObjectID)
@@ -297,14 +372,12 @@ namespace FlaxEditor.CustomEditors.Dedicated
                             break;
                         }
                     }
-
                     if (isRemoved)
                     {
                         var dummy = new RemovedScriptDummy
                         {
                             PrefabObject = prefabObjectScript
                         };
-
                         var child = CreateDiffNode(dummy);
                         if (result == null)
                             result = CreateDiffNode(editor);
@@ -313,16 +386,80 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 }
             }
 
+            // Compare child actors for removed actors.
+            if (editor is ActorEditor && editor.Values.HasReferenceValue && editor.Values.ReferenceValue is Actor prefabObjectActor)
+            {
+                var thisActor = editor.Values[0] as Actor;
+                for (int i = 0; i < prefabObjectActor.ChildrenCount; i++)
+                {
+                    var prefabActorChild = prefabObjectActor.Children[i];
+                    if (thisActor == null)
+                        continue;
+                    bool isRemoved = true;
+                    for (int j = 0; j < thisActor.ChildrenCount; j++)
+                    {
+                        var actorChild = thisActor.Children[j];
+                        if (actorChild.PrefabObjectID == prefabActorChild.PrefabObjectID)
+                        {
+                            isRemoved = false;
+                            break;
+                        }
+                    }
+                    if (isRemoved)
+                    {
+                        var dummy = new RemovedActorDummy
+                        {
+                            PrefabObject = prefabActorChild,
+                            ParentActor = thisActor,
+                            OrderInParent = prefabActorChild.OrderInParent,
+                        };
+                        var child = CreateDiffNode(dummy);
+                        if (result == null)
+                            result = CreateDiffNode(editor);
+                        result.AddChild(child);
+                    }
+                }
+            }
+
+            if (editor is ScriptsEditor && result != null && result.ChildrenCount == 0)
+                return null;
+
             return result;
         }
 
-        private void ViewChanges(Control target, Vector2 targetLocation)
+        private TreeNode CreateDiffTree(Actor actor, CustomEditorPresenter presenter, LayoutElementsContainer layout)
+        {
+            var actorNode = Editor.Instance.Scene.GetActorNode(actor);
+            ValueContainer vc = new ValueContainer(ScriptMemberInfo.Null);
+            vc.SetType(new ScriptType(actorNode.EditableObject.GetType()));
+            vc.Add(actorNode.EditableObject);
+            var editor = CustomEditorsUtil.CreateEditor(vc, null, false);
+            editor.Initialize(presenter, layout, vc);
+            var node = ProcessDiff(editor, false);
+            layout.ClearLayout();
+            foreach (var child in actor.Children)
+            {
+                var childNode = CreateDiffTree(child, presenter, layout);
+                if (childNode == null)
+                    continue;
+                if (node == null)
+                    node = CreateDiffNode(editor);
+                node.AddChild(childNode);
+            }
+            return node;
+        }
+
+        private void ViewChanges(Control target, Float2 targetLocation)
         {
             // Build a tree out of modified properties
-            var rootNode = ProcessDiff(this, false);
+            var thisActor = (Actor)Values[0];
+            var rootActor = thisActor.IsPrefabRoot ? thisActor : thisActor.GetPrefabRoot();
+            var presenter = new CustomEditorPresenter(null);
+            var layout = new CustomElementsContainer<ContainerControl>();
+            var rootNode = CreateDiffTree(rootActor, presenter, layout);
 
             // Skip if no changes detected
-            if (rootNode == null || rootNode.ChildrenCount == 0)
+            if (rootNode == null)
             {
                 var cm1 = new ContextMenu();
                 cm1.AddButton("No changes detected");
@@ -340,7 +477,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             cm.Show(target, targetLocation);
         }
 
-        private void OnDiffNodeRightClick(TreeNode node, Vector2 location)
+        private void OnDiffNodeRightClick(TreeNode node, Float2 location)
         {
             var diffMenu = (PrefabDiffContextMenu)node.ParentTree.Tag;
 
@@ -350,7 +487,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
             menu.AddButton("Revert All", OnDiffRevertAll);
             menu.AddButton("Apply All", OnDiffApplyAll);
 
-            diffMenu.ShowChild(menu, node.PointToParent(diffMenu, new Vector2(location.X, node.HeaderHeight)));
+            diffMenu.ShowChild(menu, node.PointToParent(diffMenu, new Float2(location.X, node.HeaderHeight)));
         }
 
         private void OnDiffRevertAll()
@@ -364,6 +501,15 @@ namespace FlaxEditor.CustomEditors.Dedicated
 
             // Ensure to refresh the layout
             Presenter.BuildLayoutOnUpdate();
+        }
+
+        private static void GetAllPrefabObjects(List<object> objects, Actor actor)
+        {
+            objects.Add(actor);
+            objects.AddRange(actor.Scripts);
+            var children = actor.Children;
+            foreach (var child in children)
+                GetAllPrefabObjects(objects, child);
         }
 
         private void OnDiffRevert(CustomEditor editor)
@@ -387,6 +533,22 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 return;
             }
 
+            // Special case for reverting removed Actors
+            if (editor is RemovedActorDummy removedActor)
+            {
+                Editor.Log("Reverting removed actor changes to prefab (adding it)");
+
+                var parentActor = removedActor.ParentActor;
+                var restored = parentActor.AddChild(removedActor.PrefabObject.GetType());
+                var prefabId = parentActor.PrefabID;
+                var prefabObjectId = removedActor.PrefabObject.PrefabObjectID;
+                string data = JsonSerializer.Serialize(removedActor.PrefabObject);
+                JsonSerializer.Deserialize(restored, data);
+                Presenter.Owner.SceneContext.Spawn(restored, parentActor, removedActor.OrderInParent);
+                Actor.Internal_LinkPrefab(FlaxEngine.Object.GetUnmanagedPtr(restored), ref prefabId, ref prefabObjectId);
+                return;
+            }
+
             // Special case for new Script added to actor
             if (editor.Values[0] is Script script && !script.HasPrefabLink)
             {
@@ -398,8 +560,37 @@ namespace FlaxEditor.CustomEditors.Dedicated
 
                 return;
             }
+            
+            // Special case for new Actor added to actor
+            if (editor.Values[0] is Actor a && !a.HasPrefabLink)
+            {
+                Editor.Log("Reverting added actor changes to prefab (removing it)");
 
-            editor.RevertToReferenceValue();
+                // TODO: Keep previous selection.
+                var context = Presenter.Owner.SceneContext;
+                context.Select(SceneGraph.SceneGraphFactory.FindNode(a.ID));
+                context.DeleteSelection();
+
+                return;
+            }
+
+            if (Presenter.Undo != null && Presenter.Undo.Enabled)
+            {
+                var thisActor = (Actor)Values[0];
+                var rootActor = thisActor.IsPrefabRoot ? thisActor : thisActor.GetPrefabRoot();
+                var prefabObjects = new List<object>();
+                GetAllPrefabObjects(prefabObjects, rootActor);
+                using (new UndoMultiBlock(Presenter.Undo, prefabObjects, "Revert to Prefab"))
+                {
+                    editor.RevertToReferenceValue();
+                    editor.RefreshInternal();
+                }
+            }
+            else
+            {
+                editor.RevertToReferenceValue();
+                editor.RefreshInternal();
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using Flax.Build;
 using Flax.Build.NativeCpp;
@@ -29,13 +29,7 @@ public class Profiler : EngineModule
         options.PublicDefinitions.Add("COMPILE_WITH_PROFILER");
 
         // Tracy profiling tools
-        switch (options.Platform.Target)
-        {
-        case TargetPlatform.Android:
-        case TargetPlatform.Linux:
-        case TargetPlatform.Windows:
+        if (tracy.Use(options))
             options.PublicDependencies.Add("tracy");
-            break;
-        }
     }
 }

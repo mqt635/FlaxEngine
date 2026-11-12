@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,13 +10,13 @@
 /// <summary>
 /// Sprite rendering object.
 /// </summary>
-API_CLASS() class FLAXENGINE_API SpriteRender : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/UI/Sprite Render\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API SpriteRender : public Actor
 {
-DECLARE_SCENE_OBJECT(SpriteRender);
+    DECLARE_SCENE_OBJECT(SpriteRender);
 private:
-
     Color _color;
-    Vector2 _size;
+    Float2 _size;
     SpriteHandle _sprite;
     MaterialInstance* _materialInstance = nullptr;
     MaterialParameter* _paramImage = nullptr;
@@ -26,17 +26,16 @@ private:
     int32 _sceneRenderingKey = -1;
 
 public:
-
     /// <summary>
     /// Gets the size of the sprite.
     /// </summary>
     API_PROPERTY(Attributes="EditorOrder(0), EditorDisplay(\"Sprite\")")
-    Vector2 GetSize() const;
+    Float2 GetSize() const;
 
     /// <summary>
     /// Sets the size of the sprite.
     /// </summary>
-    API_PROPERTY() void SetSize(const Vector2& value);
+    API_PROPERTY() void SetSize(const Float2& value);
 
     /// <summary>
     /// Gets the color of the sprite. Passed to the sprite material in parameter named `Color`.
@@ -85,24 +84,27 @@ public:
     API_FIELD(Attributes="EditorOrder(50), DefaultValue(DrawPass.Default), EditorDisplay(\"Sprite\")")
     DrawPass DrawModes = DrawPass::Default;
 
-private:
+    /// <summary>
+    /// Gets the object sort order key used when sorting drawable objects during rendering. Use lower values to draw object before others, higher values are rendered later (on top). Can be used to control transparency drawing.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(60), DefaultValue(0), EditorDisplay(\"Sprite\")")
+    int8 SortOrder = 0;
 
+private:
     void OnMaterialLoaded();
-    void SetImage();
+    void SetImageParam();
+    void SetColorParam();
 
 public:
-
     // [Actor]
     bool HasContentLoaded() const override;
-    void Draw(RenderContext& renderContext) override;
-    void DrawGeneric(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     void OnLayerChanged() override;
     void OnEndPlay() override;
 
 protected:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;

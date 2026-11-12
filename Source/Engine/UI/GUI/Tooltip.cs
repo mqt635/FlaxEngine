@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -16,6 +16,16 @@ namespace FlaxEngine.GUI
         private Control _showTarget;
         private string _currentText;
         private Window _window;
+
+        /// <summary>
+        /// The mouse offset from top-left corner of tooltip.
+        /// </summary>
+        private static readonly Float2 TooltipOffset = new Float2(15, 10);
+
+        /// <summary>
+        /// The horizontal alignment of the text.
+        /// </summary>
+        public TextAlignment HorizontalTextAlignment = TextAlignment.Center;
 
         /// <summary>
         /// Gets or sets the time in seconds that mouse have to be over the target to show the tooltip.
@@ -48,7 +58,7 @@ namespace FlaxEngine.GUI
         /// <param name="target">The parent control to attach to it.</param>
         /// <param name="location">Popup menu origin location in parent control coordinates.</param>
         /// <param name="targetArea">Tooltip target area of interest.</param>
-        public void Show(Control target, Vector2 location, Rectangle targetArea)
+        public void Show(Control target, Float2 location, Rectangle targetArea)
         {
             if (target == null)
                 throw new ArgumentNullException();
@@ -64,48 +74,49 @@ namespace FlaxEngine.GUI
             UnlockChildrenRecursive();
             PerformLayout();
 
-            // Calculate popup direction and initial location
             var parentWin = target.Root;
             if (parentWin == null)
                 return;
-            float dpiScale = target.RootWindow.DpiScale;
-            Vector2 dpiSize = Size * dpiScale;
-            Vector2 locationWS = target.PointToWindow(location);
-            Vector2 locationSS = parentWin.PointToScreen(locationWS);
-            Rectangle monitorBounds = Platform.GetMonitorBounds(locationSS);
-            Vector2 rightBottomMonitorBounds = monitorBounds.BottomRight;
-            Vector2 rightBottomLocationSS = locationSS + dpiSize;
 
-            // Prioritize tooltip placement within parent window, fall back to virtual desktop
-            if (rightBottomMonitorBounds.Y < rightBottomLocationSS.Y)
-            {
-                // Direction: up
-                locationSS.Y -= dpiSize.Y;
-            }
-            if (rightBottomMonitorBounds.X < rightBottomLocationSS.X)
-            {
-                // Direction: left
-                locationSS.X -= dpiSize.X;
-            }
+            // Showing a popup window might bring up the parent window on top
+            if (!parentWin.IsFocused)
+                return;
+
+            // Calculate popup direction and initial location
+            var dpiScale = target.RootWindow.DpiScale;
+            var dpiSize = Size * dpiScale;
+            var locationWS = target.PointToWindow(location);
+            var locationSS = parentWin.PointToScreen(locationWS);
+            var mousePos = Input.MouseScreenPosition;
             _showTarget = target;
+            //WrapPosition(ref locationSS);
+            WrapPosition(ref mousePos, 10);
+            locationSS = mousePos + TooltipOffset;
 
             // Create window
             var desc = CreateWindowSettings.Default;
             desc.StartPosition = WindowStartPosition.Manual;
             desc.Position = locationSS;
             desc.Size = dpiSize;
+#if PLATFORM_WINDOWS
+            if (dpiScale > 1)
+                desc.Size += dpiScale * 2; // Fix odd backround size bug
+#endif
             desc.Fullscreen = false;
             desc.HasBorder = false;
             desc.SupportsTransparency = false;
             desc.ShowInTaskbar = false;
             desc.ActivateWhenFirstShown = false;
-            desc.AllowInput = true;
+            desc.AllowInput = false;
             desc.AllowMinimize = false;
             desc.AllowMaximize = false;
             desc.AllowDragAndDrop = false;
             desc.IsTopmost = true;
-            desc.IsRegularWindow = false;
+            desc.Type = WindowType.Tooltip;
+            desc.Title = "Tooltip";
             desc.HasSizingFrame = false;
+            desc.ShowAfterFirstPaint = true;
+            desc.Parent = parentWin.RootWindow.Window;
             _window = Platform.CreateWindow(ref desc);
             if (_window == null)
                 throw new InvalidOperationException("Failed to create tooltip window.");
@@ -128,6 +139,7 @@ namespace FlaxEngine.GUI
             // Unlink
             IsLayoutLocked = true;
             Parent = null;
+            _showTarget = null;
 
             // Close window
             if (_window)
@@ -165,7 +177,7 @@ namespace FlaxEngine.GUI
 
                 if (_timeToPopupLeft <= 0.0f)
                 {
-                    if (_lastTarget.OnShowTooltip(out _currentText, out Vector2 location, out Rectangle area))
+                    if (_lastTarget.OnShowTooltip(out _currentText, out var location, out var area))
                     {
                         Show(_lastTarget, location, area);
                     }
@@ -179,6 +191,8 @@ namespace FlaxEngine.GUI
         /// <param name="target">The target.</param>
         public void OnMouseLeaveControl(Control target)
         {
+            if (Visible)
+                Hide();
             _lastTarget = null;
         }
 
@@ -190,15 +204,53 @@ namespace FlaxEngine.GUI
             }
         }
 
+        private void WrapPosition(ref Float2 locationSS, float flipOffset = 0.0f)
+        {
+            if (_showTarget?.RootWindow == null)
+                return;
+
+            // Calculate popup direction
+            var dpiScale = _showTarget.RootWindow.DpiScale;
+            var dpiSize = Size * dpiScale;
+            var monitorBounds = Platform.GetMonitorBounds(locationSS);
+            var rightBottomMonitorBounds = monitorBounds.BottomRight;
+            var rightBottomLocationSS = locationSS + dpiSize;
+
+            // Prioritize tooltip placement within parent window, fall back to virtual desktop
+            if (rightBottomMonitorBounds.Y < rightBottomLocationSS.Y)
+            {
+                // Direction: up
+                locationSS.Y -= dpiSize.Y + flipOffset;
+            }
+            if (rightBottomMonitorBounds.X < rightBottomLocationSS.X)
+            {
+                // Direction: left
+                locationSS.X -= dpiSize.X + flipOffset * 2;
+            }
+        }
+
         /// <inheritdoc />
         public override void Update(float deltaTime)
         {
-            // Auto hide if mouse leaves control area
-            Vector2 mousePos = Input.MouseScreenPosition;
-            Vector2 location = _showTarget.PointFromScreen(mousePos);
+            var mousePos = Input.MouseScreenPosition;
+            var location = _showTarget.PointFromScreen(mousePos);
             if (!_showTarget.OnTestTooltipOverControl(ref location))
             {
-                // Mouse left or sth
+                // Auto hide if mouse leaves control area
+                Hide();
+            }
+            else
+            {
+                // Position tooltip when mouse moves
+                WrapPosition(ref mousePos, 10);
+                if (_window)
+                    _window.Position = mousePos + TooltipOffset;
+            }
+
+            var mouse = Input.Mouse;
+            if (mouse.IsAnyButtonDown || Math.Abs(mouse.ScrollDelta) > Mathf.Epsilon)
+            {
+                // Hide popup when buttons are pressed
                 Hide();
             }
 
@@ -209,18 +261,32 @@ namespace FlaxEngine.GUI
         public override void Draw()
         {
             var style = Style.Current;
+            var size = Size;
 
             // Background
-            Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), Color.Lerp(style.BackgroundSelected, style.Background, 0.6f));
-            Render2D.FillRectangle(new Rectangle(1.1f, 1.1f, Width - 2, Height - 2), style.Background);
+            var bounds = new Rectangle(Float2.Zero, size);
+            Render2D.FillRectangle(bounds, style.Background);
+            Render2D.DrawRectangle(bounds, style.BackgroundSelected);
+
+            // Padding for text
+            var textRect = GetClientArea();
+            float textX = HorizontalTextAlignment switch
+            {
+                TextAlignment.Near => 15,
+                TextAlignment.Center => 5,
+                TextAlignment.Far => -5,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+            textRect.X += textX;
+            textRect.Width -= 10;
 
             // Tooltip text
             Render2D.DrawText(
                               style.FontMedium,
                               _currentText,
-                              GetClientArea(),
+                              textRect,
                               style.Foreground,
-                              TextAlignment.Center,
+                              HorizontalTextAlignment,
                               TextAlignment.Center,
                               TextWrapping.WrapWords
                              );
@@ -235,7 +301,7 @@ namespace FlaxEngine.GUI
             var style = Style.Current;
 
             // Calculate size of the tooltip
-            var size = Vector2.Zero;
+            var size = Float2.Zero;
             if (style != null && style.FontMedium && !string.IsNullOrEmpty(_currentText))
             {
                 var layout = TextLayoutOptions.Default;
@@ -252,7 +318,7 @@ namespace FlaxEngine.GUI
                 }
                 //size.X += style.FontMedium.MeasureText(_currentText).X;
             }
-            Size = size + new Vector2(24.0f);
+            Size = size + new Float2(24.0f);
 
             // Check if is visible size get changed
             if (Visible && prevSize != Size)
@@ -262,7 +328,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnShowTooltip(out string text, out Vector2 location, out Rectangle area)
+        public override bool OnShowTooltip(out string text, out Float2 location, out Rectangle area)
         {
             base.OnShowTooltip(out text, out location, out area);
 

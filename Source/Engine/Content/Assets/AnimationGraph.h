@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,9 +10,8 @@
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API AnimationGraph : public BinaryAsset
 {
-DECLARE_BINARY_ASSET_HEADER(AnimationGraph, 1);
+    DECLARE_BINARY_ASSET_HEADER(AnimationGraph, 1);
 public:
-
     /// <summary>
     /// The animation graph.
     /// </summary>
@@ -24,7 +23,6 @@ public:
     AnimGraphExecutor GraphExecutor;
 
 public:
-
     /// <summary>
     /// Gets the base model asset used for the animation preview and the skeleton layout source.
     /// </summary>
@@ -39,14 +37,15 @@ public:
     /// <param name="baseModel">The base model asset.</param>
     /// <param name="anim">The animation to play.</param>
     /// <param name="loop">True if play animation in a loop.</param>
+    /// <param name="rootMotion">True if apply root motion. Otherwise it will be ignored.</param>
     /// <returns>True if failed, otherwise false.</returns>
-    API_FUNCTION() bool InitAsAnimation(SkinnedModel* baseModel, Animation* anim, bool loop = true);
+    API_FUNCTION() bool InitAsAnimation(SkinnedModel* baseModel, Animation* anim, bool loop = true, bool rootMotion = false);
 
     /// <summary>
     /// Tries to load surface graph from the asset.
     /// </summary>
     /// <returns>The surface data or empty if failed to load it.</returns>
-    API_FUNCTION() BytesContainer LoadSurface();
+    API_FUNCTION() BytesContainer LoadSurface() const;
 
 #if USE_EDITOR
 
@@ -55,23 +54,21 @@ public:
     /// </summary>
     /// <param name="data">Stream with graph data.</param>
     /// <returns>True if cannot save it, otherwise false.</returns>
-    API_FUNCTION() bool SaveSurface(BytesContainer& data);
+    API_FUNCTION() bool SaveSurface(const BytesContainer& data);
 
 private:
-
     void FindDependencies(AnimGraphBase* graph);
 
 #endif
 
 public:
-
     // [BinaryAsset]
 #if USE_EDITOR
-    void GetReferences(Array<Guid>& output) const override;
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override;
+    bool Save(const StringView& path = StringView::Empty) override;
 #endif
 
 protected:
-
     // [BinaryAsset]
     LoadResult load() override;
     void unload(bool isReloading) override;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MODEL_TOOL && USE_AUTODESK_FBX_SDK
 
@@ -49,36 +49,32 @@ Matrix ToFlaxType(const FbxAMatrix& value)
     for (int32 row = 0; row < 4; row++)
         for (int32 col = 0; col < 4; col++)
             native.Values[row][col] = (float)value[col][row];
-
     return native;
 }
 
-Vector3 ToFlaxType(const FbxVector4& value)
+Float3 ToFlaxType(const FbxVector4& value)
 {
-    Vector3 native;
+    Float3 native;
     native.X = (float)value[0];
     native.Y = (float)value[1];
     native.Z = (float)value[2];
-
     return native;
 }
 
-Vector3 ToFlaxType(const FbxDouble3& value)
+Float3 ToFlaxType(const FbxDouble3& value)
 {
-    Vector3 native;
+    Float3 native;
     native.X = (float)value[0];
     native.Y = (float)value[1];
     native.Z = (float)value[2];
-
     return native;
 }
 
-Vector2 ToFlaxType(const FbxVector2& value)
+Float2 ToFlaxType(const FbxVector2& value)
 {
-    Vector2 native;
+    Float2 native;
     native.X = (float)value[0];
     native.Y = 1 - (float)value[1];
-
     return native;
 }
 
@@ -89,7 +85,6 @@ Color ToFlaxType(const FbxColor& value)
     native.G = (float)value[1];
     native.B = (float)value[2];
     native.A = (float)value[3];
-
     return native;
 }
 
@@ -218,9 +213,9 @@ void ProcessNodes(ImporterData& data, FbxNode* fbxNode, int32 parentIndex)
 {
     const int32 nodeIndex = data.Nodes.Count();
 
-    Vector3 translation = ToFlaxType(fbxNode->EvaluateLocalTranslation(FbxTime(0)));
-    Vector3 rotationEuler = ToFlaxType(fbxNode->EvaluateLocalRotation(FbxTime(0)));
-    Vector3 scale = ToFlaxType(fbxNode->EvaluateLocalScaling(FbxTime(0)));
+    Float3 translation = ToFlaxType(fbxNode->EvaluateLocalTranslation(FbxTime(0)));
+    Float3 rotationEuler = ToFlaxType(fbxNode->EvaluateLocalRotation(FbxTime(0)));
+    Float3 scale = ToFlaxType(fbxNode->EvaluateLocalScaling(FbxTime(0)));
     Quaternion rotation = Quaternion::Euler(rotationEuler);
 
     // Create node
@@ -231,9 +226,9 @@ void ProcessNodes(ImporterData& data, FbxNode* fbxNode, int32 parentIndex)
     node.FbxNode = fbxNode;
 
     // Geometry transform is applied to geometry (mesh data) only, it is not inherited by children, so we store it separately
-    Vector3 geomTrans = ToFlaxType(fbxNode->GeometricTranslation.Get());
-    Vector3 geomRotEuler = ToFlaxType(fbxNode->GeometricRotation.Get());
-    Vector3 geomScale = ToFlaxType(fbxNode->GeometricScaling.Get());
+    Float3 geomTrans = ToFlaxType(fbxNode->GeometricTranslation.Get());
+    Float3 geomRotEuler = ToFlaxType(fbxNode->GeometricRotation.Get());
+    Float3 geomScale = ToFlaxType(fbxNode->GeometricScaling.Get());
     Quaternion geomRotation = Quaternion::Euler(geomRotEuler);
     Transform(geomTrans, geomRotation, geomScale).GetWorld(node.GeomTransform);
 
@@ -390,11 +385,26 @@ bool ProcessMesh(ImporterData& data, FbxMesh* fbxMesh, MeshData& mesh, String& e
         mesh.Indices[i] = fbxIndices[i];
     }
 
-    // Texture coordinates
-    FbxGeometryElementUV* texcoords = fbxMesh->GetElementUV(0);
-    if (texcoords)
+    if (data.Options.ReverseWindingOrder)
     {
-        ReadLayerData(fbxMesh, *texcoords, mesh.UVs);
+        for (int32 i = 0; i < vertexCount; i += 3)
+        {
+            Swap(meshIndices[i + 1], meshIndices[i + 2]);
+            Swap(meshPositions[i + 1], meshPositions[i + 2]);
+            if (meshNormals)
+                Swap(meshNormals[i + 1], meshNormals[i + 2]);
+            if (meshTangents)
+                Swap(meshTangents[i + 1], meshTangents[i + 2]);
+        }
+    }
+
+    // Texture coordinates
+    for (int32 channelIndex = 0; channelIndex < MODEL_MAX_UV && fbxMesh->GetElementUV(channelIndex); channelIndex++)
+    {
+        FbxGeometryElementUV* texcoords = fbxMesh->GetElementUV(0);
+        mesh.UVs.Resize(channelIndex + 1);
+        auto& channel = mesh.UVs[channelIndex];
+        ReadLayerData(fbxMesh, *texcoords, channel);
     }
 
     // Normals
@@ -410,53 +420,7 @@ bool ProcessMesh(ImporterData& data, FbxMesh* fbxMesh, MeshData& mesh, String& e
     }
 
     // Lightmap UVs
-    if (data.Options.LightmapUVsSource == ModelLightmapUVsSource::Disable)
-    {
-        // No lightmap UVs
-    }
-    else if (data.Options.LightmapUVsSource == ModelLightmapUVsSource::Generate)
-    {
-        // Generate lightmap UVs
-        if (mesh.GenerateLightmapUVs())
-        {
-            // TODO: we could propagate this message to Debug Console in editor? or create interface to gather some msgs from importing service
-            LOG(Warning, "Failed to generate lightmap uvs");
-        }
-    }
-    else
-    {
-        // Select input channel index
-        int32 inputChannelIndex;
-        switch (data.Options.LightmapUVsSource)
-        {
-        case ModelLightmapUVsSource::Channel0:
-            inputChannelIndex = 0;
-            break;
-        case ModelLightmapUVsSource::Channel1:
-            inputChannelIndex = 1;
-            break;
-        case ModelLightmapUVsSource::Channel2:
-            inputChannelIndex = 2;
-            break;
-        case ModelLightmapUVsSource::Channel3:
-            inputChannelIndex = 3;
-            break;
-        default:
-            inputChannelIndex = INVALID_INDEX;
-            break;
-        }
-
-        // Check if has that channel texcoords
-        if (inputChannelIndex >= 0 && inputChannelIndex < fbxMesh->GetElementUVCount() && fbxMesh->GetElementUV(inputChannelIndex))
-        {
-            ReadLayerData(fbxMesh, *fbxMesh->GetElementUV(inputChannelIndex), mesh.LightmapUVs);
-        }
-        else
-        {
-            // TODO: we could propagate this message to Debug Console in editor? or create interface to gather some msgs from importing service
-            LOG(Warning, "Cannot import model lightmap uvs. Missing texcoords channel {0}.", inputChannelIndex);
-        }
-    }
+    mesh.SetLightmapUVsSource(data.Options.LightmapUVsSource);
 
     // Vertex Colors
     if (data.Options.ImportVertexColors && fbxMesh->GetElementVertexColorCount() > 0)
@@ -473,7 +437,7 @@ bool ProcessMesh(ImporterData& data, FbxMesh* fbxMesh, MeshData& mesh, String& e
         mesh.BlendIndices.Resize(vertexCount);
         mesh.BlendWeights.Resize(vertexCount);
         mesh.BlendIndices.SetAll(Int4::Zero);
-        mesh.BlendWeights.SetAll(Vector4::Zero);
+        mesh.BlendWeights.SetAll(Float4::Zero);
 
         for (int deformerIndex = 0; deformerIndex < skinDeformerCount; deformerIndex++)
         {
@@ -608,16 +572,17 @@ bool ProcessMesh(ImporterData& data, FbxMesh* fbxMesh, MeshData& mesh, String& e
                     blendShapeData.Vertices[i].PositionDelta = ToFlaxType(shapeControlPoints[i] - controlPoints[i]);
                 // TODO: support importing normals from blend shape
                 for (int32 i = 0; i < blendShapeData.Vertices.Count(); i++)
-                    blendShapeData.Vertices[i].NormalDelta = Vector3::Zero;
+                    blendShapeData.Vertices[i].NormalDelta = Float3::Zero;
             }
         }
     }
 
     // Flip the Y in texcoords
-    for (int32 i = 0; i < mesh.UVs.Count(); i++)
-        mesh.UVs[i].Y = 1.0f - mesh.UVs[i].Y;
-    for (int32 i = 0; i < mesh.LightmapUVs.Count(); i++)
-        mesh.LightmapUVs[i].Y = 1.0f - mesh.LightmapUVs[i].Y;
+    for (auto& channel : mesh.UVs)
+    {
+        for (int32 i = 0; i < channel.Count(); i++)
+            channel[i].Y = 1.0f - channel[i].Y;
+    }
 
     // Handle missing material case (could never happen but it's better to be sure it will work)
     if (mesh.MaterialSlotIndex == -1)
@@ -730,7 +695,7 @@ bool ImportMeshes(ImporterData& data, String& errorMsg)
 }
 
 /*
-void ImportCurve(aiVectorKey* keys, uint32 keysCount, LinearCurve<Vector3>& curve)
+void ImportCurve(aiVectorKey* keys, uint32 keysCount, LinearCurve<Float3>& curve)
 {
 	if (keys == nullptr || keysCount == 0)
 		return;
@@ -743,7 +708,7 @@ void ImportCurve(aiVectorKey* keys, uint32 keysCount, LinearCurve<Vector3>& curv
 		auto& key = keyframes[i];
 
 		key.Time = (float)aKey.mTime;
-		key.Value = ToVector3(aKey.mValue);
+		key.Value = ToFlaxType(aKey.mValue);
 	}
 }
 
@@ -821,7 +786,7 @@ void BakeTransforms(FbxScene* scene)
     scene->GetRootNode()->ConvertPivotAnimationRecursive(nullptr, FbxNode::eDestinationPivot, frameRate, false);
 }
 
-bool ModelTool::ImportDataAutodeskFbxSdk(const char* path, ImportedModelData& data, const Options& options, String& errorMsg)
+bool ModelTool::ImportDataAutodeskFbxSdk(const String& path, ImportedModelData& data, Options& options, String& errorMsg)
 {
     ScopeLock lock(FbxSdkManager::Locker);
 
@@ -841,7 +806,7 @@ bool ModelTool::ImportDataAutodeskFbxSdk(const char* path, ImportedModelData& da
     auto ios = FbxSdkManager::Manager->GetIOSettings();
     ios->SetBoolProp(IMP_FBX_MODEL, importMeshes);
     ios->SetBoolProp(IMP_FBX_ANIMATION, importAnimations);
-    if (!importer->Initialize(path, -1, ios))
+    if (!importer->Initialize(StringAnsi(path), -1, ios))
     {
         errorMsg = String::Format(TEXT("Failed to initialize FBX importer. {0}"), String(importer->GetStatus().GetErrorString()));
         return false;

@@ -1,6 +1,5 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System;
 using System.IO;
 using Flax.Build;
 using Flax.Build.NativeCpp;
@@ -8,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://www.freetype.org/
 /// </summary>
-public class freetype : DepsModule
+public class freetype : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -17,9 +16,6 @@ public class freetype : DepsModule
 
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "LICENSE.TXT";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -39,9 +35,15 @@ public class freetype : DepsModule
             break;
         case TargetPlatform.Linux:
         case TargetPlatform.PS4:
+        case TargetPlatform.PS5:
         case TargetPlatform.Android:
         case TargetPlatform.Switch:
+        case TargetPlatform.Mac:
+        case TargetPlatform.iOS:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libfreetype.a"));
+            break;
+        case TargetPlatform.Web:
+            options.OutputFiles.Add("--use-port=freetype");
             break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }

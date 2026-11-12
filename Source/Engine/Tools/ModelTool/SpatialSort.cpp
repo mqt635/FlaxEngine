@@ -44,7 +44,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /** @file Implementation of the helper class to quickly find vertices close to a given position */
 
 #include "SpatialSort.h"
-#if COMPILE_WITH_MODEL_TOOL
+#if COMPILE_WITH_MODEL_TOOL && USE_EDITOR
 #include <assimp/ai_assert.h>
 
 using namespace Assimp;
@@ -164,7 +164,7 @@ void SpatialSort::FindPositions(const aiVector3D& pPosition,
     // Add all positions inside the distance range within the given radius to the result aray
     std::vector<Entry>::const_iterator it = mPositions.begin() + index;
     const ai_real pSquared = pRadius * pRadius;
-    while (it->mDistance < maxDist)
+    while (it->mDistance <= maxDist)
     {
         if ((it->mPosition - pPosition).SquareLength() < pSquared)
             poResults.push_back(it->mIndex);

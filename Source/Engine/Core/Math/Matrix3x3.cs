@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 // -----------------------------------------------------------------------------
 // Original code from SharpDX project. https://github.com/sharpdx/SharpDX/
@@ -56,13 +56,7 @@ using System.Runtime.InteropServices;
 
 namespace FlaxEngine
 {
-    /// <summary>
-    /// Represents a 3x3 Matrix ( contains only Scale and Rotation ).
-    /// </summary>
-    [Serializable]
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    // ReSharper disable once InconsistentNaming
-    public struct Matrix3x3 : IEquatable<Matrix3x3>, IFormattable
+    partial struct Matrix3x3 : IEquatable<Matrix3x3>, IFormattable
     {
         /// <summary>
         /// The size of the <see cref="Matrix3x3"/> type, in bytes.
@@ -135,9 +129,7 @@ namespace FlaxEngine
         /// <param name="value">The value that will be assigned to all components.</param>
         public Matrix3x3(float value)
         {
-            M11 = M12 = M13 =
-                        M21 = M22 = M23 =
-                                    M31 = M32 = M33 = value;
+            M11 = M12 = M13 = M21 = M22 = M23 = M31 = M32 = M33 = value;
         }
 
         /// <summary>
@@ -194,11 +186,28 @@ namespace FlaxEngine
         }
 
         /// <summary>
+        /// Initializes a new instance of the <see cref="Matrix3x3" /> struct.
+        /// </summary>
+        /// <param name="m">The rotation/scale matrix.</param>
+        public Matrix3x3(Matrix m)
+        {
+            M11 = m.M11;
+            M12 = m.M12;
+            M13 = m.M13;
+            M21 = m.M21;
+            M22 = m.M22;
+            M23 = m.M23;
+            M31 = m.M31;
+            M32 = m.M32;
+            M33 = m.M33;
+        }
+
+        /// <summary>
         /// Gets or sets the first row in the Matrix3x3; that is M11, M12, M13
         /// </summary>
-        public Vector3 Row1
+        public Float3 Row1
         {
-            get => new Vector3(M11, M12, M13);
+            get => new Float3(M11, M12, M13);
             set
             {
                 M11 = value.X;
@@ -210,9 +219,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the second row in the Matrix3x3; that is M21, M22, M23
         /// </summary>
-        public Vector3 Row2
+        public Float3 Row2
         {
-            get => new Vector3(M21, M22, M23);
+            get => new Float3(M21, M22, M23);
             set
             {
                 M21 = value.X;
@@ -224,9 +233,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the third row in the Matrix3x3; that is M31, M32, M33
         /// </summary>
-        public Vector3 Row3
+        public Float3 Row3
         {
-            get => new Vector3(M31, M32, M33);
+            get => new Float3(M31, M32, M33);
             set
             {
                 M31 = value.X;
@@ -238,9 +247,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the first column in the Matrix3x3; that is M11, M21, M31
         /// </summary>
-        public Vector3 Column1
+        public Float3 Column1
         {
-            get => new Vector3(M11, M21, M31);
+            get => new Float3(M11, M21, M31);
             set
             {
                 M11 = value.X;
@@ -252,9 +261,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the second column in the Matrix3x3; that is M12, M22, M32
         /// </summary>
-        public Vector3 Column2
+        public Float3 Column2
         {
-            get => new Vector3(M12, M22, M32);
+            get => new Float3(M12, M22, M32);
             set
             {
                 M12 = value.X;
@@ -266,9 +275,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the third column in the Matrix3x3; that is M13, M23, M33
         /// </summary>
-        public Vector3 Column3
+        public Float3 Column3
         {
-            get => new Vector3(M13, M23, M33);
+            get => new Float3(M13, M23, M33);
             set
             {
                 M13 = value.X;
@@ -280,9 +289,9 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the scale of the Matrix3x3; that is M11, M22, and M33.
         /// </summary>
-        public Vector3 ScaleVector
+        public Float3 ScaleVector
         {
-            get => new Vector3(M11, M22, M33);
+            get => new Float3(M11, M22, M33);
             set
             {
                 M11 = value.X;
@@ -294,9 +303,6 @@ namespace FlaxEngine
         /// <summary>
         /// Gets a value indicating whether this instance is an identity Matrix3x3.
         /// </summary>
-        /// <value>
-        /// <c>true</c> if this instance is an identity Matrix3x3; otherwise, <c>false</c>.
-        /// </value>
         public bool IsIdentity => Equals(Identity);
 
         /// <summary>
@@ -471,12 +477,12 @@ namespace FlaxEngine
 
             r = new Matrix3x3
             {
-                M11 = Vector3.Dot(q.Column1, Column1),
-                M12 = Vector3.Dot(q.Column1, Column2),
-                M13 = Vector3.Dot(q.Column1, Column3),
-                M22 = Vector3.Dot(q.Column2, Column2),
-                M23 = Vector3.Dot(q.Column2, Column3),
-                M33 = Vector3.Dot(q.Column3, Column3)
+                M11 = Float3.Dot(q.Column1, Column1),
+                M12 = Float3.Dot(q.Column1, Column2),
+                M13 = Float3.Dot(q.Column1, Column3),
+                M22 = Float3.Dot(q.Column2, Column2),
+                M23 = Float3.Dot(q.Column2, Column3),
+                M33 = Float3.Dot(q.Column3, Column3)
             };
         }
 
@@ -492,12 +498,12 @@ namespace FlaxEngine
 
             l = new Matrix3x3
             {
-                M11 = Vector3.Dot(q.Row1, Row1),
-                M21 = Vector3.Dot(q.Row1, Row2),
-                M22 = Vector3.Dot(q.Row2, Row2),
-                M31 = Vector3.Dot(q.Row1, Row3),
-                M32 = Vector3.Dot(q.Row2, Row3),
-                M33 = Vector3.Dot(q.Row3, Row3)
+                M11 = Float3.Dot(q.Row1, Row1),
+                M21 = Float3.Dot(q.Row1, Row2),
+                M22 = Float3.Dot(q.Row2, Row2),
+                M31 = Float3.Dot(q.Row1, Row3),
+                M32 = Float3.Dot(q.Row2, Row3),
+                M33 = Float3.Dot(q.Row3, Row3)
             };
         }
 
@@ -509,7 +515,7 @@ namespace FlaxEngine
         /// <remarks>
         /// This method is designed to decompose an SRT transformation Matrix3x3 only.
         /// </remarks>
-        public bool Decompose(out Vector3 scale, out Quaternion rotation)
+        public bool Decompose(out Float3 scale, out Quaternion rotation)
         {
             //Source: Unknown
             //References: http://www.gamedev.net/community/forums/topic.asp?topic_id=441695
@@ -557,19 +563,19 @@ namespace FlaxEngine
         /// </remarks>
         public bool DecomposeUniformScale(out float scale, out Quaternion rotation)
         {
-            //Scaling is the length of the rows. ( just take one row since this is a uniform matrix)
+            // Scaling is the length of the rows. ( just take one row since this is a uniform matrix)
             scale = (float)Math.Sqrt((M11 * M11) + (M12 * M12) + (M13 * M13));
             var invScale = 1f / scale;
 
-            //If any of the scaling factors are zero, then the rotation matrix can not exist.
+            // If any of the scaling factors are zero, then the rotation matrix can not exist
             if (Math.Abs(scale) < Mathf.Epsilon)
             {
                 rotation = Quaternion.Identity;
                 return false;
             }
 
-            //The rotation is the left over matrix after dividing out the scaling.
-            Matrix3x3 rotationmatrix = new Matrix3x3
+            // The rotation is the leftover matrix after dividing out the scaling
+            var rotationMatrix = new Matrix3x3
             {
                 M11 = M11 * invScale,
                 M12 = M12 * invScale,
@@ -581,8 +587,7 @@ namespace FlaxEngine
                 M32 = M32 * invScale,
                 M33 = M33 * invScale
             };
-
-            Quaternion.RotationMatrix(ref rotationmatrix, out rotation);
+            Quaternion.RotationMatrix(ref rotationMatrix, out rotation);
             return true;
         }
 
@@ -1143,10 +1148,10 @@ namespace FlaxEngine
             //By separating the above algorithm into multiple lines, we actually increase accuracy.
             result = value;
 
-            result.Row2 -= (Vector3.Dot(result.Row1, result.Row2) / Vector3.Dot(result.Row1, result.Row1)) * result.Row1;
+            result.Row2 -= (Float3.Dot(result.Row1, result.Row2) / Float3.Dot(result.Row1, result.Row1)) * result.Row1;
 
-            result.Row3 -= (Vector3.Dot(result.Row1, result.Row3) / Vector3.Dot(result.Row1, result.Row1)) * result.Row1;
-            result.Row3 -= (Vector3.Dot(result.Row2, result.Row3) / Vector3.Dot(result.Row2, result.Row2)) * result.Row2;
+            result.Row3 -= (Float3.Dot(result.Row1, result.Row3) / Float3.Dot(result.Row1, result.Row1)) * result.Row1;
+            result.Row3 -= (Float3.Dot(result.Row2, result.Row3) / Float3.Dot(result.Row2, result.Row2)) * result.Row2;
         }
 
         /// <summary>
@@ -1201,14 +1206,14 @@ namespace FlaxEngine
             //By separating the above algorithm into multiple lines, we actually increase accuracy.
             result = value;
 
-            result.Row1 = Vector3.Normalize(result.Row1);
+            result.Row1 = Float3.Normalize(result.Row1);
 
-            result.Row2 -= Vector3.Dot(result.Row1, result.Row2) * result.Row1;
-            result.Row2 = Vector3.Normalize(result.Row2);
+            result.Row2 -= Float3.Dot(result.Row1, result.Row2) * result.Row1;
+            result.Row2 = Float3.Normalize(result.Row2);
 
-            result.Row3 -= Vector3.Dot(result.Row1, result.Row3) * result.Row1;
-            result.Row3 -= Vector3.Dot(result.Row2, result.Row3) * result.Row2;
-            result.Row3 = Vector3.Normalize(result.Row3);
+            result.Row3 -= Float3.Dot(result.Row1, result.Row3) * result.Row1;
+            result.Row3 -= Float3.Dot(result.Row2, result.Row3) * result.Row2;
+            result.Row3 = Float3.Normalize(result.Row3);
         }
 
         /// <summary>
@@ -1471,22 +1476,22 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="objectPosition">The position of the object around which the billboard will rotate.</param>
         /// <param name="cameraPosition">The position of the camera.</param>
-        /// <param name="cameraUpVector">The up vector of the camera.</param>
-        /// <param name="cameraForwardVector">The forward vector of the camera.</param>
+        /// <param name="cameraUpFloat">The up vector of the camera.</param>
+        /// <param name="cameraForwardFloat">The forward vector of the camera.</param>
         /// <param name="result">When the method completes, contains the created billboard Matrix3x3.</param>
-        public static void Billboard(ref Vector3 objectPosition, ref Vector3 cameraPosition, ref Vector3 cameraUpVector, ref Vector3 cameraForwardVector, out Matrix3x3 result)
+        public static void Billboard(ref Float3 objectPosition, ref Float3 cameraPosition, ref Float3 cameraUpFloat, ref Float3 cameraForwardFloat, out Matrix3x3 result)
         {
-            Vector3 difference = cameraPosition - objectPosition;
+            Float3 difference = cameraPosition - objectPosition;
 
             float lengthSq = difference.LengthSquared;
             if (Mathf.IsZero(lengthSq))
-                difference = -cameraForwardVector;
+                difference = -cameraForwardFloat;
             else
                 difference *= (float)(1.0 / Math.Sqrt(lengthSq));
 
-            Vector3.Cross(ref cameraUpVector, ref difference, out Vector3 crossed);
+            Float3.Cross(ref cameraUpFloat, ref difference, out Float3 crossed);
             crossed.Normalize();
-            Vector3.Cross(ref difference, ref crossed, out Vector3 final);
+            Float3.Cross(ref difference, ref crossed, out Float3 final);
 
             result.M11 = crossed.X;
             result.M12 = crossed.Y;
@@ -1504,12 +1509,12 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="objectPosition">The position of the object around which the billboard will rotate.</param>
         /// <param name="cameraPosition">The position of the camera.</param>
-        /// <param name="cameraUpVector">The up vector of the camera.</param>
-        /// <param name="cameraForwardVector">The forward vector of the camera.</param>
+        /// <param name="cameraUpFloat">The up vector of the camera.</param>
+        /// <param name="cameraForwardFloat">The forward vector of the camera.</param>
         /// <returns>The created billboard Matrix3x3.</returns>
-        public static Matrix3x3 Billboard(Vector3 objectPosition, Vector3 cameraPosition, Vector3 cameraUpVector, Vector3 cameraForwardVector)
+        public static Matrix3x3 Billboard(Float3 objectPosition, Float3 cameraPosition, Float3 cameraUpFloat, Float3 cameraForwardFloat)
         {
-            Billboard(ref objectPosition, ref cameraPosition, ref cameraUpVector, ref cameraForwardVector, out Matrix3x3 result);
+            Billboard(ref objectPosition, ref cameraPosition, ref cameraUpFloat, ref cameraForwardFloat, out Matrix3x3 result);
             return result;
         }
 
@@ -1520,15 +1525,15 @@ namespace FlaxEngine
         /// <param name="target">The camera look-at target.</param>
         /// <param name="up">The camera's up vector.</param>
         /// <param name="result">When the method completes, contains the created look-at Matrix3x3.</param>
-        public static void LookAt(ref Vector3 eye, ref Vector3 target, ref Vector3 up, out Matrix3x3 result)
+        public static void LookAt(ref Float3 eye, ref Float3 target, ref Float3 up, out Matrix3x3 result)
         {
-            Vector3.Subtract(ref target, ref eye, out Vector3 zaxis);
+            Float3.Subtract(ref target, ref eye, out Float3 zaxis);
             zaxis.Normalize();
 
-            Vector3.Cross(ref up, ref zaxis, out Vector3 xaxis);
+            Float3.Cross(ref up, ref zaxis, out Float3 xaxis);
             xaxis.Normalize();
 
-            Vector3.Cross(ref zaxis, ref xaxis, out Vector3 yaxis);
+            Float3.Cross(ref zaxis, ref xaxis, out Float3 yaxis);
 
             result = Identity;
             result.M11 = xaxis.X;
@@ -1549,7 +1554,7 @@ namespace FlaxEngine
         /// <param name="target">The camera look-at target.</param>
         /// <param name="up">The camera's up vector.</param>
         /// <returns>The created look-at Matrix3x3.</returns>
-        public static Matrix3x3 LookAt(Vector3 eye, Vector3 target, Vector3 up)
+        public static Matrix3x3 LookAt(Float3 eye, Float3 target, Float3 up)
         {
             LookAt(ref eye, ref target, ref up, out Matrix3x3 result);
             return result;
@@ -1560,7 +1565,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="scale">Scaling factor for all three axes.</param>
         /// <param name="result">When the method completes, contains the created scaling Matrix3x3.</param>
-        public static void Scaling(ref Vector3 scale, out Matrix3x3 result)
+        public static void Scaling(ref Float3 scale, out Matrix3x3 result)
         {
             Scaling(scale.X, scale.Y, scale.Z, out result);
         }
@@ -1570,7 +1575,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="scale">Scaling factor for all three axes.</param>
         /// <returns>The created scaling Matrix3x3.</returns>
-        public static Matrix3x3 Scaling(Vector3 scale)
+        public static Matrix3x3 Scaling(Float3 scale)
         {
             Scaling(ref scale, out Matrix3x3 result);
             return result;
@@ -1634,7 +1639,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="shearAngles">The shear angles (in degrees).</param>
         /// <param name="result">The result.</param>
-        public static void Shear(ref Vector2 shearAngles, out Matrix3x3 result)
+        public static void Shear(ref Float2 shearAngles, out Matrix3x3 result)
         {
             float shearX = shearAngles.X == 0 ? 0 : (1.0f / Mathf.Tan(Mathf.DegreesToRadians * (90 - Mathf.Clamp(shearAngles.X, -89.0f, 89.0f))));
             float shearY = shearAngles.Y == 0 ? 0 : (1.0f / Mathf.Tan(Mathf.DegreesToRadians * (90 - Mathf.Clamp(shearAngles.Y, -89.0f, 89.0f))));
@@ -1734,7 +1739,7 @@ namespace FlaxEngine
         /// <param name="axis">The axis around which to rotate. This parameter is assumed to be normalized.</param>
         /// <param name="angle">Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.</param>
         /// <param name="result">When the method completes, contains the created rotation Matrix3x3.</param>
-        public static void RotationAxis(ref Vector3 axis, float angle, out Matrix3x3 result)
+        public static void RotationAxis(ref Float3 axis, float angle, out Matrix3x3 result)
         {
             float x = axis.X;
             float y = axis.Y;
@@ -1766,7 +1771,7 @@ namespace FlaxEngine
         /// <param name="axis">The axis around which to rotate. This parameter is assumed to be normalized.</param>
         /// <param name="angle">Angle of rotation in radians. Angles are measured clockwise when looking along the rotation axis toward the origin.</param>
         /// <returns>The created rotation Matrix3x3.</returns>
-        public static Matrix3x3 RotationAxis(Vector3 axis, float angle)
+        public static Matrix3x3 RotationAxis(Float3 axis, float angle)
         {
             RotationAxis(ref axis, angle, out Matrix3x3 result);
             return result;
@@ -1843,13 +1848,9 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="translation">The translation vector.</param>
         /// <param name="result">The result.</param>
-        public static void Translation2D(ref Vector2 translation, out Matrix3x3 result)
+        public static void Translation2D(ref Float2 translation, out Matrix3x3 result)
         {
-            result = new Matrix3x3(
-                1, 0, 0,
-                0, 1, 0,
-                translation.X, translation.Y, 1
-            );
+            result = new Matrix3x3(    1, 0, 0, 0, 1, 0, translation.X, translation.Y, 1);
         }
 
         /// <summary>
@@ -1857,13 +1858,9 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="translation">The translation vector.</param>
         /// <returns>The result.</returns>
-        public static Matrix3x3 Translation2D(Vector2 translation)
+        public static Matrix3x3 Translation2D(Float2 translation)
         {
-            return new Matrix3x3(
-                1, 0, 0,
-                0, 1, 0,
-                translation.X, translation.Y, 1
-            );
+            return new Matrix3x3(1, 0, 0, 0, 1, 0, translation.X, translation.Y, 1);
         }
 
         /// <summary>
@@ -1874,11 +1871,7 @@ namespace FlaxEngine
         /// <returns>The result.</returns>
         public static Matrix3x3 Translation2D(float x, float y)
         {
-            return new Matrix3x3(
-                1, 0, 0,
-                0, 1, 0,
-                x, y, 1
-            );
+            return new Matrix3x3(1, 0, 0, 0, 1, 0, x, y, 1);
         }
 
         /// <summary>
@@ -1887,11 +1880,9 @@ namespace FlaxEngine
         /// <param name="vector">The vector.</param>
         /// <param name="transform">The transform.</param>
         /// <param name="result">The result.</param>
-        public static void Transform2D(ref Vector2 vector, ref Matrix3x3 transform, out Vector2 result)
+        public static void Transform2D(ref Float2 vector, ref Matrix3x3 transform, out Float2 result)
         {
-            result = new Vector2(
-                (vector.X * transform.M11) + (vector.Y * transform.M21) + transform.M31,
-                (vector.X * transform.M12) + (vector.Y * transform.M22) + transform.M32);
+            result = new Float2((vector.X * transform.M11) + (vector.Y * transform.M21) + transform.M31, (vector.X * transform.M12) + (vector.Y * transform.M22) + transform.M32);
         }
 
         /// <summary>
@@ -1900,9 +1891,9 @@ namespace FlaxEngine
         /// <param name="vector">The vector.</param>
         /// <param name="transform">The transform.</param>
         /// <returns>The result.</returns>
-        public static Vector2 Transform2D(Vector2 vector, Matrix3x3 transform)
+        public static Float2 Transform2D(Float2 vector, Matrix3x3 transform)
         {
-            Transform2D(ref vector, ref transform, out Vector2 result);
+            Transform2D(ref vector, ref transform, out Float2 result);
             return result;
         }
 
@@ -2041,12 +2032,7 @@ namespace FlaxEngine
         /// <returns>A 4x4 Matrix with zero translation and M44=1</returns>
         public static explicit operator Matrix(Matrix3x3 value)
         {
-            return new Matrix(
-                value.M11, value.M12, value.M13, 0,
-                value.M21, value.M22, value.M23, 0,
-                value.M31, value.M32, value.M33, 0,
-                0, 0, 0, 1
-            );
+            return new Matrix(value.M11, value.M12, value.M13, 0, value.M21, value.M22, value.M23, 0, value.M31, value.M32, value.M33, 0, 0, 0, 0, 1);
         }
 
         /// <summary>
@@ -2055,37 +2041,27 @@ namespace FlaxEngine
         /// <returns>A 3x3 Matrix</returns>
         public static explicit operator Matrix3x3(Matrix value)
         {
-            return new Matrix3x3(
-                value.M11, value.M12, value.M13,
-                value.M21, value.M22, value.M23,
-                value.M31, value.M32, value.M33
-            );
+            return new Matrix3x3(value.M11, value.M12, value.M13, value.M21, value.M22, value.M23, value.M31, value.M32, value.M33);
         }
 
         /// <summary>
         /// Returns a <see cref="System.String"/> that represents this instance.
         /// </summary>
-        /// <returns>
-        /// A <see cref="System.String"/> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String"/> that represents this instance.</returns>
         public override string ToString()
         {
-            return string.Format(CultureInfo.CurrentCulture, "[M11:{0} M12:{1} M13:{2}] [M21:{3} M22:{4} M23:{5}] [M31:{6} M32:{7} M33:{8}]",
-                                 M11, M12, M13, M21, M22, M23, M31, M32, M33);
+            return string.Format(CultureInfo.CurrentCulture, "[M11:{0} M12:{1} M13:{2}] [M21:{3} M22:{4} M23:{5}] [M31:{6} M32:{7} M33:{8}]", M11, M12, M13, M21, M22, M23, M31, M32, M33);
         }
 
         /// <summary>
         /// Returns a <see cref="System.String"/> that represents this instance.
         /// </summary>
         /// <param name="format">The format.</param>
-        /// <returns>
-        /// A <see cref="System.String"/> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String"/> that represents this instance.</returns>
         public string ToString(string format)
         {
             if (format == null)
                 return ToString();
-
             return string.Format(format, CultureInfo.CurrentCulture, "[M11:{0} M12:{1} M13:{2}] [M21:{3} M22:{4} M23:{5}] [M31:{6} M32:{7} M33:{8}]",
                                  M11.ToString(format, CultureInfo.CurrentCulture), M12.ToString(format, CultureInfo.CurrentCulture), M13.ToString(format, CultureInfo.CurrentCulture),
                                  M21.ToString(format, CultureInfo.CurrentCulture), M22.ToString(format, CultureInfo.CurrentCulture), M23.ToString(format, CultureInfo.CurrentCulture),
@@ -2096,9 +2072,7 @@ namespace FlaxEngine
         /// Returns a <see cref="System.String"/> that represents this instance.
         /// </summary>
         /// <param name="formatProvider">The format provider.</param>
-        /// <returns>
-        /// A <see cref="System.String"/> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String"/> that represents this instance.</returns>
         public string ToString(IFormatProvider formatProvider)
         {
             return string.Format(formatProvider, "[M11:{0} M12:{1} M13:{2}] [M21:{3} M22:{4} M23:{5}] [M31:{6} M32:{7} M33:{8}]",
@@ -2112,14 +2086,11 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="format">The format.</param>
         /// <param name="formatProvider">The format provider.</param>
-        /// <returns>
-        /// A <see cref="System.String"/> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String"/> that represents this instance.</returns>
         public string ToString(string format, IFormatProvider formatProvider)
         {
             if (format == null)
                 return ToString(formatProvider);
-
             return string.Format(format, formatProvider, "[M11:{0} M12:{1} M13:{2}] [M21:{3} M22:{4} M23:{5}] [M31:{6} M32:{7} M33:{8}]",
                                  M11.ToString(format, formatProvider), M12.ToString(format, formatProvider), M13.ToString(format, formatProvider),
                                  M21.ToString(format, formatProvider), M22.ToString(format, formatProvider), M23.ToString(format, formatProvider),
@@ -2129,9 +2100,7 @@ namespace FlaxEngine
         /// <summary>
         /// Returns a hash code for this instance.
         /// </summary>
-        /// <returns>
-        /// A hash code for this instance, suitable for use in hashing algorithms and data structures like a hash table. 
-        /// </returns>
+        /// <returns>A hash code for this instance, suitable for use in hashing algorithms and data structures like a hash table.</returns>
         public override int GetHashCode()
         {
             unchecked
@@ -2153,29 +2122,25 @@ namespace FlaxEngine
         /// Determines whether the specified <see cref="Matrix3x3"/> is equal to this instance.
         /// </summary>
         /// <param name="other">The <see cref="Matrix3x3"/> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Matrix3x3"/> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="Matrix3x3"/> is equal to this instance; otherwise, <c>false</c>.</returns>
         public bool Equals(ref Matrix3x3 other)
         {
-            return (Mathf.NearEqual(other.M11, M11) &&
-                    Mathf.NearEqual(other.M12, M12) &&
-                    Mathf.NearEqual(other.M13, M13) &&
-                    Mathf.NearEqual(other.M21, M21) &&
-                    Mathf.NearEqual(other.M22, M22) &&
-                    Mathf.NearEqual(other.M23, M23) &&
-                    Mathf.NearEqual(other.M31, M31) &&
-                    Mathf.NearEqual(other.M32, M32) &&
-                    Mathf.NearEqual(other.M33, M33));
+            return  M11 == other.M11 &&
+                    M12 == other.M12 &&
+                    M13 == other.M13 &&
+                    M21 == other.M21 &&
+                    M22 == other.M22 &&
+                    M23 == other.M23 &&
+                    M31 == other.M31 &&
+                    M32 == other.M32 &&
+                    M33 == other.M33;
         }
 
         /// <summary>
         /// Determines whether the specified <see cref="Matrix3x3"/> is equal to this instance.
         /// </summary>
         /// <param name="other">The <see cref="Matrix3x3"/> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Matrix3x3"/> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="Matrix3x3"/> is equal to this instance; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Equals(Matrix3x3 other)
         {
@@ -2187,33 +2152,17 @@ namespace FlaxEngine
         /// </summary>
         public static bool Equals(ref Matrix3x3 a, ref Matrix3x3 b)
         {
-            return
-            Mathf.NearEqual(a.M11, b.M11) &&
-            Mathf.NearEqual(a.M12, b.M12) &&
-            Mathf.NearEqual(a.M13, b.M13) &&
-            Mathf.NearEqual(a.M21, b.M21) &&
-            Mathf.NearEqual(a.M22, b.M22) &&
-            Mathf.NearEqual(a.M23, b.M23) &&
-            Mathf.NearEqual(a.M31, b.M31) &&
-            Mathf.NearEqual(a.M32, b.M32) &&
-            Mathf.NearEqual(a.M33, b.M33)
-            ;
+            return a.Equals(ref b);
         }
 
         /// <summary>
         /// Determines whether the specified <see cref="System.Object"/> is equal to this instance.
         /// </summary>
         /// <param name="value">The <see cref="System.Object"/> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="System.Object"/> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="System.Object"/> is equal to this instance; otherwise, <c>false</c>.</returns>
         public override bool Equals(object value)
         {
-            if (!(value is Matrix3x3))
-                return false;
-
-            var strongValue = (Matrix3x3)value;
-            return Equals(ref strongValue);
+            return value is Matrix3x3 other && Equals(ref other);
         }
     }
 }

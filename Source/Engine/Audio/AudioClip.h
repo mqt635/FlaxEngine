@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,9 +17,10 @@ class AudioSource;
 /// <seealso cref="BinaryAsset" />
 API_CLASS(NoSpawn) class FLAXENGINE_API AudioClip : public BinaryAsset, public StreamableResource
 {
-DECLARE_BINARY_ASSET_HEADER(AudioClip, 2);
-public:
+    DECLARE_BINARY_ASSET_HEADER(AudioClip, 2);
+    friend class AudioBackendOAL;
 
+public:
     /// <summary>
     /// Audio Clip resource header structure, version 2. Added on 08.08.2019.
     /// </summary>
@@ -40,53 +41,35 @@ public:
     class StreamingTask : public ThreadPoolTask
     {
     private:
-
         WeakAssetReference<AudioClip> _asset;
         FlaxStorage::LockData _dataLock;
 
     public:
-
-        /// <summary>
-        /// Init
-        /// </summary>
-        /// <param name="asset">Parent asset</param>
-        StreamingTask(AudioClip* asset)
-            : _asset(asset)
-            , _dataLock(asset->Storage->Lock())
-        {
-        }
+        StreamingTask(AudioClip* asset);
 
     public:
-
         // [ThreadPoolTask]
-        bool HasReference(Object* resource) const override
-        {
-            return _asset == resource;
-        }
+        bool HasReference(Object* resource) const override;
 
     protected:
-
         // [ThreadPoolTask]
         bool Run() override;
         void OnEnd() override;
     };
 
 private:
-
     int32 _totalChunks;
     int32 _totalChunksSize;
     StreamingTask* _streamingTask;
     float _buffersStartTimes[ASSET_FILE_DATA_CHUNKS + 1];
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="AudioClip"/> class.
     /// </summary>
     ~AudioClip();
 
 public:
-
     /// <summary>
     /// The audio clip header data.
     /// </summary>
@@ -95,7 +78,7 @@ public:
     /// <summary>
     /// The audio backend buffers (internal ids) collection used by this audio clip.
     /// </summary>
-    Array<AUDIO_BUFFER_ID_TYPE, FixedAllocation<ASSET_FILE_DATA_CHUNKS>> Buffers;
+    Array<uint32, FixedAllocation<ASSET_FILE_DATA_CHUNKS>> Buffers;
 
     /// <summary>
     /// The streaming cache. Contains indices of chunks to stream. If empty no streaming required. Managed by AudioStreamingHandler and used by the Audio streaming tasks.
@@ -103,11 +86,9 @@ public:
     Array<int32, FixedAllocation<ASSET_FILE_DATA_CHUNKS>> StreamingQueue;
 
 public:
-
     /// <summary>
     /// Gets the audio data format.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY() FORCE_INLINE AudioFormat Format() const
     {
         return AudioHeader.Format;
@@ -116,7 +97,6 @@ public:
     /// <summary>
     /// Gets the audio data info metadata.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY() FORCE_INLINE const AudioDataInfo& Info() const
     {
         return AudioHeader.Info;
@@ -125,7 +105,6 @@ public:
     /// <summary>
     /// Returns true if the sound source is three dimensional (volume and pitch varies based on listener distance and velocity).
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY() FORCE_INLINE bool Is3D() const
     {
         return AudioHeader.Is3D;
@@ -134,7 +113,6 @@ public:
     /// <summary>
     /// Returns true if the sound is using data streaming.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY() FORCE_INLINE bool IsStreamable() const
     {
         return AudioHeader.Streamable;
@@ -143,7 +121,6 @@ public:
     /// <summary>
     /// Returns true if the sound data is during streaming by an async task.
     /// </summary>
-    /// <returns>The streaming task existence value flag.</returns>
     API_PROPERTY() FORCE_INLINE bool IsStreamingTaskActive() const
     {
         return _streamingTask != nullptr;
@@ -152,11 +129,12 @@ public:
     /// <summary>
     /// Gets the length of the audio clip (in seconds).
     /// </summary>
-    /// <returns>The value.</returns>
-    API_PROPERTY() float GetLength() const;
+    API_PROPERTY() float GetLength() const
+    {
+        return AudioHeader.Info.GetLength();
+    }
 
 public:
-
     /// <summary>
     /// Gets the buffer start time (in seconds).
     /// </summary>
@@ -173,7 +151,6 @@ public:
     int32 GetFirstBufferIndex(float time, float& offset) const;
 
 public:
-
     /// <summary>
     /// Extracts the source audio data from the asset storage. Loads the whole asset. The result data is in an asset format.
     /// </summary>
@@ -199,6 +176,8 @@ public:
     API_FUNCTION() bool ExtractDataRaw(API_PARAM(Out) Array<byte>& resultData, API_PARAM(Out) AudioDataInfo& resultDataInfo);
 
 public:
+    // [BinaryAsset]
+    void CancelStreaming() override;
 
     // [StreamableResource]
     int32 GetMaxResidency() const override;
@@ -207,11 +186,15 @@ public:
     bool CanBeUpdated() const override;
     Task* UpdateAllocation(int32 residency) override;
     Task* CreateStreamingTask(int32 residency) override;
+    void CancelStreamingTasks() override;
 
 protected:
-
     // [BinaryAsset]
     bool init(AssetInitData& initData) override;
     LoadResult load() override;
     void unload(bool isReloading) override;
+
+private:
+    // Writes audio samples into Audio Backend buffer and handles automatic decompression or format conversion for runtime playback.
+    bool WriteBuffer(int32 chunkIndex);
 };

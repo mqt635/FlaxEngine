@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections;
 using System.Xml;
@@ -7,6 +7,7 @@ using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.GUI;
+using FlaxEditor.GUI.Tree;
 using FlaxEditor.Viewport.Cameras;
 using FlaxEditor.Viewport.Previews;
 using FlaxEngine;
@@ -79,11 +80,8 @@ namespace FlaxEditor.Windows.Assets
                 public override void Initialize(LayoutElementsContainer layout)
                 {
                     var proxy = (PropertiesProxy)Values[0];
-                    if (proxy.Asset == null || !proxy.Asset.IsLoaded)
-                    {
-                        layout.Label("Loading...");
+                    if (Utilities.Utils.OnAssetProperties(layout, proxy.Asset))
                         return;
-                    }
 
                     base.Initialize(layout);
 
@@ -166,7 +164,20 @@ namespace FlaxEditor.Windows.Assets
                     var proxy = (PropertiesProxy)Values[0];
                     int nodeIndex = (int)checkBox.Tag;
                     proxy.NodesMask[nodeIndex] = checkBox.Checked;
+                    if (Input.GetKey(KeyboardKeys.Shift))
+                        SetTreeChecked(checkBox.Parent as TreeNode, checkBox.Checked);
                     proxy.Window.MarkAsEdited();
+                }
+
+                private void SetTreeChecked(TreeNode tree, bool state)
+                {
+                    foreach (var node in tree.Children)
+                    {
+                        if (node is TreeNode treeNode)
+                            SetTreeChecked(treeNode, state);
+                        else if (node is CheckBox checkBox)
+                            checkBox.Checked = state;
+                    }
                 }
             }
         }
@@ -181,8 +192,10 @@ namespace FlaxEditor.Windows.Assets
         public SkeletonMaskWindow(Editor editor, AssetItem item)
         : base(editor, item)
         {
+            var inputOptions = Editor.Options.Options.Input;
+
             // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save asset to the file");
+            _saveButton = _toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save", ref inputOptions.Save);
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/animation/skeleton-mask.html")).LinkTooltip("See documentation to learn more");
 
@@ -290,14 +303,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

@@ -1,33 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+#if FLAX_EDITOR
 using System;
 using System.ComponentModel;
 using System.Globalization;
 
 namespace FlaxEngine.TypeConverters
 {
-    internal class QuaternionConverter : TypeConverter
+    internal class QuaternionConverter : VectorConverter
     {
-        /// <inheritdoc />
-        public override bool CanConvertFrom(ITypeDescriptorContext context, Type sourceType)
-        {
-            if (sourceType == typeof(string))
-            {
-                return true;
-            }
-
-            return base.CanConvertFrom(context, sourceType);
-        }
-
         /// <inheritdoc />
         public override object ConvertFrom(ITypeDescriptorContext context, CultureInfo culture, object value)
         {
             if (value is string str)
             {
-                string[] v = str.Split(',');
-                return new Quaternion(float.Parse(v[0]), float.Parse(v[1]), float.Parse(v[2]), float.Parse(v[3]));
+                string[] v = GetParts(str);
+                return new Quaternion(float.Parse(v[0], culture), float.Parse(v[1], culture), float.Parse(v[2], culture), float.Parse(v[3], culture));
             }
-
             return base.ConvertFrom(context, culture, value);
         }
 
@@ -36,10 +25,11 @@ namespace FlaxEngine.TypeConverters
         {
             if (destinationType == typeof(string))
             {
-                return ((Quaternion)value).X + "," + ((Quaternion)value).Y + "," + ((Quaternion)value).Z + "," + ((Quaternion)value).W;
+                var v = (Quaternion)value;
+                return v.X.ToString(culture) + "," + v.Y.ToString(culture) + "," + v.Z.ToString(culture) + "," + v.W.ToString(culture);
             }
-
             return base.ConvertTo(context, culture, value, destinationType);
         }
     }
 }
+#endif

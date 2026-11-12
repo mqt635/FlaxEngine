@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2020 Flax Engine. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -10,8 +10,13 @@ namespace Flax.Deploy
     {
         public class Platforms
         {
+            internal static List<TargetPlatform> PackagedPlatforms;
+
             public static void Package(TargetPlatform platform)
             {
+                if (PackagedPlatforms == null)
+                    PackagedPlatforms = new List<TargetPlatform>();
+                PackagedPlatforms.Add(platform);
                 var platformsRoot = Path.Combine(Globals.EngineRoot, "Source", "Platforms");
 
                 Log.Info(string.Empty);
@@ -23,16 +28,35 @@ namespace Flax.Deploy
                 string dst = Path.Combine(Deployer.PackageOutputPath, platformName);
                 Utilities.DirectoryDelete(dst);
 
+                // Deploy debug files for crashes debugging
+                foreach (var configuration in new[] { TargetConfiguration.Debug, TargetConfiguration.Development, TargetConfiguration.Release  })
+                {
+                    if (platform == TargetPlatform.Windows)
+                    {
+                        var dstDebug = Path.Combine(Deployer.PackageOutputPath, $"GameDebugSymbols/{platform}/{configuration}");
+                        Directory.CreateDirectory(dstDebug);
+                        var binaries = Path.Combine(src, "Binaries", "Game", "x64", configuration.ToString());
+                        DeployFiles(binaries, dstDebug, "*.pdb");
+                    }
+                }
+
                 // Deploy files
                 {
                     DeployFolder(platformsRoot, Deployer.PackageOutputPath, platformName);
 
+                    // Strip internal engine data
+                    Utilities.DirectoryDelete(Path.Combine(dst, "Binaries", "ThirdParty"));
+                    Utilities.DirectoryDelete(Path.Combine(dst, "Binaries", "Data"));
+
                     // For Linux don't deploy engine libs used by C++ scripting linking (engine source required)
                     if (platform == TargetPlatform.Linux)
                     {
-                        File.Delete(Path.Combine(dst, "Binaries", "Game", "x64", "Debug", "FlaxGame.a"));
-                        File.Delete(Path.Combine(dst, "Binaries", "Game", "x64", "Development", "FlaxGame.a"));
-                        File.Delete(Path.Combine(dst, "Binaries", "Game", "x64", "Release", "FlaxGame.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Debug", "FlaxGame.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Development", "FlaxGame.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Release", "FlaxGame.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Debug", "FlaxEngine.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Development", "FlaxEngine.a"));
+                        Utilities.FileDelete(Path.Combine(dst, "Binaries", "Game", "x64", "Release", "FlaxEngine.a"));
                     }
 
                     // Sign binaries
@@ -40,15 +64,32 @@ namespace Flax.Deploy
                     {
                         var binaries = Path.Combine(dst, "Binaries", "Game", "x64", "Debug");
                         CodeSign(Path.Combine(binaries, "FlaxGame.exe"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dll"));
                         CodeSign(Path.Combine(binaries, "FlaxEngine.CSharp.dll"));
 
                         binaries = Path.Combine(dst, "Binaries", "Game", "x64", "Development");
                         CodeSign(Path.Combine(binaries, "FlaxGame.exe"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dll"));
                         CodeSign(Path.Combine(binaries, "FlaxEngine.CSharp.dll"));
 
                         binaries = Path.Combine(dst, "Binaries", "Game", "x64", "Release");
                         CodeSign(Path.Combine(binaries, "FlaxGame.exe"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dll"));
                         CodeSign(Path.Combine(binaries, "FlaxEngine.CSharp.dll"));
+                    }
+                    else if (platform == TargetPlatform.Mac)
+                    {
+                        var binaries = Path.Combine(dst, "Binaries", "Game", "arm64", "Debug");
+                        CodeSign(Path.Combine(binaries, "FlaxGame"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dylib"));
+
+                        binaries = Path.Combine(dst, "Binaries", "Game", "arm64", "Development");
+                        CodeSign(Path.Combine(binaries, "FlaxGame"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dylib"));
+
+                        binaries = Path.Combine(dst, "Binaries", "Game", "arm64", "Release");
+                        CodeSign(Path.Combine(binaries, "FlaxGame"));
+                        CodeSign(Path.Combine(binaries, "FlaxEngine.dylib"));
                     }
 
                     // Don't distribute engine deps
@@ -63,12 +104,13 @@ namespace Flax.Deploy
                 }
 
                 // Compress
+                if (!Configuration.DontCompress)
                 {
                     Log.Info("Compressing platform files...");
 
                     var packageZipPath = Path.Combine(Deployer.PackageOutputPath, platformName + ".zip");
                     Utilities.FileDelete(packageZipPath);
-#if true
+#if false
                     using (var zip = new Ionic.Zip.ZipFile())
                     {
                         zip.AddDirectory(dst);
@@ -84,10 +126,10 @@ namespace Flax.Deploy
 #endif
 
                     Log.Info(string.Format("Compressed {0} package size: {1}", platformName, Utilities.GetFileSize(packageZipPath)));
-                }
 
-                // Remove files (only zip package is used)
-                Utilities.DirectoryDelete(dst);
+                    // Remove files (only zip package is used)
+                    Utilities.DirectoryDelete(dst);
+                }
 
                 Log.Info(string.Empty);
             }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
@@ -81,9 +81,9 @@ namespace FlaxEditor.Tools.Foliage
             }
 
             [EditorOrder(215), EditorDisplay("Painting"), Limit(0.0f, 360.0f), Tooltip("The minimum and maximum ground slope angle to paint foliage on it (in degrees).")]
-            public Vector2 PaintGroundSlopeAngleRange
+            public Float2 PaintGroundSlopeAngleRange
             {
-                get => new Vector2(_type.PaintGroundSlopeAngleMin, _type.PaintGroundSlopeAngleMax);
+                get => new Float2(_type.PaintGroundSlopeAngleMin, _type.PaintGroundSlopeAngleMax);
                 set
                 {
                     _type.PaintGroundSlopeAngleMin = value.X;
@@ -98,15 +98,15 @@ namespace FlaxEditor.Tools.Foliage
                 set => _type.PaintScaling = value;
             }
 
-            [EditorOrder(230), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.PositionScaleEditor)), Tooltip("The scale minimum values per axis.")]
-            public Vector3 ScaleMin
+            [EditorOrder(230), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.ScaleEditor)), Tooltip("The scale minimum values per axis.")]
+            public Float3 ScaleMin
             {
                 get => _type.PaintScaleMin;
                 set => _type.PaintScaleMin = value;
             }
 
-            [EditorOrder(240), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.PositionScaleEditor)), Tooltip("The scale maximum values per axis.")]
-            public Vector3 ScaleMax
+            [EditorOrder(240), EditorDisplay("Painting"), Limit(0.0f), CustomEditor(typeof(ActorTransformEditor.ScaleEditor)), Tooltip("The scale maximum values per axis.")]
+            public Float3 ScaleMax
             {
                 get => _type.PaintScaleMax;
                 set => _type.PaintScaleMax = value;
@@ -115,7 +115,7 @@ namespace FlaxEditor.Tools.Foliage
             //
 
             [EditorOrder(300), EditorDisplay("Placement", "Offset Y"), Tooltip("The per-instance random offset range on axis Y (min-max).")]
-            public Vector2 OffsetY
+            public Float2 OffsetY
             {
                 get => _type.PlacementOffsetY;
                 set => _type.PlacementOffsetY = value;
@@ -204,6 +204,7 @@ namespace FlaxEditor.Tools.Foliage
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
                 Offsets = new Margin(4, 4, 4, 0),
+                Pivot = Float2.Zero,
                 IsScrollable = true,
                 Parent = splitPanel.Panel1
             };
@@ -218,7 +219,7 @@ namespace FlaxEditor.Tools.Foliage
 
         private void OnModified()
         {
-            Editor.Instance.Scene.MarkSceneEdited(_proxy.Foliage?.Scene);
+            Editor.Instance.Scene.MarkSceneEdited(_proxy.Foliage != null ? _proxy.Foliage.Scene : null);
         }
 
         private void OnSelectedFoliageChanged()
@@ -243,6 +244,7 @@ namespace FlaxEditor.Tools.Foliage
             if (currentIndex != -1)
             {
                 ((ContainerControl)_items.Children[currentIndex]).Children[1].BackgroundColor = Style.Current.BackgroundSelected;
+                _proxy.SyncOptions();
 
                 _presenter.Select(_proxy);
                 _presenter.BuildLayoutOnUpdate();
@@ -251,6 +253,7 @@ namespace FlaxEditor.Tools.Foliage
             {
                 _presenter.Deselect();
             }
+            _presenter.Panel.Focus();
         }
 
         private void UpdateFoliageTypesList()
@@ -299,7 +302,7 @@ namespace FlaxEditor.Tools.Foliage
                         Tag = i,
                         Parent = itemPanel,
                     };
-                    itemView.Clicked += OnFoliageTypeListItemClicked;
+                    itemView.ItemClicked += OnFoliageTypeListItemClicked;
 
                     itemPanel.Height = 34;
                     itemPanel.Parent = _items;

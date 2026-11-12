@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine
 {
@@ -16,6 +16,12 @@ namespace FlaxEngine
                 return parent ? parent.Scene : null;
             }
         }
+
+        /// <summary>
+        /// Gets value indicating if the actor owning the script is in a scene.
+        /// </summary>
+        [HideInEditor, NoSerialize]
+        public bool HasScene => Actor?.HasScene ?? false; 
 
         /// <summary>
         /// Gets or sets the world space transformation of the actors owning this script.

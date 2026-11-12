@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,11 +14,11 @@ class NavMeshRuntime;
 /// <summary>
 /// The navigation mesh actor that holds a navigation data for a scene.
 /// </summary>
-API_CLASS() class FLAXENGINE_API NavMesh : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/Navigation/Nav Mesh\")") 
+class FLAXENGINE_API NavMesh : public Actor, IAssetReference
 {
-DECLARE_SCENE_OBJECT(NavMesh);
+    DECLARE_SCENE_OBJECT(NavMesh);
 public:
-
     /// <summary>
     /// The flag used to mark that navigation data has been modified since load. Used to save runtime data to the file on scene serialization.
     /// </summary>
@@ -49,7 +49,6 @@ public:
     API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Nav Mesh\")") NavMeshProperties Properties;
 
 public:
-
     /// <summary>
     /// Saves the nav mesh tiles data to the asset. Supported only in builds with assets saving enabled (eg. editor) and not during gameplay (eg. design time).
     /// </summary>
@@ -63,23 +62,28 @@ public:
     /// <summary>
     /// Gets the navmesh runtime object that matches with properties.
     /// </summary>
-    NavMeshRuntime* GetRuntime(bool createIfMissing = true) const;
+    API_FUNCTION() NavMeshRuntime* GetRuntime(bool createIfMissing = true) const;
 
 private:
-
     void AddTiles();
     void RemoveTiles();
-    void OnDataAssetLoaded();
+
+    // [IAssetReference]
+    void OnAssetChanged(Asset* asset, void* caller) override;
+    void OnAssetLoaded(Asset* asset, void* caller) override;
+    void OnAssetUnloaded(Asset* asset, void* caller) override;
+
+private:
+    bool _navMeshActive = false;
 
 public:
-
     // [Actor]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 
 protected:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;
+    void Initialize() override;
 };

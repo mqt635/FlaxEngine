@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -6,6 +6,7 @@ using System.Reflection;
 using FlaxEditor.Scripting;
 using FlaxEditor.Surface;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 using MethodInfo = System.Reflection.MethodInfo;
 
 namespace FlaxEditor.Modules.SourceCodeEditing
@@ -106,7 +107,7 @@ namespace FlaxEditor.Modules.SourceCodeEditing
 
                 // Validate node type
                 var typeName = Surface.Archetypes.Custom.GetNodeTypeName(arch);
-                var type = Scripting.TypeUtils.GetType(typeName).Type;
+                var type = TypeUtils.GetType(typeName).Type;
                 if (type == null)
                 {
                     Debug.LogWarning(string.Format("Method {0} from {1} returned invalid node archetype. Failed to find node logic defined in type {2}.", method, method.DeclaringType, typeName));

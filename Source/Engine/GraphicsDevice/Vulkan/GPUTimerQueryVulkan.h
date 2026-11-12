@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,7 +13,13 @@
 class GPUTimerQueryVulkan : public GPUResourceVulkan<GPUTimerQuery>
 {
 private:
-
+#if !VULKAN_USE_TIMER_QUERIES
+#elif GPU_VULKAN_QUERY_NEW
+    bool _hasResult = false;
+    bool _endCalled = false;
+    float _timeDelta = 0.0f;
+    uint64 _query = 0;
+#else
     struct Query
     {
         BufferedQueryPoolVulkan* Pool;
@@ -33,38 +39,37 @@ private:
     float _timeDelta = 0.0f;
     int32 _queryIndex;
     Array<QueryPair, InlinedAllocation<8>> _queries;
+#endif
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUTimerQueryVulkan"/> class.
     /// </summary>
     /// <param name="device">The graphics device.</param>
     GPUTimerQueryVulkan(GPUDeviceVulkan* device);
 
+#if !GPU_VULKAN_QUERY_NEW
 public:
-
     /// <summary>
-    /// Interrupts an in-progress query, allowing the command buffer to submitted. Interrupted queries must be resumed using Resume().
+    /// Interrupts an in-progress query, allowing the command buffer to submit. Interrupted queries must be resumed using Resume().
     /// </summary>
-    /// <param name="cmdBuffer">The GPU commands buffer.</param>
-    void Interrupt(CmdBufferVulkan* cmdBuffer);
+    /// <param name="context">The GPU context.</param>
+    void Interrupt(GPUContextVulkan* context);
 
     /// <summary>
     /// Resumes an interrupted query, restoring it back to its original in-progress state.
     /// </summary>
-    /// <param name="cmdBuffer">The GPU commands buffer.</param>
-    void Resume(CmdBufferVulkan* cmdBuffer);
+    /// <param name="context">The GPU context.</param>
+    void Resume(GPUContextVulkan* context);
 
 private:
-
     bool GetResult(Query& query);
-    void WriteTimestamp(CmdBufferVulkan* cmdBuffer, Query& query) const;
+    void WriteTimestamp(GPUContextVulkan* context, Query& query, VkPipelineStageFlagBits stage) const;
     bool TryGetResult();
     bool UseQueries();
+#endif
 
 public:
-
     // [GPUTimerQuery]
     void Begin() override;
     void End() override;
@@ -72,7 +77,6 @@ public:
     float GetResult() override;
 
 protected:
-
     // [GPUResourceVulkan]
     void OnReleaseGPU() override;
 };

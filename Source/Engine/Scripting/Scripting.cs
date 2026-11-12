@@ -1,13 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using System.Threading;
 using System.Threading.Tasks;
 using FlaxEngine.GUI;
+using FlaxEngine.Interop;
 
 namespace FlaxEngine
 {
@@ -65,7 +69,7 @@ namespace FlaxEngine
     /// <summary>
     /// C# scripting service.
     /// </summary>
-    public static class Scripting
+    public static partial class Scripting
     {
         private static readonly List<Action> UpdateActions = new List<Action>();
         private static readonly MainThreadTaskScheduler MainThreadTaskScheduler = new MainThreadTaskScheduler();
@@ -76,17 +80,22 @@ namespace FlaxEngine
         public static event Action Update;
 
         /// <summary>
-        /// Occurs on scripting 'late' update.
+        /// Occurs on scripting late update.
         /// </summary>
         public static event Action LateUpdate;
 
         /// <summary>
-        /// Occurs on scripting `fixed` update.
+        /// Occurs on scripting fixed update.
         /// </summary>
         public static event Action FixedUpdate;
 
         /// <summary>
-        /// Occurs on scripting `draw` update. Called during frame rendering and can be used to invoke custom rendering with GPUDevice.
+        /// Occurs on scripting late fixed update.
+        /// </summary>
+        public static event Action LateFixedUpdate;
+
+        /// <summary>
+        /// Occurs on scripting draw update. Called during frame rendering and can be used to invoke custom rendering with GPUDevice.
         /// </summary>
         public static event Action Draw;
 
@@ -126,8 +135,10 @@ namespace FlaxEngine
         {
             if (e.ExceptionObject is Exception exception)
             {
-                Debug.LogError("Unhandled Exception: " + exception.Message);
+                Debug.LogError($"Unhandled Exception: {exception.Message}");
                 Debug.LogException(exception);
+                //if (e.IsTerminating && !System.Diagnostics.Debugger.IsAttached)
+                //    Platform.Fatal($"Unhandled Exception: {exception}");
             }
         }
 
@@ -159,6 +170,10 @@ namespace FlaxEngine
             AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
             TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
             Localization.LocalizationChanged += OnLocalizationChanged;
+#if FLAX_EDITOR
+            FlaxEditor.ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
+            FlaxEditor.ScriptsBuilder.ScriptsReloadEnd += OnScriptsReloadEnd;
+#endif
 
             OnLocalizationChanged();
             if (!Engine.IsEditor)
@@ -167,11 +182,31 @@ namespace FlaxEngine
             }
         }
 
+#if FLAX_EDITOR
+        private static void OnScriptsReloadBegin()
+        {
+            // Tooltip might hold references to scripting assemblies
+            Style.Current.SharedTooltip = null;
+        }
+
+        private static void OnScriptsReloadEnd()
+        {
+            Style.Current.SharedTooltip = new Tooltip();
+        }
+#endif
+
         private static void OnLocalizationChanged()
         {
+            // Invariant-globalization only (see InitHostfxr with Mono)
+#if !(PLATFORM_IOS || PLATFORM_SWITCH || PLATFORM_PS4 || PLATFORM_PS5)
             var currentThread = Thread.CurrentThread;
-            currentThread.CurrentUICulture = Localization.CurrentLanguage;
-            currentThread.CurrentCulture = Localization.CurrentCulture;
+            var language = Localization.CurrentLanguage;
+            if (language != null)
+                currentThread.CurrentUICulture = language;
+            var culture = Localization.CurrentCulture;
+            if (culture != null)
+                currentThread.CurrentCulture = culture;
+#endif
         }
 
         /// <summary>
@@ -192,15 +227,57 @@ namespace FlaxEngine
 
         internal static void AddDictionaryItem(IDictionary dictionary, object key, object value)
         {
+            // TODO: more generic approach to properly add value that is of custom boxed type? (eg. via NativeInterop.MarshalToManaged)
+            if (value is ManagedArray managedArray)
+            {
+                var managedArrayHandle = ManagedHandle.Alloc(managedArray, GCHandleType.Normal);
+                value = NativeInterop.MarshalToManaged((IntPtr)managedArrayHandle, managedArray.ArrayType);
+                managedArrayHandle.Free();
+            }
             dictionary.Add(key, value);
         }
 
         internal static object[] GetDictionaryKeys(IDictionary dictionary)
         {
+            if (dictionary == null)
+                return null;
             var keys = dictionary.Keys;
             var result = new object[keys.Count];
             keys.CopyTo(result, 0);
             return result;
+        }
+
+        internal static ManagedHandle VersionToManaged(int major, int minor, int build, int revision)
+        {
+            Version version;
+            if (revision >= 0)
+                version = new Version(major, minor, Math.Max(build, 0), revision);
+            else if (build >= 0)
+                version = new Version(major, minor, build);
+            else
+                version = new Version(major, minor);
+            return ManagedHandle.Alloc(version);
+        }
+
+        internal static ManagedHandle CultureInfoToManaged(int lcid)
+        {
+#if PLATFORM_IOS || PLATFORM_SWITCH || PLATFORM_PS4 || PLATFORM_PS5
+            // Invariant-globalization only (see InitHostfxr with Mono)
+            lcid = 0;
+#endif
+            return ManagedHandle.Alloc(new CultureInfo(lcid));
+        }
+
+        internal static void VersionToNative(ManagedHandle versionHandle, ref int major, ref int minor, ref int build, ref int revision)
+        {
+            Version version = Unsafe.As<Version>(versionHandle.Target);
+            if (version != null)
+            {
+                major = version.Major;
+                minor = version.Minor;
+                build = version.Build;
+                revision = version.Revision;
+            }
         }
 
         private static void CreateGuiStyle()
@@ -209,9 +286,11 @@ namespace FlaxEngine
             {
                 Background = Color.FromBgra(0xFF1C1C1C),
                 LightBackground = Color.FromBgra(0xFF2D2D30),
+                DarkBackground = Color.FromBgra(0xFF3F3F46),
                 Foreground = Color.FromBgra(0xFFFFFFFF),
                 ForegroundGrey = Color.FromBgra(0xFFA9A9B3),
                 ForegroundDisabled = Color.FromBgra(0xFF787883),
+                ForegroundViewport = Color.FromBgra(0xFFFFFFFF),
                 BackgroundHighlighted = Color.FromBgra(0xFF54545C),
                 BorderHighlighted = Color.FromBgra(0xFF6A6A75),
                 BackgroundSelected = Color.FromBgra(0xFF007ACC),
@@ -219,12 +298,31 @@ namespace FlaxEngine
                 BackgroundNormal = Color.FromBgra(0xFF3F3F46),
                 BorderNormal = Color.FromBgra(0xFF54545C),
                 TextBoxBackground = Color.FromBgra(0xFF333337),
-                ProgressNormal = Color.FromBgra(0xFF0ad328),
                 TextBoxBackgroundSelected = Color.FromBgra(0xFF3F3F46),
                 CollectionBackgroundColor = Color.FromBgra(0x14CCCCCC),
+                ProgressNormal = Color.FromBgra(0xFF0ad328),
+                ProgressError = new Color(0.79f, 0.146f, 0.0f, 1.0f),
+                ProgressWarning = Color.Yellow,
+                Statusbar = new Style.StatusbarStyle
+                {
+                    PlayMode = Color.FromBgra(0xFF2F9135),
+                    Failed = Color.FromBgra(0xFF9C2424),
+                    Loading = Color.FromBgra(0xFF2D2D30),
+                },
+
                 SharedTooltip = new Tooltip(),
             };
-            style.DragWindow = style.BackgroundSelected * 0.7f;
+            style.SearchHighlight = style.ProgressNormal * 0.6f;
+
+            // Use optionally bundled default font (matches Editor)
+            var defaultFont = Content.LoadAsyncInternal<FontAsset>("Editor/Fonts/Roboto-Regular");
+            if (defaultFont)
+            {
+                style.FontTitle = defaultFont.CreateFont(18);
+                style.FontLarge = defaultFont.CreateFont(14);
+                style.FontMedium = defaultFont.CreateFont(9);
+                style.FontSmall = defaultFont.CreateFont(9);
+            }
 
             Style.Current = style;
         }
@@ -235,7 +333,8 @@ namespace FlaxEngine
 
             lock (UpdateActions)
             {
-                for (int i = 0; i < UpdateActions.Count; i++)
+                int count = UpdateActions.Count;
+                for (int i = 0; i < count; i++)
                 {
                     try
                     {
@@ -246,7 +345,18 @@ namespace FlaxEngine
                         Debug.LogException(ex);
                     }
                 }
-                UpdateActions.Clear();
+                int newlyAdded = UpdateActions.Count - count;
+                if (newlyAdded == 0)
+                    UpdateActions.Clear();
+                else
+                {
+                    // Someone added another action within current callback
+                    var tmp = new List<Action>();
+                    for (int i = count; i < UpdateActions.Count; i++)
+                        tmp.Add(UpdateActions[i]);
+                    UpdateActions.Clear();
+                    UpdateActions.AddRange(tmp);
+                }
             }
 
             MainThreadTaskScheduler.Execute();
@@ -262,6 +372,11 @@ namespace FlaxEngine
             FixedUpdate?.Invoke();
         }
 
+        internal static void Internal_LateFixedUpdate()
+        {
+            LateFixedUpdate?.Invoke();
+        }
+
         internal static void Internal_Draw()
         {
             Draw?.Invoke();
@@ -273,27 +388,33 @@ namespace FlaxEngine
 
             MainThreadTaskScheduler.Dispose();
             Json.JsonSerializer.Dispose();
+#if FLAX_EDITOR
+            FlaxEditor.ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
+            FlaxEditor.ScriptsBuilder.ScriptsReloadEnd -= OnScriptsReloadEnd;
+#endif
         }
 
         /// <summary>
         /// Returns true if game scripts assembly has been loaded.
         /// </summary>
         /// <returns>True if game scripts assembly is loaded, otherwise false.</returns>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern bool HasGameModulesLoaded();
+        [LibraryImport("FlaxEngine", EntryPoint = "ScriptingInternal_HasGameModulesLoaded", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static partial bool HasGameModulesLoaded();
 
         /// <summary>
         /// Returns true if given type is from one of the game scripts assemblies.
         /// </summary>
         /// <returns>True if the type is from game assembly, otherwise false.</returns>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern bool IsTypeFromGameScripts(Type type);
+        [LibraryImport("FlaxEngine", EntryPoint = "ScriptingInternal_IsTypeFromGameScripts", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static partial bool IsTypeFromGameScripts([MarshalUsing(typeof(SystemTypeMarshaller))] Type type);
 
         /// <summary>
         /// Flushes the removed objects (disposed objects using Object.Destroy).
         /// </summary>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void FlushRemovedObjects();
+        [LibraryImport("FlaxEngine", EntryPoint = "ScriptingInternal_FlushRemovedObjects", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        public static partial void FlushRemovedObjects();
     }
 
     /// <summary>
@@ -302,32 +423,32 @@ namespace FlaxEngine
     /// <remarks>
     /// Profiler is available in the editor and Debug/Development builds. Release builds don't have profiling tools.
     /// </remarks>
-    public static class Profiler
+    public static partial class Profiler
     {
         /// <summary>
         /// Begins profiling a piece of code with a custom label.
         /// </summary>
         /// <param name="name">The name of the event.</param>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void BeginEvent(string name);
+        [LibraryImport("FlaxEngine", EntryPoint = "ProfilerInternal_BeginEvent", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        public static partial void BeginEvent(string name);
 
         /// <summary>
         /// Ends profiling an event.
         /// </summary>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void EndEvent();
+        [LibraryImport("FlaxEngine", EntryPoint = "ProfilerInternal_EndEvent", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        public static partial void EndEvent();
 
         /// <summary>
         /// Begins GPU profiling a piece of code with a custom label.
         /// </summary>
         /// <param name="name">The name of the event.</param>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void BeginEventGPU(string name);
+        [LibraryImport("FlaxEngine", EntryPoint = "ProfilerInternal_BeginEventGPU", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        public static partial void BeginEventGPU(string name);
 
         /// <summary>
         /// Ends GPU profiling an event.
         /// </summary>
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern void EndEventGPU();
+        [LibraryImport("FlaxEngine", EntryPoint = "ProfilerInternal_EndEventGPU", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
+        public static partial void EndEventGPU();
     }
 }

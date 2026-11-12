@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,7 +13,6 @@
 class FLAXENGINE_API TextureMipData
 {
 public:
-
     uint32 RowPitch;
     uint32 DepthPitch;
     uint32 Lines;
@@ -24,6 +23,10 @@ public:
     TextureMipData(TextureMipData&& other) noexcept;
     TextureMipData& operator=(const TextureMipData& other);
     TextureMipData& operator=(TextureMipData&& other) noexcept;
+
+    bool GetPixels(Array<Color32>& pixels, int32 width, int32 height, PixelFormat format) const;
+    bool GetPixels(Array<Color>& pixels, int32 width, int32 height, PixelFormat format) const;
+    void Copy(void* data, uint32 dataRowPitch, uint32 dataDepthPitch, uint32 dataDepthSlices, uint32 targetRowPitch);
 
     template<typename T>
     T& Get(int32 x, int32 y)
@@ -41,10 +44,10 @@ public:
 /// <summary>
 /// Texture data container (used to keep data downloaded from the GPU).
 /// </summary>
-class FLAXENGINE_API TextureData
+API_CLASS() class FLAXENGINE_API TextureData : public ScriptingObject
 {
+    DECLARE_SCRIPTING_TYPE_WITH_CONSTRUCTOR_IMPL(TextureData, ScriptingObject);
 public:
-
     /// <summary>
     /// Single entry of the texture array. Contains collection of mip maps.
     /// </summary>
@@ -57,42 +60,25 @@ public:
     };
 
 public:
+    /// <summary>
+    /// Top level texture surface width (in pixels).
+    /// </summary>
+    API_FIELD(ReadOnly) int32 Width = 0;
 
     /// <summary>
-    /// Init
+    /// Top level texture surface height (in pixels).
     /// </summary>
-    TextureData()
-    {
-    }
+    API_FIELD(ReadOnly) int32 Height = 0;
 
     /// <summary>
-    /// Destructor
+    /// Top level texture surface depth (in pixels).
     /// </summary>
-    ~TextureData()
-    {
-    }
-
-public:
-
-    /// <summary>
-    /// Top level texture width (in pixels).
-    /// </summary>
-    int32 Width = 0;
-
-    /// <summary>
-    /// Top level texture height (in pixels).
-    /// </summary>
-    int32 Height = 0;
-
-    /// <summary>
-    /// Top level texture depth (in pixels).
-    /// </summary>
-    int32 Depth = 0;
+    API_FIELD(ReadOnly) int32 Depth = 0;
 
     /// <summary>
     /// The texture data format.
     /// </summary>
-    PixelFormat Format = PixelFormat::Unknown;
+    API_FIELD(ReadOnly) PixelFormat Format = PixelFormat::Unknown;
 
     /// <summary>
     /// The items collection (depth slices or array slices).
@@ -100,7 +86,6 @@ public:
     Array<ArrayEntry, InlinedAllocation<6>> Items;
 
 public:
-
     /// <summary>
     /// Gather texture data
     /// </summary>
@@ -124,26 +109,38 @@ public:
     }
 
     /// <summary>
-    /// Gets amount of textures in the array
+    /// Gets amount of texture slices in the array.
     /// </summary>
-    int32 GetArraySize() const
-    {
-        return Items.Count();
-    }
+    API_PROPERTY() int32 GetArraySize() const;
 
     /// <summary>
-    /// Gets amount of mip maps in the textures
+    /// Gets amount of mip maps in the texture.
     /// </summary>
-    int32 GetMipLevels() const
-    {
-        return Items.HasItems() ? Items[0].Mips.Count() : 0;
-    }
+    API_PROPERTY() int32 GetMipLevels() const;
 
     /// <summary>
-    /// Clear data
+    /// Clear allocated memory.
     /// </summary>
-    void Clear()
-    {
-        Items.Resize(0, false);
-    }
+    API_FUNCTION() void Clear();
+
+public:
+    /// <summary>
+    /// Gets the texture pixels as Color32 array.
+    /// </summary>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The result texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool GetPixels(API_PARAM(Out) Array<Color32>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0) const;
+
+    /// <summary>
+    /// Gets the texture pixels as Color array.
+    /// </summary>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The result texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool GetPixels(API_PARAM(Out) Array<Color>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0) const;
 };

@@ -1,13 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
 #include "RenderToolsVulkan.h"
 #include "Engine/Core/Types/StringBuilder.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Graphics/GPUResourceAccess.h"
 
-VkFormat RenderToolsVulkan::PixelFormatToVkFormat[static_cast<int32>(PixelFormat::MAX)] = {
+// @formatter:off
 
+VkFormat RenderToolsVulkan::PixelFormatToVkFormat[111] =
+{
     VK_FORMAT_UNDEFINED,
     VK_FORMAT_R32G32B32A32_SFLOAT,
     VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -27,13 +30,10 @@ VkFormat RenderToolsVulkan::PixelFormatToVkFormat[static_cast<int32>(PixelFormat
     VK_FORMAT_R32G32_SFLOAT,
     VK_FORMAT_R32G32_UINT,
     VK_FORMAT_R32G32_SINT,
-    VK_FORMAT_UNDEFINED,
-    // TODO: R32G8X24_Typeless
+    VK_FORMAT_UNDEFINED, // TODO: R32G8X24_Typeless
     VK_FORMAT_D32_SFLOAT_S8_UINT,
-    VK_FORMAT_UNDEFINED,
-    // TODO: R32_Float_X8X24_Typeless
-    VK_FORMAT_UNDEFINED,
-    // TODO: X32_Typeless_G8X24_UInt
+    VK_FORMAT_UNDEFINED, // TODO: R32_Float_X8X24_Typeless
+    VK_FORMAT_UNDEFINED, // TODO: X32_Typeless_G8X24_UInt
     VK_FORMAT_A2B10G10R10_UNORM_PACK32,
     VK_FORMAT_A2B10G10R10_UNORM_PACK32,
     VK_FORMAT_A2B10G10R10_UINT_PACK32,
@@ -76,15 +76,11 @@ VkFormat RenderToolsVulkan::PixelFormatToVkFormat[static_cast<int32>(PixelFormat
     VK_FORMAT_R8_UINT,
     VK_FORMAT_R8_SNORM,
     VK_FORMAT_R8_SINT,
-    VK_FORMAT_UNDEFINED,
-    // TODO: A8_UNorm
-    VK_FORMAT_UNDEFINED,
-    // TODO: R1_UNorm
+    VK_FORMAT_UNDEFINED, // TODO: A8_UNorm
+    VK_FORMAT_UNDEFINED, // TODO: R1_UNorm
     VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
-    VK_FORMAT_UNDEFINED,
-    // TODO: R8G8_B8G8_UNorm
-    VK_FORMAT_UNDEFINED,
-    // TODO: G8R8_G8B8_UNorm
+    VK_FORMAT_UNDEFINED, // TODO: R8G8_B8G8_UNorm
+    VK_FORMAT_UNDEFINED, // TODO: G8R8_G8B8_UNorm
     VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
     VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
     VK_FORMAT_BC1_RGBA_SRGB_BLOCK,
@@ -104,8 +100,7 @@ VkFormat RenderToolsVulkan::PixelFormatToVkFormat[static_cast<int32>(PixelFormat
     VK_FORMAT_B5G5R5A1_UNORM_PACK16,
     VK_FORMAT_B8G8R8A8_UNORM,
     VK_FORMAT_B8G8R8A8_UNORM,
-    VK_FORMAT_UNDEFINED,
-    // TODO: R10G10B10_Xr_Bias_A2_UNorm
+    VK_FORMAT_UNDEFINED, // TODO: R10G10B10_Xr_Bias_A2_UNorm
     VK_FORMAT_B8G8R8A8_UNORM,
     VK_FORMAT_B8G8R8A8_SRGB,
     VK_FORMAT_B8G8R8A8_UNORM,
@@ -116,92 +111,70 @@ VkFormat RenderToolsVulkan::PixelFormatToVkFormat[static_cast<int32>(PixelFormat
     VK_FORMAT_BC7_UNORM_BLOCK,
     VK_FORMAT_BC7_UNORM_BLOCK,
     VK_FORMAT_BC7_SRGB_BLOCK,
+    VK_FORMAT_ASTC_4x4_UNORM_BLOCK,
+    VK_FORMAT_ASTC_4x4_SRGB_BLOCK,
+    VK_FORMAT_ASTC_6x6_UNORM_BLOCK,
+    VK_FORMAT_ASTC_6x6_SRGB_BLOCK,
+    VK_FORMAT_ASTC_8x8_UNORM_BLOCK,
+    VK_FORMAT_ASTC_8x8_SRGB_BLOCK,
+    VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
+    VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+    VK_FORMAT_G8B8G8R8_422_UNORM, // YUY2
+    VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, // NV12
+    VK_FORMAT_UNDEFINED, // Basis
 };
 
-VkBlendFactor RenderToolsVulkan::BlendToVkBlendFactor[static_cast<int32>(BlendingMode::Blend::MAX)] =
-{
-    VK_BLEND_FACTOR_MAX_ENUM,
-    VK_BLEND_FACTOR_ZERO,
-    // Zero
-    VK_BLEND_FACTOR_ONE,
-    // One
-    VK_BLEND_FACTOR_SRC_COLOR,
-    // SrcColor
-    VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR,
-    // InvSrcColor
-    VK_BLEND_FACTOR_SRC_ALPHA,
-    // SrcAlpha
-    VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-    // InvSrcAlpha
-    VK_BLEND_FACTOR_DST_ALPHA,
-    // DestAlpha
-    VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
-    // InvDestAlpha
-    VK_BLEND_FACTOR_DST_COLOR,
-    // DestColor,
-    VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR,
-    // InvDestColor
-    VK_BLEND_FACTOR_SRC_ALPHA_SATURATE,
-    // SrcAlphaSat
-    VK_BLEND_FACTOR_CONSTANT_ALPHA,
-    // BlendFactor
-    VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
-    // BlendInvFactor
-    VK_BLEND_FACTOR_SRC1_COLOR,
-    // Src1Color
-    VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR,
-    // InvSrc1Color
-    VK_BLEND_FACTOR_SRC1_ALPHA,
-    // Src1Alpha
-    VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA,
-    // InvSrc1Alpha
-};
-
-VkBlendOp RenderToolsVulkan::OperationToVkBlendOp[static_cast<int32>(BlendingMode::Operation::MAX)] =
+VkBlendOp RenderToolsVulkan::OperationToVkBlendOp[6] =
 {
     VK_BLEND_OP_MAX_ENUM,
-    VK_BLEND_OP_ADD,
-    // Add
-    VK_BLEND_OP_SUBTRACT,
-    // Subtract
-    VK_BLEND_OP_REVERSE_SUBTRACT,
-    // RevSubtract
-    VK_BLEND_OP_MIN,
-    // Min
-    VK_BLEND_OP_MAX,
-    // Max
+    VK_BLEND_OP_ADD, // Add
+    VK_BLEND_OP_SUBTRACT, // Subtract
+    VK_BLEND_OP_REVERSE_SUBTRACT, // RevSubtract
+    VK_BLEND_OP_MIN, // Min
+    VK_BLEND_OP_MAX, // Max
 };
 
-VkCompareOp RenderToolsVulkan::ComparisonFuncToVkCompareOp[static_cast<int32>(ComparisonFunc::MAX)] =
+VkCompareOp RenderToolsVulkan::ComparisonFuncToVkCompareOp[9] =
 {
     VK_COMPARE_OP_MAX_ENUM,
-    VK_COMPARE_OP_NEVER,
-    // Never
-    VK_COMPARE_OP_LESS,
-    // Less
-    VK_COMPARE_OP_EQUAL,
-    // Equal
-    VK_COMPARE_OP_LESS_OR_EQUAL,
-    // LessEqual
-    VK_COMPARE_OP_GREATER,
-    // Grather
-    VK_COMPARE_OP_NOT_EQUAL,
-    // NotEqual
-    VK_COMPARE_OP_GREATER_OR_EQUAL,
-    // GratherEqual
-    VK_COMPARE_OP_ALWAYS,
-    // Always
+    VK_COMPARE_OP_NEVER, // Never
+    VK_COMPARE_OP_LESS, // Less
+    VK_COMPARE_OP_EQUAL, // Equal
+    VK_COMPARE_OP_LESS_OR_EQUAL, // LessEqual
+    VK_COMPARE_OP_GREATER, // Greater
+    VK_COMPARE_OP_NOT_EQUAL, // NotEqual
+    VK_COMPARE_OP_GREATER_OR_EQUAL, // GreaterEqual
+    VK_COMPARE_OP_ALWAYS, // Always
 };
+
+// @formatter:on
 
 #define VKERR(x) case x: sb.Append(TEXT(#x)); break
 
 #if GPU_ENABLE_RESOURCE_NAMING
 
-void RenderToolsVulkan::SetObjectName(VkDevice device, uint64 objectHandle, VkObjectType objectType, const String& name)
+void RenderToolsVulkan::SetObjectName(VkDevice device, uint64 objectHandle, VkObjectType objectType, const StringView& name)
 {
 #if VK_EXT_debug_utils
-    auto str = name.ToStringAnsi();
+    StringAsANSI<> str(name.Get(), name.Length());
     SetObjectName(device, objectHandle, objectType, str.Get());
+#endif
+}
+
+void RenderToolsVulkan::SetObjectName(VkDevice device, uint64 objectHandle, VkObjectType objectType, const char* name)
+{
+#if VK_EXT_debug_utils
+    // Check for valid function pointer (may not be present if not running in a debugging application)
+    if (vkSetDebugUtilsObjectNameEXT != nullptr && name != nullptr && *name != 0)
+    {
+        VkDebugUtilsObjectNameInfoEXT objectNameInfo;
+        ZeroStruct(objectNameInfo, VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT);
+        objectNameInfo.objectType = objectType;
+        objectNameInfo.objectHandle = objectHandle;
+        objectNameInfo.pObjectName = name;
+        const VkResult result = vkSetDebugUtilsObjectNameEXT(device, &objectNameInfo);
+        LOG_VULKAN_RESULT(result);
+    }
 #endif
 }
 
@@ -209,7 +182,7 @@ void RenderToolsVulkan::SetObjectName(VkDevice device, uint64 objectHandle, VkOb
 
 String RenderToolsVulkan::GetVkErrorString(VkResult result)
 {
-    StringBuilder sb(256);
+    StringBuilder sb(64);
 
     // Switch error code
     switch (result)
@@ -257,33 +230,119 @@ String RenderToolsVulkan::GetVkErrorString(VkResult result)
     return sb.ToString();
 }
 
-void RenderToolsVulkan::ValidateVkResult(VkResult result, const char* file, uint32 line)
+void RenderToolsVulkan::LogVkResult(VkResult result, const char* file, uint32 line, bool fatal)
 {
-    // Ensure result if invalid
     ASSERT(result != VK_SUCCESS);
 
-    // Get error string
-    const String& errorString = GetVkErrorString(result);
+    // Process error and format message
+    StringBuilder sb;
+    sb.Append(TEXT("Vulkan error: "));
+    sb.Append(GetVkErrorString(result));
+    if (file)
+        sb.Append(TEXT(" at ")).Append(file).Append(':').Append(line);
+    const StringView msg(sb.ToStringView());
 
-    // Send error
-    LOG(Fatal, "Vulkan error: {0} at {1}:{2}", errorString, String(file), line);
+    // Handle error
+    FatalErrorType errorType = FatalErrorType::None;
+    if (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_POOL_MEMORY)
+        errorType = FatalErrorType::GPUOutOfMemory;
+    else if (result == VK_TIMEOUT)
+        errorType = FatalErrorType::GPUHang;
+    else if (result == VK_ERROR_DEVICE_LOST || result == VK_ERROR_SURFACE_LOST_KHR || result == VK_ERROR_MEMORY_MAP_FAILED)
+        errorType = FatalErrorType::GPUCrash;
+    else if (fatal)
+        errorType = FatalErrorType::Unknown;
+    if (errorType != FatalErrorType::None)
+        Platform::Fatal(msg, nullptr, errorType);
+#if LOG_ENABLE
+    else
+        Log::Logger::Write(LogType::Error, msg);
+#endif
 }
 
-void RenderToolsVulkan::LogVkResult(VkResult result, const char* file, uint32 line)
+VkAccessFlags RenderToolsVulkan::GetAccess(GPUResourceAccess access)
 {
-    // Ensure result if invalid
-    ASSERT(result != VK_SUCCESS);
-
-    // Get error string
-    const String& errorString = GetVkErrorString(result);
-
-    // Send error
-    LOG(Error, "Vulkan error: {0} at {1}:{2}", errorString, String(file), line);
+    switch (access)
+    {
+    case GPUResourceAccess::None:
+        return VK_ACCESS_NONE;
+    case GPUResourceAccess::CopyRead:
+        return VK_ACCESS_TRANSFER_READ_BIT;
+    case GPUResourceAccess::CopyWrite:
+        return VK_ACCESS_TRANSFER_WRITE_BIT;
+    case GPUResourceAccess::CpuRead:
+        return VK_ACCESS_HOST_READ_BIT;
+    case GPUResourceAccess::CpuWrite:
+        return VK_ACCESS_HOST_WRITE_BIT;
+    case GPUResourceAccess::DepthRead:
+        return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    case GPUResourceAccess::DepthWrite:
+        return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    case GPUResourceAccess::DepthBuffer:
+        return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    case GPUResourceAccess::RenderTarget:
+        return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    case GPUResourceAccess::UnorderedAccess:
+        return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    case GPUResourceAccess::IndirectArgs:
+        return VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    case GPUResourceAccess::ShaderReadCompute:
+    case GPUResourceAccess::ShaderReadPixel:
+    case GPUResourceAccess::ShaderReadNonPixel:
+    case GPUResourceAccess::ShaderReadGraphics:
+        return VK_ACCESS_SHADER_READ_BIT;
+#if !BUILD_RELEASE
+    default:
+        LOG(Error, "Unsupported GPU Resource Access: {}", (uint32)access);
+#endif
+    }
+    return VK_ACCESS_NONE;
 }
 
-void RenderToolsVulkan::LogVkResult(VkResult result)
+VkImageLayout RenderToolsVulkan::GetImageLayout(GPUResourceAccess access)
 {
-    LogVkResult(result, "", 0);
+    switch (access)
+    {
+    case GPUResourceAccess::None:
+        return VK_IMAGE_LAYOUT_UNDEFINED;
+    case GPUResourceAccess::CopyRead:
+        return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    case GPUResourceAccess::CopyWrite:
+        return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    case GPUResourceAccess::CpuRead:
+    case GPUResourceAccess::CpuWrite:
+        return VK_IMAGE_LAYOUT_GENERAL;
+    case GPUResourceAccess::DepthRead:
+        return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+    case GPUResourceAccess::DepthWrite:
+    case GPUResourceAccess::DepthBuffer:
+        return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    case GPUResourceAccess::RenderTarget:
+        return VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
+    case GPUResourceAccess::UnorderedAccess:
+    case GPUResourceAccess::ShaderReadCompute:
+    case GPUResourceAccess::ShaderReadPixel:
+    case GPUResourceAccess::ShaderReadNonPixel:
+    case GPUResourceAccess::ShaderReadGraphics:
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+#if !BUILD_RELEASE
+    default:
+        LOG(Error, "Unsupported GPU Resource Access: {}", (uint32)access);
+#endif
+    }
+    return VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+bool RenderToolsVulkan::HasExtension(const Array<const char*>& extensions, const char* name)
+{
+    for (int32 i = 0; i < extensions.Count(); i++)
+    {
+        const char* extension = extensions[i];
+        if (extension && StringUtils::Compare(extension, name) == 0)
+            return true;
+    }
+    return false;
 }
 
 #endif

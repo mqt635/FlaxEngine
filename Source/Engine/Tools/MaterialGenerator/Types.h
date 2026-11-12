@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,10 +6,6 @@
 
 #include "Engine/Core/Enums.h"
 #include "Engine/Visject/ShaderGraph.h"
-
-class MaterialGraphNode : public ShaderGraphNode<>
-{
-};
 
 class MaterialGraph : public ShaderGraph<>
 {

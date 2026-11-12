@@ -1,15 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_DX_SHADER_COMPILER
 
 #include "ShaderCompilerDX.h"
 #include "Engine/Core/Log.h"
-#include "Engine/Threading/Threading.h"
+#include "Engine/Engine/Globals.h"
 #include "Engine/Graphics/Config.h"
 #include "Engine/GraphicsDevice/DirectX/DX12/Types.h"
 #include "Engine/Utilities/StringConverter.h"
 #include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
 #include "Engine/Platform/Windows/ComPtr.h"
+#include "Engine/Platform/FileSystem.h"
+#include "Engine/Platform/File.h"
 #include <d3d12shader.h>
 #include <ThirdParty/DirectXShaderCompiler/dxcapi.h>
 
@@ -19,12 +21,10 @@
 class IncludeDX : public IDxcIncludeHandler
 {
 private:
-
     ShaderCompilationContext* _context;
     IDxcLibrary* _library;
 
 public:
-
     IncludeDX(ShaderCompilationContext* context, IDxcLibrary* library)
     {
         _context = context;
@@ -59,7 +59,8 @@ public:
         *ppIncludeSource = nullptr;
         const char* source;
         int32 sourceLength;
-        const StringAnsi filename(pFilename);
+        StringAnsi filename(pFilename);
+        filename.Replace('\\', '/');
         if (ShaderCompiler::GetIncludedFileSource(_context, "", filename.Get(), source, sourceLength))
             return E_FAIL;
         IDxcBlobEncoding* textBlob;
@@ -70,25 +71,28 @@ public:
     }
 };
 
-ShaderCompilerDX::ShaderCompilerDX(ShaderProfile profile)
-    : ShaderCompiler(profile)
+ShaderCompilerDX::ShaderCompilerDX(ShaderProfile profile, PlatformType platform, void* dxcCreateInstanceProc)
+    : ShaderCompiler(profile, platform)
 {
     IDxcCompiler3* compiler = nullptr;
     IDxcLibrary* library = nullptr;
+    IDxcContainerBuilder* builder = nullptr;
     IDxcContainerReflection* containerReflection = nullptr;
-    if (FAILED(DxcCreateInstance(CLSID_DxcCompiler, __uuidof(compiler), reinterpret_cast<void**>(&compiler))) ||
-        FAILED(DxcCreateInstance(CLSID_DxcLibrary, __uuidof(library), reinterpret_cast<void**>(&library))) ||
-        FAILED(DxcCreateInstance(CLSID_DxcContainerReflection, __uuidof(containerReflection), reinterpret_cast<void**>(&containerReflection))))
+    DxcCreateInstanceProc createInstance = dxcCreateInstanceProc ? (DxcCreateInstanceProc)dxcCreateInstanceProc : &DxcCreateInstance;
+    if (FAILED(createInstance(CLSID_DxcCompiler, __uuidof(compiler), reinterpret_cast<void**>(&compiler))) ||
+        FAILED(createInstance(CLSID_DxcLibrary, __uuidof(library), reinterpret_cast<void**>(&library))) ||
+        FAILED(createInstance(CLSID_DxcContainerBuilder, __uuidof(builder), reinterpret_cast<void**>(&builder))) ||
+        FAILED(createInstance(CLSID_DxcContainerReflection, __uuidof(containerReflection), reinterpret_cast<void**>(&containerReflection))))
     {
         LOG(Error, "DxcCreateInstance failed");
     }
     _compiler = compiler;
     _library = library;
+    _builder = builder;
     _containerReflection = containerReflection;
-    static bool PrintVersion = true;
-    if (PrintVersion)
+    static HashSet<void*> PrintVersions;
+    if (PrintVersions.Add(createInstance))
     {
-        PrintVersion = false;
         IDxcVersionInfo* version = nullptr;
         if (compiler && SUCCEEDED(compiler->QueryInterface(__uuidof(version), reinterpret_cast<void**>(&version))))
         {
@@ -102,14 +106,13 @@ ShaderCompilerDX::ShaderCompilerDX(ShaderProfile profile)
 
 ShaderCompilerDX::~ShaderCompilerDX()
 {
-    auto compiler = (IDxcCompiler2*)_compiler;
-    if (compiler)
+    if (auto compiler = (IDxcCompiler2*)_compiler)
         compiler->Release();
-    auto library = (IDxcLibrary*)_library;
-    if (library)
+    if (auto library = (IDxcLibrary*)_library)
         library->Release();
-    auto containerReflection = (IDxcContainerReflection*)_containerReflection;
-    if (containerReflection)
+    if (auto builder = (IDxcContainerBuilder*)_builder)
+        builder->Release();
+    if (auto containerReflection = (IDxcContainerReflection*)_containerReflection)
         containerReflection->Release();
 }
 
@@ -173,8 +176,16 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
     args.Add(entryPoint.Get());
     args.Add(options->TargetName.Get());
     Array<const Char*, InlinedAllocation<250>> argsFull;
+    String debugOutputFolder;
+    if (_context->Options->GenerateDebugData)
+    {
+        debugOutputFolder = Globals::ProjectCacheFolder / TEXT("Shaders") / TEXT("DXC");
+        if (!FileSystem::DirectoryExists(debugOutputFolder))
+            FileSystem::CreateDirectory(debugOutputFolder);
+    }
 
     // Compile all shader function permutations
+    AdditionalDataVS additionalDataVS;
     for (int32 permutationIndex = 0; permutationIndex < meta.Permutations.Count(); permutationIndex++)
     {
         _macros.Clear();
@@ -213,6 +224,7 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
             argsFull.Add(TEXT("-D"));
             argsFull.Add(*d);
         }
+        GetArgs(meta, argsFull);
 
         // Compile
         ComPtr<IDxcResult> results;
@@ -244,14 +256,14 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
         }
 
         // Get the output
-        ComPtr<IDxcBlob> shaderBuffer = nullptr;
+        ComPtr<IDxcBlob> shaderBuffer;
         if (FAILED(results->GetResult(&shaderBuffer)))
         {
             LOG(Error, "IDxcOperationResult::GetResult failed.");
             return true;
         }
 
-#ifdef GPU_USE_SHADERS_DEBUG_LAYER
+#ifdef GPU_ENABLE_SHADERS_DEBUG_LAYER
         // Generate debug information
         {
             // Disassemble compiled shader
@@ -274,6 +286,15 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
             _context->OnCollectDebugInfo(meta, permutationIndex, (const char*)disassemblyUtf8->GetBufferPointer(), (int32)disassemblyUtf8->GetBufferSize());
         }
 #endif
+        if (_context->Options->GenerateDebugData)
+        {
+            ComPtr<IDxcBlob> pdbBlob;
+            ComPtr<IDxcBlobUtf16> pdbName;
+            if (results->GetOutput(DXC_OUT_PDB, IID_PPV_ARGS(pdbBlob.GetAddressOf()), pdbName.GetAddressOf()) == S_OK)
+            {
+                File::WriteAllBytes(debugOutputFolder / String(pdbName->GetStringPointer(), (int32)pdbName->GetStringLength()), (byte*)pdbBlob->GetBufferPointer(), (int32)pdbBlob->GetBufferSize());
+            }
+        }
 
         // Perform shader reflection
         if (FAILED(containerReflection->Load(shaderBuffer)))
@@ -301,9 +322,59 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
         shaderReflection->GetDesc(&desc);
 
         // Process shader reflection data
+        void* additionalData = nullptr;
+        if (type == ShaderStage::Vertex)
+        {
+            additionalData = &additionalDataVS;
+            additionalDataVS.Inputs.Clear();
+            for (UINT inputIdx = 0; inputIdx < desc.InputParameters; inputIdx++)
+            {
+                D3D12_SIGNATURE_PARAMETER_DESC inputDesc;
+                shaderReflection->GetInputParameterDesc(inputIdx, &inputDesc);
+                if (inputDesc.SystemValueType != D3D10_NAME_UNDEFINED)
+                    continue;
+                auto format = PixelFormat::Unknown;
+                switch (inputDesc.ComponentType)
+                {
+                case D3D_REGISTER_COMPONENT_UINT32:
+                    if (inputDesc.Mask >= 0b1111)
+                        format = PixelFormat::R32G32B32A32_UInt;
+                    else if (inputDesc.Mask >= 0b111)
+                        format = PixelFormat::R32G32B32_UInt;
+                    else if (inputDesc.Mask >= 0b11)
+                        format = PixelFormat::R32G32_UInt;
+                    else
+                        format = PixelFormat::R32_UInt;
+                    break;
+                case D3D_REGISTER_COMPONENT_SINT32:
+                    if (inputDesc.Mask >= 0b1111)
+                        format = PixelFormat::R32G32B32A32_SInt;
+                    else if (inputDesc.Mask >= 0b111)
+                        format = PixelFormat::R32G32B32_SInt;
+                    else if (inputDesc.Mask >= 0b11)
+                        format = PixelFormat::R32G32_SInt;
+                    else
+                        format = PixelFormat::R32_SInt;
+                    break;
+                case D3D_REGISTER_COMPONENT_FLOAT32:
+                    if (inputDesc.Mask >= 0b1111)
+                        format = PixelFormat::R32G32B32A32_Float;
+                    else if (inputDesc.Mask >= 0b111)
+                        format = PixelFormat::R32G32B32_Float;
+                    else if (inputDesc.Mask >= 0b11)
+                        format = PixelFormat::R32G32_Float;
+                    else
+                        format = PixelFormat::R32_Float;
+                    break;
+                }
+                additionalDataVS.Inputs.Add({ ParseVertexElementType(inputDesc.SemanticName, inputDesc.SemanticIndex), 0, 0, 0, format });
+            }
+        }
         DxShaderHeader header;
         Platform::MemoryClear(&header, sizeof(header));
-        ShaderBindings bindings = { desc.InstructionCount, 0, 0, 0 };
+        ShaderBindings bindings = { desc.InstructionCount };
+        bindings.InputsCount = desc.InputParameters;
+        bindings.OutputsCount = desc.OutputParameters;
         for (uint32 a = 0; a < desc.ConstantBuffers; a++)
         {
             auto cb = shaderReflection->GetConstantBufferByIndex(a);
@@ -351,66 +422,72 @@ bool ShaderCompilerDX::CompileShader(ShaderFunctionMeta& meta, WritePermutationD
             shaderReflection->GetResourceBindingDesc(i, &resDesc);
             switch (resDesc.Type)
             {
-                // Sampler
+            // Sampler
             case D3D_SIT_SAMPLER:
+                bindings.UsedSamplersMask |= 1 << resDesc.BindPoint;
                 break;
-
-                // Constant Buffer
+            // Constant Buffer
             case D3D_SIT_CBUFFER:
             case D3D_SIT_TBUFFER:
                 break;
-
-                // Shader Resource
+            // Shader Resource
             case D3D_SIT_TEXTURE:
-                bindings.UsedSRsMask |= 1 << resDesc.BindPoint;
-                header.SrDimensions[resDesc.BindPoint] = resDesc.Dimension;
+                for (UINT shift = 0; shift < resDesc.BindCount; shift++)
+                {
+                    bindings.UsedSRsMask |= 1 << (resDesc.BindPoint + shift);
+                    header.SrDimensions[resDesc.BindPoint + shift] = resDesc.Dimension;
+                }
                 break;
             case D3D_SIT_STRUCTURED:
             case D3D_SIT_BYTEADDRESS:
-                bindings.UsedSRsMask |= 1 << resDesc.BindPoint;
-                header.SrDimensions[resDesc.BindPoint] = D3D_SRV_DIMENSION_BUFFER;
+                for (UINT shift = 0; shift < resDesc.BindCount; shift++)
+                {
+                    bindings.UsedSRsMask |= 1 << (resDesc.BindPoint + shift);
+                    header.SrDimensions[resDesc.BindPoint + shift] = D3D_SRV_DIMENSION_BUFFER;
+                }
                 break;
-
-                // Unordered Access
+            // Unordered Access
             case D3D_SIT_UAV_RWTYPED:
             case D3D_SIT_UAV_RWSTRUCTURED:
             case D3D_SIT_UAV_RWBYTEADDRESS:
             case D3D_SIT_UAV_APPEND_STRUCTURED:
             case D3D_SIT_UAV_CONSUME_STRUCTURED:
             case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER:
-                bindings.UsedUAsMask |= 1 << resDesc.BindPoint;
-                switch (resDesc.Dimension)
+                for (UINT shift = 0; shift < resDesc.BindCount; shift++)
                 {
-                case D3D_SRV_DIMENSION_BUFFER:
-                    header.UaDimensions[resDesc.BindPoint] = 1; // D3D12_UAV_DIMENSION_BUFFER;
-                    break;
-                case D3D_SRV_DIMENSION_TEXTURE1D:
-                    header.UaDimensions[resDesc.BindPoint] = 2; // D3D12_UAV_DIMENSION_TEXTURE1D;
-                    break;
-                case D3D_SRV_DIMENSION_TEXTURE1DARRAY:
-                    header.UaDimensions[resDesc.BindPoint] = 3; // D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
-                    break;
-                case D3D_SRV_DIMENSION_TEXTURE2D:
-                    header.UaDimensions[resDesc.BindPoint] = 4; // D3D12_UAV_DIMENSION_TEXTURE2D;
-                    break;
-                case D3D_SRV_DIMENSION_TEXTURE2DARRAY:
-                    header.UaDimensions[resDesc.BindPoint] = 5; // D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                    break;
-                case D3D_SRV_DIMENSION_TEXTURE3D:
-                    header.UaDimensions[resDesc.BindPoint] = 8; // D3D12_UAV_DIMENSION_TEXTURE3D;
-                    break;
-                default:
-                    LOG(Error, "Unknown UAV resource {2} of type {0} at slot {1}", resDesc.Dimension, resDesc.BindPoint, String(resDesc.Name));
-                    return true;
+                    bindings.UsedUAsMask |= 1 << (resDesc.BindPoint + shift);
+                    header.UaDimensions[resDesc.BindPoint + shift] = (byte)resDesc.Dimension; // D3D_SRV_DIMENSION matches D3D12_UAV_DIMENSION
                 }
                 break;
+            }
+        }
+
+        // Strip reflection data
+        if (!options->GenerateDebugData)
+        {
+            if (auto builder = (IDxcContainerBuilder*)_builder)
+            {
+                if (builder->Load(shaderBuffer) == S_OK)
+                {
+                    builder->RemovePart(DXC_PART_PDB);
+                    builder->RemovePart(DXC_PART_REFLECTION_DATA);
+                    ComPtr<IDxcOperationResult> serializeResult;
+                    if (builder->SerializeContainer(&serializeResult) == S_OK)
+                    {
+                        ComPtr<IDxcBlob> optimizedShaderBuffer;
+                        if (SUCCEEDED(serializeResult->GetResult(&optimizedShaderBuffer)))
+                        {
+                            shaderBuffer = optimizedShaderBuffer;
+                        }
+                    }
+                }
             }
         }
 
         if (WriteShaderFunctionPermutation(_context, meta, permutationIndex, bindings, &header, sizeof(header), shaderBuffer->GetBufferPointer(), (int32)shaderBuffer->GetBufferSize()))
             return true;
 
-        if (customDataWrite && customDataWrite(_context, meta, permutationIndex, _macros))
+        if (customDataWrite && customDataWrite(_context, meta, permutationIndex, _macros, additionalData))
             return true;
     }
 

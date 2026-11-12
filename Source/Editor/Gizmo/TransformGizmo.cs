@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
 using System.Collections.Generic;
@@ -35,6 +41,11 @@ namespace FlaxEditor.Gizmo
         /// The event to duplicate selected objects.
         /// </summary>
         public Action Duplicate;
+
+        /// <summary>
+        /// Gets the array of selected objects.
+        /// </summary>
+        public List<SceneGraphNode> Selection => _selection;
 
         /// <summary>
         /// Gets the array of selected parent objects (as actors).
@@ -86,16 +97,71 @@ namespace FlaxEditor.Gizmo
         }
 
         /// <inheritdoc />
+        public override void SnapToGround()
+        {
+            if (Owner.SceneGraphRoot == null)
+                return;
+            var ray = new Ray(Position, Vector3.Down);
+            while (true)
+            {
+                var view = new Ray(Owner.ViewPosition, Owner.ViewDirection);
+                var rayCastFlags = SceneGraphNode.RayCastData.FlagTypes.SkipEditorPrimitives | SceneGraphNode.RayCastData.FlagTypes.SkipTriggers;
+                var hit = Owner.SceneGraphRoot.RayCast(ref ray, ref view, out var distance, out _, rayCastFlags);
+                if (hit != null)
+                {
+                    // Skip snapping selection to itself
+                    bool isSelected = false;
+                    for (var e = hit; e != null && !isSelected; e = e.ParentNode)
+                        isSelected |= IsSelected(e);
+                    if (isSelected)
+                    {
+                        GetSelectedObjectsBounds(out var selectionBounds, out _);
+                        var offset = Mathf.Max(selectionBounds.Size.Y * 0.5f, 1.0f);
+                        ray.Position = ray.GetPoint(offset);
+                        continue;
+                    }
+
+                    // Include objects bounds into target snap location
+                    var editorBounds = BoundingBox.Empty;
+                    Real bottomToCenter = 100000.0f;
+                    for (int i = 0; i < _selectionParents.Count; i++)
+                    {
+                        if (_selectionParents[i] is ActorNode actorNode)
+                        {
+                            var b = actorNode.Actor.EditorBoundingBoxWithChildren;
+                            BoundingBox.Merge(ref editorBounds, ref b, out editorBounds);
+                            bottomToCenter = Mathf.Min(bottomToCenter, actorNode.Actor.Position.Y - editorBounds.Minimum.Y);
+                        }
+                    }
+                    var newPosition = ray.GetPoint(distance) + new Vector3(0, bottomToCenter, 0);
+
+                    // Snap
+                    var translationDelta = newPosition - Position;
+                    var rotationDelta = Quaternion.Identity;
+                    var scaleDelta = Vector3.Zero;
+                    if (translationDelta.IsZero)
+                        break;
+                    StartTransforming();
+                    OnApplyTransformation(ref translationDelta, ref rotationDelta, ref scaleDelta);
+                    EndTransforming();
+                }
+                break;
+            }
+        }
+
+        /// <inheritdoc />
         public override void Pick()
         {
             // Ensure player is not moving objects
             if (ActiveAxis != Axis.None)
                 return;
+            Profiler.BeginEvent("Pick");
 
             // Get mouse ray and try to hit any object
             var ray = Owner.MouseRay;
             var view = new Ray(Owner.ViewPosition, Owner.ViewDirection);
-            bool selectColliders = (Owner.RenderTask.View.Flags & ViewFlags.PhysicsDebug) == ViewFlags.PhysicsDebug;
+            var renderView = Owner.RenderTask.View;
+            bool selectColliders = (renderView.Flags & ViewFlags.PhysicsDebug) == ViewFlags.PhysicsDebug || renderView.Mode == ViewMode.PhysicsColliders;
             SceneGraphNode.RayCastData.FlagTypes rayCastFlags = SceneGraphNode.RayCastData.FlagTypes.None;
             if (!selectColliders)
                 rayCastFlags |= SceneGraphNode.RayCastData.FlagTypes.SkipColliders;
@@ -141,7 +207,21 @@ namespace FlaxEditor.Gizmo
                     ActorNode prefabRoot = GetPrefabRootInParent(actorNode);
                     if (prefabRoot != null && actorNode != prefabRoot)
                     {
-                        hit = WalkUpAndFindActorNodeBeforeSelection(actorNode, prefabRoot);
+                        bool isPrefabInSelection = false;
+                        foreach (var e in sceneEditing.Selection)
+                        {
+                            if (e is ActorNode ae && GetPrefabRootInParent(ae) == prefabRoot)
+                            {
+                                isPrefabInSelection = true;
+                                break;
+                            }
+                        }
+
+                        // Skip selecting prefab root if we already had object from that prefab selected
+                        if (!isPrefabInSelection)
+                        {
+                            hit = WalkUpAndFindActorNodeBeforeSelection(actorNode, prefabRoot);
+                        }
                     }
                 }
 
@@ -164,6 +244,8 @@ namespace FlaxEditor.Gizmo
             {
                 sceneEditing.Deselect();
             }
+
+            Profiler.EndEvent();
         }
 
         /// <inheritdoc />
@@ -189,13 +271,21 @@ namespace FlaxEditor.Gizmo
             // Note: because selection may contain objects and their children we have to split them and get only parents.
             // Later during transformation we apply translation/scale/rotation only on them (children inherit transformations)
             SceneGraphTools.BuildNodesParents(_selection, _selectionParents);
+
+            base.OnSelectionChanged(newSelection);
         }
 
         /// <inheritdoc />
         protected override int SelectionCount => _selectionParents.Count;
 
         /// <inheritdoc />
-        protected override Transform GetSelectedObject(int index)
+        protected override SceneGraphNode GetSelectedObject(int index)
+        {
+            return _selectionParents[index];
+        }
+
+        /// <inheritdoc />
+        protected override Transform GetSelectedTransform(int index)
         {
             return _selectionParents[index].Transform;
         }
@@ -209,11 +299,8 @@ namespace FlaxEditor.Gizmo
             {
                 if (_selectionParents[i] is ActorNode actorNode)
                 {
-                    bounds = BoundingBox.Merge(bounds, actorNode.Actor.BoxWithChildren);
-                    if (actorNode.AffectsNavigationWithChildren)
-                    {
-                        navigationDirty |= actorNode.Actor.HasStaticFlag(StaticFlags.Navigation);
-                    }
+                    bounds = BoundingBox.Merge(bounds, actorNode.Actor.BoundingBoxWithChildren);
+                    navigationDirty |= actorNode.AffectsNavigationWithChildren;
                 }
             }
         }

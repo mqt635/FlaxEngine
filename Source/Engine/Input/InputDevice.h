@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,11 +11,10 @@
 /// <summary>
 /// Base class for all input device objects.
 /// </summary>
-API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API InputDevice : public PersistentScriptingObject
+API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API InputDevice : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(InputDevice);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(InputDevice);
 public:
-
     enum class EventType
     {
         Char,
@@ -26,6 +25,7 @@ public:
         MouseDoubleClick,
         MouseWheel,
         MouseMove,
+        MouseMoveRelative,
         MouseLeave,
         TouchDown,
         TouchMove,
@@ -52,18 +52,23 @@ public:
             struct
             {
                 MouseButton Button;
-                Vector2 Position;
+                Float2 Position;
             } MouseData;
 
             struct
             {
+                Float2 PositionRelative;
+            } MouseMovementData;
+
+            struct
+            {
                 float WheelDelta;
-                Vector2 Position;
+                Float2 Position;
             } MouseWheelData;
 
             struct
             {
-                Vector2 Position;
+                Float2 Position;
                 int32 PointerId;
             } TouchData;
         };
@@ -81,18 +86,16 @@ public:
     typedef Array<Event, InlinedAllocation<32>> EventQueue;
 
 protected:
-
     String _name;
     EventQueue _queue;
 
     explicit InputDevice(const SpawnParams& params, const StringView& name)
-        : PersistentScriptingObject(params)
+        : ScriptingObject(params)
         , _name(name)
     {
     }
 
 public:
-
     /// <summary>
     /// Gets the name.
     /// </summary>

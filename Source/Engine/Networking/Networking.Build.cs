@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using Flax.Build;
 using Flax.Build.NativeCpp;
@@ -13,6 +13,7 @@ public class Networking : EngineModule
     {
         base.Setup(options);
 
+        Tags["Network"] = string.Empty;
         options.PublicDefinitions.Add("COMPILE_WITH_NETWORKING");
     }
 }

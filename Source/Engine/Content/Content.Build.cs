@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -18,6 +18,7 @@ public class Content : EngineModule
         options.PrivateDependencies.Add("lz4");
         options.PrivateDependencies.Add("AudioTool");
         options.PrivateDependencies.Add("TextureTool");
+        options.PrivateDependencies.Add("ModelTool");
         options.PrivateDependencies.Add("Particles");
 
         if (options.Target.IsEditor)
@@ -36,6 +37,9 @@ public class Content : EngineModule
         files.AddRange(Directory.GetFiles(FolderPath, "*.h", SearchOption.TopDirectoryOnly));
         files.AddRange(Directory.GetFiles(Path.Combine(FolderPath, "Assets"), "*.h", SearchOption.TopDirectoryOnly));
         files.AddRange(Directory.GetFiles(Path.Combine(FolderPath, "Cache"), "*.h", SearchOption.TopDirectoryOnly));
+        files.AddRange(Directory.GetFiles(Path.Combine(FolderPath, "Factories"), "*.h", SearchOption.TopDirectoryOnly));
         files.AddRange(Directory.GetFiles(Path.Combine(FolderPath, "Storage"), "*.h", SearchOption.TopDirectoryOnly));
+        files.Add(Path.Combine(FolderPath, "Upgraders/BinaryAssetUpgrader.h"));
+        files.Add(Path.Combine(FolderPath, "Upgraders/IAssetUpgrader.h"));
     }
 }

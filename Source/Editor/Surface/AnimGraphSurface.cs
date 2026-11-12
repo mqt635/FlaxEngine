@@ -1,9 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using FlaxEditor.Content;
 using FlaxEditor.Scripting;
 using FlaxEditor.Surface.ContextMenu;
@@ -41,10 +39,23 @@ namespace FlaxEditor.Surface
                         DefaultValues = new object[]
                         {
                             "State",
-                            Utils.GetEmptyArray<byte>(),
-                            Utils.GetEmptyArray<byte>(),
+                            Array.Empty<byte>(),
+                            Array.Empty<byte>(),
                         },
-                        Size = new Vector2(100, 0),
+                        Size = new Float2(100, 0),
+                    },
+                    new NodeArchetype
+                    {
+                        TypeID = 34,
+                        Create = (id, context, arch, groupArch) => new Animation.StateMachineAny(id, context, arch, groupArch),
+                        Title = "Any",
+                        Description = "The generic animation states machine state with source transitions from any other state",
+                        Flags = NodeFlags.AnimGraph,
+                        Size = new Float2(100, 0),
+                        DefaultValues = new object[]
+                        {
+                            Array.Empty<byte>(),
+                        },
                     },
                 }
             }
@@ -63,7 +74,7 @@ namespace FlaxEditor.Surface
                     Title = "Transition Source State Anim",
                     Description = "The animation state machine transition source state animation data information",
                     Flags = NodeFlags.AnimGraph,
-                    Size = new Vector2(270, 110),
+                    Size = new Float2(270, 110),
                     Elements = new[]
                     {
                         NodeElementArchetype.Factory.Output(0, "Length", typeof(float), 0),
@@ -76,197 +87,10 @@ namespace FlaxEditor.Surface
             }
         };
 
-        internal static class NodesCache
-        {
-            private static readonly object _locker = new object();
-            private static int _version;
-            private static Task _task;
-            private static VisjectCM _taskContextMenu;
-            private static Dictionary<KeyValuePair<string, ushort>, GroupArchetype> _cache;
+        private static NodesCache _nodesCache = new NodesCache(IterateNodesCache);
 
-            public static void Wait()
-            {
-                _task?.Wait();
-            }
-
-            public static void Clear()
-            {
-                Wait();
-
-                if (_cache != null && _cache.Count != 0)
-                {
-                    OnCodeEditingTypesCleared();
-                }
-            }
-
-            public static void Get(VisjectCM contextMenu)
-            {
-                Wait();
-
-                lock (_locker)
-                {
-                    if (_cache == null)
-                        _cache = new Dictionary<KeyValuePair<string, ushort>, GroupArchetype>();
-                    contextMenu.LockChildrenRecursive();
-
-                    // Check if has cached groups
-                    if (_cache.Count != 0)
-                    {
-                        // Check if context menu doesn't have the recent cached groups
-                        if (!contextMenu.Groups.Any(g => g.Archetype.Tag is int asInt && asInt == _version))
-                        {
-                            var groups = contextMenu.Groups.Where(g => g.Archetype.Tag is int).ToArray();
-                            foreach (var g in groups)
-                                contextMenu.RemoveGroup(g);
-                            foreach (var g in _cache.Values)
-                                contextMenu.AddGroup(g);
-                        }
-                    }
-                    else
-                    {
-                        // Remove any old groups from context menu
-                        var groups = contextMenu.Groups.Where(g => g.Archetype.Tag is int).ToArray();
-                        foreach (var g in groups)
-                            contextMenu.RemoveGroup(g);
-
-                        // Register for scripting types reload
-                        Editor.Instance.CodeEditing.TypesCleared += OnCodeEditingTypesCleared;
-
-                        // Run caching on an async
-                        _task = Task.Run(OnActiveContextMenuShowAsync);
-                        _taskContextMenu = contextMenu;
-                    }
-
-                    contextMenu.UnlockChildrenRecursive();
-                }
-            }
-
-            private static void OnActiveContextMenuShowAsync()
-            {
-                Profiler.BeginEvent("Setup Anim Graph Context Menu (async)");
-
-                foreach (var scriptType in Editor.Instance.CodeEditing.All.Get())
-                {
-                    if (!SurfaceUtils.IsValidVisualScriptType(scriptType))
-                        continue;
-
-                    // Skip Newtonsoft.Json stuff
-                    var scriptTypeTypeName = scriptType.TypeName;
-                    if (scriptTypeTypeName.StartsWith("Newtonsoft.Json."))
-                        continue;
-                    var scriptTypeName = scriptType.Name;
-
-                    // Enum
-                    if (scriptType.IsEnum)
-                    {
-                        // Create node archetype
-                        var node = (NodeArchetype)Archetypes.Constants.Nodes[10].Clone();
-                        node.DefaultValues[0] = Activator.CreateInstance(scriptType.Type);
-                        node.Flags &= ~NodeFlags.NoSpawnViaGUI;
-                        node.Title = scriptTypeName;
-                        node.Description = scriptTypeTypeName;
-                        var attributes = scriptType.GetAttributes(false);
-                        var tooltipAttribute = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
-                        if (tooltipAttribute != null)
-                            node.Description += "\n" + tooltipAttribute.Text;
-
-                        // Create group archetype
-                        var groupKey = new KeyValuePair<string, ushort>(scriptTypeName, 2);
-                        if (!_cache.TryGetValue(groupKey, out var group))
-                        {
-                            group = new GroupArchetype
-                            {
-                                GroupID = groupKey.Value,
-                                Name = groupKey.Key,
-                                Color = new Color(243, 156, 18),
-                                Tag = _version,
-                                Archetypes = new List<NodeArchetype>(),
-                            };
-                            _cache.Add(groupKey, group);
-                        }
-
-                        // Add node to the group
-                        ((IList<NodeArchetype>)group.Archetypes).Add(node);
-                        continue;
-                    }
-
-                    // Structure
-                    if (scriptType.IsValueType)
-                    {
-                        if (scriptType.IsVoid)
-                            continue;
-
-                        // Create group archetype
-                        var groupKey = new KeyValuePair<string, ushort>(scriptTypeName, 4);
-                        if (!_cache.TryGetValue(groupKey, out var group))
-                        {
-                            group = new GroupArchetype
-                            {
-                                GroupID = groupKey.Value,
-                                Name = groupKey.Key,
-                                Color = new Color(155, 89, 182),
-                                Tag = _version,
-                                Archetypes = new List<NodeArchetype>(),
-                            };
-                            _cache.Add(groupKey, group);
-                        }
-
-                        var attributes = scriptType.GetAttributes(false);
-                        var tooltipAttribute = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
-
-                        // Create Pack node archetype
-                        var node = (NodeArchetype)Archetypes.Packing.Nodes[6].Clone();
-                        node.DefaultValues[0] = scriptTypeTypeName;
-                        node.Flags &= ~NodeFlags.NoSpawnViaGUI;
-                        node.Title = "Pack " + scriptTypeName;
-                        node.Description = scriptTypeTypeName;
-                        if (tooltipAttribute != null)
-                            node.Description += "\n" + tooltipAttribute.Text;
-                        ((IList<NodeArchetype>)group.Archetypes).Add(node);
-
-                        // Create Unpack node archetype
-                        node = (NodeArchetype)Archetypes.Packing.Nodes[13].Clone();
-                        node.DefaultValues[0] = scriptTypeTypeName;
-                        node.Flags &= ~NodeFlags.NoSpawnViaGUI;
-                        node.Title = "Unpack " + scriptTypeName;
-                        node.Description = scriptTypeTypeName;
-                        if (tooltipAttribute != null)
-                            node.Description += "\n" + tooltipAttribute.Text;
-                        ((IList<NodeArchetype>)group.Archetypes).Add(node);
-                    }
-                }
-
-                // Add group to context menu (on a main thread)
-                FlaxEngine.Scripting.InvokeOnUpdate(() =>
-                {
-                    lock (_locker)
-                    {
-                        _taskContextMenu.AddGroups(_cache.Values);
-                        _taskContextMenu = null;
-                    }
-                });
-
-                Profiler.EndEvent();
-
-                lock (_locker)
-                {
-                    _task = null;
-                }
-            }
-
-            private static void OnCodeEditingTypesCleared()
-            {
-                Wait();
-
-                lock (_locker)
-                {
-                    _cache.Clear();
-                    _version++;
-                }
-
-                Editor.Instance.CodeEditing.TypesCleared -= OnCodeEditingTypesCleared;
-            }
-        }
+        /// <inheritdoc />
+        public override bool UseContextMenuDescriptionPanel => true;
 
         /// <summary>
         /// The state machine editing context menu.
@@ -278,8 +102,6 @@ namespace FlaxEditor.Surface
         /// </summary>
         protected VisjectCM _cmStateMachineTransitionMenu;
 
-        private bool _isRegisteredForScriptsReload;
-
         /// <inheritdoc />
         public AnimGraphSurface(IVisjectSurfaceOwner owner, Action onSave, FlaxEditor.Undo undo)
         : base(owner, onSave, undo, CreateStyle())
@@ -289,14 +111,43 @@ namespace FlaxEditor.Surface
             if (customNodes != null && customNodes.Count > 0)
             {
                 AddCustomNodes(customNodes);
+            }
 
-                // Check if any of the nodes comes from the game scripts - those can be reloaded at runtime so prevent crashes
-                if (Editor.Instance.CodeEditing.AnimGraphNodes.HasTypeFromGameScripts)
+            ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
+        }
+
+        internal AnimGraphTraceEvent[] LastTraceEvents;
+
+        internal unsafe bool TryGetTraceEvent(SurfaceNode node, out AnimGraphTraceEvent traceEvent)
+        {
+            if (LastTraceEvents != null)
+            {
+                foreach (var e in LastTraceEvents)
                 {
-                    _isRegisteredForScriptsReload = true;
-                    ScriptsBuilder.ScriptsReloadBegin += OnScriptsReloadBegin;
+                    // Node IDs must match
+                    if (e.NodeId == node.ID)
+                    {
+                        uint* nodePath = e.NodePath0;
+
+                        // Get size of the path
+                        int nodePathSize = 0;
+                        while (nodePathSize < 8 && nodePath[nodePathSize] != 0)
+                            nodePathSize++;
+
+                        // Follow input node contexts path to verify if it matches with the path in the event
+                        var c = node.Context;
+                        for (int i = nodePathSize - 1; i >= 0 && c != null; i--)
+                            c = c.OwnerNodeID == nodePath[i] ? c.Parent : null;
+                        if (c != null)
+                        {
+                            traceEvent = e;
+                            return true;
+                        }
+                    }
                 }
             }
+            traceEvent = default;
+            return false;
         }
 
         private static SurfaceStyle CreateStyle()
@@ -310,8 +161,28 @@ namespace FlaxEditor.Surface
 
         private void OnScriptsReloadBegin()
         {
-            Owner.OnSurfaceClose();
+            _nodesCache.Clear();
 
+            // Check if any of the nodes comes from the game scripts - those can be reloaded at runtime so prevent crashes
+            bool hasTypeFromGameScripts = Editor.Instance.CodeEditing.AnimGraphNodes.HasTypeFromGameScripts;
+
+            // Check any surface parameter comes from Game scripts module to handle scripts reloads in Editor
+            if (!hasTypeFromGameScripts && RootContext != null)
+            {
+                foreach (var param in Parameters)
+                {
+                    if (FlaxEngine.Scripting.IsTypeFromGameScripts(param.Type.Type))
+                    {
+                        hasTypeFromGameScripts = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasTypeFromGameScripts)
+                return;
+
+            Owner.OnSurfaceClose();
             // TODO: make reload soft: dispose default primary context menu, update existing custom nodes to new ones or remove if invalid
         }
 
@@ -330,7 +201,7 @@ namespace FlaxEditor.Surface
                     _cmStateMachineMenu = new VisjectCM(new VisjectCM.InitInfo
                     {
                         Groups = StateMachineGroupArchetypes,
-                        CanSpawnNode = arch => true,
+                        CanSpawnNode = (_, _) => true,
                     });
                     _cmStateMachineMenu.ShowExpanded = true;
                 }
@@ -349,7 +220,7 @@ namespace FlaxEditor.Surface
                         ParametersGetter = null,
                         CustomNodesGroup = GetCustomNodes(),
                     });
-                    _cmStateMachineTransitionMenu.AddGroup(StateMachineTransitionGroupArchetype);
+                    _cmStateMachineTransitionMenu.AddGroup(StateMachineTransitionGroupArchetype, false);
                 }
                 menu = _cmStateMachineTransitionMenu;
             }
@@ -358,20 +229,105 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        protected override void OnShowPrimaryMenu(VisjectCM activeCM, Vector2 location, Box startBox)
+        protected override void OnShowPrimaryMenu(VisjectCM activeCM, Float2 location, List<Box> startBoxes)
         {
-            Profiler.BeginEvent("Setup Anim Graph Context Menu");
-            NodesCache.Get(activeCM);
-            Profiler.EndEvent();
+            // Check if show additional nodes in the current surface context
+            if (activeCM != _cmStateMachineMenu)
+            {
+                _nodesCache.Get(activeCM);
 
-            base.OnShowPrimaryMenu(activeCM, location, startBox);
+                base.OnShowPrimaryMenu(activeCM, location, startBoxes);
 
-            activeCM.VisibleChanged += OnActiveContextMenuVisibleChanged;
+                activeCM.VisibleChanged += OnActiveContextMenuVisibleChanged;
+            }
+            else
+            {
+                base.OnShowPrimaryMenu(activeCM, location, startBoxes);
+            }
         }
 
         private void OnActiveContextMenuVisibleChanged(Control activeCM)
         {
-            NodesCache.Wait();
+            _nodesCache.Wait();
+        }
+
+        private static void IterateNodesCache(ScriptType scriptType, Dictionary<KeyValuePair<string, ushort>, GroupArchetype> cache, int version)
+        {
+            // Skip Newtonsoft.Json stuff
+            var scriptTypeTypeName = scriptType.TypeName;
+            if (scriptTypeTypeName.StartsWith("Newtonsoft.Json."))
+                return;
+            var scriptTypeName = scriptType.Name;
+
+            // Enum
+            if (scriptType.IsEnum)
+            {
+                // Create node archetype
+                var node = (NodeArchetype)Archetypes.Constants.Nodes[10].Clone();
+                node.DefaultValues[0] = Activator.CreateInstance(scriptType.Type);
+                node.Flags &= ~NodeFlags.NoSpawnViaGUI;
+                node.Title = scriptTypeName;
+                node.Description = Editor.Instance.CodeDocs.GetTooltip(scriptType);
+
+                // Create group archetype
+                var groupKey = new KeyValuePair<string, ushort>(scriptTypeName, 2);
+                if (!cache.TryGetValue(groupKey, out var group))
+                {
+                    group = new GroupArchetype
+                    {
+                        GroupID = groupKey.Value,
+                        Name = groupKey.Key,
+                        Color = new Color(243, 156, 18),
+                        Tag = version,
+                        Archetypes = new List<NodeArchetype>(),
+                    };
+                    cache.Add(groupKey, group);
+                }
+
+                // Add node to the group
+                ((IList<NodeArchetype>)group.Archetypes).Add(node);
+                return;
+            }
+
+            // Structure
+            if (scriptType.IsValueType)
+            {
+                if (scriptType.IsVoid)
+                    return;
+
+                // Create group archetype
+                var groupKey = new KeyValuePair<string, ushort>(scriptTypeName, 4);
+                if (!cache.TryGetValue(groupKey, out var group))
+                {
+                    group = new GroupArchetype
+                    {
+                        GroupID = groupKey.Value,
+                        Name = groupKey.Key,
+                        Color = new Color(155, 89, 182),
+                        Tag = version,
+                        Archetypes = new List<NodeArchetype>(),
+                    };
+                    cache.Add(groupKey, group);
+                }
+
+                var tooltip = Editor.Instance.CodeDocs.GetTooltip(scriptType);
+
+                // Create Pack node archetype
+                var node = (NodeArchetype)Archetypes.Packing.Nodes[6].Clone();
+                node.DefaultValues[0] = scriptTypeTypeName;
+                node.Flags &= ~NodeFlags.NoSpawnViaGUI;
+                node.Title = "Pack " + scriptTypeName;
+                node.Description = tooltip;
+                ((IList<NodeArchetype>)group.Archetypes).Add(node);
+
+                // Create Unpack node archetype
+                node = (NodeArchetype)Archetypes.Packing.Nodes[13].Clone();
+                node.DefaultValues[0] = scriptTypeTypeName;
+                node.Flags &= ~NodeFlags.NoSpawnViaGUI;
+                node.Title = "Unpack " + scriptTypeName;
+                node.Description = tooltip;
+                ((IList<NodeArchetype>)group.Archetypes).Add(node);
+            }
         }
 
         /// <inheritdoc />
@@ -383,9 +339,9 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        public override bool CanUseNodeType(NodeArchetype nodeArchetype)
+        public override bool CanUseNodeType(GroupArchetype groupArchetype, NodeArchetype nodeArchetype)
         {
-            return (nodeArchetype.Flags & NodeFlags.AnimGraph) != 0 && base.CanUseNodeType(nodeArchetype);
+            return (nodeArchetype.Flags & NodeFlags.AnimGraph) != 0 && base.CanUseNodeType(groupArchetype, nodeArchetype);
         }
 
         /// <inheritdoc />
@@ -464,12 +420,9 @@ namespace FlaxEditor.Surface
                 _cmStateMachineTransitionMenu.Dispose();
                 _cmStateMachineTransitionMenu = null;
             }
-            if (_isRegisteredForScriptsReload)
-            {
-                _isRegisteredForScriptsReload = false;
-                ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
-            }
-            NodesCache.Wait();
+            ScriptsBuilder.ScriptsReloadBegin -= OnScriptsReloadBegin;
+            _nodesCache.Wait();
+            LastTraceEvents = null;
 
             base.OnDestroy();
         }

@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Globalization;
 using FlaxEditor.Utilities;
 using FlaxEngine;
+using Utils = FlaxEngine.Utils;
 
 namespace FlaxEditor.GUI.Input
 {
@@ -14,6 +14,8 @@ namespace FlaxEditor.GUI.Input
     [HideInEditor]
     public class FloatValueBox : ValueBox<float>
     {
+        private Utils.ValueCategory _category = Utils.ValueCategory.None;
+
         /// <inheritdoc />
         public override float Value
         {
@@ -36,7 +38,7 @@ namespace FlaxEditor.GUI.Input
             get => _min;
             set
             {
-                if (!Mathf.NearEqual(_min, value))
+                if (_min != value)
                 {
                     if (value > _max)
                         throw new ArgumentException();
@@ -52,7 +54,7 @@ namespace FlaxEditor.GUI.Input
             get => _max;
             set
             {
-                if (!Mathf.NearEqual(_max, value))
+                if (_max != value)
                 {
                     if (value < _min)
                         throw new ArgumentException();
@@ -84,7 +86,7 @@ namespace FlaxEditor.GUI.Input
             var range = _max - _min;
             if (Mathf.IsOne(_slideSpeed) && range > Mathf.Epsilon * 200.0f && range < 1000000.0f)
             {
-                _slideSpeed = range * 0.01f;
+                _slideSpeed = range * 0.001f;
             }
         }
 
@@ -137,18 +139,25 @@ namespace FlaxEditor.GUI.Input
             Value = Value;
         }
 
+        /// <summary>
+        /// Gets or sets the category of the value. This can be none for just a number or a more specific one like a distance.
+        /// </summary>
+        public Utils.ValueCategory Category
+        {
+            get => _category;
+            set
+            {
+                if (_category == value)
+                    return;
+                _category = value;
+                UpdateText();
+            }
+        }
+
         /// <inheritdoc />
         protected sealed override void UpdateText()
         {
-            string text;
-            if (float.IsPositiveInfinity(_value) || _value == float.MaxValue)
-                text = "Infinity";
-            else if (float.IsNegativeInfinity(_value) || _value == float.MinValue)
-                text = "-Infinity";
-            else
-                text = _value.ToString(CultureInfo.InvariantCulture);
-
-            SetText(text);
+            SetText(Utilities.Utils.FormatFloat(_value, Category));
         }
 
         /// <inheritdoc />
@@ -157,7 +166,7 @@ namespace FlaxEditor.GUI.Input
             try
             {
                 var value = ShuntingYard.Parse(Text);
-                Value = (float)Math.Round(value, 5);
+                Value = (float)value;
             }
             catch (Exception ex)
             {

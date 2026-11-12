@@ -1,21 +1,25 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Scripting/ScriptingType.h"
+#ifndef _MSC_VER
+#include "Engine/Core/Collections/Array.h"
+#endif
 #include "AssetInfo.h"
 #include "Asset.h"
 #include "Config.h"
 
 class Engine;
 class FlaxFile;
+class BinaryAsset;
 class IAssetFactory;
 class AssetsCache;
 
 // Content and assets statistics container.
 API_STRUCT() struct FLAXENGINE_API ContentStats
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(ContentStats);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(ContentStats);
 
     // Amount of asset objects in memory.
     API_FIELD() int32 AssetsCount = 0;
@@ -32,11 +36,10 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(ContentStats);
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Content
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Content);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Content);
     friend Engine;
     friend Asset;
 public:
-
     /// <summary>
     /// The time between content pool updates.
     /// </summary>
@@ -48,7 +51,6 @@ public:
     static TimeSpan AssetsUnloadInterval;
 
 public:
-
     /// <summary>
     /// Gets the assets registry.
     /// </summary>
@@ -56,7 +58,6 @@ public:
     static AssetsCache* GetRegistry();
 
 public:
-
     /// <summary>
     /// Finds the asset info by id.
     /// </summary>
@@ -74,6 +75,19 @@ public:
     API_FUNCTION() static bool GetAssetInfo(const StringView& path, API_PARAM(Out) AssetInfo& info);
 
     /// <summary>
+    /// Finds the asset path by id. In editor it returns the actual asset path, at runtime it returns the mapped asset path.
+    /// </summary>
+    /// <param name="id">The asset id.</param>
+    /// <returns>The asset path, or empty if failed to find.</returns>
+    API_FUNCTION() static StringView GetEditorAssetPath(const Guid& id);
+
+    /// <summary>
+    /// Finds all the asset IDs. Uses asset registry.
+    /// </summary>
+    /// <returns>The list of all asset IDs.</returns>
+    API_FUNCTION() static Array<Guid, HeapAllocation> GetAllAssets();
+
+    /// <summary>
     /// Finds all the asset IDs by type (exact type, without inheritance checks). Uses asset registry.
     /// </summary>
     /// <param name="type">The asset type.</param>
@@ -81,7 +95,6 @@ public:
     API_FUNCTION() static Array<Guid, HeapAllocation> GetAllAssetsByType(const MClass* type);
 
 public:
-
     /// <summary>
     /// Gets the asset factory used by the given asset type id.
     /// </summary>
@@ -97,7 +110,6 @@ public:
     static IAssetFactory* GetAssetFactory(const AssetInfo& assetInfo);
 
 public:
-
     /// <summary>
     /// Generates temporary asset path.
     /// </summary>
@@ -105,7 +117,6 @@ public:
     API_FUNCTION() static String CreateTemporaryAssetPath();
 
 public:
-
     /// <summary>
     /// Gets content statistics.
     /// </summary>
@@ -115,7 +126,26 @@ public:
     /// Gets the assets (loaded or during load).
     /// </summary>
     /// <returns>The collection of assets.</returns>
-    API_PROPERTY() static Array<Asset*, HeapAllocation> GetAssets();
+    API_FUNCTION() static Array<Asset*, HeapAllocation> GetAssets();
+
+    /// <summary>
+    /// Gets the assets (loaded or during load).
+    /// </summary>
+    /// <param name="type">Type of the assets to search for. Includes any assets derived from the type.</param>
+    /// <returns>Found actors list.</returns>
+    API_FUNCTION() static Array<Asset*, HeapAllocation> GetAssets(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type);
+
+    /// <summary>
+    /// Gets the assets (loaded or during load).
+    /// </summary>
+    /// <typeparam name="T">Type of the object.</typeparam>
+    /// <returns>Found actors list.</returns>
+    template<typename T = Asset>
+    static Array<T*, HeapAllocation> GetAssets()
+    {
+        Array<Asset*, HeapAllocation> assets = GetAssets(T::GetStaticClass());
+        return *(Array<T*, HeapAllocation>*)&assets;
+    }
 
     /// <summary>
     /// Gets the raw dictionary of assets (loaded or during load).
@@ -128,7 +158,7 @@ public:
     /// </summary>
     /// <param name="id">Asset unique ID</param>
     /// <param name="type">The asset type. If loaded object has different type (excluding types derived from the given) the loading fails.</param>
-    /// <returns>Loaded asset or null if cannot</returns>
+    /// <returns>Loaded asset or null if failed.</returns>
     API_FUNCTION() static Asset* LoadAsync(const Guid& id, API_PARAM(Attributes="TypeReference(typeof(Asset))") const MClass* type);
 
     /// <summary>
@@ -136,7 +166,7 @@ public:
     /// </summary>
     /// <param name="id">Asset unique ID</param>
     /// <param name="type">The asset type. If loaded object has different type (excluding types derived from the given) the loading fails.</param>
-    /// <returns>Loaded asset or null if cannot</returns>
+    /// <returns>Loaded asset or null if failed.</returns>
     static Asset* LoadAsync(const Guid& id, const ScriptingTypeHandle& type);
 
     /// <summary>
@@ -144,8 +174,8 @@ public:
     /// </summary>
     /// <param name="id">Asset unique ID</param>
     /// <typeparam name="T">Type of the asset to load. Includes any asset types derived from the type.</typeparam>
-    /// <returns>Loaded asset or null if cannot</returns>
-    template<typename T>
+    /// <returns>Loaded asset or null if failed.</returns>
+    template<typename T = Asset>
     FORCE_INLINE static T* LoadAsync(const Guid& id)
     {
         return static_cast<T*>(LoadAsync(id, T::TypeInitializer));
@@ -156,15 +186,15 @@ public:
     /// </summary>
     /// <param name="path">The path of the asset (absolute or relative to the current workspace directory).</param>
     /// <param name="type">The asset type. If loaded object has different type (excluding types derived from the given) the loading fails.</param>
-    /// <returns>Loaded asset or null if cannot</returns>
-    API_FUNCTION(Attributes="HideInEditor") static Asset* LoadAsync(const StringView& path, MClass* type);
+    /// <returns>Loaded asset or null if failed.</returns>
+    API_FUNCTION(Attributes="HideInEditor") static Asset* LoadAsync(const StringView& path, const MClass* type);
 
     /// <summary>
     /// Loads asset and holds it until it won't be referenced by any object. Returns null if asset is missing. Actual asset data loading is performed on a other thread in async.
     /// </summary>
     /// <param name="path">The path of the asset (absolute or relative to the current workspace directory).</param>
     /// <param name="type">The asset type. If loaded object has different type (excluding types derived from the given) the loading fails.</param>
-    /// <returns>Loaded asset or null if cannot</returns>
+    /// <returns>Loaded asset or null if failed.</returns>
     static Asset* LoadAsync(const StringView& path, const ScriptingTypeHandle& type);
 
     /// <summary>
@@ -172,8 +202,8 @@ public:
     /// </summary>
     /// <param name="path">The path of the asset (absolute or relative to the current workspace directory).</param>
     /// <typeparam name="T">Type of the asset to load. Includes any asset types derived from the type.</typeparam>
-    /// <returns>Loaded asset or null if cannot</returns>
-    template<typename T>
+    /// <returns>Loaded asset or null if failed.</returns>
+    template<typename T = Asset>
     FORCE_INLINE static T* LoadAsync(const StringView& path)
     {
         return static_cast<T*>(LoadAsync(path, T::TypeInitializer));
@@ -185,7 +215,7 @@ public:
     /// <param name="internalPath">The path of the asset relative to the engine internal content (excluding the extension).</param>
     /// <param name="type">The asset type. If loaded object has different type (excluding types derived from the given) the loading fails.</param>
     /// <returns>The loaded asset or null if failed.</returns>
-    API_FUNCTION(Attributes="HideInEditor") static Asset* LoadAsyncInternal(const StringView& internalPath, MClass* type);
+    API_FUNCTION(Attributes="HideInEditor") static Asset* LoadAsyncInternal(const StringView& internalPath, const MClass* type);
 
     /// <summary>
     /// Loads internal engine asset and holds it until it won't be referenced by any object. Returns null if asset is missing. Actual asset data loading is performed on a other thread in async.
@@ -208,7 +238,7 @@ public:
     /// </summary>
     /// <param name="internalPath">The path of the asset relative to the engine internal content (excluding the extension).</param>
     /// <returns>The loaded asset or null if failed.</returns>
-    template<typename T>
+    template<typename T = Asset>
     FORCE_INLINE static T* LoadAsyncInternal(const Char* internalPath)
     {
         return static_cast<T*>(LoadAsyncInternal(internalPath, T::TypeInitializer));
@@ -222,7 +252,7 @@ public:
     /// <param name="timeoutInMilliseconds">Custom timeout value in milliseconds.</param>
     /// <typeparam name="T">Type of the asset to load. Includes any asset types derived from the type.</typeparam>
     /// <returns>Asset instance if loaded, null otherwise.</returns>
-    template<typename T>
+    template<typename T = Asset>
     static T* Load(const Guid& id, double timeoutInMilliseconds = 30000.0)
     {
         auto asset = LoadAsync<T>(id);
@@ -239,7 +269,7 @@ public:
     /// <param name="timeoutInMilliseconds">Custom timeout value in milliseconds.</param>
     /// <typeparam name="T">Type of the asset to load. Includes any asset types derived from the type.</typeparam>
     /// <returns>Asset instance if loaded, null otherwise.</returns>
-    template<typename T>
+    template<typename T = Asset>
     static T* Load(const StringView& path, double timeoutInMilliseconds = 30000.0)
     {
         auto asset = LoadAsync<T>(path);
@@ -257,7 +287,6 @@ public:
     static bool IsAssetTypeIdInvalid(const ScriptingTypeHandle& type, const ScriptingTypeHandle& assetType);
 
 public:
-
     /// <summary>
     /// Finds the asset with at given path. Checks all loaded assets.
     /// </summary>
@@ -273,12 +302,17 @@ public:
     API_FUNCTION() static Asset* GetAsset(const Guid& id);
 
 public:
-
     /// <summary>
     /// Deletes the specified asset.
     /// </summary>
     /// <param name="asset">The asset.</param>
     API_FUNCTION() static void DeleteAsset(Asset* asset);
+    
+    /// <summary>
+    /// Deletes the script item at the specified path.
+    /// </summary>
+    /// <param name="path">The script path.</param>
+    API_FUNCTION() static void DeleteScript(const StringView& path);
 
     /// <summary>
     /// Deletes the asset at the specified path.
@@ -287,7 +321,6 @@ public:
     API_FUNCTION(Attributes="HideInEditor") static void DeleteAsset(const StringView& path);
 
 public:
-
 #if USE_EDITOR
 
     /// <summary>
@@ -334,14 +367,14 @@ public:
     }
 
     /// <summary>
-    /// Creates temporary and virtual asset of thr given type.
+    /// Creates temporary and virtual asset of the given type.
     /// </summary>
     /// <param name="type">The asset type klass.</param>
     /// <returns>Created asset or null if failed.</returns>
-    API_FUNCTION() static Asset* CreateVirtualAsset(API_PARAM(Attributes="TypeReference(typeof(Asset))") MClass* type);
+    API_FUNCTION() static Asset* CreateVirtualAsset(API_PARAM(Attributes="TypeReference(typeof(Asset))") const MClass* type);
 
     /// <summary>
-    /// Creates temporary and virtual asset of thr given type.
+    /// Creates temporary and virtual asset of the given type.
     /// </summary>
     /// <param name="type">The asset type.</param>
     /// <returns>Created asset or null if failed.</returns>
@@ -358,13 +391,21 @@ public:
     API_EVENT() static Delegate<Asset*> AssetReloading;
 
 private:
-
+    static void WaitForTask(ContentLoadTask* loadingTask, double timeoutInMilliseconds);
     static void tryCallOnLoaded(Asset* asset);
     static void onAssetLoaded(Asset* asset);
     static void onAssetUnload(Asset* asset);
-    static Asset* load(const Guid& id, const ScriptingTypeHandle& type, AssetInfo& assetInfo);
+    static void onAssetChangeId(Asset* asset, const Guid& oldId, const Guid& newId);
+#if USE_EDITOR
+    friend BinaryAsset;
+    friend class ContentService;
+    static void onAssetDepend(BinaryAsset* asset, const Guid& otherId);
+    static void onAddDependencies(Asset* asset);
+#endif
+    static void deleteFileSafety(const StringView& path, const Guid* id = nullptr);
 
-private:
-
-    static void deleteFileSafety(const StringView& path, const Guid& id);
+    // Internal bindings
+#if !COMPILE_WITHOUT_CSHARP
+    API_FUNCTION(NoProxy) static void* GetAssetsInternal();
+#endif
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.Linq;
@@ -17,7 +17,7 @@ namespace FlaxEditor.GUI.Drag
         /// </summary>
         /// <param name="data">The data.</param>
         /// <returns>The result.</returns>
-        public DragDropEffect OnDragEnter( /*ref Vector2 location, */ DragData data)
+        public DragDropEffect OnDragEnter(DragData data)
         {
             DragDropEffect effect = DragDropEffect.None;
 

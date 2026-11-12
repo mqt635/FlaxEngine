@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_UWP
 
@@ -13,8 +13,8 @@
 
 namespace
 {
-    String UserLocale, ComputerName, UserName;
-    Vector2 VirtualScreenSize = Vector2(0.0f);
+    String UserLocale, ComputerName;
+    Float2 VirtualScreenSize = Float2(0.0f);
     int32 SystemDpi = 96;
 }
 
@@ -57,9 +57,6 @@ bool UWPPlatform::Init()
     {
         ComputerName = String(buffer);
     }
-
-    // Cannot access user name with a direct API
-    UserName = String::Empty;
 
     SystemDpi = CUWPPlatform->GetDpi();
     Input::Mouse = Impl::Mouse = New<UWPWindow::UWPMouse>();
@@ -145,65 +142,17 @@ String UWPPlatform::GetComputerName()
     return ComputerName;
 }
 
-String UWPPlatform::GetUserName()
-{
-    return UserName;
-}
-
 bool UWPPlatform::GetHasFocus()
 {
     // TODO: impl this
     return true;
 }
 
-bool UWPPlatform::CanOpenUrl(const StringView& url)
+Float2 UWPPlatform::GetDesktopSize()
 {
-    return false;
-}
-
-void UWPPlatform::OpenUrl(const StringView& url)
-{
-    // TODO: add support for OpenUrl on UWP
-}
-
-Vector2 UWPPlatform::GetMousePosition()
-{
-    // Use the main window
-    auto win = Engine::MainWindow;
-    if (win)
-    {
-        return win->ClientToScreen(win->GetMousePosition());
-    }
-    return Vector2::Minimum;
-}
-
-void UWPPlatform::SetMousePosition(const Vector2& pos)
-{
-    // Use the main window
-    auto win = Engine::MainWindow;
-    if (win)
-    {
-        win->SetMousePosition(win->ScreenToClient(pos));
-    }
-}
-
-Vector2 UWPPlatform::GetDesktopSize()
-{
-    Vector2 result;
+    Float2 result;
     CUWPPlatform->GetDisplaySize(&result.X, &result.Y);
     return result;
-}
-
-Rectangle UWPPlatform::GetMonitorBounds(const Vector2& screenPos)
-{
-    // TODO: do it in a proper way
-    return Rectangle(Vector2::Zero, GetDesktopSize());
-}
-
-Rectangle UWPPlatform::GetVirtualDesktopBounds()
-{
-    // TODO: do it in a proper way
-    return Rectangle(Vector2::Zero, GetDesktopSize());
 }
 
 Window* UWPPlatform::CreateWindow(const CreateWindowSettings& settings)

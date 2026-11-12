@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -14,6 +14,7 @@ namespace FlaxEditor.Content
     /// A <see cref="Animation"/> asset proxy object.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.BinaryAssetProxy" />
+    [ContentContextMenu("New/Animation/Animation")]
     public class AnimationProxy : BinaryAssetProxy
     {
         /// <inheritdoc />
@@ -36,6 +37,19 @@ namespace FlaxEditor.Content
 
         /// <inheritdoc />
         public override Type AssetType => typeof(Animation);
+
+        /// <inheritdoc />
+        public override bool CanCreate(ContentFolder targetLocation)
+        {
+            return targetLocation.CanHaveAssets;
+        }
+
+        /// <inheritdoc />
+        public override void Create(string outputPath, object arg)
+        {
+            if (Editor.CreateAsset("Animation", outputPath))
+                throw new Exception("Failed to create new asset.");
+        }
 
         /// <inheritdoc />
         public override void OnThumbnailDrawBegin(ThumbnailRequest request, ContainerControl guiRoot, GPUContext context)

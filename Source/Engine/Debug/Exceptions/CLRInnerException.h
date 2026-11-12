@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Debug/Exception.h"
+#include "Engine/Scripting/Types.h"
 
 namespace Log
 {
@@ -24,17 +25,9 @@ namespace Log
         /// <summary>
         /// Creates default exception with additional data
         /// </summary>
-        /// <param name="message">Additional information that help describe error</param>
+        /// <param name="additionalInfo">Additional information that help describe error</param>
         CLRInnerException(const String& additionalInfo)
-            : Exception(String::Format(TEXT("Current {0} CLR method has thrown an inner exception"),
-#if USE_MONO
-                                       TEXT("Mono")
-#elif USE_CORECLR
-				TEXT(".NET Core")
-#else
-				TEXT("Unknown engine")
-#endif
-                        ), additionalInfo)
+            : Exception(TEXT("Current .NET method has thrown an inner exception"), additionalInfo)
         {
         }
     };

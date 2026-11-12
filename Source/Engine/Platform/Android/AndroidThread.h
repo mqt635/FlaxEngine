@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 /// <summary>
 /// Thread object for Android platform.
 /// </summary>
-class AndroidThread : public UnixThread
+class FLAXENGINE_API AndroidThread : public UnixThread
 {
 public:
 

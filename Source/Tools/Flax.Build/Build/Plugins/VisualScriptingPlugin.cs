@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Text;
 using Flax.Build.Bindings;
@@ -17,7 +17,11 @@ namespace Flax.Build.Plugins
             base.Init();
 
             BindingsGenerator.GenerateCppScriptWrapperFunction += OnGenerateCppScriptWrapperFunction;
-            BindingsGenerator.CppScriptObjectVirtualWrapperMethodsPostfixes.Add("_VisualScriptWrapper");
+            BindingsGenerator.ScriptingLangInfos.Add(new BindingsGenerator.ScriptingLangInfo
+            {
+                Enabled = true,
+                VirtualWrapperMethodsPostfix = "_VisualScriptWrapper",
+            });
         }
 
         private void OnGenerateCppScriptWrapperFunction(Builder.BuildData buildData, VirtualClassInfo classInfo, FunctionInfo functionInfo, int scriptVTableSize, int scriptVTableIndex, StringBuilder contents)
@@ -63,19 +67,7 @@ namespace Flax.Build.Plugins
             contents.AppendLine("        static THREADLOCAL void* WrapperCallInstance = nullptr;");
             contents.AppendLine("        if (WrapperCallInstance == object)");
             contents.AppendLine("        {");
-            contents.AppendLine("            // Prevent stack overflow by calling base method");
-            contents.AppendLine("            const auto scriptVTableBase = object->GetType().Script.ScriptVTableBase;");
-            contents.Append($"            return (this->**({functionInfo.UniqueName}_Internal_Signature*)&scriptVTableBase[{scriptVTableOffset} + 2])(");
-            separator = false;
-            for (var i = 0; i < functionInfo.Parameters.Count; i++)
-            {
-                var parameterInfo = functionInfo.Parameters[i];
-                if (separator)
-                    contents.Append(", ");
-                separator = true;
-                contents.Append(parameterInfo.Name);
-            }
-            contents.AppendLine(");");
+            BindingsGenerator.GenerateCppVirtualWrapperCallBaseMethod(buildData, contents, classInfo, functionInfo, "object->GetType().Script.ScriptVTableBase", scriptVTableOffset);
             contents.AppendLine("        }");
             contents.AppendLine("        auto scriptVTable = (VisualScript::Method**)object->GetType().Script.ScriptVTable;");
             contents.AppendLine($"        ASSERT(scriptVTable && scriptVTable[{scriptVTableOffset}]);");

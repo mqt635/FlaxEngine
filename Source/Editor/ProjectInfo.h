@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -112,6 +112,7 @@ public:
     {
         Version = ::Version(1, 0);
         DefaultSceneSpawn = Ray(Vector3::Zero, Vector3::Forward);
+        DefaultScene = Guid::Empty;
     }
 
     /// <summary>

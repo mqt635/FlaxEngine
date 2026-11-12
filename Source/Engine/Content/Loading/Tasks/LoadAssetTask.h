@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,6 +8,7 @@
 #include "Engine/Content/WeakAssetReference.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 /// <summary>
 /// Asset loading task object.
@@ -15,36 +16,24 @@
 class LoadAssetTask : public ContentLoadTask
 {
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="LoadAssetTask"/> class.
     /// </summary>
     /// <param name="asset">The asset to load.</param>
     LoadAssetTask(Asset* asset)
-        : ContentLoadTask(Type::LoadAsset)
-        , Asset(asset)
+        : Asset(asset)
     {
     }
 
     ~LoadAssetTask()
     {
-        if (Asset)
-        {
-            Asset->Locker.Lock();
-            Asset->_loadFailed = true;
-            Asset->_isLoaded = false;
-            LOG(Error, "Loading asset \'{0}\' result: {1}.", ToString(), ToString(Result::TaskFailed));
-            Asset->_loadingTask = nullptr;
-            Asset->Locker.Unlock();
-        }
+        DereferenceAsset();
     }
 
 public:
-
     WeakAssetReference<Asset> Asset;
 
 public:
-
     // [ContentLoadTask]
     bool HasReference(Object* obj) const override
     {
@@ -52,11 +41,11 @@ public:
     }
 
 protected:
-
     // [ContentLoadTask]
     Result run() override
     {
         PROFILE_CPU();
+        PROFILE_MEM(ContentAssets);
 
         // Keep valid ref to the asset
         AssetReference<::Asset> ref = Asset.Get();
@@ -66,14 +55,49 @@ protected:
         // Call loading
         if (ref->onLoad(this))
             return Result::AssetLoadError;
-
         return Result::Ok;
     }
+
+    void OnFail() override
+    {
+        DereferenceAsset(true);
+
+        // Base
+        ContentLoadTask::OnFail();
+    }
+
     void OnEnd() override
     {
-        Asset = nullptr;
+        DereferenceAsset();
 
         // Base
         ContentLoadTask::OnEnd();
+    }
+
+private:
+    void DereferenceAsset(bool failed = false)
+    {
+        auto asset = Asset.Get();
+        if (asset)
+        {
+            Task* task = (Task*)Platform::AtomicRead(&asset->_loadingTask);
+            if (task)
+            {
+                do
+                {
+                    if (task == this)
+                    {
+                        Platform::AtomicStore(&asset->_loadingTask, 0);
+                        if (failed)
+                        {
+                            Platform::AtomicStore(&asset->_loadState, (int64)Asset::LoadState::LoadFailed);
+                            LOG(Error, "Loading asset \'{0}\' result: {1}.", ToString(), ToString(Result::TaskFailed));
+                        }
+                        break;
+                    }
+                    task = task->GetContinueWithTask();
+                } while (task);
+            }
+        }
     }
 };

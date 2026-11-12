@@ -1,14 +1,32 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Transform.h"
+#include "Double4x4.h"
 #include "Matrix.h"
+#include "Matrix3x3.h"
 #include "../Types/String.h"
 
 Transform Transform::Identity(Vector3(0, 0, 0));
 
+Transform::Transform(const Vector3& position, const Matrix3x3& rotationScale)
+    : Translation(position)
+{
+    rotationScale.Decompose(Scale, Orientation);
+}
+
 String Transform::ToString() const
 {
     return String::Format(TEXT("{}"), *this);
+}
+
+bool Transform::IsIdentity() const
+{
+    return Translation.IsZero() && Orientation.IsIdentity() && Scale.IsOne();
+}
+
+bool Transform::IsNanOrInfinity() const
+{
+    return Translation.IsNanOrInfinity() || Orientation.IsNanOrInfinity() || Scale.IsNanOrInfinity();
 }
 
 Matrix Transform::GetRotation() const
@@ -40,6 +58,11 @@ void Transform::GetWorld(Matrix& result) const
     Matrix::Transformation(Scale, Orientation, Translation, result);
 }
 
+void Transform::GetWorld(Double4x4& result) const
+{
+    Double4x4::Transformation(Scale, Orientation, Translation, result);
+}
+
 Transform Transform::Add(const Vector3& translation) const
 {
     Transform result;
@@ -54,7 +77,7 @@ Transform Transform::Add(const Transform& other) const
     Transform result;
     Quaternion::Multiply(Orientation, other.Orientation, result.Orientation);
     result.Orientation.Normalize();
-    Vector3::Multiply(Scale, other.Scale, result.Scale);
+    Float3::Multiply(Scale, other.Scale, result.Scale);
     Vector3::Add(Translation, other.Translation, result.Translation);
     return result;
 }
@@ -66,14 +89,7 @@ Transform Transform::Subtract(const Transform& other) const
     const Quaternion invRotation = other.Orientation.Conjugated();
     Quaternion::Multiply(Orientation, invRotation, result.Orientation);
     result.Orientation.Normalize();
-    Vector3::Divide(Scale, other.Scale, result.Scale);
-    return result;
-}
-
-Transform Transform::LocalToWorld(const Transform& other) const
-{
-    Transform result;
-    LocalToWorld(other, result);
+    Float3::Divide(Scale, other.Scale, result.Scale);
     return result;
 }
 
@@ -101,7 +117,7 @@ void Transform::LocalToWorld(const Transform& other, Transform& result) const
     }
 
     //Vector3::Multiply(Scale, other.Scale, result.Scale);
-    result.Scale = Vector3(Scale.X * other.Scale.X, Scale.Y * other.Scale.Y, Scale.Z * other.Scale.Z);
+    result.Scale = Float3(Scale.X * other.Scale.X, Scale.Y * other.Scale.Y, Scale.Z * other.Scale.Z);
 
     //Vector3 tmp; Vector3::Multiply(other.Translation, Scale, tmp);
     Vector3 tmp = Vector3(other.Translation.X * Scale.X, other.Translation.Y * Scale.Y, other.Translation.Z * Scale.Z);
@@ -128,57 +144,24 @@ void Transform::LocalToWorld(const Transform& other, Transform& result) const
     result.Translation = Vector3(tmp.X + Translation.X, tmp.Y + Translation.Y, tmp.Z + Translation.Z);
 }
 
-Vector3 Transform::LocalToWorld(const Vector3& point) const
+void Transform::LocalToWorldVector(const Vector3& vector, Vector3& result) const
 {
-    Vector3 result = point * Scale;
-    Vector3::Transform(result, Orientation, result);
-    return result + Translation;
+    Vector3 tmp = vector * Scale;
+    Vector3::Transform(tmp, Orientation, result);
 }
 
-Vector3 Transform::LocalToWorldVector(const Vector3& vector) const
+void Transform::LocalToWorld(const Float3& point, Float3& result) const
 {
-    Vector3 result = vector * Scale;
-    Vector3::Transform(result, Orientation, result);
-    return result;
+    Float3 tmp = point * Scale;
+    Float3::Transform(tmp, Orientation, tmp);
+    Float3::Add(tmp, Translation, result);
 }
 
-void Transform::LocalToWorld(const Vector3& point, Vector3& result) const
+void Transform::LocalToWorld(const Double3& point, Double3& result) const
 {
-    Vector3 tmp = point * Scale;
-    Vector3::Transform(tmp, Orientation, tmp);
-    Vector3::Add(tmp, Translation, result);
-}
-
-void Transform::LocalToWorld(const Vector3* points, int32 pointsCount, Vector3* result) const
-{
-    for (int32 i = 0; i < pointsCount; i++)
-    {
-        result[i] = Vector3::Transform(points[i] * Scale, Orientation) + Translation;
-    }
-}
-
-Transform Transform::WorldToLocal(const Transform& other) const
-{
-    Transform result;
-
-    Vector3 invScale = Scale;
-    if (invScale.X != 0.0f)
-        invScale.X = 1.0f / invScale.X;
-    if (invScale.Y != 0.0f)
-        invScale.Y = 1.0f / invScale.Y;
-    if (invScale.Z != 0.0f)
-        invScale.Z = 1.0f / invScale.Z;
-
-    const Quaternion invRotation = Orientation.Conjugated();
-
-    Quaternion::Multiply(invRotation, other.Orientation, result.Orientation);
-    result.Orientation.Normalize();
-    Vector3::Multiply(other.Scale, invScale, result.Scale);
-    const Vector3 tmp = other.Translation - Translation;
-    Vector3::Transform(tmp, invRotation, result.Translation);
-    Vector3::Multiply(result.Translation, invScale, result.Translation);
-
-    return result;
+    Double3 tmp = point * Scale;
+    Double3::Transform(tmp, Orientation, tmp);
+    Double3::Add(tmp, Translation, result);
 }
 
 void Transform::WorldToLocal(const Transform& other, Transform& result) const
@@ -190,18 +173,16 @@ void Transform::WorldToLocal(const Transform& other, Transform& result) const
         invScale.Y = 1.0f / invScale.Y;
     if (invScale.Z != 0.0f)
         invScale.Z = 1.0f / invScale.Z;
-
     const Quaternion invRotation = Orientation.Conjugated();
-
     Quaternion::Multiply(invRotation, other.Orientation, result.Orientation);
     result.Orientation.Normalize();
-    Vector3::Multiply(other.Scale, invScale, result.Scale);
+    Float3::Multiply(other.Scale, invScale, result.Scale);
     const Vector3 tmp = other.Translation - Translation;
     Vector3::Transform(tmp, invRotation, result.Translation);
     Vector3::Multiply(result.Translation, invScale, result.Translation);
 }
 
-Vector3 Transform::WorldToLocal(const Vector3& point) const
+void Transform::WorldToLocal(const Vector3& point, Vector3& result) const
 {
     Vector3 invScale = Scale;
     if (invScale.X != 0.0f)
@@ -210,51 +191,63 @@ Vector3 Transform::WorldToLocal(const Vector3& point) const
         invScale.Y = 1.0f / invScale.Y;
     if (invScale.Z != 0.0f)
         invScale.Z = 1.0f / invScale.Z;
-
     const Quaternion invRotation = Orientation.Conjugated();
-
-    Vector3 result = point - Translation;
+    result = point - Translation;
     Vector3::Transform(result, invRotation, result);
-
-    return result * invScale;
+    result *= invScale;
 }
 
-Vector3 Transform::WorldToLocalVector(const Vector3& vector) const
+void Transform::WorldToLocalVector(const Vector3& vector, Vector3& result) const
 {
-    Vector3 invScale = Scale;
+    Float3 invScale = Scale;
     if (invScale.X != 0.0f)
         invScale.X = 1.0f / invScale.X;
     if (invScale.Y != 0.0f)
         invScale.Y = 1.0f / invScale.Y;
     if (invScale.Z != 0.0f)
         invScale.Z = 1.0f / invScale.Z;
-
     const Quaternion invRotation = Orientation.Conjugated();
-
-    Vector3 result;
     Vector3::Transform(vector, invRotation, result);
-
-    return result * invScale;
+    result *= invScale;
 }
 
-void Transform::WorldToLocal(const Vector3* points, int32 pointsCount, Vector3* result) const
+void Transform::WorldToLocal(const Quaternion& rotation, Quaternion& result) const
 {
-    Vector3 invScale = Scale;
-    if (invScale.X != 0.0f)
-        invScale.X = 1.0f / invScale.X;
-    if (invScale.Y != 0.0f)
-        invScale.Y = 1.0f / invScale.Y;
-    if (invScale.Z != 0.0f)
-        invScale.Z = 1.0f / invScale.Z;
+    Quaternion orientation = Orientation;
+    orientation.Conjugate();
+    Quaternion::Multiply(orientation, rotation, orientation);
+    orientation.Normalize();
+    result = orientation;
+}
 
-    const Quaternion invRotation = Orientation.Conjugated();
+Float3 Transform::GetRight() const
+{
+    return Float3::Transform(Float3::Right, Orientation);
+}
 
-    for (int32 i = 0; i < pointsCount; i++)
-    {
-        result[i] = points[i] - Translation;
-        Vector3::Transform(result[i], invRotation, result[i]);
-        result[i] *= invScale;
-    }
+Float3 Transform::GetLeft() const
+{
+    return Float3::Transform(Float3::Left, Orientation);
+}
+
+Float3 Transform::GetUp() const
+{
+    return Float3::Transform(Float3::Up, Orientation);
+}
+
+Float3 Transform::GetDown() const
+{
+    return Float3::Transform(Float3::Down, Orientation);
+}
+
+Float3 Transform::GetForward() const
+{
+    return Float3::Transform(Float3::Forward, Orientation);
+}
+
+Float3 Transform::GetBackward() const
+{
+    return Float3::Transform(Float3::Backward, Orientation);
 }
 
 Transform Transform::Lerp(const Transform& t1, const Transform& t2, float amount)
@@ -262,7 +255,7 @@ Transform Transform::Lerp(const Transform& t1, const Transform& t2, float amount
     Transform result;
     Vector3::Lerp(t1.Translation, t2.Translation, amount, result.Translation);
     Quaternion::Slerp(t1.Orientation, t2.Orientation, amount, result.Orientation);
-    Vector3::Lerp(t1.Scale, t2.Scale, amount, result.Scale);
+    Float3::Lerp(t1.Scale, t2.Scale, amount, result.Scale);
     return result;
 }
 
@@ -270,5 +263,11 @@ void Transform::Lerp(const Transform& t1, const Transform& t2, float amount, Tra
 {
     Vector3::Lerp(t1.Translation, t2.Translation, amount, result.Translation);
     Quaternion::Slerp(t1.Orientation, t2.Orientation, amount, result.Orientation);
-    Vector3::Lerp(t1.Scale, t2.Scale, amount, result.Scale);
+    Float3::Lerp(t1.Scale, t2.Scale, amount, result.Scale);
+}
+
+Transform Transform::AlignRotationToNormalAndSnapToGrid(const Vector3& point, const Vector3& normal, const Vector3& normalOffset, const Transform& relativeTo, const Vector3& gridSize, const Float3& scale)
+{
+    Quaternion rot = Quaternion::GetRotationFromNormal(normal, relativeTo);
+    return Transform(Vector3::SnapToGrid(point, gridSize, rot, relativeTo.Translation, normalOffset), rot, scale);
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.CustomEditors;
@@ -110,7 +110,7 @@ namespace FlaxEditor.Tools.Foliage
             }
 
             [EditorOrder(30), EditorDisplay("Instance"), Tooltip("The local-space scale of the mesh relative to the foliage actor.")]
-            public Vector3 Scale
+            public Float3 Scale
             {
                 get => _instance.Transform.Scale;
                 set
@@ -228,6 +228,7 @@ namespace FlaxEditor.Tools.Foliage
             {
                 _presenter.Select(_proxy);
             }
+            _presenter.Panel.Focus();
         }
 
         private void OnModified()

@@ -1,11 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/BaseTypes.h"
 #include "Engine/Core/Types/String.h"
 
-API_INJECT_CPP_CODE("#include \"Engine/Platform/Network.h\"");
+API_INJECT_CODE(cpp, "#include \"Engine/Platform/Network.h\"");
 
 /// <summary>
 /// Network connection protocol type.
@@ -138,7 +138,8 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(NetworkSocketGroup)
 /// <summary>
 /// Low-level networking implementation interface with Berkeley sockets.
 /// </summary>
-API_CLASS(Static, Name="Network") class FLAXENGINE_API NetworkBase
+API_CLASS(Static, Name="Network", Tag="NativeInvokeUseName")
+class FLAXENGINE_API NetworkBase
 {
 public:
     static struct FLAXENGINE_API ScriptingTypeInitializer TypeInitializer;

@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.Utilities;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -31,6 +32,11 @@ namespace FlaxEditor.CustomEditors.GUI
         internal int FirstChildControlIndex;
 
         /// <summary>
+        /// Helper value used by the <see cref="PropertiesList"/> to draw property names in a proper area.
+        /// </summary>
+        internal PropertiesList FirstChildControlContainer;
+
+        /// <summary>
         /// The linked custom editor (shows the label property).
         /// </summary>
         internal CustomEditor LinkedEditor;
@@ -39,6 +45,34 @@ namespace FlaxEditor.CustomEditors.GUI
         /// The highlight strip color drawn on a side (transparent if skip rendering).
         /// </summary>
         public Color HighlightStripColor;
+
+        /// <summary>
+        /// The active search text query used to highlight matching parts of the label.
+        /// </summary>
+        public string SearchText = string.Empty;
+
+        private string _lastSearchText;
+        private string _lastText;
+        private QueryFilterHelper.Range[] _highlightRanges;
+
+        private void UpdateHighlights()
+        {
+            var text = Text?.ToString() ?? string.Empty;
+            if (_lastSearchText == SearchText && _lastText == text)
+                return;
+
+            _lastSearchText = SearchText;
+            _lastText = text;
+
+            if (!string.IsNullOrEmpty(SearchText))
+            {
+                QueryFilterHelper.Match(SearchText, text, out _highlightRanges);
+            }
+            else
+            {
+                _highlightRanges = null;
+            }
+        }
 
         /// <summary>
         /// Occurs when label creates the context menu popup for th property. Can be used to add some custom logic per property editor.
@@ -78,6 +112,30 @@ namespace FlaxEditor.CustomEditors.GUI
             {
                 Render2D.FillRectangle(new Rectangle(0, 0, 2, Height), HighlightStripColor);
             }
+
+            UpdateHighlights();
+
+            if (_highlightRanges != null && _highlightRanges.Length > 0)
+            {
+                var text = Text.ToString();
+                var font = Font?.GetFont();
+                if (font != null)
+                {
+                    var color = Style.Current.SearchHighlight;
+                    var margin = Margin;
+                    var textSize = font.MeasureText(text);
+                    var textX = margin.Left;
+                    var textY = margin.Top + (Height - margin.Height - textSize.Y) * 0.5f;
+
+                    for (int i = 0; i < _highlightRanges.Length; i++)
+                    {
+                        var start = font.GetCharPosition(text, _highlightRanges[i].StartIndex);
+                        var end = font.GetCharPosition(text, _highlightRanges[i].EndIndex);
+                        var highlightRect = new Rectangle(start.X + textX, textY, end.X - start.X, textSize.Y);
+                        Render2D.FillRectangle(highlightRect, color);
+                    }
+                }
+            }
         }
 
         /// <inheritdoc />
@@ -89,7 +147,7 @@ namespace FlaxEditor.CustomEditors.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Right)
             {
@@ -100,7 +158,7 @@ namespace FlaxEditor.CustomEditors.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (base.OnMouseUp(location, button))
                 return true;
@@ -118,11 +176,15 @@ namespace FlaxEditor.CustomEditors.GUI
 
                 if (linkedEditor != null)
                 {
-                    var revertToPrefab = menu.AddButton("Revert to Prefab", linkedEditor.RevertToReferenceValue);
-                    revertToPrefab.Enabled = linkedEditor.CanRevertReferenceValue;
-                    var resetToDefault = menu.AddButton("Reset to default", linkedEditor.RevertToDefaultValue);
-                    resetToDefault.Enabled = linkedEditor.CanRevertDefaultValue;
-                    menu.AddSeparator();
+                    var features = linkedEditor.Presenter.Features;
+                    if ((features & (FeatureFlags.UseDefault | FeatureFlags.UsePrefab)) != 0)
+                    {
+                        if ((features & FeatureFlags.UsePrefab) != 0)
+                            menu.AddButton("Revert to Prefab", linkedEditor.RevertToReferenceValue).Enabled = linkedEditor.CanRevertReferenceValue;
+                        if ((features & FeatureFlags.UseDefault) != 0)
+                            menu.AddButton("Reset to default", linkedEditor.RevertToDefaultValue).Enabled = linkedEditor.CanRevertDefaultValue;
+                        menu.AddSeparator();
+                    }
                     menu.AddButton("Copy", linkedEditor.Copy);
                     var paste = menu.AddButton("Paste", linkedEditor.Paste);
                     paste.Enabled = linkedEditor.CanPaste;
@@ -150,8 +212,16 @@ namespace FlaxEditor.CustomEditors.GUI
         public override void OnDestroy()
         {
             SetupContextMenu = null;
+            LinkedEditor = null;
+            FirstChildControlContainer = null;
 
             base.OnDestroy();
+        }
+
+        /// <inheritdoc />
+        public override string ToString()
+        {
+            return Text.ToString();
         }
     }
 }

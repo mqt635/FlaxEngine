@@ -1,26 +1,28 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "../BinaryAsset.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Animations/AnimationData.h"
+#include "Engine/Content/AssetReference.h"
 
 class SkinnedModel;
+class AnimEvent;
 
 /// <summary>
 /// Asset that contains an animation spline represented by a set of keyframes, each representing an endpoint of a linear curve.
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API Animation : public BinaryAsset
 {
-DECLARE_BINARY_ASSET_HEADER(Animation, 1);
+    DECLARE_BINARY_ASSET_HEADER(Animation, 1);
 
     /// <summary>
     /// Contains basic information about the animation asset contents.
     /// </summary>
-    API_STRUCT() struct InfoData
+    API_STRUCT() struct FLAXENGINE_API InfoData
     {
-    DECLARE_SCRIPTING_TYPE_NO_SPAWN(InfoData);
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(InfoData);
 
         /// <summary>
         /// Length of the animation in seconds.
@@ -48,26 +50,56 @@ DECLARE_BINARY_ASSET_HEADER(Animation, 1);
         API_FIELD() int32 MemoryUsage;
     };
 
-public:
+    /// <summary>
+    /// Contains <see cref="AnimEvent"/> instance.
+    /// </summary>
+    struct FLAXENGINE_API AnimEventData
+    {
+        float Duration = 0.0f;
+        AnimEvent* Instance = nullptr;
+#if USE_EDITOR
+        StringAnsi TypeName;
+#endif
+    };
 
+    /// <summary>
+    /// Contains <see cref="AnimEvent"/> instance.
+    /// </summary>
+    struct FLAXENGINE_API NestedAnimData
+    {
+        float Time = 0.0f;
+        float Duration = 0.0f;
+        float Speed = 1.0f;
+        float StartTime = 0.0f;
+        bool Enabled = false;
+        bool Loop = false;
+        AssetReference<Animation> Anim;
+    };
+
+private:
+#if USE_EDITOR
+    bool _registerForScriptingReload = false;
+    bool _registeredForScriptingReload = false;
+    void OnScriptsReloadStart();
+#endif
+
+public:
     /// <summary>
     /// The animation data.
     /// </summary>
     AnimationData Data;
 
     /// <summary>
-    /// Contains the mapping for every skeleton node to the animation data channels.
-    /// Can be used for a simple lookup or to check if a given node is animated (unused nodes are using -1 index).
+    /// The animation events (keyframes per named track).
     /// </summary>
-    typedef Array<int32> NodeToChannel;
+    Array<Pair<String, StepCurve<AnimEventData>>> Events;
 
     /// <summary>
-    /// The skeleton nodes to animation channel indices mapping cache. Use it as read-only. It's being maintained internally by the asset.
+    /// The nested animations (animation per named track).
     /// </summary>
-    Dictionary<SkinnedModel*, NodeToChannel> MappingCache;
+    Array<Pair<String, NestedAnimData>> NestedAnims;
 
 public:
-
     /// <summary>
     /// Gets the length of the animation (in seconds).
     /// </summary>
@@ -97,20 +129,7 @@ public:
     /// </summary>
     API_PROPERTY() InfoData GetInfo() const;
 
-    /// <summary>
-    /// Clears the skeleton mapping cache.
-    /// </summary>
-    void ClearCache();
-
-    /// <summary>
-    /// Clears the skeleton mapping cache.
-    /// </summary>
-    /// <param name="obj">The target skinned model to get mapping to its skeleton.</param>
-    /// <returns>The cached node-to-channel mapping for the fast animation sampling for the skinned model skeleton nodes.</returns>
-    const NodeToChannel* GetMapping(SkinnedModel* obj);
-
 #if USE_EDITOR
-
     /// <summary>
     /// Gets the animation as serialized timeline data. Used to show it in Editor.
     /// </summary>
@@ -120,28 +139,33 @@ public:
     /// <summary>
     /// Saves the serialized timeline data to the asset as animation.
     /// </summary>
-    /// <remarks>The cannot be used by virtual assets.</remarks>
+    /// <remarks>This cannot be used by virtual assets.</remarks>
     /// <param name="data">The timeline data container.</param>
     /// <returns><c>true</c> failed to save data; otherwise, <c>false</c>.</returns>
     API_FUNCTION() bool SaveTimeline(BytesContainer& data);
-
-    /// <summary>
-    /// Saves the animation data to the asset. Supported only in Editor.
-    /// </summary>
-    /// <remarks>The cannot be used by virtual assets.</remarks>
-    /// <returns><c>true</c> failed to save data; otherwise, <c>false</c>.</returns>
-    bool Save(const StringView& path = StringView::Empty);
-
 #endif
 
 private:
+#if USE_EDITOR
+    friend class ImportModel;
+    static bool SaveHeader(const class ModelData& modelData, WriteStream& stream, int32 animIndex);
+#endif
 
-    void OnSkinnedModelUnloaded(Asset* obj);
+public:
+    // [BinaryAsset]
+#if USE_EDITOR
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override;
+    bool Save(const StringView& path = StringView::Empty) override;
+#endif
+    uint64 GetMemoryUsage() const override;
+    void OnScriptingDispose() override;
 
 protected:
-
     // [BinaryAsset]
     LoadResult load() override;
     void unload(bool isReloading) override;
+#if USE_EDITOR
+    void onLoaded_MainThread() override;
+#endif
     AssetChunksFlag getChunksToPreload() const override;
 };

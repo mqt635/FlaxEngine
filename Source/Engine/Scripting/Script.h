@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,24 +10,24 @@
 /// </summary>
 API_CLASS(Abstract) class FLAXENGINE_API Script : public SceneObject
 {
-DECLARE_SCRIPTING_TYPE(Script);
+    DECLARE_SCRIPTING_TYPE(Script);
     friend Actor;
     friend SceneTicking;
     friend class PrefabInstanceData;
 protected:
-
-    int32 _enabled : 1;
-    int32 _tickFixedUpdate : 1;
-    int32 _tickUpdate : 1;
-    int32 _tickLateUpdate : 1;
-    int32 _wasStartCalled : 1;
-    int32 _wasEnableCalled : 1;
+    uint16 _enabled : 1;
+    uint16 _tickFixedUpdate : 1;
+    uint16 _tickUpdate : 1;
+    uint16 _tickLateUpdate : 1;
+    uint16 _tickLateFixedUpdate : 1;
+    uint16 _wasAwakeCalled : 1;
+    uint16 _wasStartCalled : 1;
+    uint16 _wasEnableCalled : 1;
 #if USE_EDITOR
-    int32 _executeInEditor : 1;
+    uint16 _executeInEditor : 1;
 #endif
 
 public:
-
     /// <summary>
     /// Gets value indicating if script is active.
     /// </summary>
@@ -43,6 +43,11 @@ public:
     API_PROPERTY() void SetEnabled(bool value);
 
     /// <summary>
+    /// Gets value indicating if script is enabled and active in the scene graph. It must be active as well as all it's parents.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") bool IsEnabledInHierarchy() const;
+
+    /// <summary>
     /// Gets the actor owning that script.
     /// </summary>
     API_PROPERTY(Attributes="HideInEditor, NoAnimate")
@@ -54,7 +59,6 @@ public:
     API_PROPERTY() void SetActor(Actor* value);
 
 public:
-
     /// <summary>
     /// Called after the object is loaded.
     /// </summary>
@@ -77,7 +81,7 @@ public:
     }
 
     /// <summary>
-    /// Called before the object will be destroyed..
+    /// Called before the object will be destroyed.
     /// </summary>
     API_FUNCTION(Attributes="NoAnimate") virtual void OnDestroy()
     {
@@ -112,6 +116,13 @@ public:
     }
 
     /// <summary>
+    /// Called every fixed framerate frame (after FixedUpdate) if object is enabled.
+    /// </summary>
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnLateFixedUpdate()
+    {
+    }
+
+    /// <summary>
     /// Called during drawing debug shapes in editor. Use <see cref="DebugDraw"/> to draw debug shapes and other visualization.
     /// </summary>
     API_FUNCTION(Attributes="NoAnimate") virtual void OnDebugDraw()
@@ -126,15 +137,13 @@ public:
     }
 
 private:
-
     void SetupType();
     void Start();
     void Enable();
     void Disable();
 
 public:
-
-    // [PersistentScriptingObject]
+    // [ScriptingObject]
     String ToString() const override;
     void OnDeleteObject() override;
 
@@ -143,8 +152,7 @@ public:
     void SetParent(Actor* value, bool canBreakPrefabLink = true) override;
     int32 GetOrderInParent() const override;
     void SetOrderInParent(int32 index) override;
-    void PostLoad() override;
-    void PostSpawn() override;
+    void Initialize() override;
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;

@@ -1,7 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI;
+using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Surface.Elements
 {
@@ -26,13 +28,17 @@ namespace FlaxEditor.Surface.Elements
 
         /// <inheritdoc />
         public EnumValue(SurfaceNode parentNode, NodeElementArchetype archetype)
-        : base(Scripting.TypeUtils.GetType(archetype.Text).Type)
+        : base(TypeUtils.GetType(archetype.Text).Type)
         {
-            X = archetype.ActualPositionX;
-            Y = archetype.ActualPositionY;
-            Width = archetype.Size.X;
+            Bounds = new Rectangle(archetype.ActualPositionX, archetype.ActualPositionY, archetype.Size.X, Constants.BoxRowHeight);
             ParentNode = parentNode;
+            ParentNode.ValuesChanged += OnNodeValuesChanged;
             Archetype = archetype;
+            Value = Convert.ToInt32(ParentNode.Values[Archetype.ValueIndex]);
+        }
+
+        private void OnNodeValuesChanged()
+        {
             Value = Convert.ToInt32(ParentNode.Values[Archetype.ValueIndex]);
         }
 
@@ -42,7 +48,7 @@ namespace FlaxEditor.Surface.Elements
             if (Convert.ToInt32(ParentNode.Values[Archetype.ValueIndex]) != (int)Value)
             {
                 // Edit value
-                ParentNode.SetValue(Archetype.ValueIndex, Value);
+                ParentNode.SetValue(Archetype.ValueIndex, (int)Value);
             }
 
             base.OnValueChanged();

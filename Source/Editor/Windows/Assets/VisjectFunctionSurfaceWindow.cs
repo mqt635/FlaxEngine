@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.Content;
 using FlaxEditor.GUI;
@@ -27,9 +27,21 @@ namespace FlaxEditor.Windows.Assets
         /// </summary>
         protected readonly Panel _panel;
 
-        private readonly ToolStripButton _saveButton;
-        private readonly ToolStripButton _undoButton;
-        private readonly ToolStripButton _redoButton;
+        /// <summary>
+        /// Save button.
+        /// </summary>
+        protected ToolStripButton _saveButton;
+
+        /// <summary>
+        /// Undo button.
+        /// </summary>
+        protected ToolStripButton _undoButton;
+
+        /// <summary>
+        /// Redo button.
+        /// </summary>
+        protected ToolStripButton _redoButton;
+
         private bool _showWholeGraphOnLoad = true;
 
         /// <summary>
@@ -67,14 +79,6 @@ namespace FlaxEditor.Windows.Assets
             _undo.RedoDone += OnUndoRedo;
             _undo.ActionDone += OnUndoRedo;
 
-            // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Save64, Save).LinkTooltip("Save");
-            _toolstrip.AddSeparator();
-            _undoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo (Ctrl+Z)");
-            _redoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo (Ctrl+Y)");
-            _toolstrip.AddSeparator();
-            _toolstrip.AddButton(editor.Icons.CenterView64, ShowWholeGraph).LinkTooltip("Show whole graph");
-
             // Panel
             _panel = new Panel(ScrollBars.None)
             {
@@ -82,10 +86,6 @@ namespace FlaxEditor.Windows.Assets
                 Offsets = new Margin(0, 0, _toolstrip.Bottom, 0),
                 Parent = this
             };
-
-            // Setup input actions
-            InputActions.Add(options => options.Undo, _undo.PerformUndo);
-            InputActions.Add(options => options.Redo, _undo.PerformRedo);
         }
 
         private void OnUndoRedo(IUndoAction action)
@@ -169,10 +169,16 @@ namespace FlaxEditor.Windows.Assets
         }
 
         /// <inheritdoc />
+        public Asset SurfaceAsset => Asset;
+
+        /// <inheritdoc />
         public abstract string SurfaceName { get; }
 
         /// <inheritdoc />
         public abstract byte[] SurfaceData { get; set; }
+
+        /// <inheritdoc />
+        public VisjectSurfaceContext ParentContext => null;
 
         /// <inheritdoc />
         public void OnContextCreated(VisjectSurfaceContext context)

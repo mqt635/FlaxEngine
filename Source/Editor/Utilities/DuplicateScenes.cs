@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -36,7 +36,10 @@ namespace FlaxEditor.Utilities
         public void GatherSceneData()
         {
             if (HasData)
-                throw new InvalidOperationException("DuplicateScenes has already gathered scene data.");
+            {
+                Editor.LogError("DuplicateScenes has already gathered scene data.");
+                return;
+            }
             Profiler.BeginEvent("DuplicateScenes.GatherSceneData");
 
             Editor.Log("Collecting scene data");
@@ -47,7 +50,8 @@ namespace FlaxEditor.Utilities
             if (scenesCount == 0)
             {
                 Profiler.EndEvent();
-                throw new InvalidOperationException("Cannot gather scene data. No scene loaded.");
+                Editor.LogWarning("Cannot gather scene data. No scene loaded.");
+                return;
             }
             var sceneIds = new Guid[scenesCount];
             for (int i = 0; i < scenesCount; i++)
@@ -72,7 +76,8 @@ namespace FlaxEditor.Utilities
             if (Level.UnloadAllScenes())
             {
                 Profiler.EndEvent();
-                throw new FlaxException("Failed to unload scenes.");
+                Editor.LogError("Failed to unload scenes.");
+                return;
             }
             FlaxEngine.Scripting.FlushRemovedObjects();
 
@@ -82,7 +87,8 @@ namespace FlaxEditor.Utilities
                 if (noScenes != null && noScenes.Length != 0)
                 {
                     Profiler.EndEvent();
-                    throw new FlaxException("Failed to unload scenes.");
+                    Editor.LogError("Failed to unload scenes.");
+                    return;
                 }
             }
 
@@ -96,7 +102,10 @@ namespace FlaxEditor.Utilities
         public void CreateScenes()
         {
             if (!HasData)
-                throw new InvalidOperationException("DuplicateScenes has not gathered scene data yet.");
+            {
+                Editor.LogError("DuplicateScenes has not gathered scene data yet.");
+                return;
+            }
             Profiler.BeginEvent("DuplicateScenes.CreateScenes");
 
             Editor.Log("Creating scenes");
@@ -110,7 +119,8 @@ namespace FlaxEditor.Utilities
                 if (scene == null)
                 {
                     Profiler.EndEvent();
-                    throw new FlaxException("Failed to deserialize scene");
+                    Editor.LogError("Failed to deserialize scene.");
+                    return;
                 }
             }
 
@@ -120,9 +130,9 @@ namespace FlaxEditor.Utilities
         /// <summary>
         /// Deletes the creates scenes for the simulation.
         /// </summary>
-        public void DeletedScenes()
+        public void UnloadScenes()
         {
-            Profiler.BeginEvent("DuplicateScenes.DeletedScenes");
+            Profiler.BeginEvent("DuplicateScenes.UnloadScenes");
             Editor.Log("Restoring scene data");
 
             // TODO: here we can keep changes for actors marked to keep their state after simulation
@@ -131,9 +141,10 @@ namespace FlaxEditor.Utilities
             if (Level.UnloadAllScenes())
             {
                 Profiler.EndEvent();
-                throw new FlaxException("Failed to unload scenes.");
+                Editor.LogError("Failed to unload scenes.");
+                return;
             }
-            FlaxEngine.Scripting.FlushRemovedObjects();
+
             Profiler.EndEvent();
         }
 
@@ -143,7 +154,10 @@ namespace FlaxEditor.Utilities
         public void RestoreSceneData()
         {
             if (!HasData)
-                throw new InvalidOperationException("DuplicateScenes has not gathered scene data yet.");
+            {
+                Editor.LogError("DuplicateScenes has not gathered scene data yet.");
+                return;
+            }
             Profiler.BeginEvent("DuplicateScenes.RestoreSceneData");
 
             // Deserialize old scenes
@@ -153,8 +167,8 @@ namespace FlaxEditor.Utilities
                 var scene = Level.LoadSceneFromBytes(data.Bytes);
                 if (scene == null)
                 {
-                    Profiler.EndEvent();
-                    throw new FlaxException("Failed to deserialize scene");
+                    Editor.LogError("Failed to restore scene");
+                    continue;
                 }
 
                 // Restore `dirty` state

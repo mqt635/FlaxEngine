@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,6 @@
 class DeferredMaterialShader : public MaterialShader
 {
 private:
-
     struct Cache
     {
         PipelineStateCache Default;
@@ -21,6 +20,12 @@ private:
         PipelineStateCache MotionVectors;
         PipelineStateCache MotionVectorsSkinned;
         PipelineStateCache MotionVectorsSkinnedPerBone;
+#if GPU_ENABLE_DEVELOPMENT
+        PipelineStateCache QuadOverdraw;
+        PipelineStateCache QuadOverdrawSkinned;
+        PipelineStateCache Wireframe;
+        PipelineStateCache WireframeSkinned;
+#endif
 
         FORCE_INLINE PipelineStateCache* GetPS(const DrawPass pass, const bool useLightmap, const bool useSkinning, const bool perBoneMotionBlur)
         {
@@ -29,9 +34,17 @@ private:
             case DrawPass::Depth:
                 return useSkinning ? &DepthSkinned : &Depth;
             case DrawPass::GBuffer:
+            case DrawPass::GBuffer | DrawPass::GlobalSurfaceAtlas:
+            case DrawPass::GlobalSurfaceAtlas:
                 return useLightmap ? &DefaultLightmap : (useSkinning ? &DefaultSkinned : &Default);
             case DrawPass::MotionVectors:
                 return useSkinning ? (perBoneMotionBlur ? &MotionVectorsSkinnedPerBone : &MotionVectorsSkinned) : &MotionVectors;
+#if GPU_ENABLE_DEVELOPMENT
+            case DrawPass::QuadOverdraw:
+                return useSkinning ? &QuadOverdrawSkinned : &QuadOverdraw;
+            case DrawPass::Wireframe:
+                return useSkinning ? &WireframeSkinned : &Wireframe;
+#endif
             default:
                 return nullptr;
             }
@@ -46,32 +59,34 @@ private:
             DepthSkinned.Release();
             MotionVectors.Release();
             MotionVectorsSkinned.Release();
+#if GPU_ENABLE_DEVELOPMENT
+            QuadOverdraw.Release();
+            QuadOverdrawSkinned.Release();
+            Wireframe.Release();
+            WireframeSkinned.Release();
+#endif
         }
     };
 
 private:
-
     Cache _cache;
     Cache _cacheInstanced;
+    bool _instanced;
 
 public:
-
     DeferredMaterialShader(const StringView& name)
         : MaterialShader(name)
     {
     }
 
 public:
-
     // [MaterialShader]
-    DrawPass GetDrawModes() const override;
     bool CanUseLightmap() const override;
-    bool CanUseInstancing(InstancingHandler& handler) const override;
+    bool CanUseInstancing(const RenderContext& renderContext, InstancingHandler& handler) const override;
     void Bind(BindParameters& params) override;
     void Unload() override;
 
 protected:
-
     // [MaterialShader]
     bool Load() override;
 };

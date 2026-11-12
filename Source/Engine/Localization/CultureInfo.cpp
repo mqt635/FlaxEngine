@@ -1,22 +1,44 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CultureInfo.h"
 #include "Engine/Core/Log.h"
-#include "Engine/Scripting/ManagedCLR/MType.h"
+#include "Engine/Core/Types/StringView.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Utilities/StringConverter.h"
-#if USE_MONO
-#include <ThirdParty/mono-2.0/mono/metadata/appdomain.h>
-#include <ThirdParty/mono-2.0/mono/metadata/culture-info.h>
-#include <ThirdParty/mono-2.0/mono/metadata/culture-info-tables.h>
+#include "Engine/Scripting/Types.h"
+#include "Engine/Scripting/ManagedCLR/MProperty.h"
 
-typedef struct
-{
-    MonoObject obj;
-    MonoBoolean is_read_only;
-    gint32 lcid;
-    //...
-} MonoCultureInfo;
+#if USE_CSHARP
+#include "Engine/Scripting/ScriptingType.h"
+#include "Engine/Scripting/BinaryModule.h"
+#include "Engine/Scripting/Scripting.h"
+#include "Engine/Scripting/ManagedCLR/MAssembly.h"
+#include "Engine/Scripting/ManagedCLR/MClass.h"
+#include "Engine/Scripting/ManagedCLR/MCore.h"
+#include "Engine/Scripting/ManagedCLR/MMethod.h"
 #endif
+
+// Use in-built cultures info tables from mono
+#include "CultureInfo.Tables.h"
+
+namespace
+{
+    const CultureInfoEntry* FindEntry(const StringAnsiView& name)
+    {
+        for (int32 i = 0; i < NUM_CULTURE_ENTRIES; i++)
+        {
+            const CultureInfoEntry& e = culture_entries[i];
+            if (name == idx2string(e.name))
+                return &e;
+        }
+        return nullptr;
+    }
+};
+
+CultureInfo::CultureInfo()
+    : CultureInfo(127) // Invariant Culture
+{
+}
 
 CultureInfo::CultureInfo(int32 lcid)
 {
@@ -25,12 +47,12 @@ CultureInfo::CultureInfo(int32 lcid)
     _data = nullptr;
     if (lcid == 0)
         return;
+    PROFILE_MEM(Localization);
     if (lcid == 127)
     {
         _englishName = TEXT("Invariant Culture");
         return;
     }
-#if USE_MONO
     for (int32 i = 0; i < NUM_CULTURE_ENTRIES; i++)
     {
         auto& e = culture_entries[i];
@@ -47,11 +69,10 @@ CultureInfo::CultureInfo(int32 lcid)
             break;
         }
     }
-#else
-#error "Missing CultureInfo implementation."
-#endif
     if (!_data)
     {
+        _lcid = 127;
+        _lcidParent = 0;
         _englishName = TEXT("Invariant Culture");
         LOG(Error, "Unknown LCID {0} for CultureInfo", lcid);
     }
@@ -64,6 +85,7 @@ CultureInfo::CultureInfo(const StringView& name)
 
 CultureInfo::CultureInfo(const StringAnsiView& name)
 {
+    PROFILE_MEM(Localization);
     _data = nullptr;
     if (name.IsEmpty())
     {
@@ -72,27 +94,24 @@ CultureInfo::CultureInfo(const StringAnsiView& name)
         _englishName = TEXT("Invariant Culture");
         return;
     }
-#if USE_MONO
-    for (int32 i = 0; i < NUM_CULTURE_ENTRIES; i++)
+    const CultureInfoEntry* e = FindEntry(name);
+    if (!e && name.Find('-') != -1)
     {
-        auto& e = culture_entries[i];
-        if (name == idx2string(e.name))
-        {
-            _data = (void*)&e;
-            _lcid = (int32)e.lcid;
-            _lcidParent = (int32)e.parent_lcid;
-            _name.SetUTF8(name.Get(), name.Length());
-            const char* nativename = idx2string(e.nativename);
-            _nativeName.SetUTF8(nativename, StringUtils::Length(nativename));
-            const char* englishname = idx2string(e.englishname);
-            _englishName.SetUTF8(englishname, StringUtils::Length(englishname));
-            break;
-        }
+        e = FindEntry(name.Substring(0, name.Find('-')));
     }
-#else
-#error "Missing CultureInfo implementation."
-#endif
-    if (!_data)
+    if (e)
+    {
+        _data = (void*)e;
+        _lcid = (int32)e->lcid;
+        _lcidParent = (int32)e->parent_lcid;
+        const char* ename = idx2string(e->name);
+        _name.SetUTF8(ename, StringUtils::Length(ename));
+        const char* nativename = idx2string(e->nativename);
+        _nativeName.SetUTF8(nativename, StringUtils::Length(nativename));
+        const char* englishname = idx2string(e->englishname);
+        _englishName.SetUTF8(englishname, StringUtils::Length(englishname));
+    }
+    else
     {
         _lcid = 127;
         _lcidParent = 0;
@@ -126,18 +145,6 @@ const String& CultureInfo::GetEnglishName() const
     return _englishName;
 }
 
-bool CultureInfo::IsRightToLeft() const
-{
-#if USE_MONO
-    const auto data = static_cast<CultureInfoEntry*>(_data);
-    if (data)
-        return data->text_info.is_right_to_left ? true : false;
-#else
-#error "Missing CultureInfo implementation."
-#endif
-    return false;
-}
-
 String CultureInfo::ToString() const
 {
     return _name;
@@ -148,33 +155,26 @@ bool CultureInfo::operator==(const CultureInfo& other) const
     return _lcid == other._lcid;
 }
 
+bool CultureInfo::operator!=(const CultureInfo& other) const
+{
+    return _lcid != other._lcid;
+}
+
 void* MUtils::ToManaged(const CultureInfo& value)
 {
-#if USE_MONO
-    const auto klass = mono_class_from_name(mono_get_corlib(), "System.Globalization", "CultureInfo");
-    if (klass)
-    {
-        void* iter = nullptr;
-        MonoMethod* method;
-        while ((method = mono_class_get_methods(klass, &iter)))
-        {
-            if (StringUtils::Compare(mono_method_get_name(method), ".ctor") == 0)
-            {
-                const auto sig = mono_method_signature(method);
-                void* sigParams = nullptr;
-                mono_signature_get_params(sig, &sigParams);
-                if (mono_signature_get_param_count(sig) == 1 && mono_type_get_class(((MonoType**)sigParams)[0]) != mono_get_string_class())
-                {
-                    MonoObject* obj = mono_object_new(mono_domain_get(), klass);
-                    int32 lcid = value.GetLCID();
-                    void* params[1];
-                    params[0] = &lcid;
-                    mono_runtime_invoke(method, obj, params, nullptr);
-                    return obj;
-                }
-            }
-        }
-    }
+#if USE_CSHARP
+    PROFILE_MEM(Localization);
+    auto scriptingClass = Scripting::GetStaticClass();
+    CHECK_RETURN(scriptingClass, nullptr);
+    auto cultureInfoToManaged = scriptingClass->GetMethod("CultureInfoToManaged", 1);
+    CHECK_RETURN(cultureInfoToManaged, nullptr);
+
+    int32 lcid = value.GetLCID();
+    void* params[1];
+    params[0] = &lcid;
+    MObject* obj = cultureInfoToManaged->Invoke(nullptr, params, nullptr);
+
+    return obj;
 #endif
     return nullptr;
 }
@@ -182,9 +182,39 @@ void* MUtils::ToManaged(const CultureInfo& value)
 CultureInfo MUtils::ToNative(void* value)
 {
     int32 lcid = 127;
-#if USE_MONO
-    if (value)
-        lcid = static_cast<MonoCultureInfo*>(value)->lcid;
+#if USE_CSHARP
+    PROFILE_MEM(Localization);
+    const MClass* klass = GetBinaryModuleCorlib()->Assembly->GetClass("System.Globalization.CultureInfo");
+    if (value && klass)
+    {
+        MProperty* lcidProperty = klass->GetProperty("LCID");
+        if (lcidProperty && lcidProperty->GetGetMethod())
+        {
+            MObject* lcidObj = lcidProperty->GetGetMethod()->Invoke(value, nullptr, nullptr);
+            lcid = *(int32*)MCore::Object::Unbox(lcidObj);
+        }
+    }
 #endif
     return CultureInfo(lcid);
+}
+
+void Serialization::Serialize(ISerializable::SerializeStream& stream, const CultureInfo& v, const void* otherObj)
+{
+    stream.String(v.GetName());
+}
+
+void Serialization::Deserialize(ISerializable::DeserializeStream& stream, CultureInfo& v, ISerializeModifier* modifier)
+{
+    if (stream.IsString())
+    {
+        v = CultureInfo(stream.GetText());
+    }
+    else if (stream.IsInt())
+    {
+        v = CultureInfo(stream.GetInt());
+    }
+    else
+    {
+        v = CultureInfo();
+    }
 }

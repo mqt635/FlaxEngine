@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI.ContextMenu;
@@ -7,6 +7,100 @@ using FlaxEngine.GUI;
 
 namespace FlaxEditor.Viewport.Widgets
 {
+    /// <summary>
+    /// Otrhographic view toggle viewport Widget Button class.
+    /// Will draw a custom camera frustum to represent an orthographic or perspective camera.
+    /// </summary>
+    /// <seealso cref="ViewportWidgetButton" />
+    [HideInEditor]
+    public class OrthoCamToggleViewportWidgetButton : ViewportWidgetButton
+    {
+        private const int iconPointCount = 4;
+        private const float iconRenderScale = 4.0f;
+
+        private readonly Float2 iconDrawOffset = new Float2(3.0f, 3.0f);
+
+        private readonly Float2[] iconPointsPerspective = new[]
+        {
+            new Float2(0.0f, 1.0f), // Top left
+            new Float2(4.0f, 0.0f), // Top right
+            new Float2(4.0f, 3.0f), // Bottom right
+            new Float2(0.0f, 2.0f), // Bottom left
+        };
+
+        private readonly Float2[] iconPointsOrtho = new[]
+        {
+            new Float2(0.0f, 0.0f), // Top left
+            new Float2(4.0f, 0.0f), // Top right
+            new Float2(4.0f, 3.0f), // Bottom right
+            new Float2(0.0f, 3.0f), // Bottom left
+        };
+
+        private bool wasChecked;
+        private float lerpWeight;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="OrthoCamToggleViewportWidgetButton"/> class.
+        /// </summary>
+        public OrthoCamToggleViewportWidgetButton(float speedTextWidth)
+        : base("00.0", SpriteHandle.Invalid, null, true, 20.0f + speedTextWidth)
+        {
+            wasChecked = Checked;
+        }
+
+        /// <inheritdoc />
+        public override void Update(float deltaTime)
+        {
+            if (wasChecked != Checked)
+            {
+                lerpWeight = 0.0f;
+                wasChecked = Checked;
+            }
+
+            if (lerpWeight <= 1.0f)
+                lerpWeight += deltaTime * 4.2f;
+
+            base.Update(deltaTime);
+        }
+
+        /// <inheritdoc />
+        public override void Draw()
+        {
+            // Cache data
+            var style = Style.Current;
+            var textRect = new Rectangle(0.0f, 0.0f, Width - 2.0f, Height);
+            var backgroundRect = textRect with { Width = Width - 1.0f };
+
+            // Check if is checked or mouse is over
+            if (Checked)
+                Render2D.FillRectangle(backgroundRect, style.BackgroundSelected * (IsMouseOver ? 0.9f : 0.6f));
+            else if (IsMouseOver)
+                Render2D.FillRectangle(backgroundRect, style.BackgroundHighlighted);
+
+            // Draw text
+            Render2D.DrawText(style.FontMedium, Text, textRect, style.ForegroundViewport * (IsMouseOver ? 1.0f : 0.9f), TextAlignment.Far, TextAlignment.Center);
+
+            // Draw camera frustum icon
+            Float2[] currentStart = Checked ? iconPointsOrtho : iconPointsPerspective;
+            Float2[] currentTarget = Checked ? iconPointsPerspective : iconPointsOrtho;
+
+            var features = Render2D.Features;
+            Render2D.Features = features & ~Render2D.RenderingFeatures.VertexSnapping;
+            for (int i = 1; i < iconPointCount + 1; i++)
+            {
+                int endPointIndex = Mathf.Wrap(i, 0, iconPointCount - 1);
+                Float2 lineStart = Float2.Lerp(currentStart[i - 1], currentTarget[i - 1], lerpWeight);
+                Float2 lineEnd = Float2.Lerp(currentStart[endPointIndex], currentTarget[endPointIndex], lerpWeight);
+
+                lineStart = lineStart * iconRenderScale + iconDrawOffset;
+                lineEnd = lineEnd * iconRenderScale + iconDrawOffset;
+
+                Render2D.DrawLine(lineStart, lineEnd, Color.White);
+            }
+            Render2D.Features = features;
+        }
+    }
+
     /// <summary>
     /// Viewport Widget Button class.
     /// </summary>
@@ -19,6 +113,7 @@ namespace FlaxEditor.Viewport.Widgets
         private bool _checked;
         private bool _autoCheck;
         private bool _isMosueDown;
+        private float _forcedTextWidth;
 
         /// <summary>
         /// Event fired when user toggles checked state.
@@ -63,14 +158,16 @@ namespace FlaxEditor.Viewport.Widgets
         /// <param name="text">The text.</param>
         /// <param name="icon">The icon.</param>
         /// <param name="contextMenu">The context menu.</param>
-        /// <param name="autoCheck">if set to <c>true</c> will be automatic checked on mouse click.</param>
-        public ViewportWidgetButton(string text, SpriteHandle icon, ContextMenu contextMenu = null, bool autoCheck = false)
-        : base(0, 0, CalculateButtonWidth(0, icon.IsValid), ViewportWidgetsContainer.WidgetsHeight)
+        /// <param name="autoCheck">If set to <c>true</c> will be automatic checked on mouse click.</param>
+        /// <param name="textWidth">Forces the text to be drawn with the specified width.</param>
+        public ViewportWidgetButton(string text, SpriteHandle icon, ContextMenu contextMenu = null, bool autoCheck = false, float textWidth = 0.0f)
+        : base(0, 0, CalculateButtonWidth(textWidth, icon.IsValid), ViewportWidgetsContainer.WidgetsHeight)
         {
             _text = text;
             Icon = icon;
             _cm = contextMenu;
             _autoCheck = autoCheck;
+            _forcedTextWidth = textWidth;
 
             if (_cm != null)
                 _cm.VisibleChanged += CmOnVisibleChanged;
@@ -112,7 +209,7 @@ namespace FlaxEditor.Viewport.Widgets
             if (Icon.IsValid)
             {
                 // Draw icon
-                Render2D.DrawSprite(Icon, iconRect, style.Foreground);
+                Render2D.DrawSprite(Icon, iconRect, style.ForegroundViewport);
 
                 // Update text rectangle
                 textRect.Location.X += iconSize;
@@ -120,11 +217,11 @@ namespace FlaxEditor.Viewport.Widgets
             }
 
             // Draw text
-            Render2D.DrawText(style.FontMedium, _text, textRect, style.Foreground * (IsMouseOver ? 1.0f : 0.9f), TextAlignment.Center, TextAlignment.Center);
+            Render2D.DrawText(style.FontMedium, _text, textRect, style.ForegroundViewport * (IsMouseOver ? 1.0f : 0.9f), TextAlignment.Center, TextAlignment.Center);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left)
             {
@@ -137,13 +234,13 @@ namespace FlaxEditor.Viewport.Widgets
                 Toggled?.Invoke(this);
             }
 
-            _cm?.Show(this, new Vector2(-1, Height + 2));
+            _cm?.Show(this, new Float2(-1, Height + 2));
 
             return base.OnMouseDown(location, button);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left && _isMosueDown)
             {
@@ -160,7 +257,7 @@ namespace FlaxEditor.Viewport.Widgets
             var style = Style.Current;
 
             if (style != null && style.FontMedium)
-                Width = CalculateButtonWidth(style.FontMedium.MeasureText(_text).X, Icon.IsValid);
+                Width = CalculateButtonWidth(_forcedTextWidth > 0.0f ? _forcedTextWidth : style.FontMedium.MeasureText(_text).X, Icon.IsValid);
         }
     }
 }

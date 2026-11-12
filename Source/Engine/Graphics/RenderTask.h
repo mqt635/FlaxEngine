@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,7 +8,6 @@
 #include "Engine/Platform/CriticalSection.h"
 #include "Engine/Scripting/ScriptingObjectReference.h"
 #include "Engine/Scripting/ScriptingType.h"
-#include "PostProcessBase.h"
 #include "RenderView.h"
 
 class GPUDevice;
@@ -17,16 +16,18 @@ class GPUTexture;
 class GPUTextureView;
 class GPUSwapChain;
 class RenderBuffers;
+class PostProcessEffect;
 struct RenderContext;
 class Camera;
 class Actor;
+class Scene;
 
 /// <summary>
 /// Allows to perform custom rendering using graphics pipeline.
 /// </summary>
-API_CLASS() class FLAXENGINE_API RenderTask : public PersistentScriptingObject
+API_CLASS() class FLAXENGINE_API RenderTask : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE(RenderTask);
+    DECLARE_SCRIPTING_TYPE(RenderTask);
 
     /// <summary>
     /// List with all registered tasks
@@ -49,22 +50,24 @@ DECLARE_SCRIPTING_TYPE(RenderTask);
     static void DrawAll();
 
 private:
-
     RenderTask* _prevTask = nullptr;
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="RenderTask"/> class.
     /// </summary>
     virtual ~RenderTask();
 
 public:
-
     /// <summary>
     /// Gets or sets a value indicating whether task is enabled.
     /// </summary>
     API_FIELD() bool Enabled = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether task is doing composition over other task (eg. layered cameras stacking for local co-op).
+    /// </summary>
+    API_FIELD() bool IsComposite = false;
 
     /// <summary>
     /// The order of the task. Used for tasks rendering order. Lower first, higher later.
@@ -113,9 +116,14 @@ public:
     API_PROPERTY() virtual bool CanDraw() const;
 
     /// <summary>
-    /// Called by graphics device to draw this task. Can be used to invoke task rendering nested inside another task - use on own risk!
+    /// Called by graphics device to draw this task.
     /// </summary>
     API_FUNCTION() virtual void OnDraw();
+
+    /// <summary>
+    /// Called by graphics device to idle task that has not been selected for drawing this frame (CanDraw returned false). Can be used to recycle cached memory if task is idle for many frames in a row.
+    /// </summary>
+    virtual void OnIdle();
 
     /// <summary>
     /// Called on task rendering begin.
@@ -150,7 +158,6 @@ public:
     API_FUNCTION() virtual bool Resize(int32 width, int32 height);
 
 public:
-
     bool operator<(const RenderTask& other) const
     {
         return Order < other.Order;
@@ -178,6 +185,11 @@ API_ENUM(Attributes="Flags") enum class ActorsSources
     CustomActors = 2,
 
     /// <summary>
+    /// The scenes from the custom collection.
+    /// </summary>
+    CustomScenes = 4,
+
+    /// <summary>
     /// The actors from the loaded scenes and custom collection.
     /// </summary>
     ScenesAndCustomActors = Scenes | CustomActors,
@@ -186,31 +198,24 @@ API_ENUM(Attributes="Flags") enum class ActorsSources
 DECLARE_ENUM_OPERATORS(ActorsSources);
 
 /// <summary>
-/// Wrapper for PostProcessBase that allows to render to customized managed postFx.
-/// TODO: add support for managed inheritance of custom native types with proper spawn handling (like for ManagedScript)
+/// The Post Process effect rendering location within the rendering pipeline.
 /// </summary>
-/// <seealso cref="PostProcessBase" />
-class ManagedPostProcessEffect : public PostProcessBase
+API_ENUM() enum class RenderingUpscaleLocation
 {
-public:
+    /// <summary>
+    /// The up-scaling happens directly to the output buffer (backbuffer) after post processing and anti-aliasing.
+    /// </summary>
+    AfterAntiAliasing = 0,
+    
+    /// <summary>
+    /// The up-scaling happens before the post processing after scene rendering (after geometry, lighting, volumetrics, transparency and SSR/SSAO).
+    /// </summary>
+    BeforePostProcessing = 1,
 
     /// <summary>
-    /// The script to use. Inherits from C# class 'PostProcessEffect'.
+    /// The up-scaling happens during anti-aliasing. For example, when using Temporal Anti-Aliasing (TAA) it work as Temporal Anti-Aliasing Upsampling (TAAU) to both remove aliasing and upscale the image.
     /// </summary>
-    Script* Target = nullptr;
-
-public:
-
-    /// <summary>
-    /// Fetches the information about the PostFx location from the managed object.
-    /// </summary>
-    void FetchInfo();
-
-public:
-
-    // [PostProcessBase]
-    bool IsLoaded() const override;
-    void Render(RenderContext& renderContext, GPUTexture* input, GPUTexture* output) override;
+    DuringAntiAliasing = 2,
 };
 
 /// <summary>
@@ -219,19 +224,26 @@ public:
 /// <seealso cref="FlaxEngine.RenderTask" />
 API_CLASS() class FLAXENGINE_API SceneRenderTask : public RenderTask
 {
-DECLARE_SCRIPTING_TYPE(SceneRenderTask);
+    DECLARE_SCRIPTING_TYPE(SceneRenderTask);
+protected:
+    class SceneRendering* _customActorsScene = nullptr;
 
+public:
     /// <summary>
     /// Finalizes an instance of the <see cref="SceneRenderTask"/> class.
     /// </summary>
     ~SceneRenderTask();
 
 public:
-
     /// <summary>
     /// True if the current frame is after the camera cut. Used to clear the temporal effects history and prevent visual artifacts blended from the previous frames.
     /// </summary>
     bool IsCameraCut = true;
+
+    /// <summary>
+    /// True if the task is used for custom scene rendering and default scene drawing into output should be skipped. Enable it if you use Render event and draw scene manually.
+    /// </summary>
+    API_FIELD() bool IsCustomRendering = false;
 
     /// <summary>
     /// Marks the next rendered frame as camera cut. Used to clear the temporal effects history and prevent visual artifacts blended from the previous frames.
@@ -265,13 +277,35 @@ public:
 
     /// <summary>
     /// The scale of the rendering resolution relative to the output dimensions. If lower than 1 the scene and postprocessing will be rendered at a lower resolution and upscaled to the output backbuffer.
+    /// [Deprecated in v1.13]
     /// </summary>
-    API_FIELD() float RenderingPercentage = 1.0f;
+    API_FIELD() DEPRECATED("Use RenderScale instead.") float RenderingPercentage = 1.0f;
 
     /// <summary>
-    /// The custom set of actors to render.
+    /// The scale of the rendering resolution relative to the output dimensions. If lower than 1 the scene and postprocessing will be rendered at a lower resolution and upscaled to the output backbuffer.
     /// </summary>
-    Array<Actor*> CustomActors;
+    API_FIELD() float RenderScale = 1.0f;
+
+    /// <summary>
+    /// The texture mip level bias for materials. Positive values make textures appear blurrier; negative values sharpen.
+    /// </summary>
+    API_FIELD() float MaterialTextureMipBias = 0.0f;
+
+    /// <summary>
+    /// The image resolution upscale location within rendering pipeline. Unused if RenderingPercentage is 1.
+    /// </summary>
+    API_FIELD() RenderingUpscaleLocation UpscaleLocation = RenderingUpscaleLocation::DuringAntiAliasing;
+
+public:
+    /// <summary>
+    /// The custom set of actors to render. Used when ActorsSources::CustomActors flag is active.
+    /// </summary>
+    API_FIELD() Array<Actor*> CustomActors;
+
+    /// <summary>
+    /// The custom set of scenes to render. Used when ActorsSources::CustomScenes flag is active.
+    /// </summary>
+    API_FIELD() Array<Scene*> CustomScenes;
 
     /// <summary>
     /// Adds the custom actor to the rendering.
@@ -290,13 +324,47 @@ public:
     /// </summary>
     API_FUNCTION() void ClearCustomActors();
 
+public:
     /// <summary>
-    /// The custom post fx to render (managed).
+    /// The custom set of postfx to render.
     /// </summary>
-    Array<ManagedPostProcessEffect> CustomPostFx;
+    Array<PostProcessEffect*> CustomPostFx;
+
+    /// <summary>
+    /// Adds the custom postfx to the rendering.
+    /// </summary>
+    /// <param name="fx">The postfx script.</param>
+    API_FUNCTION() void AddCustomPostFx(PostProcessEffect* fx);
+
+    /// <summary>
+    /// Removes the custom postfx from the rendering.
+    /// </summary>
+    /// <param name="fx">The postfx script.</param>
+    API_FUNCTION() void RemoveCustomPostFx(PostProcessEffect* fx);
+
+    /// <summary>
+    /// True if allow using global custom PostFx when rendering this task.
+    /// </summary>
+    API_FIELD() bool AllowGlobalCustomPostFx = true;
+
+    /// <summary>
+    /// The custom set of global postfx to render for all <see cref="SceneRenderTask"/> (applied to tasks that have <see cref="AllowGlobalCustomPostFx"/> turned on).
+    /// </summary>
+    static Array<PostProcessEffect*> GlobalCustomPostFx;
+
+    /// <summary>
+    /// Adds the custom global postfx to the rendering.
+    /// </summary>
+    /// <param name="fx">The postfx script.</param>
+    API_FUNCTION() static void AddGlobalCustomPostFx(PostProcessEffect* fx);
+
+    /// <summary>
+    /// Removes the custom global postfx from the rendering.
+    /// </summary>
+    /// <param name="fx">The postfx script.</param>
+    API_FUNCTION() static void RemoveGlobalCustomPostFx(PostProcessEffect* fx);
 
 public:
-
     /// <summary>
     /// The action called on view rendering to collect draw calls. It allows to extend rendering pipeline and draw custom geometry non-existing in the scene or custom actors set.
     /// </summary>
@@ -311,8 +379,9 @@ public:
     /// <summary>
     /// Calls drawing scene objects.
     /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    virtual void OnCollectDrawCalls(RenderContext& renderContext);
+    /// <param name="renderContextBatch">The rendering context batch.</param>
+    /// <param name="category">The actors category to draw (see SceneRendering::DrawCategory).</param>
+    virtual void OnCollectDrawCalls(RenderContextBatch& renderContextBatch, byte category = 0);
 
     /// <summary>
     /// The action called after scene rendering. Can be used to perform custom pre-rendering or to modify the render view.
@@ -338,16 +407,22 @@ public:
     /// <param name="renderContext">The rendering context.</param>
     virtual void OnPostRender(GPUContext* context, RenderContext& renderContext);
 
-public:
+    /// <summary>
+    /// The action called before any rendering to override/customize setup RenderSetup inside RenderList. Can be used to enable eg. Motion Vectors rendering.
+    /// </summary>
+    Delegate<RenderContext&> SetupRender;
 
+public:
     /// <summary>
     /// Gets the rendering render task viewport (before upsampling).
     /// </summary>
+    /// <remarks>Includes rendering scale and ViewportRect sizing (but no viewport offset, origin at 0,0).</remarks>
     API_PROPERTY() Viewport GetViewport() const;
 
     /// <summary>
     /// Gets the rendering output viewport (after upsampling).
     /// </summary>
+    /// <remarks>Includes ViewportRect placement within output. Doesn't contain any render scale.</remarks>
     API_PROPERTY() Viewport GetOutputViewport() const;
 
     /// <summary>
@@ -356,10 +431,10 @@ public:
     API_PROPERTY() GPUTextureView* GetOutputView() const;
 
 public:
-
     // [RenderTask]
     bool Resize(int32 width, int32 height) override;
     bool CanDraw() const override;
+    void OnIdle() override;
     void OnBegin(GPUContext* context) override;
     void OnRender(GPUContext* context) override;
     void OnEnd(GPUContext* context) override;
@@ -376,7 +451,7 @@ public:
 /// <seealso cref="FlaxEngine.SceneRenderTask" />
 API_CLASS() class FLAXENGINE_API MainRenderTask : public SceneRenderTask
 {
-DECLARE_SCRIPTING_TYPE(MainRenderTask);
+    DECLARE_SCRIPTING_TYPE(MainRenderTask);
 
     /// <summary>
     /// Finalizes an instance of the <see cref="MainRenderTask"/> class.
@@ -384,53 +459,12 @@ DECLARE_SCRIPTING_TYPE(MainRenderTask);
     ~MainRenderTask();
 
 public:
-
     /// <summary>
     /// Gets the main game rendering task. Use it to plug custom rendering logic for your game.
     /// </summary>
     API_FIELD(ReadOnly) static MainRenderTask* Instance;
 
 public:
-
     // [SceneRenderTask]
     void OnBegin(GPUContext* context) override;
-};
-
-/// <summary>
-/// The high-level renderer context. Used to collect the draw calls for the scene rendering. Can be used to perform a custom rendering.
-/// </summary>
-API_STRUCT() struct RenderContext
-{
-DECLARE_SCRIPTING_TYPE_MINIMAL(RenderContext);
-
-    /// <summary>
-    /// The render buffers.
-    /// </summary>
-    API_FIELD() RenderBuffers* Buffers = nullptr;
-
-    /// <summary>
-    /// The render list.
-    /// </summary>
-    API_FIELD() RenderList* List = nullptr;
-
-    /// <summary>
-    /// The render view.
-    /// </summary>
-    API_FIELD() RenderView View;
-
-    /// <summary>
-    /// The proxy render view used to synchronize objects level of detail during rendering (eg. during shadow maps rendering passes). It's optional.
-    /// </summary>
-    API_FIELD() RenderView* LodProxyView = nullptr;
-
-    /// <summary>
-    /// The scene rendering task that is a source of renderable objects (optional).
-    /// </summary>
-    API_FIELD() SceneRenderTask* Task = nullptr;
-
-    RenderContext()
-    {
-    }
-
-    RenderContext(SceneRenderTask* task);
 };

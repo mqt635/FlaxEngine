@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SplashScreen.h"
 #include "Engine/Core/Log.h"
@@ -9,6 +9,7 @@
 #include "Engine/Render2D/Font.h"
 #include "Engine/Render2D/TextLayoutOptions.h"
 #include "Engine/Render2D/Render2D.h"
+#include "Engine/Platform/FileSystem.h"
 #include "Engine/Content/Content.h"
 #include "FlaxEngine.Gen.h"
 
@@ -18,18 +19,21 @@ const Char* SplashScreenQuotes[] =
     TEXT("Loading"),
     TEXT("Unloading"),
     TEXT("Reloading"),
-    TEXT("Reloading gun"),
+    TEXT("Downloading more RAM"),
     TEXT("Consuming your RAM"),
     TEXT("Burning your CPU"),
-    TEXT("#BetterThanUnity"),
     TEXT("Rendering buttons"),
     TEXT("Collecting crash data"),
-    TEXT("Downloading porn"),
 #if PLATFORM_WINDOWS
-    TEXT("Removing 'C:\\Windows\\'"),
+    TEXT("We're getting everything ready for you."),
 #elif PLATFORM_LINUX
-    TEXT("Time to switch to Windows?"),
-    TEXT("Installing Windows 10..."),
+    TEXT("Try it on a Raspberry"),
+    TEXT("Trying to exit vim"),
+    TEXT("sudo flax --project=HelloWorld.flaxproj"),
+#elif PLATFORM_MAC
+    TEXT("don't compare Macbooks to oranges."),
+    TEXT("Why does macbook heat up?\nBecause it doesn't have windows"),
+    TEXT("Starting Direc... um, Vulkan renderer."),
 #endif
     TEXT("Kappa!"),
     TEXT("How you doin'?"),
@@ -37,12 +41,10 @@ const Char* SplashScreenQuotes[] =
     TEXT("Bond. James Bond."),
     TEXT("To infinity and beyond!"),
     TEXT("Houston, we have a problem"),
-    TEXT("NotImplementedEngineException"),
     TEXT("Made in Poland"),
     TEXT("We like you"),
     TEXT("Compiling the compiler"),
     TEXT("Flax it up!"),
-    TEXT("Fun fact: Fortnite runs on Flax"),
     TEXT("Toss a coin to your Witcher!!!"),
     TEXT("Holy Moly!"),
     TEXT("Just Read the Instructions"),
@@ -57,7 +59,6 @@ const Char* SplashScreenQuotes[] =
     TEXT("They see me loadin'"),
     TEXT("Loadin' loadin' and loadin' loadin'"),
     TEXT("Procedurally generating buttons"),
-    TEXT("Out of Memory Exception!"),
     TEXT("Running Big Bang simulation"),
     TEXT("Calculating infinity"),
     TEXT("Dividing infinity by zero"),
@@ -67,10 +68,7 @@ const Char* SplashScreenQuotes[] =
     TEXT("Whatever you do, do it well.\n~Walt Disney"),
     TEXT("Here's Johnny!"),
     TEXT("Did you see that? No... I don't think so"),
-    TEXT("Collecting unreal power"),
     TEXT("Stay safe, friend"),
-    TEXT("trolololololololololololo"),
-    TEXT("xD"),
     TEXT("Come to the dark side"),
     TEXT("Flax Facts: This is a loading screen"),
     TEXT("Don't Stop Me Now"),
@@ -78,61 +76,69 @@ const Char* SplashScreenQuotes[] =
     TEXT("Made with Flax"),
     TEXT("This is the way"),
     TEXT("The quick brown fox jumps over the lazy dog"),
-    TEXT("Hit The Road Jack"),
     TEXT("You have 7 lives left"),
     TEXT("May the Force be with you"),
     TEXT("A martini. Shaken, not stirred"),
     TEXT("Hasta la vista, baby"),
     TEXT("Winter is coming"),
-    TEXT("You know nothing, Jon Snow"),
     TEXT("Create something awesome!"),
     TEXT("Well Polished Engine"),
     TEXT("Error 404: Joke Not Found"),
     TEXT("Rushing B"),
     TEXT("Putting pineapple on pizza"),
-    TEXT("Loading Simulation"),
+    TEXT("Entering the Matrix"),
     TEXT("Get ready for a surprise!"),
     TEXT("Coffee is my fuel"),
-    TEXT("Installing a free copy of Cyberpunk 2077"),
     TEXT("With great power comes great electricity bill"),
     TEXT("Flax was made in the same city as Witcher 3"),
     TEXT("So JavaScript is a scripting version of Java"),
     TEXT("Good things take time.\n~Someone"),
-    TEXT("Get shit done"),
     TEXT("Hold Tight! Loading Flax"),
     TEXT("That's one small step for a man,\none giant leap for mankind"),
     TEXT("Remember to save your work frequently"),
     TEXT("In case of fire:\ngit commit, git push, leave building"),
     TEXT("Keep calm and make games"),
     TEXT("You're breathtaking!!!"),
-    TEXT("Do regular dogs see police dogs & think,\nOh no it's a cop?"),
-    TEXT("Dear Santa,\nDefine naughty."),
     TEXT("Blah, blah"),
     TEXT("My PRECIOUS!!!!"),
     TEXT("YOU SHALL NOT PASS!"),
     TEXT("You have my bow.\nAnd my axe!"),
     TEXT("To the bridge of Khazad-dum."),
     TEXT("One ring to rule them all.\nOne ring to find them."),
-    TEXT("Ladies and gentelman, we got him"),
-    TEXT("Cyberpunk of game engines"),
+    TEXT("Where there's a whip, there's a way."),
     TEXT("That's what she said"),
-    TEXT("Compiling Shaders (93,788)"),
+    TEXT("We could be compiling shaders here"),
     TEXT("Hello There"),
     TEXT("BAGUETTE"),
-    TEXT("All we had to do was follow the damn train, CJ"),
-    TEXT("28 stab wounds"),
     TEXT("Here we go again"),
     TEXT("@everyone"),
     TEXT("Potato"),
     TEXT("Python is a programming snek"),
     TEXT("Flax will start when pigs will fly"),
-    TEXT("I'm the android sent by CyberLife"),
-    TEXT("Fancy-ass ray tracing, rtx on, lighting"),
     TEXT("ZOINKS"),
     TEXT("Scooby dooby doo"),
     TEXT("You shall not load!"),
     TEXT("The roof, the roof, the roof is on fire!"),
-    TEXT("I've seen better documentation ...\nFrom ransomware gangs !")
+    TEXT("Slava Ukraini!"),
+    TEXT("RTX off... for now!"),
+    TEXT("Increasing Fiber count"),
+    TEXT("Now this is podracing!"),
+    TEXT("Weird flax, but ok"),
+    TEXT("Reticulating Splines"),
+    TEXT("Discombobulating"),
+    TEXT("Who is signing all these integers?!"),
+    TEXT("Flax fact: Flax was called Celelej once."),
+    TEXT("Changing text overflow setti-"),
+    TEXT("Testing tests"),
+    TEXT("Free hugs"),
+    TEXT("Think outside the box"),
+    TEXT("Let's make something fantastic"),
+    TEXT("Be brave"),
+    TEXT("Drum roll please"),
+    TEXT("Good Luck Have Fun"),
+    TEXT("GG Well Played"),
+    TEXT("Now with documentation."),
+    TEXT("We do this not because it is easy,\nbut because we thought it would be easy"),
 };
 
 SplashScreen::~SplashScreen()
@@ -144,13 +150,13 @@ SplashScreen::~SplashScreen()
 void SplashScreen::Show()
 {
     // Skip if already shown or in headless mode
-    if (IsVisible() || CommandLine::Options.Headless)
+    if (IsVisible() || CommandLine::Options.Headless.IsTrue())
         return;
 
     LOG(Info, "Showing splash screen");
 
     // Create window
-    const float dpiScale = (float)Platform::GetDpi() / (float)DefaultDPI;
+    const float dpiScale = Platform::GetDpiScale();
     CreateWindowSettings settings;
     settings.Title = TEXT("Flax Editor");
     settings.Size.X = 500 * dpiScale;
@@ -161,7 +167,7 @@ void SplashScreen::Show()
     settings.AllowMaximize = false;
     settings.AllowDragAndDrop = false;
     settings.IsTopmost = false;
-    settings.IsRegularWindow = false;
+    settings.Type = WindowType::Utility;
     settings.HasSizingFrame = false;
     settings.ShowAfterFirstPaint = true;
     settings.StartPosition = WindowStartPosition::CenterScreen;
@@ -174,7 +180,7 @@ void SplashScreen::Show()
         if (reason == ClosingReason::User)
             cancel = true;
     });
-    _window->HitTest.Bind([](const Vector2& mouse, WindowHitCodes& hit, bool& handled)
+    _window->HitTest.Bind([](const Float2& mouse, WindowHitCodes& hit, bool& handled)
     {
         // Allow to drag window by clicking anywhere
         hit = WindowHitCodes::Caption;
@@ -185,8 +191,7 @@ void SplashScreen::Show()
 
     // Setup
     _dpiScale = dpiScale;
-    _width = settings.Size.X;
-    _height = settings.Size.Y;
+    _size = settings.Size;
     _startTime = DateTime::NowUTC();
     auto str = Globals::ProjectFolder;
 #if PLATFORM_WIN32
@@ -208,9 +213,15 @@ void SplashScreen::Show()
         if (font->IsLoaded())
             OnFontLoaded(font);
         else
-            font->OnLoaded.Bind<SplashScreen, &SplashScreen::OnFontLoaded>(this);
+            font->Loaded.Bind<SplashScreen, &SplashScreen::OnFontLoaded>(this);
     }
 
+    // Load custom image
+    _splashTexture.Loaded.Bind<SplashScreen, &SplashScreen::OnSplashLoaded>(this);
+    String splashImagePath = Globals::ProjectContentFolder / TEXT("SplashImage.flax");
+    if (FileSystem::FileExists(splashImagePath))
+        _splashTexture = Content::LoadAsync<Texture>(splashImagePath);
+    
     _window->Show();
 }
 
@@ -224,6 +235,10 @@ void SplashScreen::Close()
     // Close window
     _window->Close(ClosingReason::CloseEvent);
     _window = nullptr;
+
+    _titleFont = nullptr;
+    _subtitleFont = nullptr;
+    _splashTexture = nullptr;
 }
 
 void SplashScreen::OnShown()
@@ -236,16 +251,29 @@ void SplashScreen::OnShown()
 void SplashScreen::OnDraw()
 {
     const float s = _dpiScale;
-    const float width = _width;
-    const float height = _height;
+    const float width = _size.X;
+    const float height = _size.Y;
 
     // Peek time
     const float time = static_cast<float>((DateTime::NowUTC() - _startTime).GetTotalSeconds());
 
     // Background
-    const float lightBarHeight = 112 * s;
-    Render2D::FillRectangle(Rectangle(0, 0, width, 150 * s), Color::FromRGB(0x1C1C1C));
-    Render2D::FillRectangle(Rectangle(0, lightBarHeight, width, height), Color::FromRGB(0x0C0C0C));
+    float lightBarHeight = 112 * s;
+    if (_splashTexture != nullptr)
+    {
+        if (_splashTexture->IsLoaded())
+        {
+            lightBarHeight = height - lightBarHeight + 20 * s;
+            Render2D::DrawTexture(_splashTexture, Rectangle(0, 0, width, height));
+            Color rectColor = Color::FromRGB(0x0C0C0C);
+            Render2D::FillRectangle(Rectangle(0, lightBarHeight, width, height - lightBarHeight),rectColor.AlphaMultiplied(0.85f), rectColor.AlphaMultiplied(0.85f), rectColor, rectColor);
+        }
+    }
+    else
+    {
+        Render2D::FillRectangle(Rectangle(0, 0, width, 150 * s), Color::FromRGB(0x1C1C1C));
+        Render2D::FillRectangle(Rectangle(0, lightBarHeight, width, height), Color::FromRGB(0x0C0C0C));
+    }
 
     // Animated border
     const float anim = Math::Sin(time * 4.0f) * 0.5f + 0.5f;
@@ -256,7 +284,7 @@ void SplashScreen::OnDraw()
         return;
 
     // Title
-    const Vector2 titleLength = _titleFont->MeasureText(GetTitle());
+    const auto titleLength = _titleFont->MeasureText(GetTitle());
     TextLayoutOptions layout;
     layout.Bounds = Rectangle(10 * s, 10 * s, width - 10 * s, 50 * s);
     layout.HorizontalAlignment = TextAlignment::Near;
@@ -273,15 +301,27 @@ void SplashScreen::OnDraw()
         for (int32 i = 0; i < 4 - static_cast<int32>(time * 2.0f) % 4; i++)
             subtitle += TEXT(' ');
     }
-    layout.Bounds = Rectangle(width - 224 * s, lightBarHeight - 39 * s, 220 * s, 35 * s);
+    if (_splashTexture != nullptr)
+    {
+        layout.Bounds = Rectangle(width - 224 * s, lightBarHeight + 4 * s, 220 * s, 35 * s);
+        layout.VerticalAlignment = TextAlignment::Near;
+    }
+    else
+    {
+        layout.Bounds = Rectangle(width - 224 * s, lightBarHeight - 39 * s, 220 * s, 35 * s);
+        layout.VerticalAlignment = TextAlignment::Far;
+    }
     layout.Scale = 1.0f;
     layout.HorizontalAlignment = TextAlignment::Far;
-    layout.VerticalAlignment = TextAlignment::Far;
     Render2D::DrawText(_subtitleFont, subtitle, Color::FromRGB(0x8C8C8C), layout);
 
     // Additional info
     const float infoMargin = 6 * s;
-    layout.Bounds = Rectangle(infoMargin, lightBarHeight + infoMargin, width - (2 * infoMargin), height - lightBarHeight - (2 * infoMargin));
+    if (_splashTexture != nullptr)
+        layout.Bounds = Rectangle(infoMargin + 4 * s, lightBarHeight + infoMargin, width - (2 * infoMargin), height - lightBarHeight - (2 * infoMargin));
+    else
+        layout.Bounds = Rectangle(infoMargin, lightBarHeight + infoMargin, width - (2 * infoMargin), height - lightBarHeight - (2 * infoMargin));
+    
     layout.HorizontalAlignment = TextAlignment::Near;
     layout.VerticalAlignment = TextAlignment::Center;
     Render2D::DrawText(_subtitleFont, _infoText, Color::FromRGB(0xFFFFFF) * 0.9f, layout);
@@ -297,10 +337,21 @@ void SplashScreen::OnFontLoaded(Asset* asset)
     ASSERT(asset && asset->IsLoaded());
     auto font = (FontAsset*)asset;
 
-    font->OnLoaded.Unbind<SplashScreen, &SplashScreen::OnFontLoaded>(this);
+    font->Loaded.Unbind<SplashScreen, &SplashScreen::OnFontLoaded>(this);
 
     // Create fonts
     const float s = _dpiScale;
-    _titleFont = font->CreateFont((uint32)(35 * s));
-    _subtitleFont = font->CreateFont((uint32)(9 * s));
+    _titleFont = font->CreateFont(35 * s);
+    _subtitleFont = font->CreateFont(9 * s);
+}
+
+void SplashScreen::OnSplashLoaded()
+{
+    // Resize window to be larger if texture is being used
+    auto desktopSize = Platform::GetDesktopSize();
+    auto xSize = (desktopSize.X / (600.0f * 3.0f)) * 600.0f;
+    auto ySize = (desktopSize.Y / (200.0f * 3.0f)) * 200.0f;
+    _window->SetClientSize(Float2(xSize, ySize));
+    _size = _window->GetSize();
+    _window->SetPosition((desktopSize - _size) * 0.5f);
 }

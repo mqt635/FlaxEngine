@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 /// </summary>
 API_STRUCT() struct BrushSurface : ISerializable
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(BrushSurface);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(BrushSurface);
 
     /// <summary>
     /// The parent brush.
@@ -36,13 +36,13 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(BrushSurface);
     /// The surface texture coordinates scale.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(30), EditorDisplay(\"Brush\", \"UV Scale\"), Limit(-1000, 1000, 0.01f)")
-    Vector2 TexCoordScale = Vector2::One;
+    Float2 TexCoordScale = Float2::One;
 
     /// <summary>
     /// The surface texture coordinates offset.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(40), EditorDisplay(\"Brush\", \"UV Offset\"), Limit(-1000, 1000, 0.01f)")
-    Vector2 TexCoordOffset = Vector2::Zero;
+    Float2 TexCoordOffset = Float2::Zero;
 
     /// <summary>
     /// The surface texture coordinates rotation angle (in degrees).
@@ -57,7 +57,6 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(BrushSurface);
     float ScaleInLightmap = 1.0f;
 
 public:
-
     // [ISerializable]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
@@ -66,18 +65,17 @@ public:
 /// <summary>
 /// Performs CSG box brush operation that adds or removes geometry.
 /// </summary>
-API_CLASS() class FLAXENGINE_API BoxBrush : public Actor, public CSG::Brush
+API_CLASS(Attributes="ActorContextMenu(\"New/Other/CSG Box Brush\"), ActorToolbox(\"Other\", \"CSG Box Brush\")")
+class FLAXENGINE_API BoxBrush : public Actor, public CSG::Brush
 {
-DECLARE_SCENE_OBJECT(BoxBrush);
+    DECLARE_SCENE_OBJECT(BoxBrush);
 private:
-
     Vector3 _center;
     Vector3 _size;
     OrientedBoundingBox _bounds;
     BrushMode _mode;
 
 public:
-
     /// <summary>
     /// Brush surfaces scale in lightmap
     /// </summary>
@@ -92,7 +90,7 @@ public:
     /// <summary>
     /// Gets the brush proxies per surface.
     /// </summary>
-    API_PROPERTY(Attributes="Serialize, EditorOrder(100), EditorDisplay(\"Surfaces\", EditorDisplayAttribute.InlineStyle), Collection(CanReorderItems = false, NotNullItems = true, ReadOnly = true)")
+    API_PROPERTY(Attributes="Serialize, EditorOrder(100), EditorDisplay(\"Surfaces\", EditorDisplayAttribute.InlineStyle), Collection(CanReorderItems = false, NotNullItems = true, CanResize = true)")
     Array<BrushSurface> GetSurfaces() const;
 
     /// <summary>
@@ -161,7 +159,6 @@ public:
     API_FUNCTION() void SetMaterial(int32 surfaceIndex, MaterialBase* material);
 
 public:
-
     /// <summary>
     /// Gets the volume bounding box (oriented).
     /// </summary>
@@ -181,7 +178,7 @@ public:
     /// <param name="distance">When the method completes and returns true, contains the distance of the intersection (if any valid).</param>
     /// <param name="normal">When the method completes, contains the intersection surface normal vector (if any valid).</param>
     /// <returns>True if the actor is intersected by the ray, otherwise false.</returns>
-    API_FUNCTION() bool Intersects(int32 surfaceIndex, API_PARAM(Ref) const Ray& ray, API_PARAM(Out) float& distance, API_PARAM(Out) Vector3& normal) const;
+    API_FUNCTION() bool Intersects(int32 surfaceIndex, API_PARAM(Ref) const Ray& ray, API_PARAM(Out) Real& distance, API_PARAM(Out) Vector3& normal) const;
 
     /// <summary>
     /// Gets the brush surface triangles array (group by 3 vertices).
@@ -191,21 +188,13 @@ public:
     API_FUNCTION() void GetVertices(int32 surfaceIndex, API_PARAM(Out) Array<Vector3>& outputData) const;
 
 private:
-
-    FORCE_INLINE void UpdateBounds()
-    {
-        OrientedBoundingBox::CreateCentered(_center, _size, _bounds);
-        _bounds.Transform(_transform.GetWorld());
-        _bounds.GetBoundingBox(_box);
-        BoundingSphere::FromBox(_box, _sphere);
-    }
+    void UpdateBounds();
 
 public:
-
     // [Actor]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
 #endif
@@ -219,7 +208,6 @@ public:
     int32 GetSurfacesCount() override;
 
 protected:
-
     // [Actor]
     void OnTransformChanged() override;
     void OnActiveInTreeChanged() override;

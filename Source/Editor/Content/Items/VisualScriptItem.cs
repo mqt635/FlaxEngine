@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -8,6 +8,7 @@ using System.Reflection;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Content
@@ -99,13 +100,23 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public object GetValue(object obj)
         {
+            if (!_type.Asset)
+                throw new TargetException("Missing Visual Script asset.");
             return _type.Asset.GetScriptInstanceParameterValue(_parameter.Name, (Object)obj);
         }
 
         /// <inheritdoc />
         public void SetValue(object obj, object value)
         {
+            if (!_type.Asset)
+                throw new TargetException("Missing Visual Script asset.");
             _type.Asset.SetScriptInstanceParameterValue(_parameter.Name, (Object)obj, value);
+        }
+
+        /// <inheritdoc />
+        public object Invoke(object obj, object[] parameters)
+        {
+            throw new NotSupportedException();
         }
     }
 
@@ -134,7 +145,7 @@ namespace FlaxEditor.Content
             _index = index;
             type.Asset.GetMethodSignature(index, out _name, out _flags, out var returnTypeName, out var paramNames, out var paramTypeNames, out var paramOuts);
             _returnType = TypeUtils.GetType(returnTypeName);
-            if (paramNames.Length != 0)
+            if (paramNames != null && paramNames.Length != 0)
             {
                 _parameters = new ScriptMemberInfo.Parameter[paramNames.Length];
                 for (int i = 0; i < _parameters.Length; i++)
@@ -149,7 +160,7 @@ namespace FlaxEditor.Content
             }
             else
             {
-                _parameters = Utils.GetEmptyArray<ScriptMemberInfo.Parameter>();
+                _parameters = Array.Empty<ScriptMemberInfo.Parameter>();
             }
         }
 
@@ -212,7 +223,8 @@ namespace FlaxEditor.Content
             if (_attributes == null)
             {
                 var data = _type.Asset.GetMethodMetaData(_index, Surface.SurfaceMeta.AttributeMetaTypeID);
-                _attributes = Surface.SurfaceMeta.GetAttributes(data);
+                var dataOld = _type.Asset.GetMethodMetaData(_index, Surface.SurfaceMeta.OldAttributeMetaTypeID);
+                _attributes = Surface.SurfaceMeta.GetAttributes(data, dataOld);
             }
             return _attributes;
         }
@@ -234,6 +246,14 @@ namespace FlaxEditor.Content
         {
             throw new NotSupportedException();
         }
+
+        /// <inheritdoc />
+        public object Invoke(object obj, object[] parameters)
+        {
+            if (!_type.Asset)
+                throw new TargetException("Missing Visual Script asset.");
+            return _type.Asset.InvokeMethod(_index, obj, parameters);
+        }
     }
 
     /// <summary>
@@ -247,6 +267,7 @@ namespace FlaxEditor.Content
         private ScriptMemberInfo[] _parameters;
         private ScriptMemberInfo[] _methods;
         private object[] _attributes;
+        private List<Action<ScriptType>> _disposing;
 
         /// <summary>
         /// Gets the Visual Script asset that contains this type.
@@ -260,6 +281,13 @@ namespace FlaxEditor.Content
 
         private void CacheData()
         {
+            if (!_asset)
+            {
+                _parameters = Array.Empty<ScriptMemberInfo>();
+                _methods = Array.Empty<ScriptMemberInfo>();
+                _attributes = Array.Empty<Attribute>();
+                return;
+            }
             if (_parameters != null)
                 return;
             if (_asset.WaitForLoaded())
@@ -275,7 +303,7 @@ namespace FlaxEditor.Content
                     _parameters[i] = new ScriptMemberInfo(new VisualScriptParameterInfo(this, parameters[i]));
             }
             else
-                _parameters = Utils.GetEmptyArray<ScriptMemberInfo>();
+                _parameters = Array.Empty<ScriptMemberInfo>();
 
             // Cache Visual Script methods info
             var methodsCount = _asset.GetMethodsCount();
@@ -286,16 +314,14 @@ namespace FlaxEditor.Content
                     _methods[i] = new ScriptMemberInfo(new VisualScriptMethodInfo(this, i));
             }
             else
-                _methods = Utils.GetEmptyArray<ScriptMemberInfo>();
+                _methods = Array.Empty<ScriptMemberInfo>();
 
             // Cache Visual Script attributes
-            var attributesData = _asset.GetMetaData(Surface.SurfaceMeta.AttributeMetaTypeID);
-            if (attributesData != null && attributesData.Length != 0)
             {
-                _attributes = Surface.SurfaceMeta.GetAttributes(attributesData);
+                var data = _asset.GetMetaData(Surface.SurfaceMeta.AttributeMetaTypeID);
+                var dataOld = _asset.GetMetaData(Surface.SurfaceMeta.OldAttributeMetaTypeID);
+                _attributes = Surface.SurfaceMeta.GetAttributes(data, dataOld);
             }
-            else
-                _attributes = Utils.GetEmptyArray<object>();
         }
 
         private void OnAssetReloading(Asset asset)
@@ -310,18 +336,28 @@ namespace FlaxEditor.Content
 
         internal void Dispose()
         {
-            OnAssetReloading(_asset);
+            if (_disposing != null)
+            {
+                foreach (var e in _disposing)
+                    e(new ScriptType(this));
+                _disposing.Clear();
+                _disposing = null;
+            }
+            if (_parameters != null)
+            {
+                OnAssetReloading(_asset);
+            }
             _asset = null;
         }
 
         /// <inheritdoc />
-        public string Name => Path.GetFileNameWithoutExtension(_asset.Path);
+        public string Name => _asset ? Path.GetFileNameWithoutExtension(_asset.Path) : null;
 
         /// <inheritdoc />
         public string Namespace => string.Empty;
 
         /// <inheritdoc />
-        public string TypeName => JsonSerializer.GetStringID(_asset.ID);
+        public string TypeName => _asset ? JsonSerializer.GetStringID(_asset.ID) : null;
 
         /// <inheritdoc />
         public bool IsPublic => true;
@@ -375,9 +411,9 @@ namespace FlaxEditor.Content
         }
 
         /// <inheritdoc />
-        public bool ImplementInterface(ScriptType c)
+        public bool HasInterface(ScriptType c)
         {
-            return BaseType.ImplementInterface(c);
+            return BaseType.HasInterface(c);
         }
 
         /// <inheritdoc />
@@ -489,7 +525,7 @@ namespace FlaxEditor.Content
             var baseType = BaseType;
             if (baseType)
                 return baseType.GetProperties(bindingAttr);
-            return Utils.GetEmptyArray<ScriptMemberInfo>();
+            return Array.Empty<ScriptMemberInfo>();
         }
 
         /// <inheritdoc />
@@ -506,6 +542,14 @@ namespace FlaxEditor.Content
                 return newArray;
             }
             return _methods;
+        }
+
+        /// <inheritdoc />
+        public void TrackLifetime(Action<ScriptType> disposing)
+        {
+            if (_disposing == null)
+                _disposing = new List<Action<ScriptType>>();
+            _disposing.Add(disposing);
         }
     }
 

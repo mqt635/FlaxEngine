@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if USE_EDITOR
 
@@ -7,21 +7,23 @@
 #include "Engine/Core/Types/StringBuilder.h"
 #include "Engine/Core/Math/Vector4.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Content/Assets/Texture.h"
+#include "Engine/Content/Assets/CubeTexture.h"
 #include "Engine/Engine/GameplayGlobals.h"
 #include "Engine/Graphics/Config.h"
+#include "Engine/Renderer/Utils/GlobalSignDistanceFieldPass.h"
 
 void ShaderGraphUtilities::GenerateShaderConstantBuffer(TextWriterUnicode& writer, Array<SerializedMaterialParam>& parameters)
 {
     int32 constantsOffset = 0;
     int32 paddingIndex = 0;
-
     for (int32 i = 0; i < parameters.Count(); i++)
     {
         auto& param = parameters[i];
-
         const Char* format = nullptr;
         int32 size;
         int32 alignment;
+        bool zeroRegister = true;
         switch (param.Type)
         {
         case MaterialParameterType::Bool:
@@ -87,31 +89,39 @@ void ShaderGraphUtilities::GenerateShaderConstantBuffer(TextWriterUnicode& write
                 format = TEXT("uint {0};");
                 break;
             case VariantType::Float:
+            case VariantType::Double:
                 size = 4;
                 alignment = 4;
                 format = TEXT("float {0};");
                 break;
-            case VariantType::Vector2:
+            case VariantType::Float2:
+            case VariantType::Double2:
                 size = 8;
                 alignment = 8;
                 format = TEXT("float2 {0};");
                 break;
-            case VariantType::Vector3:
+            case VariantType::Float3:
+            case VariantType::Double3:
                 size = 12;
                 alignment = 16;
                 format = TEXT("float3 {0};");
                 break;
-            case VariantType::Vector4:
+            case VariantType::Float4:
+            case VariantType::Double4:
             case VariantType::Color:
                 size = 16;
                 alignment = 16;
                 format = TEXT("float4 {0};");
                 break;
-            default: ;
             }
             break;
         }
-        default: ;
+        case MaterialParameterType::GlobalSDF:
+            zeroRegister = false;
+            size = sizeof(GlobalSignDistanceFieldPass::ConstantsData);
+            alignment = 16;
+            format = TEXT("GlobalSDFData {0};");
+            break;
         }
         if (format)
         {
@@ -126,7 +136,8 @@ void ShaderGraphUtilities::GenerateShaderConstantBuffer(TextWriterUnicode& write
                 }
             }
 
-            param.RegisterIndex = 0;
+            if (zeroRegister)
+                param.RegisterIndex = 0;
             param.Offset = constantsOffset;
             writer.WriteLine(format, param.ShaderName);
             constantsOffset += size;
@@ -139,14 +150,19 @@ const Char* ShaderGraphUtilities::GenerateShaderResources(TextWriterUnicode& wri
     for (int32 i = 0; i < parameters.Count(); i++)
     {
         auto& param = parameters[i];
-        const Char* format;
+        const Char* format = nullptr;
+        bool zeroOffset = true;
+        int32 registers = 1;
         switch (param.Type)
         {
         case MaterialParameterType::NormalMap:
         case MaterialParameterType::GPUTexture:
         case MaterialParameterType::SceneTexture:
         case MaterialParameterType::Texture:
-            format = TEXT("Texture2D {0} : register(t{1});");
+            if (param.AsInteger == (int32)MaterialSceneTextures::SceneStencil)
+                format = TEXT("Texture2D<uint2> {0} : register(t{1});");
+            else
+                format = TEXT("Texture2D {0} : register(t{1});");
             break;
         case MaterialParameterType::GPUTextureCube:
         case MaterialParameterType::CubeTexture:
@@ -158,16 +174,42 @@ const Char* ShaderGraphUtilities::GenerateShaderResources(TextWriterUnicode& wri
         case MaterialParameterType::GPUTextureVolume:
             format = TEXT("Texture3D {0} : register(t{1});");
             break;
-        default:
-            format = nullptr;
+        case MaterialParameterType::GameplayGlobal:
+        {
+            auto asset = Content::LoadAsync<GameplayGlobals>(param.AsGuid);
+            if (!asset || asset->WaitForLoaded())
+                break;
+            GameplayGlobals::Variable variable;
+            if (!asset->Variables.TryGet(param.Name, variable))
+                break;
+            if (Texture::GetStaticType().Fullname == variable.DefaultValue.Type.TypeName)
+            {
+                // Texture
+                format = TEXT("Texture2D {0} : register(t{1});");
+            }
+            else if (CubeTexture::GetStaticType().Fullname == variable.DefaultValue.Type.TypeName)
+            {
+                // Cube Texture
+                format = TEXT("TextureCube {0} : register(t{1});");
+            }
+            break;
+        }
+        case MaterialParameterType::GlobalSDF:
+            format = TEXT("Texture3D<snorm float> {0}_Tex : register(t{1});\nTexture3D<snorm float> {0}_Mip : register(t{2});");
+            zeroOffset = false;
+            registers = 2;
+            break;
+        case MaterialParameterType::GPUBuffer:
+            format = TEXT("Buffer {0} : register(t{1});");
             break;
         }
         if (format)
         {
-            param.Offset = 0;
+            if (zeroOffset)
+                param.Offset = 0;
             param.RegisterIndex = (byte)startRegister;
-            writer.WriteLine(format, param.ShaderName, startRegister);
-            startRegister++;
+            writer.WriteLine(format, param.ShaderName, startRegister, startRegister + 1);
+            startRegister += registers;
             if (param.RegisterIndex >= GPU_MAX_SR_BINDED)
             {
                 return TEXT("Too many textures used. The maximum supported amount is " MACRO_TO_STR(GPU_MAX_SR_BINDED) " (including lightmaps and utility textures for lighting).");
@@ -220,19 +262,19 @@ const Char* GetTypename<float>()
 }
 
 template<>
-const Char* GetTypename<Vector2>()
+const Char* GetTypename<Float2>()
 {
     return TEXT("float2");
 }
 
 template<>
-const Char* GetTypename<Vector3>()
+const Char* GetTypename<Float3>()
 {
     return TEXT("float3");
 }
 
 template<>
-const Char* GetTypename<Vector4>()
+const Char* GetTypename<Float4>()
 {
     return TEXT("float4");
 }
@@ -393,8 +435,8 @@ void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCu
 }
 
 template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<float>& curve, const String& time, const String& value);
-template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Vector2>& curve, const String& time, const String& value);
-template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Vector3>& curve, const String& time, const String& value);
-template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Vector4>& curve, const String& time, const String& value);
+template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Float2>& curve, const String& time, const String& value);
+template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Float3>& curve, const String& time, const String& value);
+template void ShaderGraphUtilities::SampleCurve(TextWriterUnicode& writer, const BezierCurve<Float4>& curve, const String& time, const String& value);
 
 #endif

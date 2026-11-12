@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Surface.Archetypes;
@@ -19,6 +19,9 @@ namespace FlaxEditor.Surface
             typeof(bool),
             typeof(int),
             typeof(float),
+            typeof(Float2),
+            typeof(Float3),
+            typeof(Float4),
             typeof(Vector2),
             typeof(Vector3),
             typeof(Vector4),
@@ -33,13 +36,13 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        public override bool CanUseNodeType(NodeArchetype nodeArchetype)
+        public override bool CanUseNodeType(GroupArchetype groupArchetype, NodeArchetype nodeArchetype)
         {
             if (nodeArchetype.Title == "Function Input" ||
                 nodeArchetype.Title == "Function Output")
                 return true;
 
-            return base.CanUseNodeType(nodeArchetype);
+            return base.CanUseNodeType(groupArchetype, nodeArchetype);
         }
 
         /// <inheritdoc />

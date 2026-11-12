@@ -1,10 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Half.h"
-#include "Rectangle.h"
-#include "Vector2.h"
-#include "Vector3.h"
 #include "Vector4.h"
+#include "Rectangle.h"
 #include "Color.h"
 
 static_assert(sizeof(Half) == 2, "Invalid Half type size.");
@@ -12,41 +10,69 @@ static_assert(sizeof(Half2) == 4, "Invalid Half2 type size.");
 static_assert(sizeof(Half3) == 6, "Invalid Half3 type size.");
 static_assert(sizeof(Half4) == 8, "Invalid Half4 type size.");
 
-Half2 Half2::Zero(0, 0);
-Half3 Half3::Zero(0, 0, 0);
-Half4 Half4::Zero(0, 0, 0, 0);
+Half2 Half2::Zero(0.0f, 0.0f);
+Half3 Half3::Zero(0.0f, 0.0f, 0.0f);
+Half4 Half4::Zero(0.0f, 0.0f, 0.0f, 0.0f);
 
-Half2::Half2(const Vector2& v)
+#if !USE_SSE_HALF_CONVERSION
+
+Half Float16Compressor::Compress(float value)
 {
-    X = Float16Compressor::Compress(v.X);
-    Y = Float16Compressor::Compress(v.Y);
+    Bits v, s;
+    v.f = value;
+    uint32 sign = v.si & signN;
+    v.si ^= sign;
+    sign >>= shiftSign; // logical shift
+    s.si = mulN;
+    s.si = static_cast<int32>(s.f * v.f); // correct subnormals
+    v.si ^= (s.si ^ v.si) & -(minN > v.si);
+    v.si ^= (infN ^ v.si) & -((infN > v.si) & (v.si > maxN));
+    v.si ^= (nanN ^ v.si) & -((nanN > v.si) & (v.si > infN));
+    v.ui >>= shift; // logical shift
+    v.si ^= ((v.si - maxD) ^ v.si) & -(v.si > maxC);
+    v.si ^= ((v.si - minD) ^ v.si) & -(v.si > subC);
+    return v.ui | sign;
 }
 
-Vector2 Half2::ToVector2() const
+float Float16Compressor::Decompress(Half value)
 {
-    return Vector2(
+    Bits v;
+    v.ui = value;
+    int32 sign = v.si & signC;
+    v.si ^= sign;
+    sign <<= shiftSign;
+    v.si ^= ((v.si + minD) ^ v.si) & -(v.si > subC);
+    v.si ^= ((v.si + maxD) ^ v.si) & -(v.si > maxC);
+    Bits s;
+    s.si = mulC;
+    s.f *= v.si;
+    const int32 mask = -(norC > v.si);
+    v.si <<= shift;
+    v.si ^= (s.si ^ v.si) & mask;
+    v.si |= sign;
+    return v.f;
+}
+
+#endif
+
+Float2 Half2::ToFloat2() const
+{
+    return Float2(
         Float16Compressor::Decompress(X),
         Float16Compressor::Decompress(Y)
     );
 }
 
-Half3::Half3(const Vector3& v)
+Float3 Half3::ToFloat3() const
 {
-    X = Float16Compressor::Compress(v.X);
-    Y = Float16Compressor::Compress(v.Y);
-    Z = Float16Compressor::Compress(v.Z);
-}
-
-Vector3 Half3::ToVector3() const
-{
-    return Vector3(
+    return Float3(
         Float16Compressor::Decompress(X),
         Float16Compressor::Decompress(Y),
         Float16Compressor::Decompress(Z)
     );
 }
 
-Half4::Half4(const Vector4& v)
+Half4::Half4(const Float4& v)
 {
     X = Float16Compressor::Compress(v.X);
     Y = Float16Compressor::Compress(v.Y);
@@ -70,26 +96,26 @@ Half4::Half4(const Rectangle& rect)
     W = Float16Compressor::Compress(rect.Size.Y);
 }
 
-Vector2 Half4::ToVector2() const
+Float2 Half4::ToFloat2() const
 {
-    return Vector2(
+    return Float2(
         Float16Compressor::Decompress(X),
         Float16Compressor::Decompress(Y)
     );
 }
 
-Vector3 Half4::ToVector3() const
+Float3 Half4::ToFloat3() const
 {
-    return Vector3(
+    return Float3(
         Float16Compressor::Decompress(X),
         Float16Compressor::Decompress(Y),
         Float16Compressor::Decompress(Z)
     );
 }
 
-Vector4 Half4::ToVector4() const
+Float4 Half4::ToFloat4() const
 {
-    return Vector4(
+    return Float4(
         Float16Compressor::Decompress(X),
         Float16Compressor::Decompress(Y),
         Float16Compressor::Decompress(Z),

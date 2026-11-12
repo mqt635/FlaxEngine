@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,9 +9,8 @@
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API Keyboard : public InputDevice
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Keyboard);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Keyboard);
 protected:
-
     struct State
     {
         uint16 InputTextLength;
@@ -26,11 +25,9 @@ protected:
     explicit Keyboard();
 
 public:
-
     /// <summary>
-    /// Gets the text entered during the current frame.
+    /// Gets the text entered during the current frame (Unicode format).
     /// </summary>
-    /// <returns>The input text (Unicode).</returns>
     API_PROPERTY() StringView GetInputText() const
     {
         return StringView(_state.InputText, _state.InputTextLength);
@@ -72,7 +69,6 @@ public:
     API_PROPERTY() bool IsAnyKeyDown() const;
 
 public:
-
     /// <summary>
     /// Called when keyboard enters input character.
     /// </summary>
@@ -95,7 +91,6 @@ public:
     void OnKeyDown(KeyboardKeys key, Window* target = nullptr);
 
 public:
-
     // [InputDevice]
     void ResetState() override;;
     bool Update(EventQueue& queue) final override;

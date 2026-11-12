@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,13 +15,15 @@ class JsonWriter;
 class Engine;
 struct RenderView;
 struct RenderContext;
+struct RenderContextBatch;
+struct Tag;
 
 /// <summary>
 /// The scene manager that contains the loaded scenes collection and spawns/deleted actors.
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Level
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Level);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Level);
     friend Engine;
     friend Actor;
     friend PrefabManager;
@@ -33,7 +35,6 @@ DECLARE_SCRIPTING_TYPE_NO_SPAWN(Level);
 #endif
 
 public:
-
     /// <summary>
     /// The scenes collection lock.
     /// </summary>
@@ -44,8 +45,17 @@ public:
     /// </summary>
     API_FIELD(ReadOnly) static Array<Scene*> Scenes;
 
-public:
+    /// <summary>
+    /// True if game objects (actors and scripts) can receive a tick during engine Update/LateUpdate/FixedUpdate events. Can be used to temporarily disable gameplay logic updating.
+    /// </summary>
+    API_FIELD(Attributes="DebugCommand") static bool TickEnabled;
 
+    /// <summary>
+    /// Fraction of the frame budget to limit time spent on levels streaming. For example, value of 0.3 means that 30% of frame time can be spent on levels loading within a single frame (eg. 0.3 at 60fps is 4.8ms budget).
+    /// </summary>
+    API_FIELD(Attributes="DebugCommand") static float StreamingFrameBudget;
+
+public:
     /// <summary>
     /// Occurs when new actor gets spawned to the game.
     /// </summary>
@@ -77,7 +87,6 @@ public:
     API_EVENT() static Delegate<Actor*> ActorActiveChanged;
 
 public:
-
     /// <summary>
     /// Checks if any scene has been loaded. Loaded scene means deserialized and added to the scenes collection.
     /// </summary>
@@ -107,7 +116,6 @@ public:
     /// <summary>
     /// Gets the scenes count.
     /// </summary>
-    /// <returns>The scenes count.</returns>
     API_PROPERTY() static int32 GetScenesCount()
     {
         return Scenes.Count();
@@ -120,11 +128,11 @@ public:
     /// <returns>The scene object (loaded).</returns>
     API_FUNCTION() static Scene* GetScene(int32 index)
     {
+        CHECK_RETURN(index < GetScenesCount(), nullptr);
         return Scenes[index];
     }
 
 public:
-
     /// <summary>
     /// Spawn actor on the scene
     /// </summary>
@@ -160,12 +168,12 @@ public:
     static void CallBeginPlay(Actor* obj);
 
 public:
-
     /// <summary>
     /// Draws all the actors.
     /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    static void DrawActors(RenderContext& renderContext);
+    /// <param name="renderContextBatch">The rendering context batch.</param>
+    /// <param name="category">The actors category to draw (see SceneRendering::DrawCategory).</param>
+    static void DrawActors(RenderContextBatch& renderContextBatch, byte category = 0);
 
     /// <summary>
     /// Collects all the post fx volumes.
@@ -174,7 +182,6 @@ public:
     static void CollectPostFxVolumes(RenderContext& renderContext);
 
 public:
-
     /// <summary>
     /// Fired when scene starts saving.
     /// </summary>
@@ -216,6 +223,13 @@ public:
     API_EVENT() static Delegate<Scene*, const Guid&> SceneUnloaded;
 
     /// <summary>
+    /// Fired when scene gets preloaded (loaded but not yet added to the level).
+    /// </summary>
+    API_EVENT() static Delegate<Scene*, const Guid&> ScenePreloaded;
+
+#if USE_EDITOR
+
+    /// <summary>
     /// Fired when scene starts reloading scripts.
     /// </summary>
     API_EVENT() static Action ScriptsReloadStart;
@@ -226,12 +240,24 @@ public:
     API_EVENT() static Action ScriptsReload;
 
     /// <summary>
+    /// Fired when scene reloaded scripts (new scripting is loaded). All user objects can be restored before scenes reloading.
+    /// </summary>
+    API_EVENT() static Action ScriptsReloaded;
+
+    /// <summary>
     /// Fired when scene ends reloading scripts.
     /// </summary>
     API_EVENT() static Action ScriptsReloadEnd;
 
-public:
+    /// <summary>
+    /// Adds object to preserve during scripts reload. Called during ScriptsReloadStart event to serialize and destroy the object that should be restored when scripts reload ends.
+    /// </summary>
+    /// <param name="obj">Reference to the object to preserve during the scripting reload.</param>
+    static void ScriptsReloadRegisterObject(ScriptingObject*& obj);
 
+#endif
+
+public:
     /// <summary>
     /// Saves scene to the asset.
     /// </summary>
@@ -296,38 +322,54 @@ public:
     API_FUNCTION() static bool LoadSceneAsync(const Guid& id);
 
     /// <summary>
+    /// Begins preloading scene in the background. Intended to use by scene streaming systems that want to prepare scene but not add to the level yet.
+    /// Loads scene asset, deserializes actors and scripts, setup objects hierarchy with transformations and initializes them (incl. calling OnAwake for scripts).
+    /// Preloaded scene is not added to the loaded scenes and not active in the game (no BeginPlay/OnEnable/OnStart called yet). Use <see cref="LoadScene(Guid)"/> or <see cref="LoadSceneAsync(Guid)"/> to finish loading preloaded scene and add it to the level.
+    /// Preloaded scene can be normally unloaded via <see cref="UnloadScene(Guid)"/> to release resources if it's not needed anymore.
+    /// </summary>
+    /// <param name="id">Scene ID</param>
+    /// <returns>True if preloading cannot be done, otherwise false.</returns>
+    API_FUNCTION() static bool PreloadSceneAsync(const Guid& id);
+
+    /// <summary>
     /// Unloads given scene.
     /// </summary>
+    /// <param name="id">Scene ID</param>
+    /// <returns>True if action cannot be done, otherwise false.</returns>
+    API_FUNCTION() static bool UnloadScene(const Guid& id);
+
+    /// <summary>
+    /// Unloads given scene.
+    /// </summary>
+    /// <param name="scene">Scene</param>
     /// <returns>True if action cannot be done, otherwise false.</returns>
     API_FUNCTION() static bool UnloadScene(Scene* scene);
 
     /// <summary>
     /// Unloads given scene. Done in the background.
     /// </summary>
+    /// <param name="scene">Scene</param>
     API_FUNCTION() static void UnloadSceneAsync(Scene* scene);
 
     /// <summary>
-    /// Unloads all scenes.
+    /// Unloads all scenes. Cancels all scene preloading.
     /// </summary>
     /// <returns>True if action cannot be done, otherwise false.</returns>
     API_FUNCTION() static bool UnloadAllScenes();
 
     /// <summary>
-    /// Unloads all scenes. Done in the background.
+    /// Unloads all scenes. Done in the background. Cancels all scene preloading.
     /// </summary>
     API_FUNCTION() static void UnloadAllScenesAsync();
 
 #if USE_EDITOR
-
     /// <summary>
     /// Reloads scripts. Done in the background.
     /// </summary>
     static void ReloadScriptsAsync();
-
 #endif
 
 public:
-
     /// <summary>
     /// Tries to find actor with the given ID. It's very fast O(1) lookup.
     /// </summary>
@@ -345,9 +387,55 @@ public:
     /// <summary>
     /// Tries to find the actor of the given type in all the loaded scenes.
     /// </summary>
-    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
     /// <returns>Found actor or null.</returns>
-    API_FUNCTION() static Actor* FindActor(const MClass* type);
+    API_FUNCTION() static Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, bool activeOnly = false);
+
+    /// <summary>
+    /// Tries to find the actor of the given type and name in all the loaded scenes.
+    /// </summary>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="name">The name of the actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    API_FUNCTION() static Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, const StringView& name);
+
+    /// <summary>
+    /// Tries to find the actor with the given tag (returns the first one found).
+    /// </summary>
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
+    /// <param name="root">The custom root actor to start searching from (hierarchical), otherwise null to search all loaded scenes.</param>
+    /// <returns>Found actor or null.</returns>
+    API_FUNCTION() static Actor* FindActor(const Tag& tag, bool activeOnly = false, Actor* root = nullptr);
+
+    /// <summary>
+    /// Tries to find the actor of the given type and tag in all the loaded scenes.
+    /// </summary>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
+    /// <param name="root">The custom root actor to start searching from (hierarchical), otherwise null to search all loaded scenes.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    API_FUNCTION() static Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, const Tag& tag, bool activeOnly = false, Actor* root = nullptr);
+
+    /// <summary>
+    /// Tries to find the actors with the given tag (returns all found).
+    /// </summary>
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="activeOnly">Find only active actors.</param>
+    /// <param name="root">The custom root actor to start searching from (hierarchical), otherwise null to search all loaded scenes.</param>
+    /// <returns>Found actors or empty if none.</returns>
+    API_FUNCTION() static Array<Actor*> FindActors(const Tag& tag, const bool activeOnly = false, Actor* root = nullptr);
+
+    /// <summary>
+    /// Search actors using a parent parentTag.
+    /// </summary>
+    /// <param name="parentTag">The tag to search actors with subtags belonging to this tag</param>
+    /// <param name="activeOnly">Find only active actors.</param>
+    /// <param name="root">The custom root actor to start searching from (hierarchical), otherwise null to search all loaded scenes.</param>
+    /// <returns>Returns all actors that have subtags belonging to the given parent parentTag</returns>
+    API_FUNCTION() static Array<Actor*> FindActorsByParentTag(const Tag& parentTag, const bool activeOnly = false, Actor* root = nullptr);
 
     /// <summary>
     /// Tries to find the actor of the given type in all the loaded scenes.
@@ -360,11 +448,34 @@ public:
     }
 
     /// <summary>
+    /// Tries to find the actor of the given type and name in all the loaded scenes.
+    /// </summary>
+    /// <param name="name">The name of the actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    template<typename T>
+    FORCE_INLINE static T* FindActor(const StringView& name)
+    {
+        return (T*)FindActor(T::GetStaticClass(), name);
+    }
+
+    /// <summary>
+    /// Tries to find the actor of the given type and tag in a root actor or all the loaded scenes.
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="root">The custom root actor to start searching from (hierarchical), otherwise null to search all loaded scenes.</param>
+    /// </summary>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    template<typename T>
+    FORCE_INLINE static T* FindActor(const Tag& tag, Actor* root = nullptr)
+    {
+        return (T*)FindActor(T::GetStaticClass(), tag, root);
+    }
+
+    /// <summary>
     /// Tries to find the script of the given type in all the loaded scenes.
     /// </summary>
-    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type.</param>
+    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type. Supports interface types.</param>
     /// <returns>Found script or null.</returns>
-    API_FUNCTION() static Script* FindScript(const MClass* type);
+    API_FUNCTION() static Script* FindScript(API_PARAM(Attributes="TypeReference(typeof(Script))") const MClass* type);
 
     /// <summary>
     /// Tries to find the script of the given type in all the loaded scenes.
@@ -380,15 +491,30 @@ public:
     /// Finds all the actors of the given type in all the loaded scenes.
     /// </summary>
     /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="activeOnly">Finds only active actors in the scene.</param>
     /// <returns>Found actors list.</returns>
-    API_FUNCTION() static Array<Actor*> GetActors(const MClass* type);
+    API_FUNCTION() static Array<Actor*> GetActors(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, bool activeOnly = false);
 
     /// <summary>
-    /// Finds all the scripts of the given type in all the loaded scenes.
+    /// Finds all the actors of the given type in all the loaded scenes.
+    /// </summary>
+    /// <typeparam name="T">Type of the object.</typeparam>
+    /// <param name="activeOnly">Finds only active actors.</param>
+    /// <returns>Found actors list.</returns>
+    template<typename T = Actor>
+    static Array<T*> GetActors(bool activeOnly = false)
+    {
+        Array<Actor*> actors = GetActors(T::GetStaticClass(), activeOnly);
+        return *(Array<T*>*)&actors;
+    }
+
+    /// <summary>
+    /// Finds all the scripts of the given type in an actor or all the loaded scenes.
     /// </summary>
     /// <param name="type">Type of the script to search for. Includes any scripts derived from the type.</param>
+    /// <param name="root">The root to find scripts. If null, will search in all scenes.</param>
     /// <returns>Found scripts list.</returns>
-    API_FUNCTION() static Array<Script*> GetScripts(const MClass* type);
+    API_FUNCTION() static Array<Script*> GetScripts(API_PARAM(Attributes="TypeReference(typeof(Script))") const MClass* type, Actor* root = nullptr);
 
     /// <summary>
     /// Tries to find scene with given ID.
@@ -398,7 +524,6 @@ public:
     API_FUNCTION() static Scene* FindScene(const Guid& id);
 
 public:
-
     /// <summary>
     /// Gets the scenes.
     /// </summary>
@@ -418,7 +543,6 @@ public:
     static void GetScenes(Array<Guid>& scenes);
 
 public:
-
     /// <summary>
     /// Construct valid and solid list with actors from input list with whole tree for them (valid for fast serialization)
     /// </summary>
@@ -434,23 +558,10 @@ public:
     static void ConstructParentActorsTreeList(const Array<Actor*>& input, Array<Actor*>& output);
 
 public:
-
-    /// <summary>
-    /// The tags names.
-    /// </summary>
-    static Array<String> Tags;
-
     /// <summary>
     /// The layers names.
     /// </summary>
     static String Layers[32];
-
-    /// <summary>
-    /// Gets or adds the tag (returns the tag index).
-    /// </summary>
-    /// <param name="tag">The tag.</param>
-    /// <returns>The tag index.</returns>
-    static int32 GetOrAddTag(const StringView& tag);
 
     /// <summary>
     /// Gets the amount of non empty layer names (from the beginning, trims the last ones).
@@ -463,8 +574,14 @@ public:
     /// </summary>
     API_FUNCTION() static int32 GetLayerIndex(const StringView& layer);
 
-private:
+    /// <summary>
+    /// Gets the name of the layer based on the index.
+    /// </summary>
+    /// <param name="layerIndex">The index to find the layer string. 0 - 32.</param>
+    /// <returns>The layer string. Returns a blank string if index not found.</returns>
+    API_FUNCTION() static StringView GetLayerName(const int32 layerIndex);
 
+private:
     // Actor API
     enum class ActorEventType
     {
@@ -474,13 +591,13 @@ private:
         OnActorOrderInParentChanged = 3,
         OnActorNameChanged = 4,
         OnActorActiveChanged = 5,
+#if USE_EDITOR
+        OnActorDestroyChildren = 6,
+#endif
     };
 
     static void callActorEvent(ActorEventType eventType, Actor* a, Actor* b);
-    static bool loadScene(const Guid& sceneId);
-    static bool loadScene(const String& scenePath);
-    static bool loadScene(JsonAsset* sceneAsset);
-    static bool loadScene(const BytesContainer& sceneData, Scene** outScene = nullptr);
-    static bool loadScene(rapidjson_flax::Document& document, Scene** outScene = nullptr);
-    static bool loadScene(rapidjson_flax::Value& data, int32 engineBuild, Scene** outScene = nullptr);
+#if USE_EDITOR
+    API_EVENT(Internal) static Delegate<Actor*> ActorDestroyChildren;
+#endif
 };

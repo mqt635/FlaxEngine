@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@
 class CreateSceneAnimation
 {
 public:
-
     /// <summary>
     /// Creates the asset.
     /// </summary>
@@ -30,12 +29,12 @@ public:
         MemoryWriteStream stream(64);
         {
             // Create empty timeline
-            stream.WriteInt32(2);
+            stream.WriteInt32(4);
             stream.WriteFloat(60.0f); // FramesPerSecond
             stream.WriteInt32(5 * 60); // DurationFrames
             stream.WriteInt32(0); // Tracks Count
         }
-        context.Data.Header.Chunks[0]->Data.Copy(stream.GetHandle(), stream.GetPosition());
+        context.Data.Header.Chunks[0]->Data.Copy(ToSpan(stream));
 
         return CreateAssetResult::Ok;
     }

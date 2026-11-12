@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -153,6 +153,9 @@ namespace FlaxEditor.Windows.Assets
             {
                 OnPasteAction(pasteAction);
             }
+
+            // Scroll to new selected node
+            ScrollToSelectedNode();
         }
 
         /// <summary>
@@ -180,6 +183,9 @@ namespace FlaxEditor.Windows.Assets
             {
                 OnPasteAction(pasteAction);
             }
+
+            // Scroll to new selected node
+            ScrollToSelectedNode();
         }
 
         private void OnPasteAction(PasteActorsAction pasteAction)
@@ -258,10 +264,17 @@ namespace FlaxEditor.Windows.Assets
             }
 
             /// <inheritdoc />
-            protected override void LinkBrokenParentReference(Actor actor)
+            protected override void LinkBrokenParentReference(ActorNode actorNode)
             {
                 // Link to prefab root
-                actor.SetParent(_window.Graph.MainActor, false);
+                actorNode.Actor.SetParent(_window.Graph.MainActor, false);
+            }
+
+            /// <inheritdoc />
+            protected override void CheckBrokenParentReference(ActorNode actorNode)
+            {
+                if (actorNode.Actor.Scene != null || actorNode.Root != _window.Graph.Root)
+                    LinkBrokenParentReference(actorNode);
             }
 
             /// <inheritdoc />
@@ -328,6 +341,9 @@ namespace FlaxEditor.Windows.Assets
             }, action2.ActionString);
             action.Do();
             Undo.AddAction(action);
+
+            _treePanel.PerformLayout();
+            _treePanel.PerformLayout();
         }
     }
 }

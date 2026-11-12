@@ -1,381 +1,138 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+// Enable to put CPU profiler sections for each actor drawing to inspect slow actors draw issues
+#define SCENE_RENDERING_USE_PROFILER_PER_ACTOR 0
 
 #include "SceneRendering.h"
-#include "Scene.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/RenderView.h"
-
-#define SCENE_RENDERING_USE_PROFILER 0
-#define SCENE_RENDERING_USE_SIMD 0
-
-#if SCENE_RENDERING_USE_PROFILER
+#include "Engine/Renderer/RenderList.h"
+#include "Engine/Graphics/RenderBuffers.h"
+#include "Engine/Threading/JobSystem.h"
+#include "Engine/Physics/Actors/IPhysicsDebug.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#if !BUILD_RELEASE
+#include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Engine/Engine.h"
 #endif
 
-#if SCENE_RENDERING_USE_SIMD
-
-#include "Engine/Core/SIMD.h"
-
-ALIGN_BEGIN(16) struct CullDataSIMD
-{
-    float xs[8];
-    float ys[8];
-    float zs[8];
-    float ds[8];
-} ALIGN_END(16);
-
-#endif
-
-int32 SceneRendering::DrawEntries::Add(Actor* obj)
-{
-    int32 key = 0;
-    for (; key < List.Count(); key++)
-    {
-        if (List[key].Actor == nullptr)
-            break;
-    }
-    if (key == List.Count())
-        List.AddOne();
-    auto& e = List[key];
-    e.Actor = obj;
-    e.LayerMask = obj->GetLayerMask();
-    e.Bounds = obj->GetSphere();
-    return key;
-}
-
-void SceneRendering::DrawEntries::Update(Actor* obj, int32 key)
-{
-    if (List.IsEmpty())
-        return;
-    auto& e = List[key];
-    ASSERT_LOW_LAYER(obj == e.Actor);
-    e.LayerMask = obj->GetLayerMask();
-    e.Bounds = obj->GetSphere();
-}
-
-void SceneRendering::DrawEntries::Remove(Actor* obj, int32 key)
-{
-    if (List.IsEmpty())
-        return;
-    auto& e = List[key];
-    ASSERT_LOW_LAYER(obj == e.Actor);
-    e.Actor = nullptr;
-    e.LayerMask = 0;
-}
-
-void SceneRendering::DrawEntries::Clear()
-{
-    List.Clear();
-}
-
-void SceneRendering::DrawEntries::CullAndDraw(RenderContext& renderContext)
-{
-    auto& view = renderContext.View;
-    const BoundingFrustum frustum = view.CullingFrustum;
-#if SCENE_RENDERING_USE_SIMD
-    CullDataSIMD cullData;
-    {
-        // Near
-        auto plane = view.Frustum.GetNear();
-        cullData.xs[0] = plane.Normal.X;
-        cullData.ys[0] = plane.Normal.Y;
-        cullData.zs[0] = plane.Normal.Z;
-        cullData.ds[0] = plane.D;
-
-        // Far
-        plane = view.Frustum.GetFar();
-        cullData.xs[1] = plane.Normal.X;
-        cullData.ys[1] = plane.Normal.Y;
-        cullData.zs[1] = plane.Normal.Z;
-        cullData.ds[1] = plane.D;
-
-        // Left
-        plane = view.Frustum.GetLeft();
-        cullData.xs[2] = plane.Normal.X;
-        cullData.ys[2] = plane.Normal.Y;
-        cullData.zs[2] = plane.Normal.Z;
-        cullData.ds[2] = plane.D;
-
-        // Right
-        plane = view.Frustum.GetRight();
-        cullData.xs[3] = plane.Normal.X;
-        cullData.ys[3] = plane.Normal.Y;
-        cullData.zs[3] = plane.Normal.Z;
-        cullData.ds[3] = plane.D;
-
-        // Top
-        plane = view.Frustum.GetTop();
-        cullData.xs[4] = plane.Normal.X;
-        cullData.ys[4] = plane.Normal.Y;
-        cullData.zs[4] = plane.Normal.Z;
-        cullData.ds[4] = plane.D;
-
-        // Bottom
-        plane = view.Frustum.GetBottom();
-        cullData.xs[5] = plane.Normal.X;
-        cullData.ys[5] = plane.Normal.Y;
-        cullData.zs[5] = plane.Normal.Z;
-        cullData.ds[5] = plane.D;
-
-        // Extra 0
-        cullData.xs[6] = 0;
-        cullData.ys[6] = 0;
-        cullData.zs[6] = 0;
-        cullData.ds[6] = 0;
-
-        // Extra 1
-        cullData.xs[7] = 0;
-        cullData.ys[7] = 0;
-        cullData.zs[7] = 0;
-        cullData.ds[7] = 0;
-    }
-
-    SimdVector4 px = SIMD::Load(cullData.xs);
-    SimdVector4 py = SIMD::Load(cullData.ys);
-    SimdVector4 pz = SIMD::Load(cullData.zs);
-    SimdVector4 pd = SIMD::Load(cullData.ds);
-    SimdVector4 px2 = SIMD::Load(&cullData.xs[4]);
-    SimdVector4 py2 = SIMD::Load(&cullData.ys[4]);
-    SimdVector4 pz2 = SIMD::Load(&cullData.zs[4]);
-    SimdVector4 pd2 = SIMD::Load(&cullData.ds[4]);
-
-    for (int32 i = 0; i < List.Count(); i++)
-    {
-        auto e = List[i];
-
-        SimdVector4 cx = SIMD::Splat(e.Bounds.Center.X);
-        SimdVector4 cy = SIMD::Splat(e.Bounds.Center.Y);
-        SimdVector4 cz = SIMD::Splat(e.Bounds.Center.Z);
-        SimdVector4 r = SIMD::Splat(-e.Bounds.Radius);
-
-        SimdVector4 t = SIMD::Mul(cx, px);
-        t = SIMD::Add(t, SIMD::Mul(cy, py));
-        t = SIMD::Add(t, SIMD::Mul(cz, pz));
-        t = SIMD::Add(t, pd);
-        t = SIMD::Sub(t, r);
-        if (SIMD::MoveMask(t))
-            continue;
-
-        t = SIMD::Mul(cx, px2);
-        t = SIMD::Add(t, SIMD::Mul(cy, py2));
-        t = SIMD::Add(t, SIMD::Mul(cz, pz2));
-        t = SIMD::Add(t, pd2);
-        t = SIMD::Sub(t, r);
-        if (SIMD::MoveMask(t))
-            continue;
-
-        if (view.RenderLayersMask.Mask & e.LayerMask)
-        {
-#if SCENE_RENDERING_USE_PROFILER
-            PROFILE_CPU();
-#if TRACY_ENABLE
-            ___tracy_scoped_zone.Name(*e.Actor->GetName(), e.Actor->GetName().Length());
-#endif
-#endif
-            e.Actor->Draw(renderContext);
-        }
-    }
+#if BUILD_RELEASE
+#define CHECK_SCENE_EDIT_ACCESS()
 #else
-    for (int32 i = 0; i < List.Count(); i++)
-    {
-        auto e = List[i];
-        if (view.RenderLayersMask.Mask & e.LayerMask && frustum.Intersects(e.Bounds))
-        {
-#if SCENE_RENDERING_USE_PROFILER
-            PROFILE_CPU();
-#if TRACY_ENABLE
-            ___tracy_scoped_zone.Name(*e.Actor->GetName(), e.Actor->GetName().Length());
-#endif
-#endif
-            e.Actor->Draw(renderContext);
-        }
+#define CHECK_SCENE_EDIT_ACCESS() \
+    if (_isRendering && IsInRenderThread() && GPUDevice::Instance && GPUDevice::Instance->IsRendering() && Engine::FatalError != FatalErrorType::None) \
+    { \
+        LOG(Error, "Adding/removing actors during rendering is not supported ({}, '{}').", a->ToString(), a->GetNamePath()); \
+        return; \
     }
 #endif
+
+ISceneRenderingListener::~ISceneRenderingListener()
+{
+    for (SceneRendering* scene : _scenes)
+    {
+        scene->_listeners.Remove(this);
+    }
 }
 
-void SceneRendering::DrawEntries::CullAndDrawOffline(RenderContext& renderContext)
+void ISceneRenderingListener::ListenSceneRendering(SceneRendering* scene)
 {
-    auto& view = renderContext.View;
-    const BoundingFrustum frustum = view.CullingFrustum;
-#if SCENE_RENDERING_USE_SIMD
-    CullDataSIMD cullData;
+    if (!_scenes.Contains(scene))
     {
-        // Near
-        auto plane = view.Frustum.GetNear();
-        cullData.xs[0] = plane.Normal.X;
-        cullData.ys[0] = plane.Normal.Y;
-        cullData.zs[0] = plane.Normal.Z;
-        cullData.ds[0] = plane.D;
-
-        // Far
-        plane = view.Frustum.GetFar();
-        cullData.xs[1] = plane.Normal.X;
-        cullData.ys[1] = plane.Normal.Y;
-        cullData.zs[1] = plane.Normal.Z;
-        cullData.ds[1] = plane.D;
-
-        // Left
-        plane = view.Frustum.GetLeft();
-        cullData.xs[2] = plane.Normal.X;
-        cullData.ys[2] = plane.Normal.Y;
-        cullData.zs[2] = plane.Normal.Z;
-        cullData.ds[2] = plane.D;
-
-        // Right
-        plane = view.Frustum.GetRight();
-        cullData.xs[3] = plane.Normal.X;
-        cullData.ys[3] = plane.Normal.Y;
-        cullData.zs[3] = plane.Normal.Z;
-        cullData.ds[3] = plane.D;
-
-        // Top
-        plane = view.Frustum.GetTop();
-        cullData.xs[4] = plane.Normal.X;
-        cullData.ys[4] = plane.Normal.Y;
-        cullData.zs[4] = plane.Normal.Z;
-        cullData.ds[4] = plane.D;
-
-        // Bottom
-        plane = view.Frustum.GetBottom();
-        cullData.xs[5] = plane.Normal.X;
-        cullData.ys[5] = plane.Normal.Y;
-        cullData.zs[5] = plane.Normal.Z;
-        cullData.ds[5] = plane.D;
-
-        // Extra 0
-        cullData.xs[6] = 0;
-        cullData.ys[6] = 0;
-        cullData.zs[6] = 0;
-        cullData.ds[6] = 0;
-
-        // Extra 1
-        cullData.xs[7] = 0;
-        cullData.ys[7] = 0;
-        cullData.zs[7] = 0;
-        cullData.ds[7] = 0;
+        PROFILE_MEM(Graphics);
+        _scenes.Add(scene);
+        scene->_listeners.Add(this);
     }
-
-    SimdVector4 px = SIMD::Load(cullData.xs);
-    SimdVector4 py = SIMD::Load(cullData.ys);
-    SimdVector4 pz = SIMD::Load(cullData.zs);
-    SimdVector4 pd = SIMD::Load(cullData.ds);
-    SimdVector4 px2 = SIMD::Load(&cullData.xs[4]);
-    SimdVector4 py2 = SIMD::Load(&cullData.ys[4]);
-    SimdVector4 pz2 = SIMD::Load(&cullData.zs[4]);
-    SimdVector4 pd2 = SIMD::Load(&cullData.ds[4]);
-
-    for (int32 i = 0; i < List.Count(); i++)
-    {
-        auto e = List[i];
-
-        SimdVector4 cx = SIMD::Splat(e.Bounds.Center.X);
-        SimdVector4 cy = SIMD::Splat(e.Bounds.Center.Y);
-        SimdVector4 cz = SIMD::Splat(e.Bounds.Center.Z);
-        SimdVector4 r = SIMD::Splat(-e.Bounds.Radius);
-
-        SimdVector4 t = SIMD::Mul(cx, px);
-        t = SIMD::Add(t, SIMD::Mul(cy, py));
-        t = SIMD::Add(t, SIMD::Mul(cz, pz));
-        t = SIMD::Add(t, pd);
-        t = SIMD::Sub(t, r);
-        if (SIMD::MoveMask(t))
-            continue;
-
-        t = SIMD::Mul(cx, px2);
-        t = SIMD::Add(t, SIMD::Mul(cy, py2));
-        t = SIMD::Add(t, SIMD::Mul(cz, pz2));
-        t = SIMD::Add(t, pd2);
-        t = SIMD::Sub(t, r);
-        if (SIMD::MoveMask(t))
-            continue;
-
-        if (view.RenderLayersMask.Mask & e.LayerMask && e.Actor->GetStaticFlags() & renderContext.View.StaticFlagsMask)
-        {
-#if SCENE_RENDERING_USE_PROFILER
-            PROFILE_CPU();
-#if TRACY_ENABLE
-            ___tracy_scoped_zone.Name(*e.Actor->GetName(), e.Actor->GetName().Length());
-#endif
-#endif
-            e.Actor->Draw(renderContext);
-        }
-    }
-#else
-    for (int32 i = 0; i < List.Count(); i++)
-    {
-        auto e = List[i];
-        if (view.RenderLayersMask.Mask & e.LayerMask && frustum.Intersects(e.Bounds) && e.Actor->GetStaticFlags() & view.StaticFlagsMask)
-        {
-#if SCENE_RENDERING_USE_PROFILER
-            PROFILE_CPU();
-#if TRACY_ENABLE
-            ___tracy_scoped_zone.Name(*e.Actor->GetName(), e.Actor->GetName().Length());
-#endif
-#endif
-            e.Actor->Draw(renderContext);
-        }
-    }
-#endif
 }
 
-SceneRendering::SceneRendering(::Scene* scene)
-    : Scene(scene)
+FORCE_INLINE bool FrustumsListCull(const BoundingSphere& bounds, const Array<BoundingFrustum>& frustums)
 {
+    const int32 count = frustums.Count();
+    const BoundingFrustum* data = frustums.Get();
+    for (int32 i = 0; i < count; i++)
+    {
+        if (data[i].Intersects(bounds))
+            return true;
+    }
+    return false;
 }
 
-void SceneRendering::Draw(RenderContext& renderContext)
+void SceneRendering::Draw(RenderContextBatch& renderContextBatch, DrawCategory category)
 {
-    // Skip if disabled
-    if (!Scene->GetIsActive())
-        return;
-    auto& view = renderContext.View;
+    PROFILE_MEM(Graphics);
+    if (category == PreRender)
+    {
+        // Add additional lock during scene rendering (prevents any Actors cache modifications on content streaming threads - eg. when model residency changes)
+        Locker.ReadLock();
+        _isRendering = true;
+
+        // Register scene
+        for (const auto& renderContext : renderContextBatch.Contexts)
+            renderContext.List->Scenes.Add(this);
+        auto buffers = renderContextBatch.GetMainContext().Buffers;
+        buffers->OnSceneRendering(this);
+    }
+    else if (category == PostRender)
+    {
+        // Release additional lock
+        _isRendering = false;
+        Locker.ReadUnlock();
+    }
+    auto& view = renderContextBatch.GetMainContext().View;
+    auto& list = Actors[(int32)category];
+    _drawListData = list.Get();
+    _drawListSize = list.Count();
+    _drawBatch = &renderContextBatch;
+
+    // Setup frustum data
+    const int32 frustumsCount = renderContextBatch.Contexts.Count();
+    _drawFrustumsData.Resize(frustumsCount);
+    for (int32 i = 0; i < frustumsCount; i++)
+        _drawFrustumsData.Get()[i] = renderContextBatch.Contexts.Get()[i].View.CullingFrustum;
 
     // Draw all visual components
-    if (view.IsOfflinePass)
+#if PLATFORM_THREADS_LIMIT > 1
+    if (_drawListSize >= 64 && category == SceneDrawAsync && renderContextBatch.EnableAsync)
     {
-        Geometry.CullAndDrawOffline(renderContext);
-        if (view.Pass & DrawPass::GBuffer)
-        {
-            Common.CullAndDrawOffline(renderContext);
-            for (int32 i = 0; i < CommonNoCulling.Count(); i++)
-            {
-                auto actor = CommonNoCulling[i];
-                if (actor->GetStaticFlags() & view.StaticFlagsMask && view.RenderLayersMask.HasLayer(actor->GetLayer()))
-                    actor->Draw(renderContext);
-            }
-        }
+        // Run in async via Job System
+        Function<void(int32)> func;
+        func.Bind<SceneRendering, &SceneRendering::DrawActorsJob>(this);
+        _drawListJobs = JobSystem::GetThreadsCount();
+        const int64 waitLabel = JobSystem::Dispatch(func, _drawListJobs);
+        renderContextBatch.WaitLabels.Add(waitLabel);
     }
     else
+#endif
     {
-        Geometry.CullAndDraw(renderContext);
-        if (view.Pass & DrawPass::GBuffer)
-        {
-            Common.CullAndDraw(renderContext);
-            for (int32 i = 0; i < CommonNoCulling.Count(); i++)
-            {
-                auto actor = CommonNoCulling[i];
-                if (view.RenderLayersMask.HasLayer(actor->GetLayer()))
-                {
-#if SCENE_RENDERING_USE_PROFILER
-                    PROFILE_CPU();
-#if TRACY_ENABLE
-                    ___tracy_scoped_zone.Name(*actor->GetName(), actor->GetName().Length());
-#endif
-#endif
-                    actor->Draw(renderContext);
-                }
-            }
-        }
+        // Scene is small so draw on a main-thread
+        _drawListJobs = 1;
+        DrawActorsJob(0);
     }
+
 #if USE_EDITOR
-    if (view.Pass & DrawPass::GBuffer)
+    if (EnumHasAnyFlags(view.Pass, DrawPass::GBuffer) && category == SceneDraw)
     {
         // Draw physics shapes
-        if (view.Flags & ViewFlags::PhysicsDebug || view.Mode == ViewMode::PhysicsColliders)
+        if (EnumHasAnyFlags(view.Flags, ViewFlags::PhysicsDebug) || view.Mode == ViewMode::PhysicsColliders)
         {
+            PROFILE_CPU_NAMED("PhysicsDebug");
+            const auto* physicsDebugData = PhysicsDebug.Get();
             for (int32 i = 0; i < PhysicsDebug.Count(); i++)
             {
-                PhysicsDebug[i](view);
+                physicsDebugData[i]->DrawPhysicsDebug(view);
+            }
+        }
+
+        // Draw light shapes
+        if (EnumHasAnyFlags(view.Flags, ViewFlags::LightsDebug))
+        {
+            PROFILE_CPU_NAMED("LightsDebug");
+            const LightsDebugCallback* lightsDebugData = LightsDebug.Get();
+            for (int32 i = 0; i < LightsDebug.Count(); i++)
+            {
+                lightsDebugData[i](view);
             }
         }
     }
@@ -389,16 +146,164 @@ void SceneRendering::CollectPostFxVolumes(RenderContext& renderContext)
 #endif
     for (int32 i = 0; i < PostFxProviders.Count(); i++)
     {
-        PostFxProviders[i]->Collect(renderContext);
+        PostFxProviders.Get()[i]->Collect(renderContext);
     }
 }
 
 void SceneRendering::Clear()
 {
-    Geometry.Clear();
-    Common.Clear();
-    CommonNoCulling.Clear();
+    ScopeWriteLock lock(Locker);
+    for (auto* listener : _listeners)
+    {
+        listener->OnSceneRenderingClear(this);
+        listener->_scenes.Remove(this);
+    }
+    _listeners.Clear();
+    for (auto& e : Actors)
+        e.Clear();
+    for (auto& e : FreeActors)
+        e.Clear();
 #if USE_EDITOR
     PhysicsDebug.Clear();
 #endif
 }
+
+void SceneRendering::AddActor(Actor* a, int32& key)
+{
+    if (key != -1)
+        return;
+    PROFILE_MEM(Graphics);
+    CHECK_SCENE_EDIT_ACCESS();
+    const int32 category = a->_drawCategory;
+    ScopeWriteLock lock(Locker);
+    auto& list = Actors[category];
+    if (FreeActors[category].HasItems())
+    {
+        // Use existing item
+        key = FreeActors[category].Pop();
+    }
+    else
+    {
+        // Add a new item
+        key = list.Count();
+        list.AddOne();
+    }
+    auto& e = list[key];
+    e.Actor = a;
+    e.LayerMask = a->GetLayerMask();
+    e.Bounds = a->GetBoundingSphere();
+    e.NoCulling = a->_drawNoCulling;
+    for (auto* listener : _listeners)
+        listener->OnSceneRenderingAddActor(this, key, a);
+}
+
+void SceneRendering::UpdateActor(Actor* a, int32& key, ISceneRenderingListener::UpdateFlags flags)
+{
+    const int32 category = a->_drawCategory;
+    bool lock = !_isRendering || ((int32)flags & (int32)ISceneRenderingListener::AutoDelayDuringRendering) == 0; // Allow updating actors during rendering
+    if (lock)
+        Locker.ReadLock(); // Read-access only as list doesn't get resized (like Add/Remove do) so allow updating actors from different threads at once
+    auto& list = Actors[category];
+    if (list.Count() > key && key >= 0) // Ignore invalid key softly
+    {
+        auto& e = list[key];
+        if (e.Actor == a)
+        {
+            for (auto* listener : _listeners)
+                listener->OnSceneRenderingUpdateActor(this, key, a, e.Bounds, flags);
+            if (flags & ISceneRenderingListener::Layer)
+                e.LayerMask = a->GetLayerMask();
+            if (flags & ISceneRenderingListener::Bounds)
+                e.Bounds = a->GetBoundingSphere();
+        }
+    }
+    if (lock)
+        Locker.ReadUnlock();
+}
+
+void SceneRendering::RemoveActor(Actor* a, int32& key)
+{
+    CHECK_SCENE_EDIT_ACCESS();
+    const int32 category = a->_drawCategory;
+    ScopeWriteLock lock(Locker);
+    auto& list = Actors[category];
+    if (list.Count() > key || key < 0) // Ignore invalid key softly (eg. list after batch clear during scene unload)
+    {
+        auto& e = list.Get()[key];
+        if (e.Actor == a)
+        {
+            for (auto* listener : _listeners)
+                listener->OnSceneRenderingRemoveActor(this, key, a);
+            e.Actor = nullptr;
+            e.LayerMask = 0;
+            FreeActors[category].Add(key);
+        }
+    }
+    key = -1;
+}
+
+#define FOR_EACH_BATCH_ACTOR const int32 count = _drawListSize; int32 step = _drawListJobs; DrawActor* data = _drawListData; for (int32 index = i; index < count; index += step) { auto e = data[index]; Platform::MemoryPrefetch(&data[index + step]);
+#define CHECK_ACTOR ((viewRenderLayersMask & e.LayerMask) && (e.NoCulling || FrustumsListCull(e.Bounds, _drawFrustumsData)))
+#define CHECK_ACTOR_SINGLE_FRUSTUM ((viewRenderLayersMask & e.LayerMask) && (e.NoCulling || viewCullingFrustum.Intersects(e.Bounds)))
+#if SCENE_RENDERING_USE_PROFILER_PER_ACTOR
+#define DRAW_ACTOR(mode) PROFILE_CPU_ACTOR(e.Actor); e.Actor->Draw(mode)
+#else
+#define DRAW_ACTOR(mode) e.Actor->Draw(mode)
+#endif
+
+void SceneRendering::DrawActorsJob(int32 i)
+{
+    PROFILE_CPU();
+    PROFILE_MEM(Graphics);
+    auto& mainContext = _drawBatch->GetMainContext();
+    const auto& view = mainContext.View;
+    const Vector3 viewOrigin = view.Origin;
+    const uint32 viewRenderLayersMask = view.RenderLayersMask.Mask;
+    if (view.StaticFlagsMask != StaticFlags::None)
+    {
+        // Static-flags culling
+        FOR_EACH_BATCH_ACTOR
+            e.Bounds.Center -= viewOrigin;
+            if (CHECK_ACTOR && (e.Actor->GetStaticFlags() & view.StaticFlagsMask) == view.StaticFlagsCompare)
+            {
+                DRAW_ACTOR(*_drawBatch);
+            }
+        }
+    }
+    else if (viewOrigin.IsZero() && _drawFrustumsData.Count() == 1)
+    {
+        // Fast path for no origin shifting with a single context
+        const BoundingFrustum viewCullingFrustum = view.CullingFrustum;
+        FOR_EACH_BATCH_ACTOR
+            if (CHECK_ACTOR_SINGLE_FRUSTUM)
+            {
+                DRAW_ACTOR(*_drawBatch);
+            }
+        }
+    }
+    else if (viewOrigin.IsZero())
+    {
+        // Fast path for no origin shifting
+        FOR_EACH_BATCH_ACTOR
+            if (CHECK_ACTOR)
+            {
+                DRAW_ACTOR(*_drawBatch);
+            }
+        }
+    }
+    else
+    {
+        // Generic case
+        FOR_EACH_BATCH_ACTOR
+            e.Bounds.Center -= viewOrigin;
+            if (CHECK_ACTOR)
+            {
+                DRAW_ACTOR(*_drawBatch);
+            }
+        }
+    }
+}
+
+#undef FOR_EACH_BATCH_ACTOR
+#undef CHECK_ACTOR
+#undef DRAW_ACTOR

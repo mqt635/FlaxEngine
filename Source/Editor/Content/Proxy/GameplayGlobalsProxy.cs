@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Windows;
@@ -11,6 +11,7 @@ namespace FlaxEditor.Content
     /// A <see cref="GameplayGlobals"/> asset proxy object.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.BinaryAssetProxy" />
+    [ContentContextMenu("New/Gameplay Globals")]
     public class GameplayGlobalsProxy : BinaryAssetProxy
     {
         /// <inheritdoc />

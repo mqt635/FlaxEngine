@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GPUSampler.h"
 #include "GPUSamplerDescription.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Types/String.h"
 #include "Engine/Graphics/GPUDevice.h"
 
@@ -18,6 +19,7 @@ void GPUSamplerDescription::Clear()
 {
     Platform::MemoryClear(this, sizeof(GPUSamplerDescription));
     MaxMipLevel = MAX_float;
+    MaxAnisotropy = 1;
 }
 
 bool GPUSamplerDescription::Equals(const GPUSamplerDescription& other) const
@@ -75,6 +77,7 @@ GPUSampler* GPUSampler::New()
 }
 
 GPUSampler::GPUSampler()
+    : GPUResource(SpawnParams(Guid::New(), TypeInitializer))
 {
 }
 
@@ -100,14 +103,9 @@ String GPUSampler::ToString() const
 #endif
 }
 
-GPUResource::ResourceType GPUSampler::GetResourceType() const
+GPUResourceType GPUSampler::GetResourceType() const
 {
-    return ResourceType::Sampler;
-}
-
-GPUResource::ObjectType GPUSampler::GetObjectType() const
-{
-    return ObjectType::Other;
+    return GPUResourceType::Sampler;
 }
 
 void GPUSampler::OnReleaseGPU()

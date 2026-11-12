@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,9 +13,8 @@ struct Viewport;
 /// </summary>
 API_STRUCT() struct FLAXENGINE_API Ray
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(Ray);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(Ray);
 public:
-
     /// <summary>
     /// The position in three dimensional space where the ray starts.
     /// </summary>
@@ -27,20 +26,16 @@ public:
     API_FIELD() Vector3 Direction;
 
 public:
-
     /// <summary>
     /// Identity ray (at zero origin pointing forwards).
     /// </summary>
     static Ray Identity;
 
 public:
-
     /// <summary>
     /// Empty constructor.
     /// </summary>
-    Ray()
-    {
-    }
+    Ray() = default;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Ray"/> struct.
@@ -51,14 +46,13 @@ public:
         : Position(position)
         , Direction(direction)
     {
+        CHECK_DEBUG(Direction.IsNormalized());
     }
 
 public:
-
     String ToString() const;
 
 public:
-
     FORCE_INLINE bool operator==(const Ray& other) const
     {
         return Position == other.Position && Direction == other.Direction;
@@ -74,22 +68,24 @@ public:
         return Vector3::NearEqual(a.Position, b.Position) && Vector3::NearEqual(a.Direction, b.Direction);
     }
 
-    static bool NearEqual(const Ray& a, const Ray& b, float epsilon)
+    static bool NearEqual(const Ray& a, const Ray& b, Real epsilon)
     {
         return Vector3::NearEqual(a.Position, b.Position, epsilon) && Vector3::NearEqual(a.Direction, b.Direction, epsilon);
     }
 
 public:
-
     /// <summary>
     /// Gets a point at distance long ray.
     /// </summary>
     /// <param name="distance">The distance from ray origin.</param>
     /// <returns>The calculated point.</returns>
-    Vector3 GetPoint(float distance) const;
+    FORCE_INLINE Vector3 GetPoint(Real distance) const
+    {
+        return Position + Direction * distance;
+    }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a point.
+    /// Determines if there is an intersection between ray and a point.
     /// </summary>
     /// <param name="point">The point to test.</param>
     /// <returns>Whether the two objects intersected.</returns>
@@ -99,7 +95,7 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="Ray" />.
+    /// Determines if there is an intersection between two rays.
     /// </summary>
     /// <param name="ray">The ray to test.</param>
     /// <returns>Whether the two objects intersected.</returns>
@@ -110,7 +106,7 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="Ray" />.
+    /// Determines if there is an intersection between ray and a <see cref="Ray" />.
     /// </summary>
     /// <param name="ray">The ray to test.</param>
     /// <param name="point">When the method completes, contains the point of intersection, or <see cref="Vector3.Zero" /> if there was no intersection.
@@ -122,29 +118,29 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="Plane" />.
+    /// Determines if there is an intersection between ray and a <see cref="Plane" />.
     /// </summary>
     /// <param name="plane">The plane to test</param>
     /// <returns>Whether the two objects intersected.</returns>
     bool Intersects(const Plane& plane) const
     {
-        float distance;
+        Real distance;
         return CollisionsHelper::RayIntersectsPlane(*this, plane, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="Plane" />.
+    /// Determines if there is an intersection between ray and a <see cref="Plane" />.
     /// </summary>
     /// <param name="plane">The plane to test.</param>
     /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
     /// <returns>Whether the two objects intersected.</returns>
-    bool Intersects(const Plane& plane, float& distance) const
+    bool Intersects(const Plane& plane, Real& distance) const
     {
         return CollisionsHelper::RayIntersectsPlane(*this, plane, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="Plane" />.
+    /// Determines if there is an intersection between ray and a <see cref="Plane" />.
     /// </summary>
     /// <param name="plane">The plane to test.</param>
     /// <param name="point">When the method completes, contains the point of intersection, or <see cref="Vector3.Zero" /> if there was no intersection.</param>
@@ -155,7 +151,7 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a triangle.
+    /// Determines if there is an intersection between ray and a triangle.
     /// </summary>
     /// <param name="vertex1">The first vertex of the triangle to test.</param>
     /// <param name="vertex2">The second vertex of the triangle to test.</param>
@@ -163,25 +159,25 @@ public:
     /// <returns>Whether the two objects intersected.</returns>
     bool Intersects(const Vector3& vertex1, const Vector3& vertex2, const Vector3& vertex3) const
     {
-        float distance;
+        Real distance;
         return CollisionsHelper::RayIntersectsTriangle(*this, vertex1, vertex2, vertex3, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a triangle.
+    /// Determines if there is an intersection between ray and a triangle.
     /// </summary>
     /// <param name="vertex1">The first vertex of the triangle to test.</param>
     /// <param name="vertex2">The second vertex of the triangle to test.</param>
     /// <param name="vertex3">The third vertex of the triangle to test.</param>
     /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
     /// <returns>Whether the two objects intersected.</returns>
-    bool Intersects(const Vector3& vertex1, const Vector3& vertex2, const Vector3& vertex3, float& distance) const
+    bool Intersects(const Vector3& vertex1, const Vector3& vertex2, const Vector3& vertex3, Real& distance) const
     {
         return CollisionsHelper::RayIntersectsTriangle(*this, vertex1, vertex2, vertex3, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a triangle.
+    /// Determines if there is an intersection between ray and a triangle.
     /// </summary>
     /// <param name="vertex1">The first vertex of the triangle to test.</param>
     /// <param name="vertex2">The second vertex of the triangle to test.</param>
@@ -194,29 +190,29 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingBox" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingBox" />.
     /// </summary>
     /// <param name="box">The box to test.</param>
     /// <returns>Whether the two objects intersected.</returns>
     bool Intersects(const BoundingBox& box) const
     {
-        float distance;
+        Real distance;
         return CollisionsHelper::RayIntersectsBox(*this, box, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingBox" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingBox" />.
     /// </summary>
     /// <param name="box">The box to test.</param>
     /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
     /// <returns>Whether the two objects intersected.</returns>
-    bool Intersects(const BoundingBox& box, float& distance) const
+    bool Intersects(const BoundingBox& box, Real& distance) const
     {
         return CollisionsHelper::RayIntersectsBox(*this, box, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingBox" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingBox" />.
     /// </summary>
     /// <param name="box">The box to test.</param>
     /// <param name="point">When the method completes, contains the point of intersection, or <see cref="Vector3.Zero" /> if there was no intersection.</param>
@@ -227,29 +223,29 @@ public:
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingSphere" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingSphere" />.
     /// </summary>
     /// <param name="sphere">The sphere to test.</param>
     /// <returns>Whether the two objects intersected.</returns>
     bool Intersects(const BoundingSphere& sphere) const
     {
-        float distance;
+        Real distance;
         return CollisionsHelper::RayIntersectsSphere(*this, sphere, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingSphere" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingSphere" />.
     /// </summary>
     /// <param name="sphere">The sphere to test.</param>
     /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
     /// <returns>Whether the two objects intersected.</returns>
-    bool Intersects(const BoundingSphere& sphere, float& distance) const
+    bool Intersects(const BoundingSphere& sphere, Real& distance) const
     {
         return CollisionsHelper::RayIntersectsSphere(*this, sphere, distance);
     }
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a <see cref="BoundingSphere" />.
+    /// Determines if there is an intersection between ray and a <see cref="BoundingSphere" />.
     /// </summary>
     /// <param name="sphere">The sphere to test.</param>
     /// <param name="point">When the method completes, contains the point of intersection, or <see cref="Vector3.Zero" /> if there was no intersection.</param>
@@ -260,7 +256,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Calculates a world space ray from 2d screen coordinates.
     /// </summary>

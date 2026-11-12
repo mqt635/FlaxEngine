@@ -1,9 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
+#include "Engine/Graphics/Config.h"
+#include "Engine/Platform/Platform.h"
+#include "../IncludeDirectXHeaders.h"
+#if USE_PIX && GPU_ALLOW_PROFILE_EVENTS
+#include <ThirdParty/WinPixEventRuntime/pix3.h>
+#endif
 #include "GPUContextDX12.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/Math/Color32.h"
 #include "Engine/Core/Math/Viewport.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "GPUShaderDX12.h"
@@ -12,22 +19,22 @@
 #include "GPUTextureDX12.h"
 #include "GPUBufferDX12.h"
 #include "GPUSamplerDX12.h"
+#include "GPUVertexLayoutDX12.h"
 #include "CommandQueueDX12.h"
 #include "DescriptorHeapDX12.h"
+#include "RootSignatureDX12.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
 #include "Engine/Debug/Exceptions/NotImplementedException.h"
 #include "GPUShaderProgramDX12.h"
 #include "CommandSignatureDX12.h"
 #include "Engine/Profiler/RenderStats.h"
+#include "Engine/Graphics/GPUResourceAccess.h"
+#include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
-#include "Engine/Threading/Threading.h"
-#if USE_PIX && GPU_ALLOW_PROFILE_EVENTS
-#include <pix3.h>
-#endif
 
 #define DX12_ENABLE_RESOURCE_BARRIERS_BATCHING 1
-#define DX12_ENABLE_RESOURCE_BARRIERS_DEBUGGING 0
+#define DX12_ENABLE_RESOURCE_BARRIERS_DEBUGGING (0 && LOG_ENABLE)
 
 inline bool operator!=(const D3D12_VERTEX_BUFFER_VIEW& l, const D3D12_VERTEX_BUFFER_VIEW& r)
 {
@@ -39,21 +46,100 @@ inline bool operator!=(const D3D12_INDEX_BUFFER_VIEW& l, const D3D12_INDEX_BUFFE
     return l.SizeInBytes != r.SizeInBytes || l.Format != r.Format || l.BufferLocation != r.BufferLocation;
 }
 
+FORCE_INLINE D3D12_RESOURCE_STATES GetResourceState(GPUResourceAccess access)
+{
+    switch (access)
+    {
+    case GPUResourceAccess::None:
+        return D3D12_RESOURCE_STATE_COMMON;
+    case GPUResourceAccess::CopyRead:
+        return D3D12_RESOURCE_STATE_COPY_SOURCE;
+    case GPUResourceAccess::CopyWrite:
+        return D3D12_RESOURCE_STATE_COPY_DEST;
+    case GPUResourceAccess::CpuRead:
+        return D3D12_RESOURCE_STATE_GENERIC_READ;
+    case GPUResourceAccess::CpuWrite:
+        return D3D12_RESOURCE_STATE_COMMON;
+    case GPUResourceAccess::DepthRead:
+        return D3D12_RESOURCE_STATE_DEPTH_READ;
+    case GPUResourceAccess::DepthWrite:
+        return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    case GPUResourceAccess::DepthBuffer:
+        return D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    case GPUResourceAccess::RenderTarget:
+        return D3D12_RESOURCE_STATE_RENDER_TARGET;
+    case GPUResourceAccess::UnorderedAccess:
+        return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    case GPUResourceAccess::IndirectArgs:
+        return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    case GPUResourceAccess::ShaderReadPixel:
+        //return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; // TODO: optimize SRV states in flushSRVs to be based on current binding usage slots
+    case GPUResourceAccess::ShaderReadCompute:
+    case GPUResourceAccess::ShaderReadNonPixel:
+        //return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; // TODO: optimize SRV states in flushSRVs to be based on current binding usage slots
+    case GPUResourceAccess::ShaderReadGraphics:
+        return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+#if !BUILD_RELEASE
+    default:
+        LOG(Error, "Unsupported GPU Resource Access: {}", (uint32)access);
+#endif
+    }
+    return D3D12_RESOURCE_STATE_COMMON;
+}
+
+#if DX12_ENABLE_RESOURCE_BARRIERS_DEBUGGING
+
+String ResourceStateToString(D3D12_RESOURCE_STATES state)
+{
+    if (state == D3D12_RESOURCE_STATE_COMMON)
+        return TEXT("Common");
+    String result;
+    while (state)
+    {
+        if (result.HasChars())
+            result += TEXT('|');
+#define CHECK_STATE(type, name) if ((type & state) == type) { state &= ~type; result += TEXT(name); continue; }
+        CHECK_STATE(D3D12_RESOURCE_STATE_GENERIC_READ, "GenericRead");
+        CHECK_STATE(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, "VertexConstantBuffer");
+        CHECK_STATE(D3D12_RESOURCE_STATE_INDEX_BUFFER, "IndexBuffer");
+        CHECK_STATE(D3D12_RESOURCE_STATE_RENDER_TARGET, "RenderTarget");
+        CHECK_STATE(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "UAV");
+        CHECK_STATE(D3D12_RESOURCE_STATE_DEPTH_WRITE, "DepthWrite");
+        CHECK_STATE(D3D12_RESOURCE_STATE_DEPTH_READ, "DepthRead");
+        CHECK_STATE(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, "SRV-PS");
+        CHECK_STATE(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "SRV-VS");
+        CHECK_STATE(D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, "IndirectArg");
+        CHECK_STATE(D3D12_RESOURCE_STATE_COPY_DEST, "CopyDst");
+        CHECK_STATE(D3D12_RESOURCE_STATE_COPY_SOURCE, "CopySrc");
+        CHECK_STATE(D3D12_RESOURCE_STATE_RESOLVE_DEST, "ResolveDst");
+        CHECK_STATE(D3D12_RESOURCE_STATE_RESOLVE_SOURCE, "ResolveSrc");
+        CHECK_STATE(D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE, "ShadingRate");
+        CHECK_STATE(D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, "RtxAcceleration");
+        CHECK_STATE(D3D12_RESOURCE_STATE_PRESENT, "Present");
+#undef CHECK_STATE
+        result += TEXT("Unknown");
+        break;
+    }
+    return result;
+}
+
+#endif
+
 // Ensure to match the indirect commands arguments layout
 static_assert(sizeof(GPUDispatchIndirectArgs) == sizeof(D3D12_DISPATCH_ARGUMENTS), "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountX) == OFFSET_OF(D3D12_DISPATCH_ARGUMENTS, ThreadGroupCountX), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountX");
-static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == OFFSET_OF(D3D12_DISPATCH_ARGUMENTS, ThreadGroupCountY),"Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
+static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountY) == OFFSET_OF(D3D12_DISPATCH_ARGUMENTS, ThreadGroupCountY), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountY");
 static_assert(OFFSET_OF(GPUDispatchIndirectArgs, ThreadGroupCountZ) == OFFSET_OF(D3D12_DISPATCH_ARGUMENTS, ThreadGroupCountZ), "Wrong offset for GPUDrawIndirectArgs::ThreadGroupCountZ");
 //
 static_assert(sizeof(GPUDrawIndirectArgs) == sizeof(D3D12_DRAW_ARGUMENTS), "Wrong size of GPUDrawIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, VerticesCount) == OFFSET_OF(D3D12_DRAW_ARGUMENTS, VertexCountPerInstance), "Wrong offset for GPUDrawIndirectArgs::VerticesCount");
-static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(D3D12_DRAW_ARGUMENTS, InstanceCount),"Wrong offset for GPUDrawIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndirectArgs, InstanceCount) == OFFSET_OF(D3D12_DRAW_ARGUMENTS, InstanceCount), "Wrong offset for GPUDrawIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartVertex) == OFFSET_OF(D3D12_DRAW_ARGUMENTS, StartVertexLocation), "Wrong offset for GPUDrawIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndirectArgs, StartInstance) == OFFSET_OF(D3D12_DRAW_ARGUMENTS, StartInstanceLocation), "Wrong offset for GPUDrawIndirectArgs::StartInstance");
 //
 static_assert(sizeof(GPUDrawIndexedIndirectArgs) == sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), "Wrong size of GPUDrawIndexedIndirectArgs.");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, IndicesCount) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, IndexCountPerInstance), "Wrong offset for GPUDrawIndexedIndirectArgs::IndicesCount");
-static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, InstanceCount),"Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
+static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, InstanceCount) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, InstanceCount), "Wrong offset for GPUDrawIndexedIndirectArgs::InstanceCount");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartIndex) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, StartIndexLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartIndex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartVertex) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, BaseVertexLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartVertex");
 static_assert(OFFSET_OF(GPUDrawIndexedIndirectArgs, StartInstance) == OFFSET_OF(D3D12_DRAW_INDEXED_ARGUMENTS, StartInstanceLocation), "Wrong offset for GPUDrawIndexedIndirectArgs::StartInstance");
@@ -65,7 +151,6 @@ GPUContextDX12::GPUContextDX12(GPUDeviceDX12* device, D3D12_COMMAND_LIST_TYPE ty
     , _currentAllocator(nullptr)
     , _currentState(nullptr)
     , _currentCompute(nullptr)
-    , _swapChainsUsed(0)
     , _vbCount(0)
     , _rtCount(0)
     , _rbBufferSize(0)
@@ -74,7 +159,8 @@ GPUContextDX12::GPUContextDX12(GPUDeviceDX12* device, D3D12_COMMAND_LIST_TYPE ty
     , _isCompute(0)
     , _rtDirtyFlag(0)
     , _psDirtyFlag(0)
-    , _cbDirtyFlag(0)
+    , _cbGraphicsDirtyFlag(0)
+    , _cbComputeDirtyFlag(0)
     , _samplersDirtyFlag(0)
     , _rtDepth(nullptr)
     , _ibHandle(nullptr)
@@ -82,14 +168,26 @@ GPUContextDX12::GPUContextDX12(GPUDeviceDX12* device, D3D12_COMMAND_LIST_TYPE ty
     FrameFenceValues[0] = 0;
     FrameFenceValues[1] = 0;
     _currentAllocator = _device->GetCommandQueue()->RequestAllocator();
-    VALIDATE_DIRECTX_RESULT(device->GetDevice()->CreateCommandList(0, type, _currentAllocator, nullptr, IID_PPV_ARGS(&_commandList)));
+    VALIDATE_DIRECTX_CALL(device->GetDevice()->CreateCommandList(0, type, _currentAllocator, nullptr, IID_PPV_ARGS(&_commandList)));
+#ifdef __ID3D12GraphicsCommandList1_FWD_DEFINED__
+    _commandList->QueryInterface(IID_PPV_ARGS(&_commandList1));
+#endif
 #if GPU_ENABLE_RESOURCE_NAMING
     _commandList->SetName(TEXT("GPUContextDX12::CommandList"));
+#endif
+#if GPU_ENABLE_TRACY
+    _tracyContext = tracy::CreateD3D12Context(device->GetDevice(), _device->GetCommandQueue()->GetCommandQueue());
 #endif
 }
 
 GPUContextDX12::~GPUContextDX12()
 {
+#if GPU_ENABLE_TRACY
+    tracy::DestroyD3D12Context(_tracyContext);
+#endif
+#ifdef __ID3D12GraphicsCommandList1_FWD_DEFINED__
+    SAFE_RELEASE(_commandList1);
+#endif
     DX_SAFE_RELEASE_CHECK(_commandList, 0);
 }
 
@@ -105,7 +203,7 @@ void GPUContextDX12::AddTransitionBarrier(ResourceOwnerDX12* resource, const D3D
         resourceName = gpuResource->GetName();
     else
         resourceName = StringUtils::ToString((uint32)(uint64)resource->GetResource());
-    const auto info = String::Format(TEXT("[DX12 Resource Barrier]: 0x{0:x} -> 0x{1:x}: {2} (subresource: {3})"), before, after, resourceName, subresourceIndex);
+    const auto info = String::Format(TEXT("[DX12 Resource Barrier]: {0} -> {1}: {2} (subresource: {3})"), ResourceStateToString(before), ResourceStateToString(after), resourceName, subresourceIndex);
     Log::Logger::Write(LogType::Info, info);
 #endif
 
@@ -210,16 +308,20 @@ void GPUContextDX12::Reset()
         _currentAllocator = _device->GetCommandQueue()->RequestAllocator();
         _commandList->Reset(_currentAllocator, nullptr);
     }
+    IsOpen = true;
 
     // Setup initial state
     _currentState = nullptr;
     _rtDirtyFlag = false;
-    _cbDirtyFlag = false;
+    _cbGraphicsDirtyFlag = false;
+    _cbComputeDirtyFlag = false;
     _samplersDirtyFlag = false;
     _rtCount = 0;
     _rtDepth = nullptr;
     _srMaskDirtyGraphics = 0;
     _srMaskDirtyCompute = 0;
+    _stencilRef = 0;
+    _primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     _psDirtyFlag = false;
     _isCompute = false;
     _currentCompute = nullptr;
@@ -229,18 +331,30 @@ void GPUContextDX12::Reset()
     Platform::MemoryClear(_srHandles, sizeof(_srHandles));
     Platform::MemoryClear(_uaHandles, sizeof(_uaHandles));
     Platform::MemoryClear(_vbHandles, sizeof(_vbHandles));
+    _vertexLayout = nullptr;
     _ibHandle = nullptr;
     Platform::MemoryClear(&_cbHandles, sizeof(_cbHandles));
     Platform::MemoryClear(&_samplers, sizeof(_samplers));
-    _swapChainsUsed = 0;
+    _swapChains.Clear();
+    
+    // Bind dummy vertex buffer (used by missing bindings)
+    D3D12_VERTEX_BUFFER_VIEW dummyVBView;
+    if (!_device->DummyVB)
+    {
+        _device->DummyVB = _device->CreateBuffer(TEXT("DummyVertexBuffer"));
+        auto* layout = GPUVertexLayout::Get({ { VertexElement::Types::Attribute3, 0, 0, 0, PixelFormat::R32G32B32A32_Float } });
+        _device->DummyVB->Init(GPUBufferDescription::Vertex(layout, sizeof(Color), 1, &Color::Transparent));
+        SetResourceState(_device->DummyVB, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, 0);
+    }
+    ((GPUBufferDX12*)_device->DummyVB)->GetVBView(dummyVBView);
+    _commandList->IASetVertexBuffers(GPU_MAX_VB_BINDED, 1, &dummyVBView);
 
-    // Bind Root Signature
-    _commandList->SetGraphicsRootSignature(_device->GetRootSignature());
-    _commandList->SetComputeRootSignature(_device->GetRootSignature());
+    ForceRebindDescriptors();
 
-    // Bind heaps
-    ID3D12DescriptorHeap* ppHeaps[] = { _device->RingHeap_CBV_SRV_UAV.GetHeap(), _device->RingHeap_Sampler.GetHeap() };
-    _commandList->SetDescriptorHeaps(ARRAY_COUNT(ppHeaps), ppHeaps);
+    // Discard resources not created during rendering
+    for (auto* resource : _device->PendingResourceDiscards)
+        _commandList->DiscardResource(resource, nullptr);
+    _device->PendingResourceDiscards.Clear();
 }
 
 uint64 GPUContextDX12::Execute(bool waitForCompletion)
@@ -253,6 +367,7 @@ uint64 GPUContextDX12::Execute(bool waitForCompletion)
     _currentState = nullptr;
 
     // Execute commands
+    IsOpen = false;
     const uint64 fenceValue = queue->ExecuteCommandList(_commandList);
 
     // Cleanup used allocator
@@ -266,14 +381,15 @@ uint64 GPUContextDX12::Execute(bool waitForCompletion)
     return fenceValue;
 }
 
-void GPUContextDX12::OnSwapChainFlush()
+void GPUContextDX12::OnSwapChainFlush(ResourceOwnerDX12* backBuffer)
 {
-    _swapChainsUsed++;
+    _swapChains.Add(backBuffer);
 
     // Flush per-window (excluding the main window)
-    if (_swapChainsUsed > 1)
+    if (_swapChains.Count() > 1)
     {
         // Flush GPU commands
+        flushSwapChains();
         Flush();
     }
 }
@@ -285,6 +401,17 @@ void GPUContextDX12::GetActiveHeapDescriptor(const D3D12_CPU_DESCRIPTOR_HANDLE& 
 
     // Copy descriptor
     _device->GetDevice()->CopyDescriptorsSimple(1, descriptor.CPU, cpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void GPUContextDX12::flushSwapChains()
+{
+    // Transition swapchains to the present state
+    for (ResourceOwnerDX12* backBuffer : _swapChains)
+    {
+        SetResourceState(backBuffer, D3D12_RESOURCE_STATE_PRESENT);
+    }
+    _swapChains.Clear();
+    flushRBs();
 }
 
 void GPUContextDX12::flushSRVs()
@@ -314,7 +441,7 @@ void GPUContextDX12::flushSRVs()
     ASSERT(srCount <= GPU_MAX_SR_BINDED);
 
     // Fill table with source descriptors
-    DxShaderHeader& header = _currentCompute ? ((GPUShaderProgramCSDX12*)_currentCompute)->Header : _currentState->Header;
+    DxShaderHeader& header = _isCompute ? ((GPUShaderProgramCSDX12*)_currentCompute)->Header : _currentState->Header;
     D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStarts[GPU_MAX_SR_BINDED];
     for (uint32 i = 0; i < srCount; i++)
     {
@@ -344,9 +471,9 @@ void GPUContextDX12::flushSRVs()
 
     // Flush SRV descriptors table
     if (_isCompute)
-        _commandList->SetComputeRootDescriptorTable(2, allocation.GPU);
+        _commandList->SetComputeRootDescriptorTable(DX12_ROOT_SIGNATURE_SR, allocation.GPU);
     else
-        _commandList->SetGraphicsRootDescriptorTable(2, allocation.GPU);
+        _commandList->SetGraphicsRootDescriptorTable(DX12_ROOT_SIGNATURE_SR, allocation.GPU);
 }
 
 void GPUContextDX12::flushRTVs()
@@ -417,11 +544,11 @@ void GPUContextDX12::flushUAVs()
 
     // Count UAVs required to be bind to the pipeline (the index of the most significant bit that's set)
     const uint32 uaCount = Math::FloorLog2(uaMask) + 1;
-    ASSERT(uaCount <= GPU_MAX_UA_BINDED + 1);
+    ASSERT(uaCount <= GPU_MAX_UA_BINDED);
 
     // Fill table with source descriptors
-    DxShaderHeader& header = _currentCompute ? ((GPUShaderProgramCSDX12*)_currentCompute)->Header : _currentState->Header;
-    D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStarts[GPU_MAX_UA_BINDED + 1];
+    DxShaderHeader& header = _isCompute ? ((GPUShaderProgramCSDX12*)_currentCompute)->Header : _currentState->Header;
+    D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStarts[GPU_MAX_UA_BINDED];
     for (uint32 i = 0; i < uaCount; i++)
     {
         const auto handle = _uaHandles[i];
@@ -446,26 +573,41 @@ void GPUContextDX12::flushUAVs()
 
     // Flush UAV descriptors table
     if (_isCompute)
-        _commandList->SetComputeRootDescriptorTable(3, allocation.GPU);
+        _commandList->SetComputeRootDescriptorTable(DX12_ROOT_SIGNATURE_UA, allocation.GPU);
     else
-        _commandList->SetGraphicsRootDescriptorTable(3, allocation.GPU);
+        _commandList->SetGraphicsRootDescriptorTable(DX12_ROOT_SIGNATURE_UA, allocation.GPU);
 }
 
 void GPUContextDX12::flushCBs()
 {
-    if (!_cbDirtyFlag)
-        return;
-    _cbDirtyFlag = false;
-    for (uint32 slotIndex = 0; slotIndex < ARRAY_COUNT(_cbHandles); slotIndex++)
+    if (_cbGraphicsDirtyFlag && !_isCompute)
     {
-        auto cb = _cbHandles[slotIndex];
-        if (cb)
+        _cbGraphicsDirtyFlag = false;
+        for (uint32 i = 0; i < ARRAY_COUNT(_cbHandles); i++)
         {
-            ASSERT(cb->GPUAddress != 0);
-            if (_isCompute)
-                _commandList->SetComputeRootConstantBufferView(slotIndex, cb->GPUAddress);
-            else
-                _commandList->SetGraphicsRootConstantBufferView(slotIndex, cb->GPUAddress);
+            const auto cb = _cbHandles[i];
+            if (cb)
+            {
+                if (cb->GPUAddress != 0)
+                    _commandList->SetGraphicsRootConstantBufferView(DX12_ROOT_SIGNATURE_CB + i, cb->GPUAddress);
+                else
+                    _cbGraphicsDirtyFlag = true; // CB was binded but not yet assigned so stay in dirty state
+            }
+        }
+    }
+    else if (_cbComputeDirtyFlag && _isCompute)
+    {
+        _cbComputeDirtyFlag = false;
+        for (uint32 i = 0; i < ARRAY_COUNT(_cbHandles); i++)
+        {
+            const auto cb = _cbHandles[i];
+            if (cb)
+            {
+                if (cb->GPUAddress != 0)
+                    _commandList->SetComputeRootConstantBufferView(DX12_ROOT_SIGNATURE_CB + i, cb->GPUAddress);
+                else
+                    _cbComputeDirtyFlag = true; // CB was binded but not yet assigned so stay in dirty state
+            }
         }
     }
 }
@@ -500,9 +642,9 @@ void GPUContextDX12::flushSamplers()
     auto allocation = _device->RingHeap_Sampler.AllocateTable(samplersCount);
     _device->GetDevice()->CopyDescriptors(1, &allocation.CPU, &samplersCount, samplersCount, srcDescriptorRangeStarts, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     if (_isCompute)
-        _commandList->SetComputeRootDescriptorTable(4, allocation.GPU);
+        _commandList->SetComputeRootDescriptorTable(DX12_ROOT_SIGNATURE_SAMPLER, allocation.GPU);
     else
-        _commandList->SetGraphicsRootDescriptorTable(4, allocation.GPU);
+        _commandList->SetGraphicsRootDescriptorTable(DX12_ROOT_SIGNATURE_SAMPLER, allocation.GPU);
 }
 
 void GPUContextDX12::flushRBs()
@@ -536,8 +678,20 @@ void GPUContextDX12::flushPS()
 
         // Change state
         ASSERT(_currentState->IsValid());
-        _commandList->SetPipelineState(_currentState->GetState(_rtDepth, _rtCount, _rtHandles));
-        _commandList->IASetPrimitiveTopology(_currentState->PrimitiveTopologyType);
+#if GPU_ENABLE_ASSERTION_LOW_LAYERS
+        if (!_vertexLayout && _vbHandles[0] && !_currentState->VertexBufferLayout)
+        {
+            LOG(Error, "Missing Vertex Layout (not assigned to GPUBuffer). Vertex Shader won't read valid data resulting incorrect visuals.");
+        }
+#endif
+        ID3D12PipelineState* pso = _currentState->GetState(_rtDepth, _rtCount, _rtHandles, _vertexLayout);
+        ASSERT(pso);
+        _commandList->SetPipelineState(pso);
+        if (_primitiveTopology != _currentState->PrimitiveTopology)
+        {
+            _primitiveTopology = _currentState->PrimitiveTopology;
+            _commandList->IASetPrimitiveTopology(_primitiveTopology);
+        }
 
         RENDER_STAT_PS_STATE_CHANGE();
     }
@@ -651,12 +805,23 @@ void GPUContextDX12::FrameBegin()
 
 void GPUContextDX12::FrameEnd()
 {
+    flushSwapChains();
+
     // Base
     GPUContext::FrameEnd();
 
     // Execute command (but don't wait for them)
     FrameFenceValues[1] = FrameFenceValues[0];
     FrameFenceValues[0] = Execute(false);
+}
+
+void GPUContextDX12::OnPresent()
+{
+    GPUContext::OnPresent();
+
+#if GPU_ENABLE_TRACY
+    tracy::CollectD3D12Context(_tracyContext);
+#endif
 }
 
 #if GPU_ALLOW_PROFILE_EVENTS
@@ -666,10 +831,22 @@ void GPUContextDX12::EventBegin(const Char* name)
 #if USE_PIX
     PIXBeginEvent(_commandList, 0, name);
 #endif
+
+#if GPU_ENABLE_TRACY
+    char buffer[60];
+    int32 bufferSize = StringUtils::Copy(buffer, name, sizeof(buffer));
+    auto& zone = _tracyZones.AddOne();
+    tracy::BeginD3D12ZoneScope(zone.Data, _tracyContext, _commandList, buffer, bufferSize);
+#endif
 }
 
 void GPUContextDX12::EventEnd()
 {
+#if GPU_ENABLE_TRACY
+    tracy::EndD3D12ZoneScope(_tracyZones.Last().Data);
+    _tracyZones.RemoveLast();
+#endif
+
 #if USE_PIX
     PIXEndEvent(_commandList);
 #endif
@@ -690,7 +867,6 @@ bool GPUContextDX12::IsDepthBufferBinded()
 void GPUContextDX12::Clear(GPUTextureView* rt, const Color& color)
 {
     auto rtDX12 = static_cast<GPUTextureViewDX12*>(rt);
-
     if (rtDX12)
     {
         SetResourceState(rtDX12->GetResourceOwner(), D3D12_RESOURCE_STATE_RENDER_TARGET, rtDX12->SubresourceIndex);
@@ -700,23 +876,24 @@ void GPUContextDX12::Clear(GPUTextureView* rt, const Color& color)
     }
 }
 
-void GPUContextDX12::ClearDepth(GPUTextureView* depthBuffer, float depthValue)
+void GPUContextDX12::ClearDepth(GPUTextureView* depthBuffer, float depthValue, uint8 stencilValue)
 {
     auto depthBufferDX12 = static_cast<GPUTextureViewDX12*>(depthBuffer);
-
     if (depthBufferDX12)
     {
         SetResourceState(depthBufferDX12->GetResourceOwner(), D3D12_RESOURCE_STATE_DEPTH_WRITE, depthBufferDX12->SubresourceIndex);
         flushRBs();
 
-        _commandList->ClearDepthStencilView(depthBufferDX12->DSV(), D3D12_CLEAR_FLAG_DEPTH, depthValue, 0xff, 0, nullptr);
+        D3D12_CLEAR_FLAGS clearFlags = D3D12_CLEAR_FLAG_DEPTH;
+        if (PixelFormatExtensions::HasStencil(depthBufferDX12->GetFormat()))
+            clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
+        _commandList->ClearDepthStencilView(depthBufferDX12->DSV(), clearFlags, depthValue, stencilValue, 0, nullptr);
     }
 }
 
-void GPUContextDX12::ClearUA(GPUBuffer* buf, const Vector4& value)
+void GPUContextDX12::ClearUA(GPUBuffer* buf, const Float4& value)
 {
     ASSERT(buf != nullptr && buf->IsUnorderedAccess());
-
     auto bufDX12 = reinterpret_cast<GPUBufferDX12*>(buf);
 
     SetResourceState(bufDX12, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -726,6 +903,48 @@ void GPUContextDX12::ClearUA(GPUBuffer* buf, const Vector4& value)
     Descriptor desc;
     GetActiveHeapDescriptor(uav, desc);
     _commandList->ClearUnorderedAccessViewFloat(desc.GPU, uav, bufDX12->GetResource(), value.Raw, 0, nullptr);
+}
+
+void GPUContextDX12::ClearUA(GPUBuffer* buf, const uint32 value[4])
+{
+    ASSERT(buf != nullptr && buf->IsUnorderedAccess());
+    auto bufDX12 = reinterpret_cast<GPUBufferDX12*>(buf);
+
+    SetResourceState(bufDX12, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    flushRBs();
+
+    auto uav = ((GPUBufferViewDX12*)bufDX12->View())->UAV();
+    Descriptor desc;
+    GetActiveHeapDescriptor(uav, desc);
+    _commandList->ClearUnorderedAccessViewUint(desc.GPU, uav, bufDX12->GetResource(), value, 0, nullptr);
+}
+
+void GPUContextDX12::ClearUA(GPUTexture* texture, const uint32 value[4])
+{
+    ASSERT(texture != nullptr && texture->IsUnorderedAccess());
+    auto texDX12 = reinterpret_cast<GPUTextureDX12*>(texture);
+
+    SetResourceState(texDX12, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    flushRBs();
+
+    auto uav = ((GPUTextureViewDX12*)texDX12->View(0))->UAV();
+    Descriptor desc;
+    GetActiveHeapDescriptor(uav, desc);
+    _commandList->ClearUnorderedAccessViewUint(desc.GPU, uav, texDX12->GetResource(), value, 0, nullptr);
+}
+
+void GPUContextDX12::ClearUA(GPUTexture* texture, const Float4& value)
+{
+    ASSERT(texture != nullptr && texture->IsUnorderedAccess());
+    auto texDX12 = reinterpret_cast<GPUTextureDX12*>(texture);
+
+    SetResourceState(texDX12, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    flushRBs();
+
+    auto uav = ((GPUTextureViewDX12*)(texDX12->IsVolume() ? texDX12->ViewVolume() : texDX12->View(0)))->UAV();
+    Descriptor desc;
+    GetActiveHeapDescriptor(uav, desc);
+    _commandList->ClearUnorderedAccessViewFloat(desc.GPU, uav, texDX12->GetResource(), value.Raw, 0, nullptr);
 }
 
 void GPUContextDX12::ResetRenderTarget()
@@ -776,7 +995,7 @@ void GPUContextDX12::SetRenderTarget(GPUTextureView* depthBuffer, GPUTextureView
 
 void GPUContextDX12::SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPUTextureView*>& rts)
 {
-    ASSERT(Math::IsInRange(rts.Length(), 1, GPU_MAX_RT_BINDED));
+    ASSERT(Math::IsInRange(rts.Length(), 0, GPU_MAX_RT_BINDED));
 
     const auto depthBufferDX12 = static_cast<GPUTextureViewDX12*>(depthBuffer);
 
@@ -797,15 +1016,18 @@ void GPUContextDX12::SetRenderTarget(GPUTextureView* depthBuffer, const Span<GPU
     }
 }
 
-void GPUContextDX12::SetRenderTarget(GPUTextureView* rt, GPUBuffer* uaOutput)
+void GPUContextDX12::SetBlendFactor(const Float4& value)
 {
-    auto uaOutputDX12 = uaOutput ? (GPUBufferViewDX12*)uaOutput->View() : nullptr;
+    _commandList->OMSetBlendFactor(value.Raw);
+}
 
-    // Set render target normally
-    SetRenderTarget(nullptr, rt);
-
-    // Bind UAV output to the 2nd slot (after render target to match DX11 binding model)
-    _uaHandles[1] = uaOutputDX12;
+void GPUContextDX12::SetStencilRef(uint32 value)
+{
+    if (_stencilRef != value)
+    {
+        _stencilRef = value;
+        _commandList->OMSetStencilRef(value);
+    }
 }
 
 void GPUContextDX12::ResetSR()
@@ -830,14 +1052,14 @@ void GPUContextDX12::ResetUA()
             _srMaskDirtyGraphics |= 1 << slot;
             _srMaskDirtyCompute |= 1 << slot;
             _uaHandles[slot] = nullptr;
-            break;
         }
     }
 }
 
 void GPUContextDX12::ResetCB()
 {
-    _cbDirtyFlag = false;
+    _cbGraphicsDirtyFlag = false;
+    _cbComputeDirtyFlag = false;
     Platform::MemoryClear(_cbHandles, sizeof(_cbHandles));
 }
 
@@ -847,16 +1069,21 @@ void GPUContextDX12::BindCB(int32 slot, GPUConstantBuffer* cb)
     auto cbDX12 = static_cast<GPUConstantBufferDX12*>(cb);
     if (_cbHandles[slot] != cbDX12)
     {
-        _cbDirtyFlag = true;
+        _cbGraphicsDirtyFlag = true;
+        _cbComputeDirtyFlag = true;
         _cbHandles[slot] = cbDX12;
     }
 }
 
 void GPUContextDX12::BindSR(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_SR_BINDED);
+    if (view && ((IShaderResourceDX12*)view->GetNativePtr())->SRV().ptr == 0)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::SRV);
+#endif
     auto handle = view ? (IShaderResourceDX12*)view->GetNativePtr() : nullptr;
-    if (_srHandles[slot] != handle || !handle)
+    if (_srHandles[slot] != handle)
     {
         _srMaskDirtyGraphics |= 1 << slot;
         _srMaskDirtyCompute |= 1 << slot;
@@ -868,18 +1095,21 @@ void GPUContextDX12::BindSR(int32 slot, GPUResourceView* view)
 
 void GPUContextDX12::BindUA(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_UA_BINDED);
+    if (view && ((IShaderResourceDX12*)view->GetNativePtr())->UAV().ptr == 0)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::UAV);
+#endif
     _uaHandles[slot] = view ? (IShaderResourceDX12*)view->GetNativePtr() : nullptr;
     if (view)
         *view->LastRenderTime = _lastRenderTime;
 }
 
-void GPUContextDX12::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets)
+void GPUContextDX12::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32* vertexBuffersOffsets, GPUVertexLayout* vertexLayout)
 {
     ASSERT(vertexBuffers.Length() >= 0 && vertexBuffers.Length() <= GPU_MAX_VB_BINDED);
-
     bool vbEdited = _vbCount != vertexBuffers.Length();
-    D3D12_VERTEX_BUFFER_VIEW views[GPU_MAX_VB_BINDED];
+    __declspec(align(16)) D3D12_VERTEX_BUFFER_VIEW views[GPU_MAX_VB_BINDED];
     for (int32 i = 0; i < vertexBuffers.Length(); i++)
     {
         const auto vbDX12 = static_cast<GPUBufferDX12*>(vertexBuffers[i]);
@@ -909,6 +1139,13 @@ void GPUContextDX12::BindVB(const Span<GPUBuffer*>& vertexBuffers, const uint32*
             return;
 #endif
         _commandList->IASetVertexBuffers(0, vertexBuffers.Length(), views);
+    }
+    if (!vertexLayout)
+         vertexLayout = GPUVertexLayout::Get(vertexBuffers);
+    if (_vertexLayout != vertexLayout)
+    {
+        _vertexLayout = (GPUVertexLayoutDX12*)vertexLayout;
+        _psDirtyFlag = true;
     }
 }
 
@@ -945,7 +1182,8 @@ void GPUContextDX12::UpdateCB(GPUConstantBuffer* cb, const void* data)
         return;
 
     // Allocate bytes for the buffer
-    DynamicAllocation allocation = _device->UploadBuffer->Allocate(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    auto allocation = _device->UploadBuffer.Allocate(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    RENDER_STAT_DATA_UPLOAD(size);
 
     // Copy data
     Platform::MemoryCopy(allocation.CPUAddress, data, allocation.Size);
@@ -958,7 +1196,8 @@ void GPUContextDX12::UpdateCB(GPUConstantBuffer* cb, const void* data)
     {
         if (_cbHandles[i] == cbDX12)
         {
-            _cbDirtyFlag = true;
+            _cbGraphicsDirtyFlag = true;
+            _cbComputeDirtyFlag = true;
             break;
         }
     }
@@ -966,6 +1205,7 @@ void GPUContextDX12::UpdateCB(GPUConstantBuffer* cb, const void* data)
 
 void GPUContextDX12::Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCountX, uint32 threadGroupCountY, uint32 threadGroupCountZ)
 {
+    bool bindPipelineState = _currentCompute != shader;
     _isCompute = 1;
     _currentCompute = shader;
 
@@ -978,24 +1218,28 @@ void GPUContextDX12::Dispatch(GPUShaderProgramCS* shader, uint32 threadGroupCoun
     auto shaderDX12 = (GPUShaderProgramCSDX12*)shader;
     auto computeState = shaderDX12->GetOrCreateState();
 
-    _commandList->SetPipelineState(computeState);
-    RENDER_STAT_PS_STATE_CHANGE();
+    if (bindPipelineState)
+    {
+        _commandList->SetPipelineState(computeState);
+        RENDER_STAT_PS_STATE_CHANGE();
+    }
 
     _commandList->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     RENDER_STAT_DISPATCH_CALL();
 
     _isCompute = 0;
-    _currentCompute = nullptr;
 
     // Restore previous state on next draw call
     _psDirtyFlag = true;
 
     // Insert UAV barrier to ensure proper memory access for multiple sequential dispatches
-    AddUAVBarrier();
+    if (_pass == 0)
+        AddUAVBarrier();
 }
 
 void GPUContextDX12::DispatchIndirect(GPUShaderProgramCS* shader, GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
+    bool bindPipelineState = _currentCompute != shader;
     _isCompute = 1;
     _currentCompute = shader;
 
@@ -1011,21 +1255,24 @@ void GPUContextDX12::DispatchIndirect(GPUShaderProgramCS* shader, GPUBuffer* buf
     auto shaderDX12 = (GPUShaderProgramCSDX12*)shader;
     auto computeState = shaderDX12->GetOrCreateState();
 
-    _commandList->SetPipelineState(computeState);
-    RENDER_STAT_PS_STATE_CHANGE();
+    if (bindPipelineState)
+    {
+        _commandList->SetPipelineState(computeState);
+        RENDER_STAT_PS_STATE_CHANGE();
+    }
 
     auto signature = _device->DispatchIndirectCommandSignature->GetSignature();
     _commandList->ExecuteIndirect(signature, 1, bufferForArgsDX12->GetResource(), (UINT64)offsetForArgs, nullptr, 0);
     RENDER_STAT_DISPATCH_CALL();
 
     _isCompute = 0;
-    _currentCompute = nullptr;
 
     // Restore previous state on next draw call
     _psDirtyFlag = true;
 
     // Insert UAV barrier to ensure proper memory access for multiple sequential dispatches
-    AddUAVBarrier();
+    if (_pass == 0)
+        AddUAVBarrier();
 }
 
 void GPUContextDX12::ResolveMultisample(GPUTexture* sourceMultisampleTexture, GPUTexture* destTexture, int32 sourceSubResource, int32 destSubResource, PixelFormat format)
@@ -1055,12 +1302,12 @@ void GPUContextDX12::DrawIndexedInstanced(uint32 indicesCount, uint32 instanceCo
 {
     OnDrawCall();
     _commandList->DrawIndexedInstanced(indicesCount, instanceCount, startIndex, startVertex, startInstance);
-    RENDER_STAT_DRAW_CALL(0, indicesCount / 3 * instanceCount);
+    RENDER_STAT_DRAW_CALL(indicesCount * instanceCount, indicesCount / 3 * instanceCount);
 }
 
 void GPUContextDX12::DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
 
     auto bufferForArgsDX12 = (GPUBufferDX12*)bufferForArgs;
     auto signature = _device->DrawIndirectCommandSignature->GetSignature();
@@ -1073,7 +1320,7 @@ void GPUContextDX12::DrawInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offs
 
 void GPUContextDX12::DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint32 offsetForArgs)
 {
-    ASSERT(bufferForArgs && bufferForArgs->GetFlags() & GPUBufferFlags::Argument);
+    ASSERT(bufferForArgs && EnumHasAnyFlags(bufferForArgs->GetFlags(), GPUBufferFlags::Argument));
 
     auto bufferForArgsDX12 = (GPUBufferDX12*)bufferForArgs;
     auto signature = _device->DrawIndexedIndirectCommandSignature->GetSignature();
@@ -1082,6 +1329,31 @@ void GPUContextDX12::DrawIndexedInstancedIndirect(GPUBuffer* bufferForArgs, uint
     OnDrawCall();
     _commandList->ExecuteIndirect(signature, 1, bufferForArgsDX12->GetResource(), (UINT64)offsetForArgs, nullptr, 0);
     RENDER_STAT_DRAW_CALL(0, 0);
+}
+
+uint64 GPUContextDX12::BeginQuery(GPUQueryType type)
+{
+    auto query = _device->AllocQuery(type);
+    if (query.Raw)
+    {
+        auto heap = _device->QueryHeaps[query.Heap];
+        if (type == GPUQueryType::Timer) // Timer queries call End twice on different queries to calculate duration between GPU time clocks
+            _commandList->EndQuery(heap->QueryHeap, heap->QueryType, query.SecondaryElement);
+        else
+            _commandList->BeginQuery(heap->QueryHeap, heap->QueryType, query.Element);
+    }
+    return query.Raw;
+}
+
+void GPUContextDX12::EndQuery(uint64 queryID)
+{
+    if (queryID)
+    {
+        GPUQueryDX12 query;
+        query.Raw = queryID;
+        auto heap = _device->QueryHeaps[query.Heap];
+        _commandList->EndQuery(heap->QueryHeap, heap->QueryType, query.Element);
+    }
 }
 
 void GPUContextDX12::SetViewport(const Viewport& viewport)
@@ -1099,6 +1371,14 @@ void GPUContextDX12::SetScissor(const Rectangle& scissorRect)
     _commandList->RSSetScissorRects(1, &rect);
 }
 
+void GPUContextDX12::SetDepthBounds(float minDepth, float maxDepth)
+{
+#ifdef __ID3D12GraphicsCommandList1_FWD_DEFINED__
+    if (_commandList1)
+        _commandList1->OMSetDepthBounds(minDepth, maxDepth);
+#endif
+}
+
 GPUPipelineState* GPUContextDX12::GetState() const
 {
     return _currentState;
@@ -1113,7 +1393,7 @@ void GPUContextDX12::SetState(GPUPipelineState* state)
     }
 }
 
-void GPUContextDX12::ClearState()
+void GPUContextDX12::ResetState()
 {
     if (!_commandList)
         return;
@@ -1153,14 +1433,15 @@ void GPUContextDX12::Flush()
 void GPUContextDX12::UpdateBuffer(GPUBuffer* buffer, const void* data, uint32 size, uint32 offset)
 {
     ASSERT(data);
-    ASSERT(buffer && buffer->GetSize() >= size);
+    ASSERT(buffer && buffer->GetSize() >= size + offset);
 
     auto bufferDX12 = (GPUBufferDX12*)buffer;
 
     SetResourceState(bufferDX12, D3D12_RESOURCE_STATE_COPY_DEST);
     flushRBs();
 
-    _device->UploadBuffer->UploadBuffer(this, bufferDX12->GetResource(), offset, data, size);
+    _device->UploadBuffer.UploadBuffer(GetCommandList(), bufferDX12->GetResource(), offset, data, size);
+    RENDER_STAT_DATA_UPLOAD(size);
 }
 
 void GPUContextDX12::CopyBuffer(GPUBuffer* dstBuffer, GPUBuffer* srcBuffer, uint32 size, uint32 dstOffset, uint32 srcOffset)
@@ -1186,7 +1467,8 @@ void GPUContextDX12::UpdateTexture(GPUTexture* texture, int32 arrayIndex, int32 
     SetResourceState(textureDX12, D3D12_RESOURCE_STATE_COPY_DEST);
     flushRBs();
 
-    _device->UploadBuffer->UploadTexture(this, textureDX12->GetResource(), data, rowPitch, slicePitch, mipIndex, arrayIndex);
+    _device->UploadBuffer.UploadTexture(GetCommandList(), textureDX12->GetResource(), data, rowPitch, slicePitch, mipIndex, arrayIndex);
+    RENDER_STAT_DATA_UPLOAD(slicePitch);
 }
 
 void GPUContextDX12::CopyTexture(GPUTexture* dstResource, uint32 dstSubresource, uint32 dstX, uint32 dstY, uint32 dstZ, GPUTexture* srcResource, uint32 srcSubresource)
@@ -1201,8 +1483,23 @@ void GPUContextDX12::CopyTexture(GPUTexture* dstResource, uint32 dstSubresource,
     // Get destination copy location
     D3D12_TEXTURE_COPY_LOCATION dst;
     dst.pResource = dstTextureDX12->GetResource();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = dstSubresource;
+    if (dstTextureDX12->IsStaging())
+    {
+        const int32 mipLevel = (int32)dstSubresource % dstTextureDX12->MipLevels();
+        const int32 copyOffset = dstTextureDX12->ComputeBufferOffset((int32)dstSubresource, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Offset = copyOffset;
+        dst.PlacedFootprint.Footprint.Width = dstTextureDX12->CalculateMipSize(dstTextureDX12->Width(), mipLevel);
+        dst.PlacedFootprint.Footprint.Height = dstTextureDX12->CalculateMipSize(dstTextureDX12->Height(), mipLevel);
+        dst.PlacedFootprint.Footprint.Depth = dstTextureDX12->CalculateMipSize(dstTextureDX12->Depth(), mipLevel);
+        dst.PlacedFootprint.Footprint.Format = RenderToolsDX::ToDxgiFormat(dstTextureDX12->Format());
+        dst.PlacedFootprint.Footprint.RowPitch = dstTextureDX12->ComputeRowPitch(mipLevel, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    }
+    else
+    {
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = dstSubresource;
+    }
 
     // Get source copy location
     D3D12_TEXTURE_COPY_LOCATION src;
@@ -1226,7 +1523,8 @@ void GPUContextDX12::ResetCounter(GPUBuffer* buffer)
     flushRBs();
 
     uint32 value = 0;
-    _device->UploadBuffer->UploadBuffer(this, counter->GetResource(), 0, &value, 4);
+    _device->UploadBuffer.UploadBuffer(GetCommandList(), counter->GetResource(), 0, &value, 4);
+    RENDER_STAT_DATA_UPLOAD(4);
 
     SetResourceState(counter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
@@ -1253,25 +1551,23 @@ void GPUContextDX12::CopyResource(GPUResource* dstResource, GPUResource* srcReso
 
     auto dstResourceDX12 = dynamic_cast<ResourceOwnerDX12*>(dstResource);
     auto srcResourceDX12 = dynamic_cast<ResourceOwnerDX12*>(srcResource);
+    auto dstBufferDX12 = dynamic_cast<GPUBufferDX12*>(dstResource);
+    auto srcBufferDX12 = dynamic_cast<GPUBufferDX12*>(srcResource);
+    auto dstTextureDX12 = dynamic_cast<GPUTextureDX12*>(dstResource);
+    auto srcTextureDX12 = dynamic_cast<GPUTextureDX12*>(srcResource);
 
     SetResourceState(dstResourceDX12, D3D12_RESOURCE_STATE_COPY_DEST);
     SetResourceState(srcResourceDX12, D3D12_RESOURCE_STATE_COPY_SOURCE);
     flushRBs();
 
-    auto srcType = srcResource->GetObjectType();
-    auto dstType = dstResource->GetObjectType();
-
     // Buffer -> Buffer
-    if (srcType == GPUResource::ObjectType::Buffer && dstType == GPUResource::ObjectType::Buffer)
+    if (srcBufferDX12 && dstBufferDX12)
     {
         _commandList->CopyResource(dstResourceDX12->GetResource(), srcResourceDX12->GetResource());
     }
-        // Texture -> Texture
-    else if (srcType == GPUResource::ObjectType::Texture && dstType == GPUResource::ObjectType::Texture)
+    // Texture -> Texture
+    else if (srcTextureDX12 && dstTextureDX12)
     {
-        auto dstTextureDX12 = static_cast<GPUTextureDX12*>(dstResource);
-        auto srcTextureDX12 = static_cast<GPUTextureDX12*>(srcResource);
-
         if (dstTextureDX12->IsStaging())
         {
             // Staging Texture -> Staging Texture
@@ -1342,32 +1638,26 @@ void GPUContextDX12::CopySubresource(GPUResource* dstResource, uint32 dstSubreso
 {
     ASSERT(dstResource && srcResource);
 
-    auto srcType = srcResource->GetObjectType();
-    auto dstType = dstResource->GetObjectType();
+    auto dstResourceDX12 = dynamic_cast<ResourceOwnerDX12*>(dstResource);
+    auto srcResourceDX12 = dynamic_cast<ResourceOwnerDX12*>(srcResource);
+    auto dstBufferDX12 = dynamic_cast<GPUBufferDX12*>(dstResource);
+    auto srcBufferDX12 = dynamic_cast<GPUBufferDX12*>(srcResource);
+    auto dstTextureDX12 = dynamic_cast<GPUTextureDX12*>(dstResource);
+    auto srcTextureDX12 = dynamic_cast<GPUTextureDX12*>(srcResource);
+
+    SetResourceState(dstResourceDX12, D3D12_RESOURCE_STATE_COPY_DEST);
+    SetResourceState(srcResourceDX12, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    flushRBs();
 
     // Buffer -> Buffer
-    if (srcType == GPUResource::ObjectType::Buffer && dstType == GPUResource::ObjectType::Buffer)
+    if (srcBufferDX12 && dstBufferDX12)
     {
-        auto dstBufferDX12 = dynamic_cast<ResourceOwnerDX12*>(dstResource);
-        auto srcBufferDX12 = dynamic_cast<ResourceOwnerDX12*>(srcResource);
-
-        SetResourceState(dstBufferDX12, D3D12_RESOURCE_STATE_COPY_DEST);
-        SetResourceState(srcBufferDX12, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        flushRBs();
-
         uint64 bytesCount = srcResource->GetMemoryUsage();
         _commandList->CopyBufferRegion(dstBufferDX12->GetResource(), 0, srcBufferDX12->GetResource(), 0, bytesCount);
     }
-        // Texture -> Texture
-    else if (srcType == GPUResource::ObjectType::Texture && dstType == GPUResource::ObjectType::Texture)
+    // Texture -> Texture
+    else if (srcTextureDX12 && dstTextureDX12)
     {
-        auto dstTextureDX12 = static_cast<GPUTextureDX12*>(dstResource);
-        auto srcTextureDX12 = static_cast<GPUTextureDX12*>(srcResource);
-
-        SetResourceState(dstTextureDX12, D3D12_RESOURCE_STATE_COPY_DEST);
-        SetResourceState(srcTextureDX12, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        flushRBs();
-
         if (srcTextureDX12->IsStaging() || dstTextureDX12->IsStaging())
         {
             Log::NotImplementedException(TEXT("Copy region of staging resources is not supported yet."));
@@ -1390,6 +1680,34 @@ void GPUContextDX12::CopySubresource(GPUResource* dstResource, uint32 dstSubreso
     {
         Log::NotImplementedException(TEXT("Cannot copy data between buffer and texture."));
     }
+}
+
+void GPUContextDX12::SetResourceState(GPUResource* resource, uint64 state, int32 subresource)
+{
+    auto resourceDX12 = dynamic_cast<ResourceOwnerDX12*>(resource);
+    SetResourceState(resourceDX12, (D3D12_RESOURCE_STATES)state, subresource);
+}
+
+void GPUContextDX12::ForceRebindDescriptors()
+{
+    // Bind Root Signature
+    _commandList->SetGraphicsRootSignature(_device->GetRootSignature());
+    _commandList->SetComputeRootSignature(_device->GetRootSignature());
+
+    // Bind heaps
+    ID3D12DescriptorHeap* ppHeaps[] = { _device->RingHeap_CBV_SRV_UAV.GetHeap(), _device->RingHeap_Sampler.GetHeap() };
+    _commandList->SetDescriptorHeaps(ARRAY_COUNT(ppHeaps), ppHeaps);
+}
+
+void GPUContextDX12::Transition(GPUResource* resource, GPUResourceAccess access)
+{
+    SetResourceState(dynamic_cast<ResourceOwnerDX12*>(resource), GetResourceState(access));
+}
+
+void GPUContextDX12::OverlapUA(bool end)
+{
+    if (end)
+        AddUAVBarrier();
 }
 
 #endif

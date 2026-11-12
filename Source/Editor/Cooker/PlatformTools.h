@@ -1,13 +1,43 @@
-// Copyright (c) 2012-2019 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "CookingData.h"
-#include "Engine/Core/Collections/Dictionary.h"
 #include "Editor/Scripting/ScriptsBuilder.h"
 #include "Engine/Graphics/PixelFormat.h"
 
 class TextureBase;
+
+/// <summary>
+/// The game cooker cache interface.
+/// </summary>
+class FLAXENGINE_API IBuildCache
+{
+public:
+    /// <summary>
+    /// Removes all cached entries for assets that contain a given asset type. This forces rebuild for them.
+    /// </summary>
+    virtual void InvalidateCachePerType(const StringView& typeName) = 0;
+
+    /// <summary>
+    /// Removes all cached entries for assets that contain a given asset type. This forces rebuild for them.
+    /// </summary>
+    template<typename T>
+    FORCE_INLINE void InvalidateCachePerType()
+    {
+        InvalidateCachePerType(T::TypeName);
+    }
+
+    /// <summary>
+    /// Removes all cached entries for assets that contain a shader. This forces rebuild for them.
+    /// </summary>
+    void InvalidateCacheShaders();
+
+    /// <summary>
+    /// Removes all cached entries for assets that contain a texture. This forces rebuild for them.
+    /// </summary>
+    void InvalidateCacheTextures();
+};
 
 /// <summary>
 /// The platform support tools base interface.
@@ -15,7 +45,6 @@ class TextureBase;
 class FLAXENGINE_API PlatformTools
 {
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="PlatformTools"/> class.
     /// </summary>
@@ -24,32 +53,49 @@ public:
     /// <summary>
     /// Gets the name of the platform for UI and logging.
     /// </summary>
-    /// <returns>The name.</returns>
     virtual const Char* GetDisplayName() const = 0;
 
     /// <summary>
     /// Gets the name of the platform for filesystem cache directories, deps folder.
     /// </summary>
-    /// <returns>The name.</returns>
     virtual const Char* GetName() const = 0;
 
     /// <summary>
     /// Gets the type of the platform.
     /// </summary>
-    /// <returns>The platform type.</returns>
     virtual PlatformType GetPlatform() const = 0;
 
     /// <summary>
     /// Gets the architecture of the platform.
     /// </summary>
-    /// <returns>The architecture type.</returns>
     virtual ArchitectureType GetArchitecture() const = 0;
 
     /// <summary>
-    /// Gets the value indicating whenever platform requires AOT.
+    /// Gets the .Net version to use for the cooked game.
     /// </summary>
-    /// <returns>True if platform uses AOT and needs C# assemblies to be precompiled, otherwise false.</returns>
-    virtual bool UseAOT() const
+    virtual int32 GetDotnetVersion() const
+    {
+#if OFFICIAL_BUILD
+        // Use the fixed .NET SDK version in packaged builds for compatibility (FlaxGame is precompiled with it)
+        return GAME_BUILD_DOTNET_RUNTIME_MIN_VER;
+#else
+        // Use the highest version found on a system (Flax.Build will decide)
+        return 0;
+#endif
+    }
+
+    /// <summary>
+    /// Gets the value indicating whenever platform requires AOT (needs C# assemblies to be precompiled).
+    /// </summary>
+    virtual DotNetAOTModes UseAOT() const
+    {
+        return DotNetAOTModes::None;
+    }
+
+    /// <summary>
+    /// Gets the value indicating whenever platform supports using system-installed .Net Runtime.
+    /// </summary>
+    virtual bool UseSystemDotnet() const
     {
         return false;
     }
@@ -72,12 +118,29 @@ public:
     /// <param name="data">The cooking data.</param>
     /// <param name="file">The file path.</param>
     /// <returns>True if it's a native file, otherwise false.<returns>
-    virtual bool IsNativeCodeFile(CookingData& data, const String& file)
-    {
-        return false;
-    }
+    virtual bool IsNativeCodeFile(CookingData& data, const String& file);
 
 public:
+    /// <summary>
+    /// Loads the build cache. Allows to invalidate any cached asset types based on the build settings for incremental builds (eg. invalidate textures/shaders).
+    /// </summary>
+    /// <param name="data">The cooking data.</param>
+    /// <param name="data">The build cache interface.</param>
+    /// <param name="data">The loaded cache data. Can be empty when starting a fresh build.</param>
+    virtual void LoadCache(CookingData& data, IBuildCache* cache, const Span<byte>& bytes)
+    {
+    }
+
+    /// <summary>
+    /// Saves the build cache. Allows to store any build settings to be used for cache invalidation on incremental builds.
+    /// </summary>
+    /// <param name="data">The cooking data.</param>
+    /// <param name="data">The build cache interface.</param>
+    /// <returns>Data to cache, will be restored during next incremental build.<returns>
+    virtual Array<byte> SaveCache(CookingData& data, IBuildCache* cache)
+    {
+        return Array<byte>();
+    }
 
     /// <summary>
     /// Called when game building starts.
@@ -137,64 +200,6 @@ public:
     }
 
     /// <summary>
-    /// The C# scripts AOT configuration options.
-    /// </summary>
-    struct AotConfig
-    {
-        String AotCompilerPath;
-        String AotCompilerArgs;
-        String AssemblerPath;
-        String AssemblerArgs;
-        String ArchiverPath;
-        String ArchiverArgs;
-        String AuxToolPath;
-        String AuxToolArgs;
-        String AotCachePath;
-        Dictionary<String, String> EnvVars;
-        Array<String> AssembliesSearchDirs;
-        Array<String> Assemblies;
-
-        AotConfig(CookingData& data)
-        {
-            Platform::GetEnvironmentVariables(EnvVars);
-            EnvVars[TEXT("MONO_PATH")] = data.DataOutputPath / TEXT("Mono/lib/mono/4.5");
-            AssembliesSearchDirs.Add(data.DataOutputPath / TEXT("Mono/lib/mono/4.5"));
-        }
-    };
-
-    /// <summary>
-    /// Called to configure AOT options.
-    /// </summary>
-    /// <param name="data">The cooking data.</param>
-    /// <param name="config">The configuration.</param>
-    virtual void OnConfigureAOT(CookingData& data, AotConfig& config)
-    {
-    }
-
-    /// <summary>
-    /// Called to execute AOT for the given assembly.
-    /// </summary>
-    /// <param name="data">The cooking data.</param>
-    /// <param name="config">The configuration.</param>
-    /// <param name="assemblyPath">The input managed library file path.</param>
-    /// <returns>True if failed, otherwise false.<returns>
-    virtual bool OnPerformAOT(CookingData& data, AotConfig& config, const String& assemblyPath)
-    {
-        return false;
-    }
-
-    /// <summary>
-    /// Called after AOT execution for the assemblies.
-    /// </summary>
-    /// <param name="data">The cooking data.</param>
-    /// <param name="config">The configuration.</param>
-    /// <returns>True if failed, otherwise false.<returns>
-    virtual bool OnPostProcessAOT(CookingData& data, AotConfig& config)
-    {
-        return false;
-    }
-
-    /// <summary>
     /// Called during staged build post-processing.
     /// </summary>
     /// <param name="data">The cooking data.</param>
@@ -202,5 +207,16 @@ public:
     virtual bool OnPostProcess(CookingData& data)
     {
         return false;
+    }
+
+    /// <summary>
+    /// Called to run the cooked game build on device.
+    /// </summary>
+    /// <param name="data">The cooking data.</param>
+    /// <param name="executableFile">The game executable file path to run (or tool path to run if build should run on remote device). Empty if not supported.</param>
+    /// <param name="commandLineFormat">The command line for executable file. Use `{0}` to insert custom command line for passing to the cooked game.</param>
+    /// <param name="workingDir">Overriden custom working directory to use. Leave empty if use cooked data output folder.</param>
+    virtual void OnRun(CookingData& data, String& executableFile, String& commandLineFormat, String& workingDir)
+    {
     }
 };

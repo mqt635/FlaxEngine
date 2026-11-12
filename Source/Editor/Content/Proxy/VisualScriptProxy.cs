@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -8,6 +8,7 @@ using FlaxEditor.Windows;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Content
 {
@@ -15,6 +16,7 @@ namespace FlaxEditor.Content
     /// A <see cref="VisualScript"/> asset proxy object.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.BinaryAssetProxy" />
+    [ContentContextMenu("New/Visual Script")]
     public class VisualScriptProxy : BinaryAssetProxy, IScriptTypesContainer
     {
         internal VisualScriptProxy()

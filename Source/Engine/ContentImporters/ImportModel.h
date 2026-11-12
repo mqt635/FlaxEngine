@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,28 +9,21 @@
 #include "Engine/Tools/ModelTool/ModelTool.h"
 
 /// <summary>
-/// Enable/disable caching model import options
-/// </summary>
-#define IMPORT_MODEL_CACHE_OPTIONS 1
-
-/// <summary>
 /// Importing models utility
 /// </summary>
-class ImportModelFile
+class ImportModel
 {
 public:
-
     typedef ModelTool::Options Options;
 
 public:
-
     /// <summary>
     /// Tries the get model import options from the target location asset.
     /// </summary>
     /// <param name="path">The asset path.</param>
     /// <param name="options">The options.</param>
     /// <returns>True if success, otherwise false.</returns>
-    static bool TryGetImportOptions(String path, Options& options);
+    static bool TryGetImportOptions(const StringView& path, Options& options);
 
     /// <summary>
     /// Imports the model file.
@@ -47,10 +40,10 @@ public:
     static CreateAssetResult Create(CreateAssetContext& context);
 
 private:
-
-    static CreateAssetResult ImportModel(CreateAssetContext& context, ModelData& modelData);
-    static CreateAssetResult ImportSkinnedModel(CreateAssetContext& context, ModelData& modelData);
-    static CreateAssetResult ImportAnimation(CreateAssetContext& context, ModelData& modelData);
+    static CreateAssetResult CreateModel(CreateAssetContext& context, const ModelData& data, const Options* options = nullptr);
+    static CreateAssetResult CreateSkinnedModel(CreateAssetContext& context, const ModelData& data, const Options* options = nullptr);
+    static CreateAssetResult CreateAnimation(CreateAssetContext& context, const ModelData& data, const Options* options = nullptr);
+    static CreateAssetResult CreatePrefab(CreateAssetContext& context, const ModelData& data, const Options& options, const Array<struct PrefabObject>& prefabObjects);
 };
 
 #endif

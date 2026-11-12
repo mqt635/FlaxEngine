@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,5 +9,5 @@
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API CubeTexture : public TextureBase
 {
-DECLARE_BINARY_ASSET_HEADER(CubeTexture, TexturesSerializedVersion);
+    DECLARE_BINARY_ASSET_HEADER(CubeTexture, TexturesSerializedVersion);
 };

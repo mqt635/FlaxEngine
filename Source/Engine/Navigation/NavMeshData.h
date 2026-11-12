@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,13 +7,13 @@
 
 class WriteStream;
 
-struct NavMeshTileDataHeader
+PACK_STRUCT(struct NavMeshTileDataHeader
 {
     int32 PosX;
     int32 PosY;
     int32 Layer;
     int32 DataSize;
-};
+});
 
 struct NavMeshTileData
 {
@@ -33,7 +33,6 @@ struct NavMeshDataHeader
 class NavMeshData
 {
 public:
-
     /// <summary>
     /// The size of the navmesh tile (in world units).
     /// </summary>
@@ -45,7 +44,6 @@ public:
     Array<NavMeshTileData> Tiles;
 
 public:
-
     /// <summary>
     /// Saves the navmesh tiles to the specified stream.
     /// </summary>

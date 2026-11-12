@@ -1,57 +1,48 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "PhysicsActor.h"
+#include "Engine/Level/Actor.h"
+#include "Engine/Physics/Types.h"
+#include "Engine/Physics/Actors/IPhysicsActor.h"
 #include "Engine/Physics/Collisions.h"
 
 class PhysicsColliderActor;
+class Collider;
 
 /// <summary>
 /// Physics simulation driven object.
 /// </summary>
-/// <seealso cref="PhysicsActor" />
-API_CLASS() class FLAXENGINE_API RigidBody : public PhysicsActor
+/// <seealso cref="Actor" />
+API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Rigid Body\"), ActorToolbox(\"Physics\")")
+class FLAXENGINE_API RigidBody : public Actor, public IPhysicsActor
 {
-DECLARE_SCENE_OBJECT(RigidBody);
+    DECLARE_SCENE_OBJECT(RigidBody);
 protected:
-
-    PxRigidDynamic* _actor;
-    Vector3 _cachedScale;
+    void* _actor;
+    Float3 _cachedScale;
 
     float _mass;
     float _linearDamping;
     float _angularDamping;
     float _maxAngularVelocity;
     float _massScale;
-    Vector3 _centerOfMassOffset;
+    Float3 _centerOfMassOffset;
     RigidbodyConstraints _constraints;
 
-    int32 _enableSimulation : 1;
-    int32 _isKinematic : 1;
-    int32 _useCCD : 1;
-    int32 _enableGravity : 1;
-    int32 _startAwake : 1;
-    int32 _updateMassWhenScaleChanges : 1;
-    int32 _overrideMass : 1;
+    uint32 _enableSimulation : 1;
+    uint32 _isKinematic : 1;
+    uint32 _useCCD : 1;
+    uint32 _enableGravity : 1;
+    uint32 _startAwake : 1;
+    uint32 _updateMassWhenScaleChanges : 1;
+    uint32 _overrideMass : 1;
+    uint32 _isUpdatingTransform : 1;
 
 public:
-
     /// <summary>
-    /// Enables kinematic mode for the rigidbody.
+    /// Enables kinematic mode for the rigidbody. Kinematic rigidbodies are special dynamic actors that are not influenced by forces(such as gravity), and have no momentum. They are considered to have infinite mass and can push regular dynamic actors out of the way. Kinematics will not collide with static or other kinematic objects but are great for moving platforms or characters, where direct motion control is desired.
     /// </summary>
-    /// <remarks>
-    /// Kinematic rigidbodies are special dynamic actors that are not influenced by forces(such as gravity), and have no momentum.
-    /// They are considered to have infinite mass and can push regular dynamic actors out of the way.
-    /// Kinematics will not collide with static or other kinematic objects.
-    /// <para>
-    /// Kinematic rigidbodies are great for moving platforms or characters, where direct motion control is desired.
-    /// </para>
-    /// <para>
-    /// Kinematic rigidbodies are incompatible with CCD.
-    /// </para>
-    /// </remarks>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(10), DefaultValue(false), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE bool GetIsKinematic() const
     {
@@ -59,29 +50,13 @@ public:
     }
 
     /// <summary>
-    /// Enables kinematic mode for the rigidbody.
+    /// Enables kinematic mode for the rigidbody. Kinematic rigidbodies are special dynamic actors that are not influenced by forces(such as gravity), and have no momentum. They are considered to have infinite mass and can push regular dynamic actors out of the way. Kinematics will not collide with static or other kinematic objects but are great for moving platforms or characters, where direct motion control is desired.
     /// </summary>
-    /// <remarks>
-    /// Kinematic rigidbodies are special dynamic actors that are not influenced by forces(such as gravity), and have no momentum.
-    /// They are considered to have infinite mass and can push regular dynamic actors out of the way.
-    /// Kinematics will not collide with static or other kinematic objects.
-    /// <para>
-    /// Kinematic rigidbodies are great for moving platforms or characters, where direct motion control is desired.
-    /// </para>
-    /// <para>
-    /// Kinematic rigidbodies are incompatible with CCD.
-    /// </para>
-    /// </remarks>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetIsKinematic(const bool value);
 
     /// <summary>
-    /// Gets the 'drag' force added to reduce linear movement.
+    /// Gets the 'drag' force added to reduce linear movement. Linear damping can be used to slow down an object. The higher the drag the more the object slows down.
     /// </summary>
-    /// <remarks>
-    /// Linear damping can be used to slow down an object. The higher the drag the more the object slows down.
-    /// </remarks>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(60), DefaultValue(0.01f), Limit(0), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE float GetLinearDamping() const
     {
@@ -89,21 +64,13 @@ public:
     }
 
     /// <summary>
-    /// Sets the 'drag' force added to reduce linear movement.
+    /// Sets the 'drag' force added to reduce linear movement. Linear damping can be used to slow down an object. The higher the drag the more the object slows down.
     /// </summary>
-    /// <remarks>
-    /// Linear damping can be used to slow down an object. The higher the drag the more the object slows down.
-    /// </remarks>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetLinearDamping(float value);
 
     /// <summary>
-    /// Gets the 'drag' force added to reduce angular movement.
+    /// Gets the 'drag' force added to reduce angular movement. Angular damping can be used to slow down the rotation of an object. The higher the drag the more the rotation slows down.
     /// </summary>
-    /// <remarks>
-    /// Angular damping can be used to slow down the rotation of an object. The higher the drag the more the rotation slows down.
-    /// </remarks>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(70), DefaultValue(0.05f), Limit(0), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE float GetAngularDamping() const
     {
@@ -111,18 +78,14 @@ public:
     }
 
     /// <summary>
-    /// Sets the 'drag' force added to reduce angular movement.
+    /// Sets the 'drag' force added to reduce angular movement. Angular damping can be used to slow down the rotation of an object. The higher the drag the more the rotation slows down.
     /// </summary>
-    /// <remarks>
-    /// Angular damping can be used to slow down the rotation of an object. The higher the drag the more the rotation slows down.
-    /// </remarks>
     /// <param name="value">The value.</param>
     API_PROPERTY() void SetAngularDamping(float value);
 
     /// <summary>
     /// If true simulation and collisions detection will be enabled for the rigidbody.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(20), DefaultValue(true), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE bool GetEnableSimulation() const
     {
@@ -132,13 +95,11 @@ public:
     /// <summary>
     /// If true simulation and collisions detection will be enabled for the rigidbody.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetEnableSimulation(bool value);
 
     /// <summary>
     /// If true Continuous Collision Detection (CCD) will be used for this component.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(30), DefaultValue(false), EditorDisplay(\"Rigid Body\", \"Use CCD\")")
     FORCE_INLINE bool GetUseCCD() const
     {
@@ -148,13 +109,11 @@ public:
     /// <summary>
     /// If true Continuous Collision Detection (CCD) will be used for this component.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetUseCCD(const bool value);
 
     /// <summary>
     /// If object should have the force of gravity applied.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(40), DefaultValue(true), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE bool GetEnableGravity() const
     {
@@ -164,13 +123,11 @@ public:
     /// <summary>
     /// If object should have the force of gravity applied.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetEnableGravity(bool value);
 
     /// <summary>
     /// If object should start awake, or if it should initially be sleeping.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(50), DefaultValue(true), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE bool GetStartAwake() const
     {
@@ -180,13 +137,11 @@ public:
     /// <summary>
     /// If object should start awake, or if it should initially be sleeping.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetStartAwake(bool value);
 
     /// <summary>
     /// If true, it will update mass when actor scale changes.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(130), DefaultValue(false), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE bool GetUpdateMassWhenScaleChanges() const
     {
@@ -196,17 +151,11 @@ public:
     /// <summary>
     /// If true, it will update mass when actor scale changes.
     /// </summary>
-    /// <param name="value">The value.</
     API_PROPERTY() void SetUpdateMassWhenScaleChanges(bool value);
 
     /// <summary>
-    /// Gets the maximum angular velocity that a simulated object can achieve.
+    /// Gets the maximum angular velocity that a simulated object can achieve. The angular velocity of rigidbodies is clamped to MaxAngularVelocity to avoid numerical instability with fast rotating bodies. Because this may prevent intentional fast rotations on objects such as wheels, you can override this value per rigidbody.
     /// </summary>
-    /// <remarks>
-    /// The angular velocity of rigidbodies is clamped to MaxAngularVelocity to avoid numerical instability with fast rotating bodies.
-    /// Because this may prevent intentional fast rotations on objects such as wheels, you can override this value per rigidbody.
-    /// </remarks>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(90), DefaultValue(7.0f), Limit(0), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE float GetMaxAngularVelocity() const
     {
@@ -214,72 +163,48 @@ public:
     }
 
     /// <summary>
-    /// Sets the maximum angular velocity that a simulated object can achieve.
+    /// Sets the maximum angular velocity that a simulated object can achieve. The angular velocity of rigidbodies is clamped to MaxAngularVelocity to avoid numerical instability with fast rotating bodies. Because this may prevent intentional fast rotations on objects such as wheels, you can override this value per rigidbody.
     /// </summary>
-    /// <remarks>
-    /// The angular velocity of rigidbodies is clamped to MaxAngularVelocity to avoid numerical instability with fast rotating bodies.
-    /// Because this may prevent intentional fast rotations on objects such as wheels, you can override this value per rigidbody.
-    /// </remarks>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetMaxAngularVelocity(float value);
 
     /// <summary>
     /// Override the auto computed mass.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="HideInEditor")
-    FORCE_INLINE bool GetOverrideMass() const
-    {
-        return _overrideMass != 0;
-    }
+    bool GetOverrideMass() const;
 
     /// <summary>
     /// Override the auto computed mass.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetOverrideMass(bool value);
 
     /// <summary>
-    /// Gets the mass value measured in kilograms (use override value only if EnableOverrideMass is enabled).
+    /// Gets the mass value measured in kilograms (use override value only if OverrideMass is checked).
     /// </summary>
-    /// <returns>The value.</returns>
-    API_PROPERTY(Attributes="EditorOrder(110), Limit(0), EditorDisplay(\"Rigid Body\")")
-    FORCE_INLINE float GetMass() const
-    {
-        return _mass;
-    }
+    API_PROPERTY(Attributes="EditorOrder(110), Limit(0), EditorDisplay(\"Rigid Body\"), ValueCategory(Utils.ValueCategory.Mass)")
+    float GetMass() const;
 
     /// <summary>
-    /// Sets the mass value measured in kilograms (use override value only if EnableOverrideMass is enabled).
+    /// Sets the mass value measured in kilograms (use override value only if OverrideMass is checked).
     /// </summary>
-    /// <remarks>
-    /// If set auto enables mass override.
-    /// </remarks>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetMass(float value);
 
     /// <summary>
     /// Gets the per-instance scaling of the mass.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(120), DefaultValue(1.0f), Limit(0.001f, 100.0f), EditorDisplay(\"Rigid Body\")")
-    FORCE_INLINE float GetMassScale() const
-    {
-        return _massScale;
-    }
+    float GetMassScale() const;
 
     /// <summary>
     /// Sets the per-instance scaling of the mass.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetMassScale(float value);
 
     /// <summary>
     /// Gets the user specified offset for the center of mass of this object, from the calculated location.
     /// </summary>
-    /// <returns>The value.</returns>
-    API_PROPERTY(Attributes="EditorOrder(140), DefaultValue(typeof(Vector3), \"0,0,0\"), EditorDisplay(\"Rigid Body\", \"Center Of Mass Offset\")")
-    FORCE_INLINE Vector3 GetCenterOfMassOffset() const
+    API_PROPERTY(Attributes="EditorOrder(140), DefaultValue(typeof(Float3), \"0,0,0\"), EditorDisplay(\"Rigid Body\", \"Center Of Mass Offset\")")
+    FORCE_INLINE Float3 GetCenterOfMassOffset() const
     {
         return _centerOfMassOffset;
     }
@@ -287,13 +212,11 @@ public:
     /// <summary>
     /// Sets the user specified offset for the center of mass of this object, from the calculated location.
     /// </summary>
-    /// <param name="value">The value.</param>
-    API_PROPERTY() void SetCenterOfMassOffset(const Vector3& value);
+    API_PROPERTY() void SetCenterOfMassOffset(const Float3& value);
 
     /// <summary>
     /// Gets the object movement constraint flags that define degrees of freedom are allowed for the simulation of object.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(150), DefaultValue(RigidbodyConstraints.None), EditorDisplay(\"Rigid Body\")")
     FORCE_INLINE RigidbodyConstraints GetConstraints() const
     {
@@ -303,56 +226,41 @@ public:
     /// <summary>
     /// Sets the object movement constraint flags that define degrees of freedom are allowed for the simulation of object.
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetConstraints(const RigidbodyConstraints value);
 
 public:
-
     /// <summary>
     /// Gets the linear velocity of the rigidbody.
     /// </summary>
-    /// <remarks>
-    /// It's used mostly to get the current velocity. Manual modifications may result in unrealistic behaviour.
-    /// </remarks>
-    /// <returns>The value.</returns>
+    /// <remarks>It's used mostly to get the current velocity. Manual modifications may result in unrealistic behaviour.</remarks>
     API_PROPERTY(Attributes="HideInEditor")
     Vector3 GetLinearVelocity() const;
 
     /// <summary>
     /// Sets the linear velocity of the rigidbody.
     /// </summary>
-    /// <remarks>
-    /// It's used mostly to get the current velocity. Manual modifications may result in unrealistic behaviour.
-    /// </remarks>
+    /// <remarks>It's used mostly to get the current velocity. Manual modifications may result in unrealistic behaviour.</remarks>
     /// <param name="value">The value.</param>
     API_PROPERTY() void SetLinearVelocity(const Vector3& value) const;
 
     /// <summary>
     /// Gets the angular velocity of the rigidbody measured in radians per second.
     /// </summary>
-    /// <remarks>
-    /// It's used mostly to get the current angular velocity. Manual modifications may result in unrealistic behaviour.
-    /// </remarks>
-    /// <returns>The value.</returns>
+    /// <remarks>It's used mostly to get the current angular velocity. Manual modifications may result in unrealistic behaviour.</remarks>
     API_PROPERTY(Attributes="HideInEditor")
     Vector3 GetAngularVelocity() const;
 
     /// <summary>
     /// Sets the angular velocity of the rigidbody measured in radians per second.
     /// </summary>
-    /// <remarks>
-    /// It's used mostly to get the current angular velocity. Manual modifications may result in unrealistic behaviour.
-    /// </remarks>
+    /// <remarks>It's used mostly to get the current angular velocity. Manual modifications may result in unrealistic behaviour.</remarks>
     /// <param name="value">The value.</param>
     API_PROPERTY() void SetAngularVelocity(const Vector3& value) const;
 
     /// <summary>
     /// Gets the maximum depenetration velocity when rigidbody moving out of penetrating state.
     /// </summary>
-    /// <remarks>
-    /// This value controls how much velocity the solver can introduce to correct for penetrations in contacts. 
-    /// Using this property can smooth objects moving out of colliding state and prevent unstable motion.
-    /// </remarks>
+    /// <remarks>This value controls how much velocity the solver can introduce to correct for penetrations in contacts. Using this property can smooth objects moving out of colliding state and prevent unstable motion.</remarks>
     /// <returns>The value</returns>
     API_PROPERTY(Attributes="HideInEditor")
     float GetMaxDepenetrationVelocity() const;
@@ -360,19 +268,14 @@ public:
     /// <summary>
     /// Sets the maximum depenetration velocity when rigidbody moving out of penetrating state.
     /// </summary>
-    /// <remarks>
-    /// This value controls how much velocity the solver can introduce to correct for penetrations in contacts. 
-    /// Using this property can smooth objects moving out of colliding state and prevent unstable motion.
-    /// </remarks>
+    /// <remarks>This value controls how much velocity the solver can introduce to correct for penetrations in contacts. Using this property can smooth objects moving out of colliding state and prevent unstable motion.</remarks>
     /// <param name="value">The value.</param>
     API_PROPERTY() void SetMaxDepenetrationVelocity(const float value) const;
 
     /// <summary>
     /// Gets the mass-normalized kinetic energy threshold below which an actor may go to sleep.
     /// </summary>
-    /// <remarks>
-    /// Actors whose kinetic energy divided by their mass is below this threshold will be candidates for sleeping.
-    /// </remarks>
+    /// <remarks>Actors whose kinetic energy divided by their mass is below this threshold will be candidates for sleeping.</remarks>
     /// <returns>The value</returns>
     API_PROPERTY(Attributes="HideInEditor")
     float GetSleepThreshold() const;
@@ -380,26 +283,21 @@ public:
     /// <summary>
     /// Sets the mass-normalized kinetic energy threshold below which an actor may go to sleep.
     /// </summary>
-    /// <remarks>
-    /// Actors whose kinetic energy divided by their mass is below this threshold will be candidates for sleeping.
-    /// </remarks>
+    /// <remarks>Actors whose kinetic energy divided by their mass is below this threshold will be candidates for sleeping.</remarks>
     /// <param name="value">The value.</param>
     API_PROPERTY() void SetSleepThreshold(const float value) const;
 
     /// <summary>
     /// Gets the center of the mass in the local space.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY() Vector3 GetCenterOfMass() const;
 
     /// <summary>
     /// Determines whether this rigidbody is sleeping.
     /// </summary>
-    /// <returns><c>true</c> if this rigidbody is sleeping; otherwise, <c>false</c>.</returns>
     API_PROPERTY() bool IsSleeping() const;
 
 public:
-
     /// <summary>
     /// Forces a rigidbody to sleep (for at least one frame).
     /// </summary>
@@ -414,15 +312,6 @@ public:
     /// Updates the actor's mass (auto calculated mass from density and inertia tensor or overriden value).
     /// </summary>
     API_FUNCTION() void UpdateMass();
-
-    /// <summary>
-    /// Gets the native PhysX rigid actor object.
-    /// </summary>
-    /// <returns>The PhysX dynamic rigid actor.</returns>
-    FORCE_INLINE PxRigidDynamic* GetPhysXRigidActor() const
-    {
-        return _actor;
-    }
 
     /// <summary>
     /// Applies a force (or impulse) defined in the world space to the rigidbody at its center of mass.
@@ -542,7 +431,6 @@ public:
     API_FUNCTION() void ClosestPoint(const Vector3& position, API_PARAM(Out) Vector3& result) const;
 
 public:
-
     /// <summary>
     /// Occurs when a collision start gets registered for this rigidbody (it collides with something).
     /// </summary>
@@ -564,7 +452,6 @@ public:
     API_EVENT() Delegate<PhysicsColliderActor*> TriggerExit;
 
 public:
-
     void OnCollisionEnter(const Collision& c);
     void OnCollisionExit(const Collision& c);
 
@@ -574,31 +461,45 @@ public:
     // Called when collider gets detached from this rigidbody or activated/deactivated. Used to update rigidbody mass.
     virtual void OnColliderChanged(Collider* c);
 
-protected:
-
     /// <summary>
-    /// Creates the physics actor.
+    /// Updates the bounding box.
     /// </summary>
-    void CreateActor();
+    void UpdateBounds();
 
     /// <summary>
     /// Updates the rigidbody scale dependent properties like mass (may be modified when actor transformation changes).
     /// </summary>
     void UpdateScale();
 
-public:
+    template<typename ColliderType = Collider, typename AllocationType = HeapAllocation>
+    void GetColliders(Array<ColliderType*, AllocationType>& result) const
+    {
+        for (int32 i = 0; i < Children.Count(); i++)
+        {
+            const auto collider = Cast<ColliderType>(Children.Get()[i]);
+            if (collider && collider->GetAttachedRigidBody() == this)
+                result.Add(collider);
+        }
+    }
 
-    // [PhysicsActor]
+public:
+    // [Actor]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-    PxActor* GetPhysXActor() override;
-    PxRigidActor* GetRigidActor() override;
+    void AddMovement(const Vector3& translation, const Quaternion& rotation) override;
+#if USE_EDITOR
+    void OnDebugDrawSelected() override;
+#endif
+
+    // [IPhysicsActor]
+    void* GetPhysicsActor() const override;
+    void OnActiveTransformChanged() override;
 
 protected:
-
-    // [PhysicsActor]
+    // [Actor]
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void OnActiveInTreeChanged() override;
     void OnTransformChanged() override;
+    void OnPhysicsSceneChanged(PhysicsScene* previous) override;
 };

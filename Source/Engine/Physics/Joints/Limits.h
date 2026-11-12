@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 /// </summary>
 API_STRUCT() struct SpringParameters
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(SpringParameters);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(SpringParameters);
 
     /// <summary>
     /// The spring strength. Force proportional to the position error.
@@ -23,7 +23,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(SpringParameters);
     API_FIELD() float Damping;
 
 public:
-
     /// <summary>
     /// Constructs a spring with no force.
     /// </summary>
@@ -45,12 +44,6 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const SpringParameters& other) const
     {
         return Stiffness == other.Stiffness && Damping == other.Damping;
@@ -62,7 +55,7 @@ public:
 /// </summary>
 API_STRUCT() struct LimitLinearRange
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinearRange);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinearRange);
 
     /// <summary>
     /// Distance from the limit at which it becomes active. Allows the solver to activate earlier than the limit is reached to avoid breaking the limit.
@@ -90,7 +83,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinearRange);
     API_FIELD() float Upper = 0.0f;
 
 public:
-
     /// <summary>
     /// Constructs an empty limit.
     /// </summary>
@@ -127,19 +119,9 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const LimitLinearRange& other) const
     {
-        return Lower == other.Lower
-                && Upper == other.Upper
-                && ContactDist == other.ContactDist
-                && Restitution == other.Restitution
-                && Spring == other.Spring;
+        return Lower == other.Lower && Upper == other.Upper && ContactDist == other.ContactDist && Restitution == other.Restitution && Spring == other.Spring;
     }
 };
 
@@ -148,7 +130,7 @@ public:
 /// </summary>
 API_STRUCT() struct LimitLinear
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinear);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinear);
 
     /// <summary>
     /// Distance from the limit at which it becomes active. Allows the solver to activate earlier than the limit is reached to avoid breaking the limit.
@@ -171,7 +153,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(LimitLinear);
     API_FIELD() float Extent = 0.0f;
 
 public:
-
     /// <summary>
     /// Constructs an empty limit.
     /// </summary>
@@ -204,18 +185,9 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const LimitLinear& other) const
     {
-        return Extent == other.Extent
-                && ContactDist == other.ContactDist
-                && Restitution == other.Restitution
-                && Spring == other.Spring;
+        return Extent == other.Extent && ContactDist == other.ContactDist && Restitution == other.Restitution && Spring == other.Spring;
     }
 };
 
@@ -224,7 +196,7 @@ public:
 /// </summary>
 API_STRUCT() struct LimitAngularRange
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LimitAngularRange);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LimitAngularRange);
 
     /// <summary>
     /// Distance from the limit at which it becomes active. Allows the solver to activate earlier than the limit is reached to avoid breaking the limit.
@@ -252,7 +224,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(LimitAngularRange);
     API_FIELD() float Upper = 0.0f;
 
 public:
-
     /// <summary>
     /// Constructs an empty limit.
     /// </summary>
@@ -289,19 +260,9 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const LimitAngularRange& other) const
     {
-        return Lower == other.Lower
-                && Upper == other.Upper
-                && ContactDist == other.ContactDist
-                && Restitution == other.Restitution
-                && Spring == other.Spring;
+        return Lower == other.Lower && Upper == other.Upper && ContactDist == other.ContactDist && Restitution == other.Restitution && Spring == other.Spring;
     }
 };
 
@@ -310,7 +271,7 @@ public:
 /// </summary>
 API_STRUCT() struct LimitConeRange
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LimitConeRange);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LimitConeRange);
 
     /// <summary>
     /// Distance from the limit at which it becomes active. Allows the solver to activate earlier than the limit is reached to avoid breaking the limit.
@@ -338,7 +299,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(LimitConeRange);
     API_FIELD(Attributes="Limit(0.0f, 180.0f)") float ZLimitAngle = 90.0f;
 
 public:
-
     /// <summary>
     /// Constructs a limit with a 45 degree cone.
     /// </summary>
@@ -375,18 +335,8 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const LimitConeRange& other) const
     {
-        return YLimitAngle == other.YLimitAngle
-                && ZLimitAngle == other.ZLimitAngle
-                && ContactDist == other.ContactDist
-                && Restitution == other.Restitution
-                && Spring == other.Spring;
+        return YLimitAngle == other.YLimitAngle && ZLimitAngle == other.ZLimitAngle && ContactDist == other.ContactDist && Restitution == other.Restitution && Spring == other.Spring;
     }
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,7 +17,6 @@ class Task;
 class FLAXENGINE_API GPUSwapChain : public GPUResource
 {
 protected:
-
     int32 _width = 0;
     int32 _height = 0;
     uint64 _presentCount = 0;
@@ -25,12 +24,9 @@ protected:
     Window* _window = nullptr;
     Task* _downloadTask = nullptr;
 
-    GPUSwapChain()
-    {
-    }
+    GPUSwapChain();
 
 public:
-
     /// <summary>
     /// Gets the linked window.
     /// </summary>
@@ -66,9 +62,9 @@ public:
     /// <summary>
     /// The output backbuffer width and height (in pixels).
     /// </summary>
-    FORCE_INLINE Vector2 GetSize() const
+    FORCE_INLINE Float2 GetSize() const
     {
-        return Vector2(static_cast<float>(_width), static_cast<float>(_height));
+        return Float2(static_cast<float>(_width), static_cast<float>(_height));
     }
 
     /// <summary>
@@ -110,7 +106,7 @@ public:
     /// </summary>
     /// <param name="context">The GPU commands context.</param>
     /// <param name="dst">The destination texture. It must match the output dimensions and format. No staging texture support.</param>
-    virtual void CopyBackbuffer(GPUContext* context, GPUTexture* dst) = 0;
+    virtual void CopyBackbuffer(GPUContext* context, GPUTexture* dst);
 
     /// <summary>
     /// Checks if task is ready to render.
@@ -123,7 +119,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Creates GPU async task that will gather render target data from the GPU.
     /// </summary>
@@ -132,7 +127,6 @@ public:
     virtual Task* DownloadDataAsync(TextureData& result);
 
 public:
-
     /// <summary>
     /// Begin task rendering.
     /// </summary>
@@ -162,16 +156,7 @@ public:
     virtual bool Resize(int32 width, int32 height) = 0;
 
 public:
-
     // [GPUResource]
-    ResourceType GetResourceType() const final override
-    {
-        return ResourceType::Texture;
-    }
-#if GPU_ENABLE_RESOURCE_NAMING
-    String GetName() const override
-    {
-        return String::Format(TEXT("RenderOutput {0}x{1}"), GetWidth(), GetHeight());
-    }
-#endif
+    String ToString() const override;
+    GPUResourceType GetResourceType() const final override;
 };

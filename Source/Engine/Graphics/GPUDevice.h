@@ -1,11 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Platform/Platform.h"
+#include "Engine/Platform/CriticalSection.h"
+#include "Engine/Core/NonCopyable.h"
+#include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingObject.h"
-#include "Async/GPUTasksManager.h"
-#include "GPUResourcesCollection.h"
 #include "GPUAdapter.h"
 #include "GPULimits.h"
 #include "Enums.h"
@@ -13,6 +14,7 @@
 
 class ITextureOwner;
 class RenderTask;
+class GPUResource;
 class GPUContext;
 class GPUShader;
 class GPUTimerQuery;
@@ -20,31 +22,104 @@ class GPUTexture;
 class GPUBuffer;
 class GPUSampler;
 class GPUPipelineState;
+class GPUConstantBuffer;
+class GPUVertexLayout;
+class GPUTasksContext;
+class GPUTasksExecutor;
 class GPUSwapChain;
+class GPUTasksManager;
 class Shader;
 class Model;
 class Material;
 class MaterialBase;
 
 /// <summary>
+/// Contains information about current GPU memory usage and budget.
+/// </summary>
+API_STRUCT(NoDefault) struct GPUMemoryStats
+{
+    DECLARE_SCRIPTING_TYPE_MINIMAL(GPUMemoryStats);
+
+    /// <summary>
+    /// Amount of used dedicated video memory in bytes. Memory local to the device, and represents the fastest available memory to the GPU.
+    /// </summary>
+    API_FIELD() uint64 UsedDedicatedMemory = 0;
+
+    /// <summary>
+    /// Total amount of dedicated memory budget in bytes. Memory local to the device, and represents the fastest available memory to the GPU.
+    /// </summary>
+    API_FIELD() uint64 TotalDedicatedMemory = 0;
+
+    /// <summary>
+    /// Amount of used system video memory in bytes. Memory non-local to the device, and may have slower performance than the dedicated/local.
+    /// </summary>
+    API_FIELD() uint64 UsedSystemMemory = 0;
+
+    /// <summary>
+    /// Total amount of system memory budget in bytes. Memory non-local to the device, and may have slower performance than the dedicated/local.
+    /// </summary>
+    API_FIELD() uint64 TotalSystemMemory = 0;
+};
+
+/// <summary>
 /// Graphics device object for rendering on GPU.
 /// </summary>
-API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API GPUDevice : public PersistentScriptingObject
+API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API GPUDevice : public ScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDevice);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDevice);
 public:
-
     /// <summary>
     /// Graphics Device states that describe its lifetime.
     /// </summary>
-    DECLARE_ENUM_6(DeviceState, Missing, Created, Ready, Removed, Disposing, Disposed);
+    enum class DeviceState
+    {
+        Missing = 0,
+        Created,
+        Ready,
+        Removed,
+        Disposing,
+        Disposed
+    };
 
     /// <summary>
-    /// Describes a video output display mode.
+    /// Describes a video output display (monitor).
+    /// </summary>
+    API_STRUCT() struct VideoOutput
+    {
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(VideoOutputMode);
+
+        /// <summary>
+        /// The display name.
+        /// </summary>
+        API_FIELD() String Name;
+
+        /// <summary>
+        /// The native screen resolution width (in pixel).
+        /// </summary>
+        API_FIELD() uint32 Width = 0;
+
+        /// <summary>
+        /// The native screen resolution height (in pixel).
+        /// </summary>
+        API_FIELD() uint32 Height = 0;
+
+        /// <summary>
+        /// The maximum screen refresh rate (in hertz).
+        /// </summary>
+        API_FIELD() float RefreshRate = 0;
+
+        /// <summary>
+        /// Flag that indicates that monitor supports displaying High Dynamic Range colors.
+        /// </summary>
+        API_FIELD() bool HDR = false;
+    };
+
+    /// <summary>
+    /// Describes a video output display mode (monitor screen mode).
     /// </summary>
     API_STRUCT() struct VideoOutputMode
     {
-    DECLARE_SCRIPTING_TYPE_NO_SPAWN(VideoOutputMode);
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(VideoOutputMode);
 
         /// <summary>
         /// The resolution width (in pixel).
@@ -59,7 +134,23 @@ public:
         /// <summary>
         /// The screen refresh rate (in hertz).
         /// </summary>
-        API_FIELD() uint32 RefreshRate;
+        API_FIELD() float RefreshRate;
+
+        /// <summary>
+        /// The index of the VideoOutput from the device monitors list.
+        /// </summary>
+        API_FIELD() int32 VideoOutputIndex;
+    };
+
+    /// <summary>
+    /// Collection of internal graphics API command queue pointers. Depend on the platform.
+    /// </summary>
+    struct QueueInfo
+    {
+        // The main graphics command queue (ID3D12CommandQueue* or VkQueue as void*). Null if not applicable.
+        void* MainQueue = nullptr;
+        // Vulkan queue family index for MainQueue. Zero for non-Vulkan backends.
+        uint32 MainQueueFamilyIndex = 0;
     };
 
     /// <summary>
@@ -68,11 +159,13 @@ public:
     API_FIELD(ReadOnly) static GPUDevice* Instance;
 
 protected:
-
     // State
     DeviceState _state;
     bool _isRendering;
     bool _wasVSyncUsed;
+#if GPU_ENABLE_DEBUG_LAYER
+    bool _debugLayer;
+#endif
     int32 _drawGpuEventIndex;
     RendererType _rendererType;
     ShaderProfile _shaderProfile;
@@ -81,9 +174,13 @@ protected:
     // Private resources (hidden with declaration)
     struct PrivateData;
     PrivateData* _res;
+    Array<GPUResource*> _resources;
+    CriticalSection _resourcesLock;
+    RenderTask* _lastVSyncTask = nullptr;
+
+    void OnRequestingExit();
 
 protected:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUDevice"/> class.
     /// </summary>
@@ -92,30 +189,16 @@ protected:
     GPUDevice(RendererType type, ShaderProfile profile);
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="GPUDevice"/> class.
     /// </summary>
     virtual ~GPUDevice();
 
 public:
-
     /// <summary>
     /// The graphics device locking mutex.
     /// </summary>
     CriticalSection Locker;
-
-    /// <summary>
-    /// The GPU resources collection.
-    /// </summary>
-    GPUResourcesCollection Resources;
-
-    /// <summary>
-    /// GPU asynchronous work manager.
-    /// </summary>
-    GPUTasksManager TasksManager;
-
-public:
 
     /// <summary>
     /// The total amount of graphics memory in bytes.
@@ -123,9 +206,19 @@ public:
     API_FIELD(ReadOnly) uint64 TotalGraphicsMemory;
 
     /// <summary>
+    /// Indicates that debug tool is profiling device (eg. RenderDoc).
+    /// </summary>
+    API_FIELD(ReadOnly) bool IsDebugToolAttached;
+
+    /// <summary>
     /// The GPU limits.
     /// </summary>
     API_FIELD(ReadOnly) GPULimits Limits;
+
+    /// <summary>
+    /// The available video outputs (monitors).
+    /// </summary>
+    API_FIELD(ReadOnly) Array<VideoOutput> VideoOutputs;
 
     /// <summary>
     /// The available video output modes.
@@ -135,7 +228,7 @@ public:
     /// <summary>
     /// Quad rendering shader
     /// </summary>
-    GPUShader* QuadShader;
+    API_FIELD(ReadOnly) GPUShader* QuadShader;
 
     /// <summary>
     /// The current task being executed.
@@ -158,7 +251,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets current device state.
     /// </summary>
@@ -223,14 +315,34 @@ public:
     API_PROPERTY() virtual void* GetNativePtr() const = 0;
 
     /// <summary>
-    /// Gets the amount of memory usage by all the GPU resources (in bytes).
+    /// Gets the native command queue info of the underlying graphics device. It contains a low-level platform-specific data.
+    /// </summary>
+    virtual QueueInfo GetNativeQueue() const;
+
+    /// <summary>
+    /// Gets the amount of memory usage by all the GPU resources (in bytes). Returned value is estimated based on resources created by the engine and might not be accurate. Use GPUMemoryStats for more detailed memory budget usage.
     /// </summary>
     API_PROPERTY() uint64 GetMemoryUsage() const;
 
     /// <summary>
+    /// Gets the current GPU memory stats.
+    /// </summary>
+    API_PROPERTY() virtual GPUMemoryStats GetMemoryStats();
+
+    /// <summary>
+    /// Gets the list with all active GPU resources.
+    /// </summary>
+    Array<GPUResource*> GetResources() const;
+
+    /// <summary>
+    /// Gets the GPU asynchronous work manager.
+    /// </summary>
+    GPUTasksManager* GetTasksManager() const;
+
+    /// <summary>
     /// Gets the default material.
     /// </summary>
-    MaterialBase* GetDefaultMaterial() const;
+    API_PROPERTY() MaterialBase* GetDefaultMaterial() const;
 
     /// <summary>
     /// Gets the default material (Deformable domain).
@@ -263,12 +375,21 @@ public:
     GPUPipelineState* GetClearPS() const;
 
     /// <summary>
+    /// Gets the shader pipeline state object for YUY2 frame decoding to RGBA.
+    /// </summary>
+    GPUPipelineState* GetDecodeYUY2PS() const;
+
+    /// <summary>
+    /// Gets the shader pipeline state object for NV12 frame decoding to RGBA.
+    /// </summary>
+    GPUPipelineState* GetDecodeNV12PS() const;
+
+    /// <summary>
     /// Gets the fullscreen-triangle vertex buffer.
     /// </summary>
     GPUBuffer* GetFullscreenTriangleVB() const;
 
 public:
-
     /// <summary>
     /// Init device resources
     /// </summary>
@@ -302,8 +423,31 @@ public:
     /// </summary>
     virtual void WaitForGPU() = 0;
 
-protected:
+    /// <summary>
+    /// Reads the query result from the GPU. Timer queries return time in microseconds (1/1000 ms).
+    /// </summary>
+    /// <remarks>GPU query results are short-lived, meaning that in the frame that results are ready, they won't be available in the next frame, as queries are reused.</remarks>
+    /// <param name="queryID">Query identifier returned by GPUContext::BeginQuery.</param>
+    /// <param name="result">The output result data of the query. Valid only when function returns true.</param>
+    /// <param name="wait">True if wait for the GPU to end processing commands for sync data ready. Otherwise, if query is incomplete then function will return value of false without result.</param>
+    /// <returns>True if got valid query result, otherwise false. If called with wait enabled then device failed to readback the query data.</returns>
+    virtual bool GetQueryResult(uint64 queryID, uint64& result, bool wait = false) = 0;
 
+public:
+    void AddResource(GPUResource* resource);
+    void RemoveResource(GPUResource* resource);
+
+    /// <summary>
+    /// Dumps all GPU resources information to the log.
+    /// </summary>
+    void DumpResourcesToLog() const;
+
+    /// <summary>
+    /// Dumps all GPU resources information to the log.
+    /// </summary>
+    API_FUNCTION(Attributes="DebugCommand") static void DumpResources();
+
+protected:
     virtual void preDispose();
 
     /// <summary>
@@ -326,8 +470,12 @@ protected:
     /// </summary>
     virtual void RenderEnd();
 
-public:
+    /// <summary>
+    /// Called when program crashed due to GPU error (out of memory, hang, error - see Engine::FatalError). By default, it logs all GPU resources to the log. Can be used to update platform-specific stats or extract crash-info.
+    /// </summary>
+    virtual void OnCrash();
 
+public:
     /// <summary>
     /// Creates the texture.
     /// </summary>
@@ -350,9 +498,10 @@ public:
 
     /// <summary>
     /// Creates the timer query object.
+    /// [Deprecated in v1.12]
     /// </summary>
     /// <returns>The timer query.</returns>
-    virtual GPUTimerQuery* CreateTimerQuery() = 0;
+    DEPRECATED("Use new BeginQuery/EndQuery on GPUContext to insert queries and GetQueryResult on GPUDevice to read the results.") virtual GPUTimerQuery* CreateTimerQuery() = 0;
 
     /// <summary>
     /// Creates the buffer.
@@ -368,11 +517,26 @@ public:
     API_FUNCTION() virtual GPUSampler* CreateSampler() = 0;
 
     /// <summary>
+    /// Creates the vertex buffer layout.
+    /// </summary>
+    /// <returns>The vertex buffer layout.</returns>
+    API_FUNCTION() virtual GPUVertexLayout* CreateVertexLayout(const Array<struct VertexElement, FixedAllocation<GPU_MAX_VS_ELEMENTS>>& elements, bool explicitOffsets = false) = 0;
+    typedef Array<VertexElement, FixedAllocation<GPU_MAX_VS_ELEMENTS>> VertexElements;
+
+    /// <summary>
     /// Creates the native window swap chain.
     /// </summary>
     /// <param name="window">The output window.</param>
     /// <returns>The native window swap chain.</returns>
     virtual GPUSwapChain* CreateSwapChain(Window* window) = 0;
+
+    /// <summary>
+    /// Creates the constant buffer.
+    /// </summary>
+    /// <param name="name">The resource name.</param>
+    /// <param name="size">The buffer size (in bytes).</param>
+    /// <returns>The constant buffer.</returns>
+    virtual GPUConstantBuffer* CreateConstantBuffer(uint32 size, const StringView& name = StringView::Empty) = 0;
 
     /// <summary>
     /// Creates the GPU tasks context.
@@ -385,6 +549,12 @@ public:
     /// </summary>
     /// <returns>The GPU tasks executor.</returns>
     virtual GPUTasksExecutor* CreateTasksExecutor();
+
+private:
+    // Internal bindings
+#if !COMPILE_WITHOUT_CSHARP
+    API_FUNCTION(NoProxy) void* GetResourcesInternal();
+#endif
 };
 
 /// <summary>
@@ -405,3 +575,10 @@ struct FLAXENGINE_API GPUDeviceLock : NonCopyable
         Device->Locker.Unlock();
     }
 };
+
+// Utility to get GPU resource name (StringView) from the AssetInfo. Supports cooked builds with enabled debug resource naming that resolves original file path from the project to boost debugging experience.
+#if GPU_ENABLE_RESOURCE_NAMING && !USE_EDITOR
+#define GPU_GET_RESOURCE_NAME_FROM_ASSET(assetInfo) Content::GetRegistry()->GetEditorAssetPath(info->ID)
+#else
+#define GPU_GET_RESOURCE_NAME_FROM_ASSET(assetInfo) info->Path
+#endif

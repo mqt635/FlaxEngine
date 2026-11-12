@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -77,15 +77,20 @@ namespace FlaxEditor.Windows
             public const float DefaultHeight = 32.0f;
 
             private DebugLogWindow _window;
+            private RichTextBox _richTextBox;
             public LogGroup Group;
             public LogEntryDescription Desc;
             public SpriteHandle Icon;
+            public int LogCount = 1;
+
+            private Color Color => Group == LogGroup.Error ? _window._colorError : (Group == LogGroup.Warning ? _window._colorWarning : _window._colorInfo);
 
             public LogEntry(DebugLogWindow window, ref LogEntryDescription desc)
             : base(0, 0, 120, DefaultHeight)
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop;
                 IsScrollable = true;
+                AutoFocus = true;
 
                 _window = window;
                 Desc = desc;
@@ -93,16 +98,34 @@ namespace FlaxEditor.Windows
                 {
                 case LogType.Warning:
                     Group = LogGroup.Warning;
-                    Icon = _window.IconWarning;
+                    Icon = _window._iconWarning;
                     break;
                 case LogType.Info:
                     Group = LogGroup.Info;
-                    Icon = _window.IconInfo;
+                    Icon = _window._iconInfo;
                     break;
                 default:
                     Group = LogGroup.Error;
-                    Icon = _window.IconError;
+                    Icon = _window._iconError;
                     break;
+                }
+
+                // Use Rich Text Box to display title if it contains any HTML tags
+                if (desc.Title.Contains('<') && desc.Title.Contains('>'))
+                {
+                    _richTextBox = new RichTextBox
+                    {
+                        ClipText = false,
+                        HasBorder = false,
+                        BackgroundColor = Color.Transparent,
+                        Text = desc.Title,
+                    };
+                    if (_window._colorDebugLogText)
+                    {
+                        var style = _richTextBox.TextStyle;
+                        style.Color = Color;
+                        _richTextBox.TextStyle = style;
+                    }
                 }
             }
 
@@ -114,29 +137,63 @@ namespace FlaxEditor.Windows
             /// <inheritdoc />
             public override void Draw()
             {
-                base.Draw();
-
-                // Cache data
                 var style = Style.Current;
                 var index = IndexInParent;
-                var clientRect = new Rectangle(Vector2.Zero, Size);
+                var clientRect = new Rectangle(Float2.Zero, Size);
+                var color = Color;
 
                 // Background
                 if (_window._selected == this)
-                    Render2D.FillRectangle(clientRect, IsFocused ? style.BackgroundSelected : style.LightBackground);
+                {
+                    Render2D.FillRectangle(clientRect, style.LightBackground);
+
+                    // Small rectangle to signal that entry is selected
+                    Rectangle selectionHighlightRect = clientRect with { Width = 4 };
+                    Render2D.FillRectangle(selectionHighlightRect, style.BackgroundSelected);
+                }
                 else if (IsMouseOver)
                     Render2D.FillRectangle(clientRect, style.BackgroundHighlighted);
                 else if (index % 2 == 0)
-                    Render2D.FillRectangle(clientRect, style.Background * 0.9f);
+                    Render2D.FillRectangle(clientRect, style.BackgroundTone);
 
                 // Icon
-                var iconColor = Group == LogGroup.Error ? Color.Red : (Group == LogGroup.Warning ? Color.Yellow : style.Foreground);
-                Render2D.DrawSprite(Icon, new Rectangle(5, 0, 32, 32), iconColor);
+                Render2D.DrawSprite(Icon, new Rectangle(8, 0, 32, 32), color);
 
                 // Title
-                var textRect = new Rectangle(38, 2, clientRect.Width - 40, clientRect.Height - 10);
+                var textRect = new Rectangle(43, 2, clientRect.Width - 40, clientRect.Height - 10);
                 Render2D.PushClip(ref clientRect);
-                Render2D.DrawText(style.FontMedium, Desc.Title, textRect, style.Foreground);
+                bool coloredText = _window._colorDebugLogText;
+                if (_richTextBox != null)
+                {
+                    Render2D.PushTransform(Matrix3x3.Translation2D(textRect.Location));
+                    _richTextBox.DrawSelf();
+                    Render2D.PopTransform();
+                }
+                else
+                {
+                    Render2D.DrawText(style.FontMedium, Desc.Title, textRect, coloredText ? color : style.Foreground);
+                }
+
+                // Adding log counter for collapsed logs
+                if (LogCount > 1)
+                {
+                    Float2 logCountPos = Float2.Zero;
+                    if (_richTextBox != null)
+                    {
+                        var blocks = _richTextBox.TextBlocks;
+                        if (blocks.Count != 0)
+                        {
+                            var block = blocks[^1];
+                            logCountPos = new Float2(block.Bounds.Right, block.Bounds.Top);
+                        }
+                    }
+                    else
+                    {
+                        logCountPos.X = style.FontMedium.MeasureText(Desc.Title).X;
+                    }
+                    Render2D.DrawText(style.FontMedium, $" ({LogCount})", color, textRect.Location + logCountPos);
+                }
+
                 Render2D.PopClip();
             }
 
@@ -161,6 +218,8 @@ namespace FlaxEditor.Windows
             /// <inheritdoc />
             public override bool OnKeyDown(KeyboardKeys key)
             {
+                InputOptions options = FlaxEditor.Editor.Instance.Options.Options.Input;
+
                 // Up
                 if (key == KeyboardKeys.ArrowUp)
                 {
@@ -191,7 +250,7 @@ namespace FlaxEditor.Windows
                     Open();
                 }
                 // Ctrl+C
-                else if (key == KeyboardKeys.C && Root.GetKey(KeyboardKeys.Control))
+                else if (options.Copy.Process(this))
                 {
                     Copy();
                     return true;
@@ -219,18 +278,28 @@ namespace FlaxEditor.Windows
                 Clipboard.Text = Info.Replace("\r\n", "\n").Replace("\n", Environment.NewLine);
             }
 
-            public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+            public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
             {
-                Open();
-                return true;
+                if (button == MouseButton.Left)
+                {
+                    Open();
+                    return true;
+                }
+
+                return false;
             }
 
             /// <inheritdoc />
-            public override bool OnMouseDown(Vector2 location, MouseButton button)
+            public override bool OnMouseDown(Float2 location, MouseButton button)
             {
                 if (base.OnMouseDown(location, button))
                     return true;
 
+                if (button == MouseButton.Left)
+                {
+                    Focus();
+                    return true;
+                }
                 if (button == MouseButton.Right)
                 {
                     Focus();
@@ -243,7 +312,7 @@ namespace FlaxEditor.Windows
             }
 
             /// <inheritdoc />
-            public override bool OnMouseUp(Vector2 location, MouseButton button)
+            public override bool OnMouseUp(Float2 location, MouseButton button)
             {
                 if (base.OnMouseUp(location, button))
                     return true;
@@ -268,6 +337,18 @@ namespace FlaxEditor.Windows
 
                 base.OnMouseLeave();
             }
+
+            /// <inheritdoc />
+            public override void OnDestroy()
+            {
+                if (_richTextBox != null)
+                {
+                    _richTextBox.OnDestroy();
+                    _richTextBox = null;
+                }
+
+                base.OnDestroy();
+            }
         }
 
         private readonly SplitPanel _split;
@@ -283,14 +364,18 @@ namespace FlaxEditor.Windows
         private readonly List<LogEntry> _pendingEntries = new List<LogEntry>(32);
 
         private readonly ToolStripButton _clearOnPlayButton;
+        private readonly ToolStripButton _collapseLogsButton;
         private readonly ToolStripButton _pauseOnErrorButton;
         private readonly ToolStripButton[] _groupButtons = new ToolStripButton[3];
 
         private LogType _iconType = LogType.Info;
-
-        internal SpriteHandle IconInfo;
-        internal SpriteHandle IconWarning;
-        internal SpriteHandle IconError;
+        private SpriteHandle _iconInfo;
+        private SpriteHandle _iconWarning;
+        private SpriteHandle _iconError;
+        private Color _colorInfo;
+        private Color _colorWarning;
+        private Color _colorError;
+        private bool _colorDebugLogText;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DebugLogWindow"/> class.
@@ -300,21 +385,37 @@ namespace FlaxEditor.Windows
         : base(editor, true, ScrollBars.None)
         {
             Title = "Debug Log";
-            Icon = IconInfo;
-            OnEditorOptionsChanged(Editor.Options.Options);
+            Icon = _iconInfo;
+            FlaxEditor.Utilities.Utils.SetupCommonInputActions(this);
 
             // Toolstrip
             var toolstrip = new ToolStrip(22.0f)
             {
                 Parent = this,
             };
-            toolstrip.AddButton("Clear", Clear).LinkTooltip("Clears all log entries");
-            _clearOnPlayButton = (ToolStripButton)toolstrip.AddButton("Clear on Play").SetAutoCheck(true).SetChecked(true).LinkTooltip("Clears all log entries on enter playmode");
-            _pauseOnErrorButton = (ToolStripButton)toolstrip.AddButton("Pause on Error").SetAutoCheck(true).LinkTooltip("Performs auto pause on error");
+            toolstrip.AddButton("Clear", Clear).LinkTooltip("Clears all log entries.");
+            _clearOnPlayButton = (ToolStripButton)toolstrip.AddButton("Clear on Play", () =>
+            {
+                editor.Options.Options.Interface.DebugLogClearOnPlay = _clearOnPlayButton.Checked;
+                editor.Options.Apply(editor.Options.Options);
+            }).SetAutoCheck(true).LinkTooltip("Clears all log entries on enter playmode.");
+            _collapseLogsButton = (ToolStripButton)toolstrip.AddButton("Collapse", () =>
+            {
+                editor.Options.Options.Interface.DebugLogCollapse = _collapseLogsButton.Checked;
+                editor.Options.Apply(editor.Options.Options);
+            }).SetAutoCheck(true).LinkTooltip("Collapses similar logs.");
+            _pauseOnErrorButton = (ToolStripButton)toolstrip.AddButton("Pause on Error", () =>
+            {
+                editor.Options.Options.Interface.DebugLogPauseOnError = _pauseOnErrorButton.Checked;
+                editor.Options.Apply(editor.Options.Options);
+            }).SetAutoCheck(true).LinkTooltip("Performs auto pause on error.");
             toolstrip.AddSeparator();
-            _groupButtons[0] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Error32, () => UpdateLogTypeVisibility(LogGroup.Error, _groupButtons[0].Checked)).SetAutoCheck(true).SetChecked(true).LinkTooltip("Shows/hides error messages");
-            _groupButtons[1] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Warning32, () => UpdateLogTypeVisibility(LogGroup.Warning, _groupButtons[1].Checked)).SetAutoCheck(true).SetChecked(true).LinkTooltip("Shows/hides warning messages");
-            _groupButtons[2] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Info32, () => UpdateLogTypeVisibility(LogGroup.Info, _groupButtons[2].Checked)).SetAutoCheck(true).SetChecked(true).LinkTooltip("Shows/hides info messages");
+            _groupButtons[0] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Error32, () => { OnGroupButtonPressed(0); })
+                                                         .SetAutoCheck(true).LinkTooltip("Shows/hides error messages.");
+            _groupButtons[1] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Warning32, () => { OnGroupButtonPressed(1); })
+                                                         .SetAutoCheck(true).LinkTooltip("Shows/hides warning messages.");
+            _groupButtons[2] = (ToolStripButton)toolstrip.AddButton(editor.Icons.Info32, () => { OnGroupButtonPressed(2); })
+                                                         .SetAutoCheck(true).LinkTooltip("Shows/hides info messages.");
             UpdateCount();
 
             // Split panel
@@ -336,31 +437,67 @@ namespace FlaxEditor.Windows
                 VerticalAlignment = TextAlignment.Near,
                 HorizontalAlignment = TextAlignment.Near,
                 Offsets = Margin.Zero,
+                Pivot = Float2.Zero,
             };
 
             // Entries panel
             _entriesPanel = new VerticalPanel
             {
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Pivot = Float2.Zero,
                 Offsets = Margin.Zero,
                 IsScrollable = true,
                 Parent = _split.Panel1,
             };
 
             // Cache entries icons
-            IconInfo = Editor.Icons.Info64;
-            IconWarning = Editor.Icons.Warning64;
-            IconError = Editor.Icons.Error64;
+            _iconInfo = Editor.Icons.Info64;
+            _iconWarning = Editor.Icons.Warning64;
+            _iconError = Editor.Icons.Error64;
 
             // Bind events
             Editor.Options.OptionsChanged += OnEditorOptionsChanged;
             Debug.Logger.LogHandler.SendLog += LogHandlerOnSendLog;
             Debug.Logger.LogHandler.SendExceptionLog += LogHandlerOnSendExceptionLog;
+
+            // Init editor options
+            OnEditorOptionsChanged(Editor.Options.Options);
+        }
+
+        private void OnGroupButtonPressed(int index)
+        {
+            UpdateLogTypeVisibility((LogGroup)index, _groupButtons[index].Checked);
+            if (Input.GetKey(KeyboardKeys.Shift))
+            {
+                for (int i = 0; i < (int)LogGroup.Max; i++)
+                {
+                    if (i == index)
+                        continue;
+                    _groupButtons[i].Checked = !_groupButtons[index].Checked;
+                    UpdateLogTypeVisibility((LogGroup)i, _groupButtons[i].Checked);
+                }
+            }
+
+            var options = Editor.Options.Options.Interface;
+            options.DebugLogShowErrorMessages = _groupButtons[0].Checked;
+            options.DebugLogShowWarningMessages = _groupButtons[1].Checked;
+            options.DebugLogShowInfoMessages = _groupButtons[2].Checked;
+            Editor.Options.Apply(Editor.Options.Options);
         }
 
         private void OnEditorOptionsChanged(EditorOptions options)
         {
             _timestampsFormats = options.Interface.DebugLogTimestampsFormat;
+            _clearOnPlayButton.Checked = options.Interface.DebugLogClearOnPlay;
+            _collapseLogsButton.Checked = options.Interface.DebugLogCollapse;
+            _pauseOnErrorButton.Checked = options.Interface.DebugLogPauseOnError;
+            _groupButtons[0].Checked = options.Interface.DebugLogShowErrorMessages;
+            _groupButtons[1].Checked = options.Interface.DebugLogShowWarningMessages;
+            _groupButtons[2].Checked = options.Interface.DebugLogShowInfoMessages;
+            _colorInfo = options.Visual.LogInfoColor;
+            _colorWarning = options.Visual.LogWarningColor;
+            _colorError = options.Visual.LogErrorColor;
+            _colorDebugLogText = options.Visual.ColorDebugLogText;
         }
 
         /// <summary>
@@ -368,9 +505,12 @@ namespace FlaxEditor.Windows
         /// </summary>
         public void Clear()
         {
+            lock (_locker)
+            {
+                _pendingEntries.Clear();
+            }
             if (_entriesPanel == null)
                 return;
-
             RemoveEntries();
         }
 
@@ -386,15 +526,9 @@ namespace FlaxEditor.Windows
             // Create new entry
             switch (_timestampsFormats)
             {
-            case InterfaceOptions.TimestampsFormats.Utc:
-                desc.Title = $"[{DateTime.UtcNow}] {desc.Title}";
-                break;
-            case InterfaceOptions.TimestampsFormats.LocalTime:
-                desc.Title = $"[{DateTime.Now}] {desc.Title}";
-                break;
-            case InterfaceOptions.TimestampsFormats.TimeSinceStartup:
-                desc.Title = string.Format("[{0:g}] ", TimeSpan.FromSeconds(Time.TimeSinceStartup)) + desc.Title;
-                break;
+            case InterfaceOptions.TimestampsFormats.Utc: desc.Title = $"[{DateTime.UtcNow}] {desc.Title}"; break;
+            case InterfaceOptions.TimestampsFormats.LocalTime: desc.Title = $"[{DateTime.Now}] {desc.Title}"; break;
+            case InterfaceOptions.TimestampsFormats.TimeSinceStartup: desc.Title = string.Format("[{0:g}] ", TimeSpan.FromSeconds(Time.TimeSinceStartup)) + desc.Title; break;
             }
             var newEntry = new LogEntry(this, ref desc);
 
@@ -419,6 +553,7 @@ namespace FlaxEditor.Windows
             // Pause on Error (we should do it as fast as possible)
             if (newEntry.Group == LogGroup.Error && _pauseOnErrorButton.Checked && Editor.StateMachine.CurrentState == Editor.StateMachine.PlayingState)
             {
+                Editor.Log("Pause Play mode on error (toggle this behaviour in the Debug Log panel)");
                 Editor.Simulation.RequestPausePlay();
             }
         }
@@ -528,7 +663,7 @@ namespace FlaxEditor.Windows
                         if (noLocation)
                         {
                             desc.LocationFile = match.Groups[2].Value;
-                            int.TryParse(match.Groups[5].Value, out desc.LocationLine);
+                            int.TryParse(match.Groups[4].Value, out desc.LocationLine);
                             noLocation = false;
                         }
                         fineStackTrace.AppendLine(match.Groups[0].Value);
@@ -557,7 +692,7 @@ namespace FlaxEditor.Windows
                 if (match.Success)
                 {
                     desc.LocationFile = match.Groups[2].Value;
-                    int.TryParse(match.Groups[3].Value, out desc.LocationLine);
+                    int.TryParse(match.Groups[4].Value, out desc.LocationLine);
                 }
             }
 
@@ -606,6 +741,30 @@ namespace FlaxEditor.Windows
                     var top = _entriesPanel.Children.Count != 0 ? _entriesPanel.Children[_entriesPanel.Children.Count - 1].Bottom + spacing : margin.Top;
                     for (int i = 0; i < _pendingEntries.Count; i++)
                     {
+                        if (_collapseLogsButton.Checked)
+                        {
+                            bool logExists = false;
+                            foreach (var child in _entriesPanel.Children)
+                            {
+                                if (child is LogEntry entry)
+                                {
+                                    var pendingEntry = _pendingEntries[i];
+                                    if (string.Equals(entry.Desc.Title, pendingEntry.Desc.Title, StringComparison.Ordinal) &&
+                                        string.Equals(entry.Desc.LocationFile, pendingEntry.Desc.LocationFile, StringComparison.Ordinal) &&
+                                        entry.Desc.Level == pendingEntry.Desc.Level &&
+                                        string.Equals(entry.Desc.Description, pendingEntry.Desc.Description, StringComparison.Ordinal) &&
+                                        entry.Desc.LocationLine == pendingEntry.Desc.LocationLine)
+                                    {
+                                        entry.LogCount += 1;
+                                        newEntry = entry;
+                                        logExists = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (logExists)
+                                continue;
+                        }
                         newEntry = _pendingEntries[i];
                         newEntry.Visible = _groupButtons[(int)newEntry.Group].Checked;
                         anyVisible |= newEntry.Visible;
@@ -622,7 +781,16 @@ namespace FlaxEditor.Windows
 
                     // Scroll to the new entry (if any added to view)
                     if (scrollView && anyVisible)
-                        panelScroll.ScrollViewTo(newEntry);
+                    {
+                        panelScroll.ScrollViewTo(newEntry, true);
+
+                        bool scrollViewNew = (panelScroll.VScrollBar.Maximum - panelScroll.VScrollBar.TargetValue) < LogEntry.DefaultHeight * 1.5f;
+                        if (scrollViewNew != scrollView)
+                        {
+                            // Make sure scrolling doesn't stop in case too many entries were added at once
+                            panelScroll.ScrollViewTo(new Float2(float.MaxValue, float.MaxValue), true);
+                        }
+                    }
                 }
             }
 
@@ -630,10 +798,10 @@ namespace FlaxEditor.Windows
         }
 
         /// <inheritdoc />
-        public override void OnPlayBegin()
+        public override void OnPlayBeginning()
         {
             // Clear on Play
-            if (_clearOnPlayButton.Checked)
+            if (Editor.Options.Options.Interface.DebugLogClearOnPlay)
             {
                 Clear();
             }
@@ -667,14 +835,13 @@ namespace FlaxEditor.Windows
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

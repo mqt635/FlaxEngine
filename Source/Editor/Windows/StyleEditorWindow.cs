@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using FlaxEditor.CustomEditors;
@@ -115,7 +115,7 @@ namespace FlaxEditor.Windows
             {
                 Text = "Example Label",
                 Parent = preview,
-                Location = new Vector2(PreviewX, 50),
+                Location = new Float2(PreviewX, 50),
                 TooltipText = "Example Tooltip"
             };
 

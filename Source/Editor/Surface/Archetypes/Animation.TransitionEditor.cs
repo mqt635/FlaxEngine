@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.CustomEditors;
@@ -34,13 +34,15 @@ namespace FlaxEditor.Surface.Archetypes
                 // Context menu dimensions
                 const float width = 280.0f;
                 const float height = 220.0f;
-                Size = new Vector2(width, height);
+                Size = new Float2(width, height);
 
                 // Title
                 var title = new Label(2, 2, width - 4, 23.0f)
                 {
                     Font = new FontReference(Style.Current.FontLarge),
                     Text = transition.SurfaceName,
+                    Margin = new Margin(4),
+                    AutoFitText = true,
                     Parent = this
                 };
 

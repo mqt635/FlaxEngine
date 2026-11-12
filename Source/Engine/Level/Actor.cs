@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -74,7 +74,7 @@ namespace FlaxEngine
         /// Angles order (xyz): pitch, yaw and roll.
         /// </remarks>
         [HideInEditor, NoSerialize, NoAnimate]
-        public Vector3 EulerAngles
+        public Float3 EulerAngles
         {
             get => Orientation.EulerAngles;
             set
@@ -92,7 +92,7 @@ namespace FlaxEngine
         /// Angles order (xyz): pitch, yaw and roll.
         /// </remarks>
         [HideInEditor, NoSerialize, NoAnimate]
-        public Vector3 LocalEulerAngles
+        public Float3 LocalEulerAngles
         {
             get => LocalOrientation.EulerAngles;
             set
@@ -123,6 +123,9 @@ namespace FlaxEngine
         /// <returns>The child actor.</returns>
         public Actor AddChild(Type type)
         {
+            if (type.IsAbstract)
+                return null;
+
             var result = (Actor)New(type);
             result.SetParent(this, false, false);
             return result;
@@ -135,6 +138,9 @@ namespace FlaxEngine
         /// <returns>The child actor.</returns>
         public T AddChild<T>() where T : Actor
         {
+            if (typeof(T).IsAbstract)
+                return null;
+
             var result = New<T>();
             result.SetParent(this, false, false);
             return result;
@@ -159,7 +165,7 @@ namespace FlaxEngine
         public bool TryGetChild<T>(out T actor) where T : Actor
         {
             actor = GetChild(typeof(T)) as T;
-            return actor != null;
+            return (object)actor != null;
         }
 
         /// <summary>
@@ -172,6 +178,9 @@ namespace FlaxEngine
             var result = GetChild<T>();
             if (result == null)
             {
+                if (typeof(T).IsAbstract)
+                    return null;
+
                 result = New<T>();
                 result.SetParent(this, false, false);
             }
@@ -185,6 +194,9 @@ namespace FlaxEngine
         /// <returns>The created script instance, null otherwise.</returns>
         public Script AddScript(Type type)
         {
+            if (type.IsAbstract)
+                return null;
+
             var script = (Script)New(type);
             script.Parent = this;
             return script;
@@ -197,6 +209,9 @@ namespace FlaxEngine
         /// <returns>The created script instance, null otherwise.</returns>
         public T AddScript<T>() where T : Script
         {
+            if (typeof(T).IsAbstract)
+                return null;
+
             var script = New<T>();
             script.Parent = this;
             return script;
@@ -207,7 +222,7 @@ namespace FlaxEngine
         /// </summary>
         /// <typeparam name="T">Type of the script to search for. Includes any scripts derived from the type.</typeparam>
         /// <returns>The script or null if failed to find.</returns>
-        public T GetScript<T>() where T : Script
+        public T GetScript<T>() where T : class
         {
             return GetScript(typeof(T)) as T;
         }
@@ -218,10 +233,10 @@ namespace FlaxEngine
         /// <typeparam name="T">Type of the script to search for. Includes any scripts derived from the type.</typeparam>
         /// <param name="script">The returned script, valid only if method returns true.</param>
         /// <returns>True if found a script of that type or false if failed to find.</returns>
-        public bool TryGetScript<T>(out T script) where T : Script
+        public bool TryGetScript<T>(out T script) where T : class
         {
             script = GetScript(typeof(T)) as T;
-            return script != null;
+            return (object)script != null;
         }
 
         /// <summary>
@@ -229,7 +244,7 @@ namespace FlaxEngine
         /// </summary>
         /// <typeparam name="T">Type of the object.</typeparam>
         /// <returns>Script instance if found, null otherwise.</returns>
-        public T FindScript<T>() where T : Script
+        public T FindScript<T>() where T : class
         {
             return FindScript(typeof(T)) as T;
         }
@@ -238,10 +253,34 @@ namespace FlaxEngine
         /// Tries to find the actor of the given type in this actor hierarchy (checks this actor and all children hierarchy).
         /// </summary>
         /// <typeparam name="T">Type of the object.</typeparam>
+        /// <param name="activeOnly">Finds only a active actor.</param>
         /// <returns>Actor instance if found, null otherwise.</returns>
-        public T FindActor<T>() where T : Actor
+        public T FindActor<T>(bool activeOnly = false) where T : Actor
         {
-            return FindActor(typeof(T)) as T;
+            return FindActor(typeof(T), activeOnly) as T;
+        }
+
+        /// <summary>
+        /// Tries to find the actor of the given type and name in this actor hierarchy (checks this actor and all children hierarchy).
+        /// </summary>
+        /// <param name="name">Name of the object.</param>
+        /// <typeparam name="T">Type of the object.</typeparam>
+        /// <returns>Actor instance if found, null otherwise.</returns>
+        public T FindActor<T>(string name) where T : Actor
+        {
+            return FindActor(typeof(T), name) as T;
+        }
+
+        /// <summary>
+        /// Tries to find actor of the given type and tag in this actor hierarchy (checks this actor and all children hierarchy).
+        /// </summary>
+        /// <param name="tag">A tag on the object.</param>
+        /// <typeparam name="T">Type of the object.</typeparam>
+        /// <param name="activeOnly">Finds only an active actor.</param>
+        /// <returns>Actor instance if found, null otherwise.</returns>
+        public T FindActor<T>(Tag tag, bool activeOnly = false) where T : Actor
+        {
+            return FindActor(typeof(T), tag, activeOnly) as T;
         }
 
         /// <summary>
@@ -259,7 +298,7 @@ namespace FlaxEngine
                     length++;
             }
             if (length == 0)
-                return Utils.GetEmptyArray<T>();
+                return Array.Empty<T>();
             var output = new T[length];
             length = 0;
             for (int i = 0; i < count; i++)
@@ -275,7 +314,7 @@ namespace FlaxEngine
         /// </summary>
         /// <typeparam name="T">Type of the scripts to search for. Includes any scripts derived from the type.</typeparam>
         /// <returns>All scripts matching the specified type.</returns>
-        public T[] GetScripts<T>() where T : Script
+        public T[] GetScripts<T>() where T : class
         {
             var count = ScriptsCount;
             var length = 0;
@@ -285,7 +324,7 @@ namespace FlaxEngine
                     length++;
             }
             if (length == 0)
-                return Utils.GetEmptyArray<T>();
+                return Array.Empty<T>();
             var output = new T[length];
             length = 0;
             for (int i = 0; i < count; i++)
@@ -294,23 +333,6 @@ namespace FlaxEngine
                     output[length++] = obj;
             }
             return output;
-        }
-
-        /// <summary>
-        /// Destroys the children. Calls Object.Destroy on every child actor and unlink them for the parent.
-        /// </summary>
-        /// <param name="timeLeft">The time left to destroy object (in seconds).</param>
-        [NoAnimate]
-        public void DestroyChildren(float timeLeft = 0.0f)
-        {
-            if (ChildrenCount == 0)
-                return;
-            Actor[] children = Children;
-            for (var i = 0; i < children.Length; i++)
-            {
-                children[i].Parent = null;
-                Destroy(children[i], timeLeft);
-            }
         }
 
         /// <summary>
@@ -344,13 +366,20 @@ namespace FlaxEngine
         /// <param name="point">The point (world-space).</param>
         /// <param name="axis">The axis (normalized).</param>
         /// <param name="angle">The angle (in degrees).</param>
-        public void RotateAround(Vector3 point, Vector3 axis, float angle)
+        /// /// <param name="orientActor">Whether to orient the actor the same amount as rotation.</param>
+        public void RotateAround(Vector3 point, Vector3 axis, float angle, bool orientActor = true)
         {
             var transform = Transform;
             var q = Quaternion.RotationAxis(axis, angle * Mathf.DegreesToRadians);
-            var dif = (transform.Translation - point) * q;
-            transform.Translation = point + dif;
-            transform.Orientation = q;
+            if (Vector3.NearEqual(point, transform.Translation) && orientActor)
+                transform.Orientation *= q;
+            else
+            {
+                var dif = (transform.Translation - point) * q;
+                transform.Translation = point + dif;
+                if (orientActor)
+                    transform.Orientation *= q;
+            }
             Transform = transform;
         }
 
@@ -359,5 +388,9 @@ namespace FlaxEngine
         {
             return $"{Name} ({GetType().Name})";
         }
+
+#if FLAX_EDITOR
+        private bool ShowTransform => !(this is UIControl);
+#endif
     }
 }

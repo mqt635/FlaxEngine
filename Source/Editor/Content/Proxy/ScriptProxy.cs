@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -45,7 +45,7 @@ namespace FlaxEditor.Content
         }
 
         /// <inheritdoc />
-        public override string NewItemName => "Script";
+        public override string NewItemName => "MyScript";
 
         /// <inheritdoc />
         public override bool CanCreate(ContentFolder targetLocation)
@@ -69,12 +69,13 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public override bool IsFileNameValid(string filename)
         {
-            // Scripts cannot start with digit. 
-            if (Char.IsDigit(filename[0]))
+            if (char.IsDigit(filename[0]))
+                return false;
+            if (filename.Equals("Script"))
                 return false;
             return true;
         }
-        
+
         /// <inheritdoc />
         public override void Create(string outputPath, object arg)
         {

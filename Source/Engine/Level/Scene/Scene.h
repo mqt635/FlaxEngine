@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -19,7 +19,8 @@ API_CLASS() class FLAXENGINE_API Scene : public Actor
 {
     friend class Level;
     friend class ReloadScriptsAction;
-DECLARE_SCENE_OBJECT(Scene);
+    friend class SceneLoader;
+    DECLARE_SCENE_OBJECT(Scene);
 
     /// <summary>
     /// Finalizes an instance of the <see cref="Scene"/> class.
@@ -27,21 +28,10 @@ DECLARE_SCENE_OBJECT(Scene);
     ~Scene();
 
 public:
-
     /// <summary>
     /// The scene metadata.
     /// </summary>
     SceneInfo Info;
-
-    /// <summary>
-    /// The last load time.
-    /// </summary>
-    DateTime LoadTime;
-
-    /// <summary>
-    /// The last save time.
-    /// </summary>
-    DateTime SaveTime;
 
     /// <summary>
     /// The scene rendering manager.
@@ -80,7 +70,6 @@ public:
     API_PROPERTY() void SetLightmapSettings(const LightmapSettings& value);
 
 public:
-
     /// <summary>
     /// Removes all baked lightmap textures from the scene.
     /// </summary>
@@ -93,8 +82,6 @@ public:
     /// <param name="timeoutMs">The timeout to wait before building CSG (in milliseconds).</param>
     API_FUNCTION() void BuildCSG(float timeoutMs = 50);
 
-#if USE_EDITOR
-
     /// <summary>
     /// Gets path to the scene file
     /// </summary>
@@ -105,15 +92,22 @@ public:
     /// </summary>
     API_PROPERTY() String GetFilename() const;
 
+#if USE_EDITOR
     /// <summary>
     /// Gets path to the scene data folder
     /// </summary>
     API_PROPERTY() String GetDataFolderPath() const;
 
+    /// <summary>
+    /// Gets the asset references (scene asset). Supported only in Editor.
+    /// </summary>
+    /// <seealso cref="Asset.GetReferences"/>
+    /// <returns>The collection of the asset ids referenced by this asset.</returns>
+    API_FUNCTION() Array<Guid, HeapAllocation> GetAssetReferences() const;
+
 #endif
 
 private:
-
     MeshCollider* TryGetCsgCollider();
     StaticModel* TryGetCsgModel();
     void CreateCsgCollider();
@@ -125,7 +119,6 @@ private:
 #endif
 
 public:
-
     // [Actor]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
@@ -133,10 +126,8 @@ public:
     void EndPlay() override;
 
 protected:
-
     // [Actor]
-    void PostLoad() override;
-    void PostSpawn() override;
+    void Initialize() override;
     void BeginPlay(SceneBeginData* data) override;
     void OnTransformChanged() override;
 };

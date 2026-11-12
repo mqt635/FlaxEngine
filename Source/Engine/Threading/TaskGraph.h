@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,12 +10,13 @@ class TaskGraph;
 /// <summary>
 /// System that can generate work into Task Graph for asynchronous execution.
 /// </summary>
-API_CLASS(Abstract) class FLAXENGINE_API TaskGraphSystem : public PersistentScriptingObject
+API_CLASS(Abstract) class FLAXENGINE_API TaskGraphSystem : public ScriptingObject
 {
 DECLARE_SCRIPTING_TYPE(TaskGraphSystem);
     friend TaskGraph;
 private:
     Array<TaskGraphSystem*, InlinedAllocation<16>> _dependencies;
+    Array<TaskGraphSystem*, InlinedAllocation<16>> _reverseDependencies;
 
 public:
     /// <summary>
@@ -24,11 +25,19 @@ public:
     API_FIELD() int32 Order = 0;
 
 public:
+    ~TaskGraphSystem();
+
     /// <summary>
     /// Adds the dependency on the system execution. Before this system can be executed the given dependant system has to be executed first.
     /// </summary>
     /// <param name="system">The system to depend on.</param>
     API_FUNCTION() void AddDependency(TaskGraphSystem* system);
+
+    /// <summary>
+    /// Removes the dependency on the system execution.
+    /// </summary>
+    /// <param name="system">The system to not depend on anymore.</param>
+    API_FUNCTION() void RemoveDependency(TaskGraphSystem* system);
 
     /// <summary>
     /// Called before executing any systems of the graph. Can be used to initialize data (synchronous).
@@ -52,15 +61,15 @@ public:
 /// <summary>
 /// Graph-based asynchronous tasks scheduler for high-performance computing and processing.
 /// </summary>
-API_CLASS() class FLAXENGINE_API TaskGraph : public PersistentScriptingObject
+API_CLASS() class FLAXENGINE_API TaskGraph : public ScriptingObject
 {
 DECLARE_SCRIPTING_TYPE(TaskGraph);
 private:
     Array<TaskGraphSystem*, InlinedAllocation<64>> _systems;
     Array<TaskGraphSystem*, InlinedAllocation<64>> _remaining;
     Array<TaskGraphSystem*, InlinedAllocation<64>> _queue;
+    Array<int64, InlinedAllocation<64>> _labels;
     TaskGraphSystem* _currentSystem = nullptr;
-    int64 _currentLabel = 0;
 
 public:
     /// <summary>

@@ -1,25 +1,27 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "VisualScript.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/Types/Span.h"
 #include "Engine/Core/Types/DataContainer.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
-#include "Engine/Scripting/MException.h"
 #include "Engine/Scripting/Scripting.h"
 #include "Engine/Scripting/Events.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MMethod.h"
 #include "Engine/Scripting/ManagedCLR/MField.h"
 #include "Engine/Scripting/ManagedCLR/MUtils.h"
-#include "Engine/Scripting/ManagedCLR/MType.h"
+#include "Engine/Scripting/ManagedCLR/MException.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Serialization/MemoryWriteStream.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Serialization/JsonWriter.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Utilities/StringConverter.h"
 #include "Engine/Threading/MainThreadTask.h"
+#include "Engine/Level/SceneObject.h"
 #include "FlaxEngine.Gen.h"
 
 namespace
@@ -36,10 +38,28 @@ namespace
 
     void PrintStack(LogType type)
     {
+#if LOG_ENABLE
         const String stack = VisualScripting::GetStackTrace();
         Log::Logger::Write(type, TEXT("Visual Script stack trace:"));
         Log::Logger::Write(type, stack);
         Log::Logger::Write(type, TEXT(""));
+#endif
+    }
+
+    bool SerializeValue(const Variant& a, const Variant& b)
+    {
+        bool result = a != b;
+        if (result)
+        {
+            // Special case for scene objects to handle prefab object references
+            auto* aSceneObject = ScriptingObject::Cast<SceneObject>((ScriptingObject*)a);
+            auto* bSceneObject = ScriptingObject::Cast<SceneObject>((ScriptingObject*)b);
+            if (aSceneObject && bSceneObject)
+            {
+                result = Serialization::ShouldSerialize(aSceneObject, bSceneObject);
+            }
+        }
+        return result;
     }
 }
 
@@ -54,15 +74,15 @@ bool VisualScriptGraph::onNodeLoaded(Node* n)
 {
     switch (n->GroupID)
     {
-        // Function
+    // Function
     case 16:
         switch (n->TypeID)
         {
-            // Invoke Method
+        // Invoke Method
         case 4:
             n->Data.InvokeMethod.Method = nullptr;
             break;
-            // Get/Set Field
+        // Get/Set Field
         case 7:
         case 8:
             n->Data.GetSetField.Field = nullptr;
@@ -143,7 +163,7 @@ VisjectExecutor::Value VisualScriptExecutor::eatBox(Node* caller, Box* box)
 
     // Add to the calling stack
     VisualScripting::StackFrame frame = *stack.Stack;
-    frame.Node = parentNode;
+    frame.Node = (VisualScriptGraphNode*)parentNode;
     frame.Box = box;
     frame.PreviousFrame = stack.Stack;
     stack.Stack = &frame;
@@ -169,14 +189,14 @@ VisjectExecutor::Value VisualScriptExecutor::eatBox(Node* caller, Box* box)
 VisjectExecutor::Graph* VisualScriptExecutor::GetCurrentGraph() const
 {
     auto& stack = ThreadStacks.Get();
-    return stack.Stack && stack.Stack->Script ? &stack.Stack->Script->Graph : nullptr;
+    return stack.Stack && stack.Stack->Script ? (Graph*)&stack.Stack->Script->Graph : nullptr;
 }
 
 void VisualScriptExecutor::ProcessGroupParameters(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // Get
+    // Get
     case 3:
     {
         int32 paramIndex;
@@ -188,6 +208,7 @@ void VisualScriptExecutor::ProcessGroupParameters(Box* box, Node* node, Value& v
             break;
         }
         const auto param = stack.Stack->Script->Graph.GetParameter((Guid)node->Values[0], paramIndex);
+        ScopeLock lock(stack.Stack->Script->Locker);
         const auto instanceParams = stack.Stack->Script->_instances.Find(stack.Stack->Instance->GetID());
         if (param && instanceParams)
         {
@@ -200,7 +221,7 @@ void VisualScriptExecutor::ProcessGroupParameters(Box* box, Node* node, Value& v
         }
         break;
     }
-        // Set
+    // Set
     case 4:
     {
         int32 paramIndex;
@@ -212,6 +233,7 @@ void VisualScriptExecutor::ProcessGroupParameters(Box* box, Node* node, Value& v
             break;
         }
         const auto param = stack.Stack->Script->Graph.GetParameter((Guid)node->Values[0], paramIndex);
+        ScopeLock lock(stack.Stack->Script->Locker);
         const auto instanceParams = stack.Stack->Script->_instances.Find(stack.Stack->Instance->GetID());
         if (param && instanceParams)
         {
@@ -222,7 +244,7 @@ void VisualScriptExecutor::ProcessGroupParameters(Box* box, Node* node, Value& v
             LOG(Error, "Failed to access Visual Script parameter for {0}.", stack.Stack->Instance->ToString());
             PrintStack(LogType::Error);
         }
-        if (node->Boxes[2].HasConnection())
+        if (box->ID == 0 && node->Boxes[2].HasConnection())
             eatBox(node, node->Boxes[2].FirstConnection());
         break;
     }
@@ -235,11 +257,11 @@ void VisualScriptExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
 {
     switch (node->TypeID)
     {
-        // This Instance
+    // This Instance
     case 19:
         value = ThreadStacks.Get().Stack->Instance;
         break;
-        // Cast
+    // Cast
     case 25:
     {
         if (box->ID == 0)
@@ -297,7 +319,7 @@ void VisualScriptExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         }
         break;
     }
-        // Cast Value
+    // Cast Value
     case 26:
     {
         if (box->ID == 0)
@@ -310,10 +332,17 @@ void VisualScriptExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
                 const StringAsANSI<100> typeNameAnsi(typeName.Get(), typeName.Length());
                 if (StringUtils::Compare(typeNameAnsi.Get(), obj.Type.GetTypeName()) != 0)
                 {
-                    MonoClass* klass = Scripting::FindClassNative(StringAnsiView(typeNameAnsi.Get(), typeName.Length()));
-                    MonoClass* objKlass = MUtils::GetClass(obj);
-                    if (!klass || !objKlass || mono_class_is_subclass_of(objKlass, klass, false) == 0)
+#if USE_CSHARP
+                    MClass* klass = Scripting::FindClass(StringAnsiView(typeNameAnsi.Get(), typeName.Length()));
+                    MClass* objKlass = MUtils::GetClass(obj);
+                    if (!klass || !objKlass || !objKlass->IsSubClassOf(klass))
                         obj = Value::Null;
+#else
+                    const ScriptingTypeHandle type = Scripting::FindScriptingType(StringAnsiView(typeNameAnsi.Get(), typeName.Length()));
+                    const ScriptingTypeHandle objType = obj.Type.GetScriptingType();
+                    if (!type || !objType || !objType.IsSubclassOf(type))
+                        obj = Value::Null;
+#endif
                 }
             }
 
@@ -358,6 +387,18 @@ void VisualScriptExecutor::ProcessGroupTools(Box* box, Node* node, Value& value)
         }
         break;
     }
+    // Reroute
+    case 29:
+        if (node->GetBox(0) == box)
+        {
+            // Impulse flow
+            box = node->GetBox(1);
+            if (box->HasConnection())
+                eatBox(node, box->FirstConnection());
+        }
+        else
+            value = tryGetValue(node->GetBox(0), Value::Zero);
+        break;
     default:
         VisjectExecutor::ProcessGroupTools(box, node, value);
         break;
@@ -368,7 +409,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
 {
     switch (node->TypeID)
     {
-        // Method Override
+    // Method Override
     case 3:
     {
         if (boxBase->ID == 0)
@@ -385,13 +426,13 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
         }
         break;
     }
-        // Invoke Method
+    // Invoke Method
     case 4:
     {
         // Call Impulse or Pure Method
         if (boxBase->ID == 0 || (bool)node->Values[3])
         {
-            auto& cache = node->Data.InvokeMethod;
+            auto& cache = ((VisualScriptGraphNode*)node)->Data.InvokeMethod;
             if (!cache.Method)
             {
                 // Load method signature
@@ -413,7 +454,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
                 if (version == 4)
                 {
                     signature.IsStatic = stream.ReadBool();
-                    stream.ReadVariantType(&signature.ReturnType);
+                    stream.Read(signature.ReturnType);
                     int32 signatureParamsCount;
                     stream.ReadInt32(&signatureParamsCount);
                     signature.Params.Resize(signatureParamsCount);
@@ -423,7 +464,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
                         int32 parameterNameLength;
                         stream.ReadInt32(&parameterNameLength);
                         stream.SetPosition(stream.GetPosition() + parameterNameLength * sizeof(Char));
-                        stream.ReadVariantType(&param.Type);
+                        stream.Read(param.Type);
                         param.IsOut = stream.ReadBool();
                     }
                 }
@@ -448,6 +489,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
                 }
                 else
                 {
+#if !COMPILE_WITHOUT_CSHARP
                     // Fallback to C#-only types
                     const auto mclass = Scripting::FindClass(StringAnsiView(typeNameAnsi.Get(), typeName.Length()));
                     if (mclass)
@@ -461,6 +503,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
                         }
                     }
                     else
+#endif
                     {
                         if (typeName.HasChars())
                         {
@@ -595,14 +638,14 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
         }
         break;
     }
-        // Return
+    // Return
     case 5:
     {
-        auto& scope = ThreadStacks.Get().Stack->Scope;
+        auto scope = ThreadStacks.Get().Stack->Scope;
         scope->FunctionReturn = tryGetValue(node->GetBox(1), Value::Zero);
         break;
     }
-        // Function
+    // Function
     case 6:
     {
         if (boxBase->ID == 0)
@@ -614,15 +657,17 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
         else
         {
             // Evaluate method parameter value from the current scope
-            auto& scope = ThreadStacks.Get().Stack->Scope;
-            value = scope->Parameters[boxBase->ID - 1];
+            auto scope = ThreadStacks.Get().Stack->Scope;
+            int32 index = boxBase->ID - 1;
+            if (index < scope->Parameters.Length())
+                value = scope->Parameters.Get()[index];
         }
         break;
     }
-        // Get Field
+    // Get Field
     case 7:
     {
-        auto& cache = node->Data.GetSetField;
+        auto& cache = ((VisualScriptGraphNode*)node)->Data.GetSetField;
         if (!cache.Field)
         {
             const auto typeName = (StringView)node->Values[0];
@@ -705,10 +750,10 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
         }
         break;
     }
-        // Get Field
+    // Get Field
     case 8:
     {
-        auto& cache = node->Data.GetSetField;
+        auto& cache = ((VisualScriptGraphNode*)node)->Data.GetSetField;
         if (!cache.Field)
         {
             const auto typeName = (StringView)node->Values[0];
@@ -798,7 +843,7 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
             eatBox(node, returnedImpulse->FirstConnection());
         break;
     }
-        // Bind/Unbind
+    // Bind/Unbind
     case 9:
     case 10:
     {
@@ -862,10 +907,16 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
             instance = eatBox(node, box->FirstConnection());
         else
             instance.SetObject(object);
-        if (!instance.AsObject)
+        ScriptingObject* instanceObj = (ScriptingObject*)instance;
+        if (!instanceObj)
         {
             LOG(Error, "Cannot bind event to null object.");
             PrintStack(LogType::Error);
+            break;
+        }
+        if (boxBase->ID == 1)
+        {
+            value = instance;
             break;
         }
         // TODO: check if instance is of event type (including inheritance)
@@ -899,13 +950,13 @@ void VisualScriptExecutor::ProcessGroupFunction(Box* boxBase, Node* node, Value&
                     }
                     eventBinding->BindedMethods.Add(method);
                     if (eventBinding->BindedMethods.Count() == 1)
-                        (*eventBinder)(instance.AsObject, object, true);
+                        (*eventBinder)(instanceObj, object, true);
                 }
                 else if (eventBinding)
                 {
                     // Unbind from the event
                     if (eventBinding->BindedMethods.Count() == 1)
-                        (*eventBinder)(instance.AsObject, object, false);
+                        (*eventBinder)(instanceObj, object, false);
                     eventBinding->BindedMethods.Remove(method);
                 }
             }
@@ -926,7 +977,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
 {
     switch (node->TypeID)
     {
-        // If
+    // If
     case 1:
     {
         const bool condition = (bool)tryGetValue(node->GetBox(1), Value::Zero);
@@ -935,7 +986,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
             eatBox(node, boxBase->FirstConnection());
         break;
     }
-        // For Loop
+    // For Loop
     case 2:
     {
         const auto scope = ThreadStacks.Get().Stack->Scope;
@@ -948,7 +999,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         switch (boxBase->ID)
         {
-            // Loop
+        // Loop
         case 0:
         {
             if (iteratorIndex == scope->ReturnedValues.Count())
@@ -969,13 +1020,13 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
                 eatBox(node, boxBase->FirstConnection());
             break;
         }
-            // Break
+        // Break
         case 3:
             // Reset loop iterator
             if (iteratorIndex != scope->ReturnedValues.Count())
                 scope->ReturnedValues[iteratorIndex].Value.AsInt = MAX_int32 - 1;
             break;
-            // Index
+        // Index
         case 5:
             if (iteratorIndex != scope->ReturnedValues.Count())
                 value = scope->ReturnedValues[iteratorIndex].Value;
@@ -983,7 +1034,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         break;
     }
-        // While Loop
+    // While Loop
     case 3:
     {
         const auto scope = ThreadStacks.Get().Stack->Scope;
@@ -996,7 +1047,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         switch (boxBase->ID)
         {
-            // Loop
+        // Loop
         case 0:
         {
             if (iteratorIndex == scope->ReturnedValues.Count())
@@ -1016,13 +1067,13 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
                 eatBox(node, boxBase->FirstConnection());
             break;
         }
-            // Break
+        // Break
         case 2:
             // Reset loop iterator
             if (iteratorIndex != scope->ReturnedValues.Count())
                 scope->ReturnedValues[iteratorIndex].Value.AsInt = -1;
             break;
-            // Index
+        // Index
         case 4:
             if (iteratorIndex != scope->ReturnedValues.Count())
                 value = scope->ReturnedValues[iteratorIndex].Value;
@@ -1030,7 +1081,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         break;
     }
-        // Sequence
+    // Sequence
     case 4:
     {
         const int32 count = (int32)node->Values[0];
@@ -1042,7 +1093,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         break;
     }
-        // Branch On Enum
+    // Branch On Enum
     case 5:
     {
         const Value v = tryGetValue(node->GetBox(1), Value::Null);
@@ -1064,7 +1115,7 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         break;
     }
-        // Delay
+    // Delay
     case 6:
     {
         boxBase = node->GetBox(2);
@@ -1104,6 +1155,165 @@ void VisualScriptExecutor::ProcessGroupFlow(Box* boxBase, Node* node, Value& val
         }
         break;
     }
+    // Array For Each
+    case 7:
+    {
+        const auto scope = ThreadStacks.Get().Stack->Scope;
+        int32 iteratorIndex = 0;
+        for (; iteratorIndex < scope->ReturnedValues.Count(); iteratorIndex++)
+        {
+            const auto& e = scope->ReturnedValues[iteratorIndex];
+            if (e.NodeId == node->ID && e.BoxId == 0)
+                break;
+        }
+        int32 arrayIndex = 0;
+        for (; arrayIndex < scope->ReturnedValues.Count(); arrayIndex++)
+        {
+            const auto& e = scope->ReturnedValues[arrayIndex];
+            if (e.NodeId == node->ID && e.BoxId == 1)
+                break;
+        }
+        switch (boxBase->ID)
+        {
+        // Loop
+        case 0:
+        {
+            if (iteratorIndex == scope->ReturnedValues.Count())
+            {
+                if (arrayIndex == scope->ReturnedValues.Count())
+                    arrayIndex++;
+                scope->ReturnedValues.AddOne();
+            }
+            if (arrayIndex == scope->ReturnedValues.Count())
+                scope->ReturnedValues.AddOne();
+            auto& iteratorValue = scope->ReturnedValues[iteratorIndex];
+            iteratorValue.NodeId = node->ID;
+            iteratorValue.BoxId = 0;
+            iteratorValue.Value = 0;
+            auto& arrayValue = scope->ReturnedValues[arrayIndex];
+            arrayValue.NodeId = node->ID;
+            arrayValue.BoxId = 1;
+            arrayValue.Value = tryGetValue(node->GetBox(1), Value::Null);
+            if (arrayValue.Value.Type.Type == VariantType::Array)
+            {
+                const int32 count = arrayValue.Value.AsArray().Count();
+                for (; iteratorValue.Value.AsInt < count; iteratorValue.Value.AsInt++)
+                {
+                    boxBase = node->GetBox(3);
+                    if (boxBase->HasConnection())
+                        eatBox(node, boxBase->FirstConnection());
+                }
+            }
+            else if (arrayValue.Value.Type.Type != VariantType::Null)
+            {
+                OnError(node, boxBase, String::Format(TEXT("Input value {0} is not an array."), arrayValue.Value));
+            }
+            boxBase = node->GetBox(6);
+            if (boxBase->HasConnection())
+                eatBox(node, boxBase->FirstConnection());
+            break;
+        }
+        // Break
+        case 2:
+            // Reset loop iterator
+            if (iteratorIndex != scope->ReturnedValues.Count())
+                scope->ReturnedValues[iteratorIndex].Value.AsInt = MAX_int32 - 1;
+            break;
+        // Item
+        case 4:
+            if (iteratorIndex != scope->ReturnedValues.Count() && arrayIndex != scope->ReturnedValues.Count())
+                value = scope->ReturnedValues[arrayIndex].Value.AsArray()[(int32)scope->ReturnedValues[iteratorIndex].Value];
+            break;
+        // Index
+        case 5:
+            if (iteratorIndex != scope->ReturnedValues.Count())
+                value = (int32)scope->ReturnedValues[iteratorIndex].Value;
+            break;
+        }
+        break;
+    }
+    // Dictionary For Each
+    case 8:
+    {
+        const auto scope = ThreadStacks.Get().Stack->Scope;
+        int32 iteratorIndex = 0;
+        for (; iteratorIndex < scope->ReturnedValues.Count(); iteratorIndex++)
+        {
+            const auto& e = scope->ReturnedValues[iteratorIndex];
+            if (e.NodeId == node->ID && e.BoxId == 0)
+                break;
+        }
+        int32 dictionaryIndex = 0;
+        for (; iteratorIndex < scope->ReturnedValues.Count(); dictionaryIndex++)
+        {
+            const auto& e = scope->ReturnedValues[dictionaryIndex];
+            if (e.NodeId == node->ID && e.BoxId == 1)
+                break;
+        }
+        switch (boxBase->ID)
+        {
+        // Loop
+        case 0:
+        {
+            if (iteratorIndex == scope->ReturnedValues.Count())
+            {
+                if (dictionaryIndex == scope->ReturnedValues.Count())
+                    dictionaryIndex++;
+                scope->ReturnedValues.AddOne();
+            }
+            if (dictionaryIndex == scope->ReturnedValues.Count())
+                scope->ReturnedValues.AddOne();
+            auto& iteratorValue = scope->ReturnedValues[iteratorIndex];
+            iteratorValue.NodeId = node->ID;
+            iteratorValue.BoxId = 0;
+            auto& dictionaryValue = scope->ReturnedValues[dictionaryIndex];
+            dictionaryValue.NodeId = node->ID;
+            dictionaryValue.BoxId = 1;
+            dictionaryValue.Value = tryGetValue(node->GetBox(4), Value::Null);
+            if (dictionaryValue.Value.Type.Type == VariantType::Dictionary)
+            {
+                auto& dictionary = *dictionaryValue.Value.AsDictionary;
+                iteratorValue.Value = dictionary.Begin().Index();
+                int32 end = dictionary.End().Index();
+                while (iteratorValue.Value.AsInt < end)
+                {
+                    boxBase = node->GetBox(3);
+                    if (boxBase->HasConnection())
+                        eatBox(node, boxBase->FirstConnection());
+                    Dictionary<Variant, Variant>::Iterator it(&dictionary, iteratorValue.Value.AsInt);
+                    ++it;
+                    iteratorValue.Value.AsInt = it.Index();
+                }
+            }
+            else if (dictionaryValue.Value.Type.Type != VariantType::Null)
+            {
+                OnError(node, boxBase, String::Format(TEXT("Input value {0} is not a dictionary."), dictionaryValue.Value));
+                return;
+            }
+            boxBase = node->GetBox(6);
+            if (boxBase->HasConnection())
+                eatBox(node, boxBase->FirstConnection());
+            break;
+        }
+        // Key
+        case 1:
+            if (iteratorIndex != scope->ReturnedValues.Count() && dictionaryIndex != scope->ReturnedValues.Count())
+                value = Dictionary<Variant, Variant>::Iterator(scope->ReturnedValues[dictionaryIndex].Value.AsDictionary, scope->ReturnedValues[iteratorIndex].Value.AsInt)->Key;
+            break;
+        // Value
+        case 2:
+            if (iteratorIndex != scope->ReturnedValues.Count() && dictionaryIndex != scope->ReturnedValues.Count())
+                value = Dictionary<Variant, Variant>::Iterator(scope->ReturnedValues[dictionaryIndex].Value.AsDictionary, scope->ReturnedValues[iteratorIndex].Value.AsInt)->Value;
+            break;
+        // Break
+        case 5:
+            // Reset loop iterator
+            if (iteratorIndex != scope->ReturnedValues.Count())
+                scope->ReturnedValues[iteratorIndex].Value.AsInt = MAX_int32 - 1;
+            break;
+        }
+        break;
+    }
     }
 }
 
@@ -1114,8 +1324,27 @@ VisualScript::VisualScript(const SpawnParams& params, const AssetInfo* info)
 {
 }
 
+#if USE_EDITOR
+
+bool VisualScript::Save(const StringView& path)
+{
+    if (OnCheckSave(path))
+        return true;
+    ScopeLock lock(Locker);
+    MemoryWriteStream writeStream;
+    if (Graph.Save(&writeStream, true))
+        return true;
+    BytesContainer data;
+    data.Link(ToSpan(writeStream));
+    return SaveSurface(data, Meta);
+}
+
+#endif
+
 Asset::LoadResult VisualScript::load()
 {
+    PROFILE_MEM(ScriptingVisual);
+
     // Build Visual Script typename that is based on asset id
     String typeName = _id.ToString();
     StringUtils::ConvertUTF162ANSI(typeName.Get(), _typenameChars, 32);
@@ -1128,13 +1357,13 @@ Asset::LoadResult VisualScript::load()
         return LoadResult::MissingDataChunk;
     MemoryReadStream metadataStream(metadataChunk->Get(), metadataChunk->Size());
     int32 version;
-    metadataStream.ReadInt32(&version);
+    metadataStream.Read(version);
     switch (version)
     {
     case 1:
     {
-        metadataStream.ReadString(&Meta.BaseTypename, 31);
-        metadataStream.ReadInt32((int32*)&Meta.Flags);
+        metadataStream.Read(Meta.BaseTypename, 31);
+        metadataStream.Read((int32&)Meta.Flags);
         break;
     }
     default:
@@ -1187,10 +1416,10 @@ Asset::LoadResult VisualScript::load()
             {
             case 1:
             {
-                signatureStream.ReadStringAnsi(&method.Name, 71);
+                signatureStream.Read(method.Name, 71);
                 method.MethodFlags = (MethodFlags)signatureStream.ReadByte();
                 method.Signature.IsStatic = ((byte)method.MethodFlags & (byte)MethodFlags::Static) != 0;
-                signatureStream.ReadVariantType(&method.Signature.ReturnType);
+                signatureStream.Read(method.Signature.ReturnType);
                 int32 parametersCount;
                 signatureStream.ReadInt32(&parametersCount);
                 method.Signature.Params.Resize(parametersCount);
@@ -1198,8 +1427,8 @@ Asset::LoadResult VisualScript::load()
                 for (int32 i = 0; i < parametersCount; i++)
                 {
                     auto& param = method.Signature.Params[i];
-                    signatureStream.ReadStringAnsi(&method.ParamNames[i], 13);
-                    signatureStream.ReadVariantType(&param.Type);
+                    signatureStream.Read(method.ParamNames[i], 13);
+                    signatureStream.Read(param.Type);
                     param.IsOut = signatureStream.ReadByte() != 0;
                     bool hasDefaultValue = signatureStream.ReadByte() != 0;
                 }
@@ -1245,6 +1474,9 @@ Asset::LoadResult VisualScript::load()
 #if USE_EDITOR
     if (_instances.HasItems())
     {
+        // Mark as already loaded so any WaitForLoaded checks during GetDefaultInstance bellow will handle this Visual Script as ready to use
+        Platform::AtomicStore(&_loadState, (int64)LoadState::Loaded);
+
         // Setup scripting type
         CacheScriptingType();
 
@@ -1279,7 +1511,8 @@ Asset::LoadResult VisualScript::load()
                 for (int32 i = 0; i < count; i++)
                 {
                     const int32 oldIndex = _oldParamsLayout.Find(Graph.Parameters[i].Identifier);
-                    instanceParams[i] = oldIndex != -1 ? valuesCache[oldIndex] : Graph.Parameters[i].Value;
+                    const bool useOldValue = oldIndex != -1 && valuesCache[oldIndex] != _oldParamsValues[i];
+                    instanceParams[i] = useOldValue ? valuesCache[oldIndex] : Graph.Parameters[i].Value;
                 }
             }
         }
@@ -1294,6 +1527,8 @@ Asset::LoadResult VisualScript::load()
                     instanceParams[i] = Graph.Parameters[i].Value;
             }
         }
+        _oldParamsLayout.Clear();
+        _oldParamsValues.Clear();
     }
 #endif
 
@@ -1302,20 +1537,24 @@ Asset::LoadResult VisualScript::load()
 
 void VisualScript::unload(bool isReloading)
 {
+    PROFILE_MEM(ScriptingVisual);
 #if USE_EDITOR
     if (isReloading)
     {
         // Cache existing instanced parameters IDs to restore values after asset reload (params order might be changed but the IDs are stable)
         _oldParamsLayout.Resize(Graph.Parameters.Count());
+        _oldParamsValues.Resize(Graph.Parameters.Count());
         for (int32 i = 0; i < Graph.Parameters.Count(); i++)
         {
             auto& param = Graph.Parameters[i];
             _oldParamsLayout[i] = param.Identifier;
+            _oldParamsValues[i] = param.Value;
         }
     }
     else
     {
         _oldParamsLayout.Clear();
+        _oldParamsValues.Clear();
     }
 #else
     _instances.Clear();
@@ -1329,16 +1568,22 @@ void VisualScript::unload(bool isReloading)
     // Note: preserve the registered scripting type but invalidate the locally cached handle
     if (_scriptingTypeHandle)
     {
-        auto& type = VisualScriptingModule.Types[_scriptingTypeHandle.TypeIndex];
+        VisualScriptingBinaryModule::Locker.Lock();
+        ScriptingType& type = VisualScriptingModule.Types[_scriptingTypeHandle.TypeIndex];
         if (type.Script.DefaultInstance)
         {
             Delete(type.Script.DefaultInstance);
             type.Script.DefaultInstance = nullptr;
         }
+        char* typeName = (char*)Allocator::Allocate(sizeof(_typenameChars));
+        Platform::MemoryCopy(typeName, _typenameChars, sizeof(_typenameChars));
+        ((StringAnsiView&)type.Fullname) = StringAnsiView(typeName, 32);
+        VisualScriptingModule._unloadedScriptTypeNames.Add(typeName);
         VisualScriptingModule.TypeNameToTypeIndex.RemoveValue(_scriptingTypeHandle.TypeIndex);
         VisualScriptingModule.Scripts[_scriptingTypeHandle.TypeIndex] = nullptr;
         _scriptingTypeHandleCached = _scriptingTypeHandle;
         _scriptingTypeHandle = ScriptingTypeHandle();
+        VisualScriptingBinaryModule::Locker.Unlock();
     }
 }
 
@@ -1349,6 +1594,8 @@ AssetChunksFlag VisualScript::getChunksToPreload() const
 
 void VisualScript::CacheScriptingType()
 {
+    PROFILE_MEM(ScriptingVisual);
+    ScopeLock lock(VisualScriptingBinaryModule::Locker);
     auto& binaryModule = VisualScriptingModule;
 
     // Find base type
@@ -1453,11 +1700,15 @@ void VisualScript::CacheScriptingType()
 VisualScriptingBinaryModule::VisualScriptingBinaryModule()
     : _name("Visual Scripting")
 {
+    // Visual Scripts can be unloaded and loaded again even in game
+    CanReload = true;
 }
 
 ScriptingObject* VisualScriptingBinaryModule::VisualScriptObjectSpawn(const ScriptingObjectSpawnParams& params)
 {
     // Create native object (base type can be C++ or C#)
+    if (params.Type.Module == nullptr)
+        return nullptr;
     ScriptingType& visualScriptType = (ScriptingType&)params.Type.GetType();
     ScriptingTypeHandle baseTypeHandle = visualScriptType.GetBaseType();
     const ScriptingType* baseTypePtr = &baseTypeHandle.GetType();
@@ -1468,9 +1719,7 @@ ScriptingObject* VisualScriptingBinaryModule::VisualScriptObjectSpawn(const Scri
     }
     ScriptingObject* object = baseTypePtr->Script.Spawn(params);
     if (!object)
-    {
         return nullptr;
-    }
 
     // Beware! Hacking vtables incoming! Undefined behaviors exploits! Low-level programming!
     visualScriptType.HackObjectVTable(object, baseTypeHandle, 1);
@@ -1483,6 +1732,8 @@ ScriptingObject* VisualScriptingBinaryModule::VisualScriptObjectSpawn(const Scri
     VisualScript* visualScript = VisualScriptingModule.Scripts[params.Type.TypeIndex];
 
     // Initialize instance data
+    PROFILE_MEM(ScriptingVisual);
+    ScopeLock lock(visualScript->Locker);
     auto& instanceParams = visualScript->_instances[object->GetID()].Params;
     instanceParams.Resize(visualScript->Graph.Parameters.Count());
     for (int32 i = 0; i < instanceParams.Count(); i++)
@@ -1493,9 +1744,9 @@ ScriptingObject* VisualScriptingBinaryModule::VisualScriptObjectSpawn(const Scri
         {
             // Special case for C# object property in Visual Script so duplicate the object instead of cloning the reference to it
             MemoryWriteStream writeStream;
-            writeStream.WriteVariant(param);
-            MemoryReadStream readStream(writeStream.GetHandle(), writeStream.GetPosition());
-            readStream.ReadVariant(&param);
+            writeStream.Write(param);
+            MemoryReadStream readStream(ToSpan(writeStream));
+            readStream.Read(param);
         }
     }
 
@@ -1506,6 +1757,8 @@ ScriptingObject* VisualScriptingBinaryModule::VisualScriptObjectSpawn(const Scri
 
 void VisualScriptingBinaryModule::OnScriptsReloading()
 {
+    PROFILE_MEM(ScriptingVisual);
+
     // Clear any cached types from that module across all loaded Visual Scripts
     for (auto& script : Scripts)
     {
@@ -1532,13 +1785,13 @@ void VisualScriptingBinaryModule::OnScriptsReloading()
         {
             switch (node.Type)
             {
-                // Invoke Method
+            // Invoke Method
             case GRAPH_NODE_MAKE_TYPE(16, 4):
             {
                 node.Data.InvokeMethod.Method = nullptr;
                 break;
             }
-                // Get/Set Field
+            // Get/Set Field
             case GRAPH_NODE_MAKE_TYPE(16, 7):
             case GRAPH_NODE_MAKE_TYPE(16, 8):
             {
@@ -1554,6 +1807,7 @@ void VisualScriptingBinaryModule::OnScriptsReloading()
 
 void VisualScriptingBinaryModule::OnEvent(ScriptingObject* object, Span<Variant> parameters, ScriptingTypeHandle eventType, StringView eventName)
 {
+    PROFILE_MEM(ScriptingVisual);
     if (object)
     {
         // Object event
@@ -1580,10 +1834,12 @@ void VisualScriptingBinaryModule::OnEvent(ScriptingObject* object, Span<Variant>
     else
     {
         // Static event
+        bool called = false;
         for (auto& asset : Content::GetAssetsRaw())
         {
             if (const auto visualScript = ScriptingObject::Cast<VisualScript>(asset.Value))
             {
+                visualScript->Locker.Lock();
                 for (auto& e : visualScript->_instances)
                 {
                     auto instance = &e.Value;
@@ -1593,10 +1849,14 @@ void VisualScriptingBinaryModule::OnEvent(ScriptingObject* object, Span<Variant>
                             continue;
                         for (auto& m : b.BindedMethods)
                         {
-                            VisualScripting::Invoke(m, object, parameters);
+                            VisualScripting::Invoke(m, nullptr, parameters);
                         }
+                        called = true;
                     }
                 }
+                visualScript->Locker.Unlock();
+                if (called)
+                    break;
             }
         }
     }
@@ -1639,6 +1899,7 @@ bool VisualScriptingBinaryModule::FindScriptingType(const StringAnsiView& typeNa
 
 void* VisualScriptingBinaryModule::FindMethod(const ScriptingTypeHandle& typeHandle, const StringAnsiView& name, int32 numParams)
 {
+    ScopeLock lock(Locker);
     return (void*)Scripts[typeHandle.TypeIndex]->FindMethod(name, numParams);
 }
 
@@ -1652,9 +1913,13 @@ bool VisualScriptingBinaryModule::InvokeMethod(void* method, const Variant& inst
         if (!instanceObject || instanceObject->GetTypeHandle() != vsMethod->Script->GetScriptingType())
         {
             if (!instanceObject)
+            {
                 LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) without object instance", String(vsMethod->Script->GetScriptTypeName()), String(vsMethod->Name), vsMethod->ParamNames.Count());
+            }
             else
+            {
                 LOG(Error, "Failed to call method '{0}.{1}' (args count: {2}) with invalid object instance of type '{3}'", String(vsMethod->Script->GetScriptTypeName()), String(vsMethod->Name), vsMethod->ParamNames.Count(), String(instanceObject->GetType().Fullname));
+            }
             return true;
         }
     }
@@ -1670,6 +1935,7 @@ void VisualScriptingBinaryModule::GetMethodSignature(void* method, ScriptingType
 
 void* VisualScriptingBinaryModule::FindField(const ScriptingTypeHandle& typeHandle, const StringAnsiView& name)
 {
+    ScopeLock lock(Locker);
     return (void*)Scripts[typeHandle.TypeIndex]->FindField(name);
 }
 
@@ -1690,6 +1956,7 @@ bool VisualScriptingBinaryModule::GetFieldValue(void* field, const Variant& inst
         LOG(Error, "Failed to get field '{0}' without object instance", vsFiled->Parameter->Name);
         return true;
     }
+    ScopeLock lock(vsFiled->Script->Locker);
     const auto instanceParams = vsFiled->Script->_instances.Find(instanceObject->GetID());
     if (!instanceParams)
     {
@@ -1702,6 +1969,7 @@ bool VisualScriptingBinaryModule::GetFieldValue(void* field, const Variant& inst
 
 bool VisualScriptingBinaryModule::SetFieldValue(void* field, const Variant& instance, Variant& value)
 {
+    PROFILE_MEM(ScriptingVisual);
     const auto vsFiled = (VisualScript::Field*)field;
     const auto instanceObject = (ScriptingObject*)instance;
     if (!instanceObject)
@@ -1709,6 +1977,7 @@ bool VisualScriptingBinaryModule::SetFieldValue(void* field, const Variant& inst
         LOG(Error, "Failed to set field '{0}' without object instance", vsFiled->Parameter->Name);
         return true;
     }
+    ScopeLock lock(vsFiled->Script->Locker);
     const auto instanceParams = vsFiled->Script->_instances.Find(instanceObject->GetID());
     if (!instanceParams)
     {
@@ -1723,9 +1992,12 @@ void VisualScriptingBinaryModule::SerializeObject(JsonWriter& stream, ScriptingO
 {
     char idName[33];
     stream.StartObject();
+    Locker.Lock();
     const auto asset = Scripts[object->GetTypeHandle().TypeIndex].Get();
+    Locker.Unlock();
     if (asset)
     {
+        ScopeLock lock(asset->Locker);
         const auto instanceParams = asset->_instances.Find(object->GetID());
         if (instanceParams)
         {
@@ -1741,7 +2013,7 @@ void VisualScriptingBinaryModule::SerializeObject(JsonWriter& stream, ScriptingO
                         auto& param = asset->Graph.Parameters[paramIndex];
                         auto& value = params[paramIndex];
                         auto& otherValue = otherParams->Value.Params[paramIndex];
-                        if (value != otherValue)
+                        if (SerializeValue(value, otherValue))
                         {
                             param.Identifier.ToString(idName, Guid::FormatType::N);
                             stream.Key(idName, 32);
@@ -1756,7 +2028,7 @@ void VisualScriptingBinaryModule::SerializeObject(JsonWriter& stream, ScriptingO
                         auto& param = asset->Graph.Parameters[paramIndex];
                         auto& value = params[paramIndex];
                         auto& otherValue = param.Value;
-                        if (value != otherValue)
+                        if (SerializeValue(value, otherValue))
                         {
                             param.Identifier.ToString(idName, Guid::FormatType::N);
                             stream.Key(idName, 32);
@@ -1784,10 +2056,14 @@ void VisualScriptingBinaryModule::SerializeObject(JsonWriter& stream, ScriptingO
 
 void VisualScriptingBinaryModule::DeserializeObject(ISerializable::DeserializeStream& stream, ScriptingObject* object, ISerializeModifier* modifier)
 {
+    PROFILE_MEM(ScriptingVisual);
     ASSERT(stream.IsObject());
+    Locker.Lock();
     const auto asset = Scripts[object->GetTypeHandle().TypeIndex].Get();
+    Locker.Unlock();
     if (asset)
     {
+        ScopeLock lock(asset->Locker);
         const auto instanceParams = asset->_instances.Find(object->GetID());
         if (instanceParams)
         {
@@ -1812,9 +2088,12 @@ void VisualScriptingBinaryModule::DeserializeObject(ISerializable::DeserializeSt
 
 void VisualScriptingBinaryModule::OnObjectIdChanged(ScriptingObject* object, const Guid& oldId)
 {
+    Locker.Lock();
     const auto asset = Scripts[object->GetTypeHandle().TypeIndex].Get();
+    Locker.Unlock();
     if (asset)
     {
+        ScopeLock lock(asset->Locker);
         auto& instanceParams = asset->_instances[object->GetID()];
         auto oldParams = asset->_instances.Find(oldId);
         if (oldParams)
@@ -1827,10 +2106,13 @@ void VisualScriptingBinaryModule::OnObjectIdChanged(ScriptingObject* object, con
 
 void VisualScriptingBinaryModule::OnObjectDeleted(ScriptingObject* object)
 {
+    Locker.Lock();
     const auto asset = Scripts[object->GetTypeHandle().TypeIndex].Get();
+    Locker.Unlock();
     if (asset)
     {
         // Cleanup object data
+        ScopeLock lock(asset->Locker);
         asset->_instances.Remove(object->GetID());
     }
 }
@@ -1842,14 +2124,21 @@ void VisualScriptingBinaryModule::Destroy(bool isReloading)
         return;
 
     BinaryModule::Destroy(isReloading);
+
+    // Free cached script typenames table
+    for (char* str : _unloadedScriptTypeNames)
+        Allocator::Free(str);
+    _unloadedScriptTypeNames.Clear();
 }
 
 ScriptingTypeHandle VisualScript::GetScriptingType()
 {
-    if (!_scriptingTypeHandle && !WaitForLoaded())
-    {
+    if (WaitForLoaded())
+        return ScriptingTypeHandle();
+    Locker.Lock();
+    if (!_scriptingTypeHandle)
         CacheScriptingType();
-    }
+    Locker.Unlock();
     return _scriptingTypeHandle;
 }
 
@@ -1861,7 +2150,14 @@ ScriptingObject* VisualScript::CreateInstance()
 
 VisualScript::Instance* VisualScript::GetScriptInstance(ScriptingObject* instance) const
 {
-    return instance ? _instances.TryGet(instance->GetID()) : nullptr;
+    Instance* result = nullptr;
+    if (instance)
+    {
+        Locker.Lock();
+        result = _instances.TryGet(instance->GetID());
+        Locker.Unlock();
+    }
+    return result;
 }
 
 const Variant& VisualScript::GetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance) const
@@ -1882,13 +2178,15 @@ const Variant& VisualScript::GetScriptInstanceParameterValue(const StringView& n
     return Variant::Null;
 }
 
-void VisualScript::SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, const Variant& value) const
+void VisualScript::SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, const Variant& value)
 {
+    PROFILE_MEM(ScriptingVisual);
     CHECK(instance);
     for (int32 paramIndex = 0; paramIndex < Graph.Parameters.Count(); paramIndex++)
     {
         if (Graph.Parameters[paramIndex].Name == name)
         {
+            ScopeLock lock(Locker);
             const auto instanceParams = _instances.Find(instance->GetID());
             if (instanceParams)
             {
@@ -1902,13 +2200,15 @@ void VisualScript::SetScriptInstanceParameterValue(const StringView& name, Scrip
     LOG(Warning, "Failed to set {0} parameter '{1}'", ToString(), name);
 }
 
-void VisualScript::SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, Variant&& value) const
+void VisualScript::SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, Variant&& value)
 {
+    PROFILE_MEM(ScriptingVisual);
     CHECK(instance);
     for (int32 paramIndex = 0; paramIndex < Graph.Parameters.Count(); paramIndex++)
     {
         if (Graph.Parameters[paramIndex].Name == name)
         {
+            ScopeLock lock(Locker);
             const auto instanceParams = _instances.Find(instance->GetID());
             if (instanceParams)
             {
@@ -1940,8 +2240,10 @@ const VisualScript::Field* VisualScript::FindField(const StringAnsiView& name) c
     return nullptr;
 }
 
-BytesContainer VisualScript::LoadSurface()
+BytesContainer VisualScript::LoadSurface() const
 {
+    if (WaitForLoaded())
+        return BytesContainer();
     ScopeLock lock(Locker);
     if (!LoadChunks(GET_CHUNK_FLAG(0)))
     {
@@ -1950,26 +2252,16 @@ BytesContainer VisualScript::LoadSurface()
         result.Copy(data->Data);
         return result;
     }
-
     LOG(Warning, "\'{0}\' surface data is missing.", ToString());
     return BytesContainer();
 }
 
 #if USE_EDITOR
 
-bool VisualScript::SaveSurface(BytesContainer& data, const Metadata& meta)
+bool VisualScript::SaveSurface(const BytesContainer& data, const Metadata& meta) const
 {
-    // Wait for asset to be loaded or don't if last load failed
-    if (LastLoadFailed())
-    {
-        LOG(Warning, "Saving asset that failed to load.");
-    }
-    else if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave())
         return true;
-    }
-
     ScopeLock lock(Locker);
 
     // Release all chunks
@@ -1977,18 +2269,16 @@ bool VisualScript::SaveSurface(BytesContainer& data, const Metadata& meta)
         ReleaseChunk(i);
 
     // Set Visject Surface data
-    auto visjectSurfaceChunk = GetOrCreateChunk(0);
-    visjectSurfaceChunk->Data.Copy(data);
+    GetOrCreateChunk(0)->Data.Copy(data);
 
     // Set metadata
-    auto metadataChunk = GetOrCreateChunk(1);
     MemoryWriteStream metaStream(512);
     {
-        metaStream.WriteInt32(1);
-        metaStream.WriteString(meta.BaseTypename, 31);
-        metaStream.WriteInt32((int32)meta.Flags);
+        metaStream.Write(1);
+        metaStream.Write(meta.BaseTypename, 31);
+        metaStream.Write((int32)meta.Flags);
     }
-    metadataChunk->Data.Copy(metaStream.GetHandle(), metaStream.GetPosition());
+    GetOrCreateChunk(1)->Data.Copy(ToSpan(metaStream));
 
     // Save
     AssetInitData assetData;
@@ -2020,17 +2310,25 @@ void VisualScript::GetMethodSignature(int32 index, String& name, byte& flags, St
     }
 }
 
+Variant VisualScript::InvokeMethod(int32 index, const Variant& instance, Span<Variant> parameters) const
+{
+    auto& method = _methods[index];
+    Variant result;
+    VisualScriptingModule.InvokeMethod((void*)&method, instance, parameters, result);
+    return result;
+}
+
 Span<byte> VisualScript::GetMetaData(int32 typeID)
 {
     auto meta = Graph.Meta.GetEntry(typeID);
-    return meta ? ToSpan(meta->Data.Get(), meta->Data.Count()) : Span<byte>(nullptr, 0);
+    return meta ? ToSpan(meta->Data) : Span<byte>(nullptr, 0);
 }
 
 Span<byte> VisualScript::GetMethodMetaData(int32 index, int32 typeID)
 {
     auto& method = _methods[index];
     auto meta = method.Node->Meta.GetEntry(typeID);
-    return meta ? ToSpan(meta->Data.Get(), meta->Data.Count()) : Span<byte>(nullptr, 0);
+    return meta ? ToSpan(meta->Data) : Span<byte>(nullptr, 0);
 }
 
 #endif
@@ -2049,7 +2347,7 @@ String VisualScripting::GetStackTrace()
         String node;
         switch (frame->Node->Type)
         {
-            // Get/Set Parameter
+        // Get/Set Parameter
         case GRAPH_NODE_MAKE_TYPE(6, 3):
         case GRAPH_NODE_MAKE_TYPE(6, 4):
         {
@@ -2058,19 +2356,19 @@ String VisualScripting::GetStackTrace()
             node += param ? param->Name : ((Guid)frame->Node->Values[0]).ToString();
             break;
         }
-            // Method Override
+        // Method Override
         case GRAPH_NODE_MAKE_TYPE(16, 3):
             node = (StringView)frame->Node->Values[0];
             node += TEXT("()");
             break;
-            // Invoke Method
+        // Invoke Method
         case GRAPH_NODE_MAKE_TYPE(16, 4):
             node = (StringView)frame->Node->Values[0];
             node += TEXT(".");
             node += (StringView)frame->Node->Values[1];
             node += TEXT("()");
             break;
-            // Function
+        // Function
         case GRAPH_NODE_MAKE_TYPE(16, 6):
             node = String(frame->Script->GetScriptTypeName());
             for (int32 i = 0; i < frame->Script->_methods.Count(); i++)
@@ -2102,6 +2400,7 @@ VisualScriptingBinaryModule* VisualScripting::GetBinaryModule()
 
 Variant VisualScripting::Invoke(VisualScript::Method* method, ScriptingObject* instance, Span<Variant> parameters)
 {
+    PROFILE_MEM(ScriptingVisual);
     CHECK_RETURN(method && method->Script->IsLoaded(), Variant::Zero);
     PROFILE_CPU_SRC_LOC(method->ProfilerData);
 
@@ -2142,6 +2441,7 @@ bool VisualScripting::Evaluate(VisualScript* script, ScriptingObject* instance, 
     const auto box = node->GetBox(boxId);
     if (!box)
         return false;
+    PROFILE_MEM(ScriptingVisual);
 
     // Add to the calling stack
     ScopeContext scope;

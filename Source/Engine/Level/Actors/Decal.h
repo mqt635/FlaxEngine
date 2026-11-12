@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "../Actor.h"
+#include "Engine/Core/Types/LayersMask.h"
+#include "Engine/Core/Math/Matrix.h"
 #include "Engine/Core/Math/OrientedBoundingBox.h"
 #include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Content/AssetReference.h"
@@ -10,18 +12,16 @@
 /// <summary>
 /// Actor that draws the can be used to draw a custom decals on top of the other objects.
 /// </summary>
-API_CLASS() class FLAXENGINE_API Decal : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Decal\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API Decal : public Actor
 {
-DECLARE_SCENE_OBJECT(Decal);
+    DECLARE_SCENE_OBJECT(Decal);
 private:
-
     Vector3 _size;
     OrientedBoundingBox _bounds;
-    Matrix _world;
     int32 _sceneRenderingKey = -1;
 
 public:
-
     /// <summary>
     /// The decal material. Must have domain mode to Decal type.
     /// </summary>
@@ -33,6 +33,12 @@ public:
     /// </summary>
     API_FIELD(Attributes="EditorOrder(20), EditorDisplay(\"Decal\")")
     int32 SortOrder = 0;
+
+    /// <summary>
+    /// The layers mask used for render composition. Can be used to include or exclude specific actor layers from the drawing on top of them.
+    /// </summary>
+    API_FIELD(Attributes = "EditorOrder(25), EditorDisplay(\"Decal\")")
+    LayersMask RenderLayersMask;
 
     /// <summary>
     /// The minimum screen size for the decal drawing. If the decal size on the screen is smaller than this value then decal will be culled. Set it to higher value to make culling more aggressive.
@@ -52,40 +58,28 @@ public:
     /// <summary>
     /// Sets the decal bounds size (in local space).
     /// </summary>
-    /// <param name="value">The value.</param>
     API_PROPERTY() void SetSize(const Vector3& value);
 
 public:
-
     /// <summary>
     /// Utility to crate a new virtual Material Instance asset, set its parent to the currently applied material, and assign it to the decal. Can be used to modify the decal material parameters from code.
     /// </summary>
     /// <returns>The created virtual material instance.</returns>
     API_FUNCTION() MaterialInstance* CreateAndSetVirtualMaterialInstance();
 
-    /// <summary>
-    /// Gets the decal world matrix used to transform the 1x1x1 cube from the mesh space to world space.
-    /// </summary>
-    /// <param name="result">The result value container.</param>
-    FORCE_INLINE void GetWorld(Matrix* result) const
-    {
-        *result = _world;
-    }
-
 public:
-
     // [Actor]
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
+    BoundingBox GetEditorBoundingBox() const override;
 #endif
     void OnLayerChanged() override;
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
 protected:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;

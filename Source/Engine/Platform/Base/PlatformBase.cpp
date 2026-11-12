@@ -1,10 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Engine/Platform/Platform.h"
 #include "Engine/Platform/CPUInfo.h"
 #include "Engine/Platform/MemoryStats.h"
 #include "Engine/Platform/MessageBox.h"
 #include "Engine/Platform/FileSystem.h"
+#include "Engine/Platform/Window.h"
+#include "Engine/Platform/User.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Types/TimeSpan.h"
@@ -15,6 +17,7 @@
 #include "Engine/Core/Utilities.h"
 #if COMPILE_WITH_PROFILER
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #endif
 #include "Engine/Threading/Threading.h"
 #include "Engine/Engine/CommandLine.h"
@@ -39,7 +42,18 @@ static_assert(sizeof(bool) == 1, "Invalid bool type size.");
 static_assert(sizeof(float) == 4, "Invalid float type size.");
 static_assert(sizeof(double) == 8, "Invalid double type size.");
 
+// Check configuration
+static_assert((PLATFORM_THREADS_LIMIT & (PLATFORM_THREADS_LIMIT - 1)) == 0, "Threads limit must be power of two.");
+static_assert(PLATFORM_THREADS_LIMIT % 4 == 0 || PLATFORM_THREADS_LIMIT == 1, "Threads limit must be multiple of 4.");
+
+const Char* PlatformBase::ApplicationClassName = TEXT("FlaxWindow");
 float PlatformBase::CustomDpiScale = 1.0f;
+Array<User*, FixedAllocation<8>> PlatformBase::Users;
+Delegate<User*> PlatformBase::UserAdded;
+Delegate<User*> PlatformBase::UserRemoved;
+void* OutOfMemoryBuffer = nullptr;
+volatile int64 FatalReporting = 0;
+CPUInfo CpuInfo;
 
 const Char* ToString(NetworkConnectionType value)
 {
@@ -102,6 +116,22 @@ const Char* ToString(ThreadPriority value)
     }
 }
 
+UserBase::UserBase(const String& name)
+    : UserBase(SpawnParams(Guid::New(), TypeInitializer), name)
+{
+}
+
+UserBase::UserBase(const SpawnParams& params, const String& name)
+    : ScriptingObject(params)
+    , _name(name)
+{
+}
+
+String UserBase::GetName() const
+{
+    return _name;
+}
+
 bool PlatformBase::Init()
 {
 #if BUILD_DEBUG
@@ -125,6 +155,12 @@ bool PlatformBase::Init()
 
     srand((unsigned int)Platform::GetTimeCycles());
 
+    // Preallocate safety dynamic buffer to be released before Out Of Memory reporting to ensure code can properly execute
+#ifndef PLATFORM_OUT_OF_MEMORY_BUFFER_SIZE
+#define PLATFORM_OUT_OF_MEMORY_BUFFER_SIZE (1ull * 1024 * 1024) // 1 MB
+#endif
+    OutOfMemoryBuffer = Allocator::Allocate(PLATFORM_OUT_OF_MEMORY_BUFFER_SIZE);
+
     return false;
 }
 
@@ -137,11 +173,15 @@ void PlatformBase::LogInfo()
     LOG(Info, "CPU package count: {0}, Core count: {1}, Logical processors: {2}", cpuInfo.ProcessorPackageCount, cpuInfo.ProcessorCoreCount, cpuInfo.LogicalProcessorCount);
     LOG(Info, "CPU Page size: {0}, cache line size: {1} bytes", Utilities::BytesToText(cpuInfo.PageSize), cpuInfo.CacheLineSize);
     LOG(Info, "L1 cache: {0}, L2 cache: {1}, L3 cache: {2}", Utilities::BytesToText(cpuInfo.L1CacheSize), Utilities::BytesToText(cpuInfo.L2CacheSize), Utilities::BytesToText(cpuInfo.L3CacheSize));
-    LOG(Info, "Clock speed: {0} GHz", Utilities::RoundTo2DecimalPlaces(cpuInfo.ClockSpeed * 1e-9f));
+    LOG(Info, "Clock speed: {0}", Utilities::HertzToText(cpuInfo.ClockSpeed));
 
     const MemoryStats memStats = Platform::GetMemoryStats();
     LOG(Info, "Physical Memory: {0} total, {1} used ({2}%)", Utilities::BytesToText(memStats.TotalPhysicalMemory), Utilities::BytesToText(memStats.UsedPhysicalMemory), Utilities::RoundTo2DecimalPlaces((float)memStats.UsedPhysicalMemory * 100.0f / (float)memStats.TotalPhysicalMemory));
     LOG(Info, "Virtual Memory: {0} total, {1} used ({2}%)", Utilities::BytesToText(memStats.TotalVirtualMemory), Utilities::BytesToText(memStats.UsedVirtualMemory), Utilities::RoundTo2DecimalPlaces((float)memStats.UsedVirtualMemory * 100.0f / (float)memStats.TotalVirtualMemory));
+    LOG(Info, "Program Size: {0}", Utilities::BytesToText(memStats.ProgramSizeMemory));
+#if !BUILD_RELEASE && !PLATFORM_DESKTOP
+    LOG(Info, "Extra Development Memory: {0}", Utilities::BytesToText(memStats.ExtraDevelopmentMemory));
+#endif
 
     LOG(Info, "Main thread id: 0x{0:x}, Process id: {1}", Globals::MainThreadID, Platform::GetCurrentProcessId());
     LOG(Info, "Desktop size: {0}", Platform::GetDesktopSize());
@@ -163,9 +203,21 @@ void PlatformBase::BeforeExit()
 
 void PlatformBase::Exit()
 {
+    Allocator::Free(OutOfMemoryBuffer);
+    OutOfMemoryBuffer = nullptr;
 }
 
 #if COMPILE_WITH_PROFILER
+
+#define TEST_MALLOC 0
+#if TEST_MALLOC
+#include "Engine/Utilities/MallocTester.h"
+MallocTester& GetMallocTester()
+{
+    static MallocTester MallocTest;
+    return MallocTest;
+}
+#endif
 
 #define TRACY_ENABLE_MEMORY (TRACY_ENABLE)
 
@@ -174,11 +226,20 @@ void PlatformBase::OnMemoryAlloc(void* ptr, uint64 size)
     if (!ptr)
         return;
 
+#if TEST_MALLOC
+    if (GetMallocTester().OnMalloc(ptr, size))
+        LOG(Fatal, "Invalid malloc detected for pointer 0x{0:x} ({1} bytes)!\n{2}", (uintptr)ptr, size, Platform::GetStackTrace(3));
+#endif
+
 #if TRACY_ENABLE_MEMORY
     // Track memory allocation in Tracy
-    //tracy::Profiler::MemAlloc(ptr, size, false);
-    tracy::Profiler::MemAllocCallstack(ptr, size, 12, false);
+    //tracy::Profiler::MemAlloc(ptr, (size_t)size, false);
+    tracy::Profiler::MemAllocCallstack(ptr, (size_t)size, 12, false);
 #endif
+
+    // Register in memory profiler
+    if (ProfilerMemory::Enabled)
+        ProfilerMemory::OnMemoryAlloc(ptr, size);
 
     // Register allocation during the current CPU event
     auto thread = ProfilerCPU::GetCurrentThread();
@@ -197,9 +258,18 @@ void PlatformBase::OnMemoryFree(void* ptr)
     if (!ptr)
         return;
 
+    // Register in memory profiler
+    if (ProfilerMemory::Enabled)
+        ProfilerMemory::OnMemoryFree(ptr);
+
 #if TRACY_ENABLE_MEMORY
     // Track memory allocation in Tracy
     tracy::Profiler::MemFree(ptr, false);
+#endif
+
+#if TEST_MALLOC
+    if (GetMallocTester().OnFree(ptr))
+        LOG(Fatal, "Invalid free detected for pointer 0x{0:x}!\n{1}", (uintptr)ptr, Platform::GetStackTrace(3));
 #endif
 }
 
@@ -232,26 +302,65 @@ bool PlatformBase::Is64BitApp()
 #endif
 }
 
-void PlatformBase::Fatal(const Char* msg, void* context)
+bool PlatformBase::Is64BitPlatform()
 {
+#if PLATFORM_64BITS
+    return true;
+#else
+    return false;
+#endif
+}
+
+CPUInfo PlatformBase::GetCPUInfo()
+{
+    return CpuInfo;
+}
+
+int32 PlatformBase::GetCacheLineSize()
+{
+    return (int32)Platform::GetCPUInfo().CacheLineSize;
+}
+
+void PlatformBase::Fatal(const StringView& msg, void* context, FatalErrorType error)
+{
+    // Let only one thread to report the error (and wait for it to end to have valid log before crash)
+RETRY:
+    if (Platform::InterlockedCompareExchange(&FatalReporting, 1, 0) != 0)
+    {
+        Platform::Sleep(1);
+        goto RETRY;
+    }
+
     // Check if is already during fatal state
-    if (Globals::FatalErrorOccurred)
+    if (Engine::FatalError != FatalErrorType::None)
     {
         // Just send one more error to the log and back
         LOG(Error, "Error after fatal error: {0}", msg);
+        Platform::AtomicStore(&FatalReporting, 0);
         return;
     }
 
+    // Free OOM safety buffer
+    Allocator::Free(OutOfMemoryBuffer);
+    OutOfMemoryBuffer = nullptr;
+
     // Set flags
+    PRAGMA_DISABLE_DEPRECATION_WARNINGS;
     Globals::FatalErrorOccurred = true;
     Globals::IsRequestingExit = true;
-    Globals::ExitCode = -1;
+    Globals::ExitCode = -Math::Max((int32)error, 1);
+    PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+    Engine::IsRequestingExit = true;
+    Engine::ExitCode = -Math::Max((int32)error, 1);
+    Engine::FatalError = error;
+    Engine::RequestingExit();
 
     // Collect crash info (platform-dependant implementation that might collect stack trace and/or create memory dump)
-    if (Log::Logger::LogFilePath.HasChars())
+#if LOG_ENABLE
     {
         // Log separation for crash info
-        Log::Logger::WriteFloor();
+        LOG_FLUSH();
+        LOG_FLOOR();
         LOG(Error, "");
         LOG(Error, "Critical error! Reason: {0}", msg);
         LOG(Error, "");
@@ -263,24 +372,36 @@ void PlatformBase::Fatal(const Char* msg, void* context)
             LOG(Error, "Stack trace:");
             for (const auto& frame : stackFrames)
             {
-                char chr = 0;
+                // Remove any path from the module name
                 int32 num = StringUtils::Length(frame.ModuleName);
-                while (num > 0 && chr != '\\' && chr != '/' && chr != ':')
-                    chr = frame.ModuleName[--num];
-                StringAsUTF16<ARRAY_COUNT(StackFrame::ModuleName)> moduleName(frame.ModuleName + num + 1);
+                while (num > 0 && frame.ModuleName[num - 1] != '\\' && frame.ModuleName[num - 1] != '/' && frame.ModuleName[num - 1] != ':')
+                    num--;
+                StringAsUTF16<ARRAY_COUNT(StackFrame::ModuleName)> moduleName(frame.ModuleName + num);
+                num = moduleName.Length();
+                if (num != 0 && num < ARRAY_COUNT(StackFrame::ModuleName) - 2)
+                {
+                    // Append separator between module name and the function name
+                    ((Char*)moduleName.Get())[num++] = '!';
+                    ((Char*)moduleName.Get())[num] = 0;
+                }
+
                 StringAsUTF16<ARRAY_COUNT(StackFrame::FunctionName)> functionName(frame.FunctionName);
                 if (StringUtils::Length(frame.FileName) != 0)
                 {
                     StringAsUTF16<ARRAY_COUNT(StackFrame::FileName)> fileName(frame.FileName);
-                    LOG(Error, "    at {0}!{1}() in {2}:line {3}", moduleName.Get(), functionName.Get(), fileName.Get(), frame.LineNumber);
+                    LOG(Error, "    at {0}{1}() in {2}:line {3}", moduleName.Get(), functionName.Get(), fileName.Get(), frame.LineNumber);
+                }
+                else if (StringUtils::Length(frame.ModuleName) != 0 && StringUtils::Length(frame.FunctionName) != 0)
+                {
+                    LOG(Error, "    at {0}{1}()", moduleName.Get(), functionName.Get());
                 }
                 else if (StringUtils::Length(frame.FunctionName) != 0)
                 {
-                    LOG(Error, "    at {0}!{1}()", moduleName.Get(), functionName.Get());
+                    LOG(Error, "    at {0}0x{1:x}", functionName.Get(), (uint64)frame.ProgramCounter);
                 }
                 else if (StringUtils::Length(frame.ModuleName) != 0)
                 {
-                    LOG(Error, "    at {0} 0x{1:x}", moduleName.Get(), (uint64)frame.ProgramCounter);
+                    LOG(Error, "    at {0}0x{1:x}", moduleName.Get(), (uint64)frame.ProgramCounter);
                 }
                 else
                 {
@@ -290,16 +411,36 @@ void PlatformBase::Fatal(const Char* msg, void* context)
             LOG(Error, "");
         }
 
-        // Log process memory stats
+        // Log memory stats
         {
             const MemoryStats memoryStats = Platform::GetMemoryStats();
-            LOG(Error, "Used Physical Memory: {0} ({1}%)", Utilities::BytesToText(memoryStats.UsedPhysicalMemory), (int32)(100 * memoryStats.UsedPhysicalMemory / memoryStats.TotalPhysicalMemory));
-            LOG(Error, "Used Virtual Memory: {0} ({1}%)", Utilities::BytesToText(memoryStats.UsedVirtualMemory), (int32)(100 * memoryStats.UsedVirtualMemory / memoryStats.TotalVirtualMemory));
             const ProcessMemoryStats processMemoryStats = Platform::GetProcessMemoryStats();
-            LOG(Error, "Process Used Physical Memory: {0}", Utilities::BytesToText(processMemoryStats.UsedPhysicalMemory));
-            LOG(Error, "Process Used Virtual Memory: {0}", Utilities::BytesToText(processMemoryStats.UsedVirtualMemory));
-        }
+#define GET_MEM(totalUsed, processUsed) totalUsed > processUsed ? totalUsed - processUsed : 0
+	        const uint64 externalUsedPhysical = GET_MEM(memoryStats.UsedPhysicalMemory, processMemoryStats.UsedPhysicalMemory);
+	        const uint64 externalUsedVirtual = GET_MEM(memoryStats.UsedVirtualMemory, processMemoryStats.UsedVirtualMemory);
+#undef GET_MEM
 
+            // Total memory usage
+            LOG(Error, "Total Used Physical Memory: {0} ({1}%)", Utilities::BytesToText(memoryStats.UsedPhysicalMemory), (int32)(100 * memoryStats.UsedPhysicalMemory / memoryStats.TotalPhysicalMemory));
+            LOG(Error, "Total Used Virtual Memory: {0} ({1}%)", Utilities::BytesToText(memoryStats.UsedVirtualMemory), (int32)(100 * memoryStats.UsedVirtualMemory / memoryStats.TotalVirtualMemory));
+
+            // Engine memory usage
+            LOG(Error, "Process Used Physical Memory: {0} ({1}%)", Utilities::BytesToText(processMemoryStats.UsedPhysicalMemory), (int32)(100 * processMemoryStats.UsedPhysicalMemory / memoryStats.TotalPhysicalMemory));
+            LOG(Error, "Process Used Virtual Memory: {0} ({1}%)", Utilities::BytesToText(processMemoryStats.UsedVirtualMemory), (int32)(100 * processMemoryStats.UsedVirtualMemory / memoryStats.TotalVirtualMemory));
+
+            // External apps memory usage
+            LOG(Error, "External Used Physical Memory: {0} ({1}%)", Utilities::BytesToText(externalUsedPhysical), (int32)(100 * externalUsedPhysical / memoryStats.TotalPhysicalMemory));
+            LOG(Error, "External Used Virtual Memory: {0} ({1}%)", Utilities::BytesToText(externalUsedVirtual), (int32)(100 * externalUsedVirtual / memoryStats.TotalVirtualMemory));
+        }
+#if COMPILE_WITH_PROFILER
+        if (error == FatalErrorType::OutOfMemory || error == FatalErrorType::GPUOutOfMemory)
+        {
+            ProfilerMemory::Dump();
+        }
+#endif
+    }
+    if (Log::Logger::LogFilePath.HasChars())
+    {
         // Create separate folder with crash info
         const String crashDataFolder = String(StringUtils::GetDirectoryName(Log::Logger::LogFilePath)) / TEXT("Crash_") + StringUtils::GetFileNameWithoutExtension(Log::Logger::LogFilePath).Substring(4);
         FileSystem::CreateDirectory(crashDataFolder);
@@ -309,30 +450,42 @@ void PlatformBase::Fatal(const Char* msg, void* context)
 
         // Capture the original log file
         LOG(Error, "");
-        Log::Logger::WriteFloor();
+        LOG_FLOOR();
         LOG_FLUSH();
         FileSystem::CopyFile(crashDataFolder / TEXT("Log.txt"), Log::Logger::LogFilePath);
 
         LOG(Error, "Crash info collected.");
-        Log::Logger::WriteFloor();
+        LOG_FLOOR();
     }
+#endif
+
+    Platform::AtomicStore(&FatalReporting, 0);
 
     // Show error message
-    Error(msg);
+    if (Engine::ReportCrash.IsBinded())
+        Engine::ReportCrash(msg, context);
+    else
+        Error(msg);
 
     // Only main thread can call exit directly
     if (IsInMainThread())
     {
-        Engine::Exit(-1);
+        Engine::Exit(Engine::ExitCode, error);
     }
 }
 
-void PlatformBase::Error(const Char* msg)
+void PlatformBase::Error(const StringView& msg)
 {
 #if PLATFORM_HAS_HEADLESS_MODE
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
     {
-        std::cout << "Error: " << msg << std::endl;
+#if PLATFORM_TEXT_IS_CHAR16
+        StringAnsi ansi(msg);
+        ansi += PLATFORM_LINE_TERMINATOR;
+        printf("Error: %s\n", ansi.Get());
+#else
+        std::cout << "Error: " << *msg << std::endl;
+#endif
     }
     else
 #endif
@@ -341,12 +494,12 @@ void PlatformBase::Error(const Char* msg)
     }
 }
 
-void PlatformBase::Warning(const Char* msg)
+void PlatformBase::Warning(const StringView& msg)
 {
 #if PLATFORM_HAS_HEADLESS_MODE
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
     {
-        std::cout << "Warning: " << msg << std::endl;
+        std::cout << "Warning: " << *msg << std::endl;
     }
     else
 #endif
@@ -355,12 +508,12 @@ void PlatformBase::Warning(const Char* msg)
     }
 }
 
-void PlatformBase::Info(const Char* msg)
+void PlatformBase::Info(const StringView& msg)
 {
 #if PLATFORM_HAS_HEADLESS_MODE
-    if (CommandLine::Options.Headless)
+    if (CommandLine::Options.Headless.IsTrue())
     {
-        std::cout << "Info: " << msg << std::endl;
+        std::cout << "Info: " << *msg << std::endl;
     }
     else
 #endif
@@ -369,27 +522,12 @@ void PlatformBase::Info(const Char* msg)
     }
 }
 
-void PlatformBase::Fatal(const StringView& msg)
+void PlatformBase::Fatal(const StringView& msg, FatalErrorType error)
 {
-    Fatal(*msg);
+    Fatal(msg, nullptr, error);
 }
 
-void PlatformBase::Error(const StringView& msg)
-{
-    Error(*msg);
-}
-
-void PlatformBase::Warning(const StringView& msg)
-{
-    Warning(*msg);
-}
-
-void PlatformBase::Info(const StringView& msg)
-{
-    Info(*msg);
-}
-
-void PlatformBase::Log(const StringView& msg)
+void PlatformBase::Log(const StringView& msg, int32 logType)
 {
 }
 
@@ -402,28 +540,43 @@ void PlatformBase::Crash(int32 line, const char* file)
 {
     const StringAsUTF16<256> fileUTF16(file);
     const String msg = String::Format(TEXT("Fatal crash!\nFile: {0}\nLine: {1}"), fileUTF16.Get(), line);
-    LOG_STR(Fatal, msg);
+    LOG_STR(Error, msg);
+    Fatal(msg, nullptr, FatalErrorType::Assertion);
 }
 
 void PlatformBase::OutOfMemory(int32 line, const char* file)
 {
-    const StringAsUTF16<256> fileUTF16(file);
-    const String msg = String::Format(TEXT("Out of memory error!\nFile: {0}\nLine: {1}"), fileUTF16.Get(), line);
-    LOG_STR(Fatal, msg);
+    fmt_flax::allocator allocator;
+    fmt_flax::memory_buffer buffer(allocator);
+    static_assert(fmt::inline_buffer_size > 300, "Update stack buffer to prevent dynamic memory allocation on Out Of Memory.");
+    if (file)
+    {
+        const StringAsUTF16<256> fileUTF16(file);
+        fmt_flax::format(buffer, TEXT("Out of memory error!\nFile: {0}\nLine: {1}"), fileUTF16.Get(), line);
+    }
+    else
+    {
+        fmt_flax::format(buffer, TEXT("Out of memory error!"));
+    }
+    const StringView msg(buffer.data(), (int32)buffer.size());
+    LOG_STR(Error, msg);
+    Fatal(msg, nullptr, FatalErrorType::OutOfMemory);
 }
 
 void PlatformBase::MissingCode(int32 line, const char* file, const char* info)
 {
     const StringAsUTF16<256> fileUTF16(file);
     const String msg = String::Format(TEXT("TODO: {0}\nFile: {1}\nLine: {2}"), String(info), fileUTF16.Get(), line);
-    LOG_STR(Fatal, msg);
+    LOG_STR(Error, msg);
+    Fatal(msg, nullptr, FatalErrorType::Assertion);
 }
 
 void PlatformBase::Assert(const char* message, const char* file, int line)
 {
     const StringAsUTF16<256> fileUTF16(file);
     const String msg = String::Format(TEXT("Assertion failed!\nFile: {0}\nLine: {1}\n\nExpression: {2}"), fileUTF16.Get(), line, String(message));
-    LOG_STR(Fatal, msg);
+    LOG_STR(Error, msg);
+    Fatal(msg, nullptr, FatalErrorType::Assertion);
 }
 
 void PlatformBase::CheckFailed(const char* message, const char* file, int line)
@@ -462,6 +615,16 @@ ScreenOrientationType PlatformBase::GetScreenOrientationType()
     return ScreenOrientationType::Unknown;
 }
 
+String PlatformBase::GetUserLanguage()
+{
+    return Platform::GetUserLocaleName();
+}
+
+String PlatformBase::GetUserName()
+{
+    return Users.Count() != 0 ? Users[0]->GetName() : String::Empty;
+}
+
 bool PlatformBase::GetIsPaused()
 {
     return false;
@@ -495,7 +658,41 @@ void PlatformBase::CreateGuid(Guid& result)
     result = Guid(dateThingHigh, randomThing | (sequentialThing << 16), cyclesThing, dateThingLow);
 }
 
-Vector2 PlatformBase::GetVirtualDesktopSize()
+bool PlatformBase::CanOpenUrl(const StringView& url)
+{
+    return false;
+}
+
+void PlatformBase::OpenUrl(const StringView& url)
+{
+}
+
+Float2 PlatformBase::GetMousePosition()
+{
+    const Window* win = Engine::MainWindow;
+    if (win)
+        return win->ClientToScreen(win->GetMousePosition());
+    return Float2::Minimum;
+}
+
+void PlatformBase::SetMousePosition(const Float2& position)
+{
+    const Window* win = Engine::MainWindow;
+    if (win)
+        win->SetMousePosition(win->ScreenToClient(position));
+}
+
+Rectangle PlatformBase::GetMonitorBounds(const Float2& screenPos)
+{
+    return Rectangle(Float2::Zero, Platform::GetDesktopSize());
+}
+
+Rectangle PlatformBase::GetVirtualDesktopBounds()
+{
+    return Rectangle(Float2::Zero, Platform::GetDesktopSize());
+}
+
+Float2 PlatformBase::GetVirtualDesktopSize()
 {
     return Platform::GetVirtualDesktopBounds().Size;
 }
@@ -517,22 +714,49 @@ bool PlatformBase::SetEnvironmentVariable(const String& name, const String& valu
     return true;
 }
 
-int32 PlatformBase::StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow, bool waitForEnd)
+int32 PlatformBase::CreateProcess(CreateProcessSettings& settings)
 {
     // Not supported
     return -1;
+}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+#include "Engine/Platform/CreateProcessSettings.h"
+
+int32 PlatformBase::StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow, bool waitForEnd)
+{
+    CreateProcessSettings procSettings;
+    procSettings.FileName = filename;
+    procSettings.Arguments = args;
+    procSettings.WorkingDirectory = workingDir;
+    procSettings.HiddenWindow = hiddenWindow;
+    procSettings.WaitForEnd = waitForEnd;
+    procSettings.LogOutput = waitForEnd;
+    procSettings.ShellExecute = true;
+    return Platform::CreateProcess(procSettings);
 }
 
 int32 PlatformBase::RunProcess(const StringView& cmdLine, const StringView& workingDir, bool hiddenWindow)
 {
-    return Platform::RunProcess(cmdLine, workingDir, Dictionary<String, String>(), hiddenWindow);
+    CreateProcessSettings procSettings;
+    procSettings.FileName = cmdLine;
+    procSettings.WorkingDirectory = workingDir;
+    procSettings.HiddenWindow = hiddenWindow;
+    return Platform::CreateProcess(procSettings);
 }
 
 int32 PlatformBase::RunProcess(const StringView& cmdLine, const StringView& workingDir, const Dictionary<String, String>& environment, bool hiddenWindow)
 {
-    // Not supported
-    return -1;
+    CreateProcessSettings procSettings;
+    procSettings.FileName = cmdLine;
+    procSettings.WorkingDirectory = workingDir;
+    procSettings.Environment = environment;
+    procSettings.HiddenWindow = hiddenWindow;
+    return Platform::CreateProcess(procSettings);
 }
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 Array<PlatformBase::StackFrame> PlatformBase::GetStackFrames(int32 skipCount, int32 maxDepth, void* context)
 {
@@ -546,14 +770,21 @@ String PlatformBase::GetStackTrace(int32 skipCount, int32 maxDepth, void* contex
     for (const auto& frame : stackFrames)
     {
         StringAsUTF16<ARRAY_COUNT(StackFrame::FunctionName)> functionName(frame.FunctionName);
+        const StringView functionNameStr(functionName.Get());
         if (StringUtils::Length(frame.FileName) != 0)
         {
             StringAsUTF16<ARRAY_COUNT(StackFrame::FileName)> fileName(frame.FileName);
-            result.AppendFormat(TEXT("   at {0}() in {1}:line {2}\n"), functionName.Get(), fileName.Get(), frame.LineNumber);
+            result.Append(TEXT("   at ")).Append(functionNameStr);
+            if (!functionNameStr.EndsWith(')'))
+                result.Append(TEXT("()"));
+            result.AppendFormat(TEXT("in {0}:line {1}\n"),fileName.Get(), frame.LineNumber);
         }
         else if (StringUtils::Length(frame.FunctionName) != 0)
         {
-            result.AppendFormat(TEXT("   at {0}()\n"), functionName.Get());
+            result.Append(TEXT("   at ")).Append(functionNameStr);
+            if (!functionNameStr.EndsWith(')'))
+                result.Append(TEXT("()"));
+            result.Append('\n');
         }
         else
         {
@@ -566,6 +797,26 @@ String PlatformBase::GetStackTrace(int32 skipCount, int32 maxDepth, void* contex
 void PlatformBase::CollectCrashData(const String& crashDataFolder, void* context)
 {
 }
+
+#if USE_EDITOR
+
+#include "Engine/Core/Math/Color32.h"
+
+Delegate<Color32> PlatformBase::PickScreenColorDone;
+
+Color32 PlatformBase::GetScreenColorAt(const Float2& pos)
+{
+    // No supported
+    return Color32::Transparent;
+}
+
+void PlatformBase::PickScreenColor()
+{
+    // Just return transparent color when not implemented/supported
+    PickScreenColorDone(Color32::Transparent);
+}
+
+#endif
 
 const Char* ToString(PlatformType type)
 {
@@ -587,6 +838,47 @@ const Char* ToString(PlatformType type)
         return TEXT("Android");
     case PlatformType::Switch:
         return TEXT("Switch");
+    case PlatformType::PS5:
+        return TEXT("PlayStation 5");
+    case PlatformType::Mac:
+        return TEXT("Mac");
+    case PlatformType::iOS:
+        return TEXT("iOS");
+    case PlatformType::Web:
+        return TEXT("Web");
+    default:
+        return TEXT("");
+    }
+}
+
+const Char* ToStringExact(PlatformType type)
+{
+    switch (type)
+    {
+    case PlatformType::Windows:
+        return TEXT("Windows");
+    case PlatformType::XboxOne:
+        return TEXT("XboxOne");
+    case PlatformType::UWP:
+        return TEXT("UWP");
+    case PlatformType::Linux:
+        return TEXT("Linux");
+    case PlatformType::PS4:
+        return TEXT("PS4");
+    case PlatformType::XboxScarlett:
+        return TEXT("XboxScarlett");
+    case PlatformType::Android:
+        return TEXT("Android");
+    case PlatformType::Switch:
+        return TEXT("Switch");
+    case PlatformType::PS5:
+        return TEXT("PS5");
+    case PlatformType::Mac:
+        return TEXT("Mac");
+    case PlatformType::iOS:
+        return TEXT("iOS");
+    case PlatformType::Web:
+        return TEXT("Web");
     default:
         return TEXT("");
     }

@@ -1,18 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BinaryAsset.h"
 #include "Cache/AssetsCache.h"
 #include "Storage/ContentStorageManager.h"
 #include "Loading/Tasks/LoadAssetDataTask.h"
+#include "Factories/BinaryAssetFactory.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Serialization/JsonTools.h"
 #include "Engine/Debug/Exceptions/JsonParseException.h"
-#include "Factories/BinaryAssetFactory.h"
 #include "Engine/Threading/ThreadPoolTask.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if USE_EDITOR
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Engine/Globals.h"
 #endif
 
 REGISTER_BINARY_ASSET_ABSTRACT(BinaryAsset, "FlaxEngine.BinaryAsset");
@@ -82,6 +84,11 @@ bool BinaryAsset::Init(AssetInitData& initData)
         {
             asset->_dependantAssets.Add(this);
         }
+        else
+        {
+            // Dependency is not yet loaded to keep track this link to act when it's loaded
+            Content::onAssetDepend(this, e.First);
+        }
     }
 #endif
 
@@ -114,10 +121,7 @@ void BinaryAsset::Reimport() const
 void BinaryAsset::GetImportMetadata(String& path, String& username) const
 {
     if (Metadata.IsInvalid())
-    {
-        LOG(Warning, "Missing asset metadata.");
         return;
-    }
 
     // Parse metadata and try to get import info
     rapidjson_flax::Document document;
@@ -126,6 +130,12 @@ void BinaryAsset::GetImportMetadata(String& path, String& username) const
     {
         path = JsonTools::GetString(document, "ImportPath");
         username = JsonTools::GetString(document, "ImportUsername");
+        if (path.HasChars() && FileSystem::IsRelative(path))
+        {
+            // Convert path back to thr absolute (eg. if stored in relative format)
+            path = Globals::ProjectFolder / path;
+            StringUtils::PathRemoveRelativeParts(path);
+        }
     }
     else
     {
@@ -146,9 +156,7 @@ void BinaryAsset::ClearDependencies()
     {
         auto asset = Cast<BinaryAsset>(Content::GetAsset(e.First));
         if (asset)
-        {
             asset->_dependantAssets.Remove(this);
-        }
     }
     Dependencies.Clear();
 }
@@ -187,8 +195,10 @@ bool BinaryAsset::HasDependenciesModified() const
 
 #endif
 
-FlaxChunk* BinaryAsset::GetOrCreateChunk(int32 index)
+FlaxChunk* BinaryAsset::GetOrCreateChunk(int32 index) const
 {
+    if (IsVirtual()) // Virtual assets don't own storage container
+        return nullptr;
     ASSERT(Math::IsInRange(index, 0, ASSET_FILE_DATA_CHUNKS - 1));
 
     // Try get
@@ -201,7 +211,7 @@ FlaxChunk* BinaryAsset::GetOrCreateChunk(int32 index)
 
     // Allocate
     ASSERT(Storage);
-    _header.Chunks[index] = chunk = Storage->AllocateChunk();
+    const_cast<BinaryAsset*>(this)->_header.Chunks[index] = chunk = Storage->AllocateChunk();
     if (chunk)
         chunk->RegisterUsage();
 
@@ -259,10 +269,9 @@ void BinaryAsset::GetChunkData(int32 index, BytesContainer& data) const
     data.Link(chunk->Data);
 }
 
-bool BinaryAsset::LoadChunk(int32 chunkIndex)
+bool BinaryAsset::LoadChunk(int32 chunkIndex) const
 {
     ASSERT(Storage);
-
     const auto chunk = _header.Chunks[chunkIndex];
     if (chunk != nullptr
         && chunk->IsMissing()
@@ -271,19 +280,14 @@ bool BinaryAsset::LoadChunk(int32 chunkIndex)
         if (Storage->LoadAssetChunk(chunk))
             return true;
     }
-
     return false;
 }
 
-bool BinaryAsset::LoadChunks(AssetChunksFlag chunks)
+bool BinaryAsset::LoadChunks(AssetChunksFlag chunks) const
 {
-    ASSERT(Storage);
-
-    // Check if skip loading
     if (chunks == 0)
         return false;
-
-    // Load all missing marked chunks
+    ASSERT(Storage);
     for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
     {
         auto chunk = _header.Chunks[i];
@@ -296,7 +300,6 @@ bool BinaryAsset::LoadChunks(AssetChunksFlag chunks)
                 return true;
         }
     }
-
     return false;
 }
 
@@ -317,28 +320,31 @@ bool BinaryAsset::SaveAsset(const StringView& path, AssetInitData& data, bool si
 
 bool BinaryAsset::SaveToAsset(const StringView& path, AssetInitData& data, bool silentMode)
 {
+    PROFILE_CPU();
+
     // Ensure path is in a valid format
     String pathNorm(path);
-    FileSystem::NormalizePath(pathNorm);
+    ContentStorageManager::FormatPath(pathNorm);
+    const StringView filePath = pathNorm;
 
     // Find target storage container and the asset
-    auto storage = ContentStorageManager::TryGetStorage(pathNorm);
-    auto asset = Content::GetAsset(pathNorm);
+    auto storage = ContentStorageManager::TryGetStorage(filePath);
+    auto asset = Content::GetAsset(filePath);
     auto binaryAsset = dynamic_cast<BinaryAsset*>(asset);
     if (asset && !binaryAsset)
     {
         LOG(Warning, "Cannot write to the non-binary asset location.");
         return true;
     }
-
-    // Check if can perform write operation to the asset container
-    if (storage)
+    if (!binaryAsset && !storage && FileSystem::FileExists(filePath))
     {
-        if (!storage->AllowDataModifications())
-        {
-            LOG(Warning, "Cannot write to the asset storage container.");
-            return true;
-        }
+        // Force-resolve storage (asset at that path could be not yet loaded into registry)
+        storage = ContentStorageManager::GetStorage(filePath);
+    }
+    if (storage && storage->IsReadOnly())
+    {
+        LOG(Warning, "Cannot write to the asset storage container.");
+        return true;
     }
 
     // Initialize data container
@@ -347,6 +353,11 @@ bool BinaryAsset::SaveToAsset(const StringView& path, AssetInitData& data, bool 
     {
         // Use the same asset ID
         data.Header.ID = binaryAsset->GetID();
+    }
+    else if (storage && storage->GetEntriesCount())
+    {
+        // Use the same file ID
+        data.Header.ID = storage->GetEntry(0).ID;
     }
     else
     {
@@ -362,18 +373,27 @@ bool BinaryAsset::SaveToAsset(const StringView& path, AssetInitData& data, bool 
     {
         // HACK: file is locked by some tasks (e.g material asset loaded some data and is updating the asset)
         // Let's hide these locks just for the saving
-        const auto locks = storage->_chunksLock;
-        storage->_chunksLock = 0;
+        const auto locks = Platform::AtomicRead(&storage->_chunksLock);
+        Platform::AtomicStore(&storage->_chunksLock, 0);
         result = storage->Save(data, silentMode);
-        storage->_chunksLock = locks;
+        Platform::InterlockedAdd(&storage->_chunksLock, locks);
     }
     else
     {
-        ASSERT(pathNorm.HasChars());
-        result = FlaxStorage::Create(pathNorm, data, silentMode);
+        result = FlaxStorage::Create(filePath, data, silentMode);
     }
     if (binaryAsset)
         binaryAsset->_isSaving = false;
+
+    if (binaryAsset)
+    {
+        // Inform dependant asset (use cloned version because it might be modified by assets when they got reloaded)
+        auto dependantAssets = binaryAsset->_dependantAssets;
+        for (auto& e : dependantAssets)
+        {
+            e->OnDependencyModified(binaryAsset);
+        }
+    }
 
     return result;
 }
@@ -445,14 +465,30 @@ void BinaryAsset::OnDeleteObject()
 
 #endif
 
-const String& BinaryAsset::GetPath() const
+StringView BinaryAsset::GetPath() const
 {
 #if USE_EDITOR
-    return Storage ? Storage->GetPath() : String::Empty;
+    return Storage ? StringView(Storage->GetPath()) : StringView::Empty;
 #else
     // In build all assets are packed into packages so use ID for original path lookup
     return Content::GetRegistry()->GetEditorAssetPath(_id);
 #endif
+}
+
+uint64 BinaryAsset::GetMemoryUsage() const
+{
+    Locker.Lock();
+    uint64 result = Asset::GetMemoryUsage();
+    result += sizeof(BinaryAsset) - sizeof(Asset);
+    result += _dependantAssets.Capacity() * sizeof(BinaryAsset*);
+    for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
+    {
+        auto chunk = _header.Chunks[i];
+        if (chunk != nullptr && chunk->IsLoaded())
+            result += chunk->Size();
+    }
+    Locker.Unlock();
+    return result;
 }
 
 /// <summary>
@@ -462,25 +498,21 @@ const String& BinaryAsset::GetPath() const
 class InitAssetTask : public ContentLoadTask
 {
 private:
-
     WeakAssetReference<BinaryAsset> _asset;
     FlaxStorage::LockData _dataLock;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="InitAssetTask"/> class.
     /// </summary>
     /// <param name="asset">The asset.</param>
     InitAssetTask(BinaryAsset* asset)
-        : ContentLoadTask(Type::Custom)
-        , _asset(asset)
+        : _asset(asset)
         , _dataLock(asset->Storage->Lock())
     {
     }
 
 public:
-
     // [ContentLoadTask]
     bool HasReference(Object* obj) const override
     {
@@ -488,18 +520,16 @@ public:
     }
 
 protected:
-
     // [ContentLoadTask]
     Result run() override
     {
         AssetReference<BinaryAsset> ref = _asset.Get();
         if (ref == nullptr)
             return Result::MissingReferences;
-
-        // Prepare
         auto storage = ref->Storage;
         auto factory = (BinaryAssetFactoryBase*)Content::GetAssetFactory(ref->GetTypeName());
         ASSERT(factory);
+        PROFILE_MEM(ContentAssets);
 
         // Here we should open storage and extract AssetInitData
         // This would also allow to convert/upgrade data
@@ -510,12 +540,12 @@ protected:
 
         return Result::Ok;
     }
+
     void OnEnd() override
     {
         _dataLock.Release();
         _asset = nullptr;
 
-        // Base
         ContentLoadTask::OnEnd();
     }
 };
@@ -534,10 +564,7 @@ ContentLoadTask* BinaryAsset::createLoadingTask()
         loadTask = preLoadChunksTask;
     }
 
-    // Before asset loading we have to initialize storage
-    // TODO: maybe in build game we could do it in place?
-    // This step is only for opening asset files in background and upgrading them
-    // In build game we have only a few packages which are ready to use
+    // Before asset loading we have to initialize storage and pull the asset header
     auto initTask = New<InitAssetTask>(this);
     initTask->ContinueWith(loadTask);
     loadTask = initTask;
@@ -551,7 +578,43 @@ Asset::LoadResult BinaryAsset::loadAsset()
     ASSERT(Storage && _header.ID.IsValid() && _header.TypeName.HasChars());
 
     auto lock = Storage->Lock();
-    return load();
+    auto chunksToPreload = getChunksToPreload();
+    if (chunksToPreload != 0)
+    {
+        // Ensure that any chunks that were requested before are loaded in memory (in case streaming flushed them out after timeout)
+        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
+        {
+            const auto chunk = _header.Chunks[i];
+            if (GET_CHUNK_FLAG(i) & chunksToPreload && chunk && chunk->IsMissing())
+                Storage->LoadAssetChunk(chunk);
+        }
+    }
+    const LoadResult result = load();
+#if !BUILD_RELEASE
+    if (result == LoadResult::MissingDataChunk)
+    {
+        // Provide more insights on potentially missing asset data chunk
+        Char chunksBitMask[ASSET_FILE_DATA_CHUNKS + 1];
+        Char chunksExistBitMask[ASSET_FILE_DATA_CHUNKS + 1];
+        Char chunksLoadBitMask[ASSET_FILE_DATA_CHUNKS + 1];
+        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
+        {
+            if (const FlaxChunk* chunk = _header.Chunks[i])
+            {
+                chunksBitMask[i] = '1';
+                chunksExistBitMask[i] = chunk->ExistsInFile() ? '1' : '0';
+                chunksLoadBitMask[i] = chunk->IsLoaded() ? '1' : '0';
+            }
+            else
+            {
+                chunksBitMask[i] = chunksExistBitMask[i] = chunksLoadBitMask[i] = '0';
+            }
+        }
+        chunksBitMask[ASSET_FILE_DATA_CHUNKS] = chunksExistBitMask[ASSET_FILE_DATA_CHUNKS] = chunksLoadBitMask[ASSET_FILE_DATA_CHUNKS] = 0;
+        LOG(Warning, "Asset reports missing data chunk. Chunks bitmask: {}, existing chunks: {} loaded chunks: {}. '{}'", chunksBitMask, chunksExistBitMask, chunksLoadBitMask, ToString());
+    }
+#endif
+    return result;
 }
 
 void BinaryAsset::releaseStorage()
@@ -570,7 +633,7 @@ void BinaryAsset::onRename(const StringView& newPath)
     ScopeLock lock(Locker);
 
     // We don't support packages now
-    ASSERT(!Storage->IsPackage() && Storage->AllowDataModifications() && Storage->GetEntriesCount() == 1);
+    ASSERT(!Storage->IsPackage() && !Storage->IsReadOnly() && Storage->GetEntriesCount() == 1);
 
     // Rename storage
     Storage->OnRename(newPath);

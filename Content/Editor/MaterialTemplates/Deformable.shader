@@ -2,6 +2,7 @@
 // Version: @0
 
 #define MATERIAL 1
+#define USE_PER_VIEW_CONSTANTS 1
 @3
 #include "./Flax/Common.hlsl"
 #include "./Flax/MaterialCommon.hlsl"
@@ -9,23 +10,14 @@
 @7
 // Primary constant buffer (with additional material parameters)
 META_CB_BEGIN(0, Data)
-float4x4 ViewProjectionMatrix;
 float4x4 WorldMatrix;
 float4x4 LocalMatrix;
-float4x4 ViewMatrix;
-float3 ViewPos;
-float ViewFar;
-float3 ViewDir;
-float TimeParam;
-float4 ViewInfo;
-float4 ScreenSize;
 float3 Dummy0;
 float WorldDeterminantSign;
 float MeshMinZ;
 float Segment;
 float ChunksPerSegment;
 float PerInstanceRandom;
-float4 TemporalAAJitter;
 float3 GeometrySize;
 float MeshMaxZ;
 @1META_CB_END
@@ -215,6 +207,20 @@ float3 GetObjectSize(MaterialInput input)
 	return GeometrySize * float3(world._m00, world._m11, world._m22);
 }
 
+// Gets the current object scale (supports instancing)
+float3 GetObjectScale(MaterialInput input)
+{
+    float4x4 world = WorldMatrix;
+
+    // Extract scale from the world matrix
+    float3 scale;
+    scale.x = length(float3(world._11, world._12, world._13));
+    scale.y = length(float3(world._21, world._22, world._23));
+    scale.z = length(float3(world._31, world._32, world._33));
+
+    return scale;
+}
+
 // Get the current object random value
 float GetPerInstanceRandom(MaterialInput input)
 {
@@ -302,10 +308,10 @@ VertexOutput VS_SplineModel(ModelInput input)
 	world = mul(world, WorldMatrix);
 
 	// Compute clip space position
-	output.Position = mul(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
 
 	// Pass vertex attributes
-	output.Geometry.TexCoord = input.TexCoord;
+	output.Geometry.TexCoord = input.TexCoord0;
 #if USE_VERTEX_COLOR
 	output.Geometry.VertexColor = input.Color;
 #endif
@@ -331,7 +337,7 @@ VertexOutput VS_SplineModel(ModelInput input)
 	// Apply world position offset per-vertex
 #if USE_POSITION_OFFSET
 	output.Geometry.WorldPosition += material.PositionOffset;
-	output.Position = mul(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
 #endif
 
 	// Get tessalation multiplier (per vertex)
@@ -373,5 +379,20 @@ void PS_Depth(PixelInput input)
 #endif
 #endif
 }
+
+#if _PS_QuadOverdraw
+
+#include "./Flax/Editor/QuadOverdraw.hlsl"
+
+// Pixel Shader function for Quad Overdraw Pass (development-only)
+[earlydepthstencil]
+META_PS(true, FEATURE_LEVEL_SM5)
+META_FLAG(DevelopmentOnly)
+void PS_QuadOverdraw(float4 svPos : SV_Position, uint primId : SV_PrimitiveID)
+{
+	DoQuadOverdraw(svPos, primId);
+}
+
+#endif
 
 @9

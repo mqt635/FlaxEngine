@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -25,6 +25,11 @@ namespace Flax.Build.Graph
         /// The working directory for any process invoked by this task.
         /// </summary>
         public string WorkingDirectory = string.Empty;
+
+        /// <summary>
+        /// The command to call upon task execution.
+        /// </summary>
+        public Action Command;
 
         /// <summary>
         /// The command to run to create produced files.

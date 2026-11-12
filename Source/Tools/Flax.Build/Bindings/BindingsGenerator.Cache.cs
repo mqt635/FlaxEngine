@@ -1,4 +1,4 @@
-// (c) 2012-2020 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -19,7 +19,7 @@ namespace Flax.Build.Bindings
     partial class BindingsGenerator
     {
         private static readonly Dictionary<string, Type> TypeCache = new Dictionary<string, Type>();
-        private const int CacheVersion = 9;
+        private const int CacheVersion = 23;
 
         internal static void Write(BinaryWriter writer, string e)
         {
@@ -36,6 +36,23 @@ namespace Flax.Build.Bindings
                 writer.Write(list.Length);
                 for (int i = 0; i < list.Length; i++)
                     writer.Write(list[i]);
+            }
+            else
+            {
+                writer.Write(0);
+            }
+        }
+
+        internal static void Write(BinaryWriter writer, Dictionary<string, string> map)
+        {
+            if (map != null)
+            {
+                writer.Write(map.Count);
+                foreach (var e in map)
+                {
+                    writer.Write(e.Key);
+                    writer.Write(e.Value);
+                }
             }
             else
             {
@@ -156,6 +173,22 @@ namespace Flax.Build.Bindings
             return list;
         }
 
+        internal static Dictionary<string, string> Read(BinaryReader reader, Dictionary<string, string> map)
+        {
+            var count = reader.ReadInt32();
+            if (count != 0)
+            {
+                map = new Dictionary<string, string>();
+                for (int i = 0; i < count; i++)
+                {
+                    var key = reader.ReadString();
+                    var value = reader.ReadString();
+                    map.Add(key, value);
+                }
+            }
+            return map;
+        }
+
         internal static T Read<T>(BinaryReader reader, T e) where T : IBindingsCache
         {
             var typename = reader.ReadString();
@@ -220,7 +253,7 @@ namespace Flax.Build.Bindings
             {
                 // Version
                 writer.Write(CacheVersion);
-                writer.Write(File.GetLastWriteTime(Assembly.GetExecutingAssembly().Location).Ticks);
+                writer.Write(FileCache.GetLastWriteTime(Assembly.GetExecutingAssembly().Location).Ticks);
 
                 // Build options
                 writer.Write(moduleOptions.IntermediateFolder);
@@ -237,7 +270,7 @@ namespace Flax.Build.Bindings
                 {
                     var headerFile = headerFiles[i];
                     writer.Write(headerFile);
-                    writer.Write(File.GetLastWriteTime(headerFile).Ticks);
+                    writer.Write(FileCache.GetLastWriteTime(headerFile).Ticks);
                 }
 
                 // Info
@@ -248,7 +281,7 @@ namespace Flax.Build.Bindings
         private static bool LoadCache(ref ModuleInfo moduleInfo, BuildOptions moduleOptions, List<string> headerFiles)
         {
             var path = GetCachePath(moduleInfo.Module, moduleOptions);
-            if (!File.Exists(path))
+            if (!FileCache.Exists(path))
                 return false;
             try
             {
@@ -259,7 +292,7 @@ namespace Flax.Build.Bindings
                     var version = reader.ReadInt32();
                     if (version != CacheVersion)
                         return false;
-                    if (File.GetLastWriteTime(Assembly.GetExecutingAssembly().Location).Ticks != reader.ReadInt64())
+                    if (FileCache.GetLastWriteTime(Assembly.GetExecutingAssembly().Location).Ticks != reader.ReadInt64())
                         return false;
 
                     // Build options
@@ -268,13 +301,13 @@ namespace Flax.Build.Bindings
                         reader.ReadInt32() != (int)moduleOptions.Architecture ||
                         reader.ReadInt32() != (int)moduleOptions.Configuration)
                         return false;
-                    var publicDefinitions = Read(reader, Utilities.GetEmptyArray<string>());
+                    var publicDefinitions = Read(reader, Array.Empty<string>());
                     if (publicDefinitions.Length != moduleOptions.PublicDefinitions.Count || publicDefinitions.Any(x => !moduleOptions.PublicDefinitions.Contains(x)))
                         return false;
-                    var privateDefinitions = Read(reader, Utilities.GetEmptyArray<string>());
+                    var privateDefinitions = Read(reader, Array.Empty<string>());
                     if (privateDefinitions.Length != moduleOptions.PrivateDefinitions.Count || privateDefinitions.Any(x => !moduleOptions.PrivateDefinitions.Contains(x)))
                         return false;
-                    var preprocessorDefinitions = Read(reader, Utilities.GetEmptyArray<string>());
+                    var preprocessorDefinitions = Read(reader, Array.Empty<string>());
                     if (preprocessorDefinitions.Length != moduleOptions.CompileEnv.PreprocessorDefinitions.Count || preprocessorDefinitions.Any(x => !moduleOptions.CompileEnv.PreprocessorDefinitions.Contains(x)))
                         return false;
 
@@ -287,7 +320,7 @@ namespace Flax.Build.Bindings
                         var headerFile = headerFiles[i];
                         if (headerFile != reader.ReadString())
                             return false;
-                        if (File.GetLastWriteTime(headerFile).Ticks > reader.ReadInt64())
+                        if (FileCache.GetLastWriteTime(headerFile).Ticks > reader.ReadInt64())
                             return false;
                     }
 

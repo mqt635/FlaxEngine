@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections;
-using FlaxEditor.Scripting;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -21,7 +21,7 @@ namespace FlaxEditor.CustomEditors.Editors
         {
             var arrayType = Values.Type;
             var elementType = arrayType.GetElementType();
-            return Array.CreateInstance(elementType, size);
+            return TypeUtils.CreateArrayInstance(elementType, size);
         }
 
         /// <inheritdoc />
@@ -35,7 +35,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 // Allocate new array
                 var arrayType = Values.Type;
                 var elementType = arrayType.GetElementType();
-                var newValues = Array.CreateInstance(elementType, newSize);
+                var newValues = TypeUtils.CreateArrayInstance(elementType, newSize);
 
                 var sharedCount = Mathf.Min(oldSize, newSize);
                 if (array != null && sharedCount > 0)
@@ -46,13 +46,14 @@ namespace FlaxEditor.CustomEditors.Editors
                     if (elementType.IsValueType || NotNullItems)
                     {
                         // Fill new entries with the last value
+                        var lastValue = array.GetValue(oldSize - 1);
                         for (int i = oldSize; i < newSize; i++)
-                            Array.Copy(array, oldSize - 1, newValues, i, 1);
+                            newValues.SetValue(Utilities.Utils.CloneValue(lastValue), i);
                     }
                     else
                     {
                         // Initialize new entries with default values
-                        var defaultValue = TypeUtils.GetDefaultValue(new ScriptType(elementType));
+                        var defaultValue = TypeUtils.GetDefaultValue(elementType);
                         for (int i = oldSize; i < newSize; i++)
                             newValues.SetValue(defaultValue, i);
                     }
@@ -60,7 +61,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 else if (newSize > 0)
                 {
                     // Initialize new entries with default values
-                    var defaultValue = TypeUtils.GetDefaultValue(new ScriptType(elementType));
+                    var defaultValue = TypeUtils.GetDefaultValue(elementType);
                     for (int i = 0; i < newSize; i++)
                         newValues.SetValue(defaultValue, i);
                 }
@@ -79,7 +80,7 @@ namespace FlaxEditor.CustomEditors.Editors
             var size = array.Length;
             var arrayType = Values.Type;
             var elementType = arrayType.GetElementType();
-            var cloned = Array.CreateInstance(elementType, size);
+            var cloned = TypeUtils.CreateArrayInstance(elementType, size);
 
             Array.Copy(array, 0, cloned, 0, size);
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,9 +7,11 @@
 #include <string.h>
 
 struct Guid;
+struct Version;
 struct CPUInfo;
 struct MemoryStats;
 struct ProcessMemoryStats;
+struct CreateProcessSettings;
 struct CreateWindowSettings;
 struct BatteryInfo;
 
@@ -124,12 +126,36 @@ enum class ThreadPriority
 
 extern FLAXENGINE_API const Char* ToString(ThreadPriority value);
 
-API_INJECT_CPP_CODE("#include \"Engine/Platform/Platform.h\"");
+/// <summary>
+/// Possible fatal error types that cause engine exit.
+/// </summary>
+API_ENUM() enum class FatalErrorType
+{
+    // No fatal error set.
+    None,
+    // Not defined or custom error.
+    Unknown,
+    // Runtime exception caught by the handler (eg. stack overflow, invalid memory address access).
+    Exception,
+    // Data assertion failed (eg. invalid value or code usage).
+    Assertion,
+    // Program run out of memory to allocate.
+    OutOfMemory,
+    // The graphics device crashed, has been removed or restarted.
+    GPUCrash,
+    // The graphics device stopped responding (eg. incorrect rendering code or bug in driver).
+    GPUHang,
+    // The graphics device run out of video memory to allocate.
+    GPUOutOfMemory,
+};
+
+API_INJECT_CODE(cpp, "#include \"Engine/Platform/Platform.h\"");
 
 /// <summary>
 /// Runtime platform service.
 /// </summary>
-API_CLASS(Static, Name="Platform") class FLAXENGINE_API PlatformBase
+API_CLASS(Static, Name="Platform", Tag="NativeInvokeUseName")
+class FLAXENGINE_API PlatformBase
 {
 DECLARE_SCRIPTING_TYPE_MINIMAL(PlatformBase);
 
@@ -160,12 +186,18 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(PlatformBase);
     static void BeforeExit();
 
     /// <summary>
-    /// Called after engine exit to shutdown platform service.
+    /// Called after engine exit to shut down platform service.
     /// </summary>
     static void Exit();
 
 public:
 
+    /// <summary>
+    /// Application windows class name.
+    /// </summary>
+    static const Char* ApplicationClassName;
+
+public:
     /// <summary>
     /// Copy memory region
     /// </summary>
@@ -215,6 +247,12 @@ public:
     static void MemoryBarrier() = delete;
 
     /// <summary>
+    /// Indicates to the processor that a cache line will be needed in the near future.
+    /// </summary>
+    /// <param name="ptr">The address of the cache line to be loaded. This address is not required to be on a cache line boundary.</param>
+    static void MemoryPrefetch(void const* ptr) = delete;
+
+    /// <summary>
     /// Sets a 64-bit variable to the specified value as an atomic operation. The function prevents more than one thread from using the same variable simultaneously.
     /// </summary>
     /// <param name="dst">A pointer to the first operand. This value will be replaced with the result of the operation.</param>
@@ -225,7 +263,7 @@ public:
     /// <summary>
     /// Performs an atomic compare-and-exchange operation on the specified values. The function compares two specified 32-bit values and exchanges with another 32-bit value based on the outcome of the comparison.
     /// </summary>
-    /// <remarks>The function compares the dst value with the comperand value. If the dst value is equal to the comperand value, the value value is stored in the address specified by dst. Otherwise, no operation is performed.</remarks>
+    /// <remarks>The function compares the dst value with the comperand value. If the dst value is equal to the comperand value, the value is stored in the address specified by dst. Otherwise, no operation is performed.</remarks>
     /// <param name="dst">A pointer to the first operand. This value will be replaced with the result of the operation.</param>
     /// <param name="exchange">The value to exchange.</param>
     /// <param name="comperand">The value to compare to destination.</param>
@@ -235,7 +273,7 @@ public:
     /// <summary>
     /// Performs an atomic compare-and-exchange operation on the specified values. The function compares two specified 64-bit values and exchanges with another 64-bit value based on the outcome of the comparison.
     /// </summary>
-    /// <remarks>The function compares the dst value with the comperand value. If the dst value is equal to the comperand value, the value value is stored in the address specified by dst. Otherwise, no operation is performed.</remarks>
+    /// <remarks>The function compares the dst value with the comperand value. If the dst value is equal to the comperand value, the value is stored in the address specified by dst. Otherwise, no operation is performed.</remarks>
     /// <param name="dst">A pointer to the first operand. This value will be replaced with the result of the operation.</param>
     /// <param name="exchange">The value to exchange.</param>
     /// <param name="comperand">The value to compare to destination.</param>
@@ -261,7 +299,7 @@ public:
     /// </summary>
     /// <param name="dst">A pointer to the first operand. This value will be replaced with the result of the operation.</param>
     /// <param name="value">The second operand.</param>
-    /// <returns>The result value of the operation.</returns>
+    /// <returns>The original value of the dst parameter.</returns>
     static int64 InterlockedAdd(int64 volatile* dst, int64 value) = delete;
 
     /// <summary>
@@ -269,14 +307,14 @@ public:
     /// </summary>
     /// <param name="dst">A pointer to the destination value.</param>
     /// <returns>The function returns the value of the destination parameter.</returns>
-    static int32 AtomicRead(int32 volatile* dst) = delete;
+    static int32 AtomicRead(int32 const volatile* dst) = delete;
 
     /// <summary>
     /// Performs an atomic 64-bit variable read operation on the specified values.
     /// </summary>
     /// <param name="dst">A pointer to the destination value.</param>
     /// <returns>The function returns the value of the destination parameter.</returns>
-    static int64 AtomicRead(int64 volatile* dst) = delete;
+    static int64 AtomicRead(int64 const volatile* dst) = delete;
 
     /// <summary>
     /// Sets a 32-bit variable to the specified value as an atomic operation.
@@ -291,12 +329,6 @@ public:
     /// <param name="dst">A pointer to the value to be exchanged.</param>
     /// <param name="value">The value to be set.</param>
     static void AtomicStore(int64 volatile* dst, int64 value) = delete;
-
-    /// <summary>
-    /// Indicates to the processor that a cache line will be needed in the near future.
-    /// </summary>
-    /// <param name="ptr">The address of the cache line to be loaded. This address is not required to be on a cache line boundary.</param>
-    static void Prefetch(void const* ptr) = delete;
 
 #if COMPILE_WITH_PROFILER
     static void OnMemoryAlloc(void* ptr, uint64 size);
@@ -332,7 +364,6 @@ public:
     static void FreePages(void* ptr);
 
 public:
-
     /// <summary>
     /// Returns the current runtime platform type. It's compile-time constant.
     /// </summary>
@@ -347,19 +378,29 @@ public:
     /// Returns true if running on 64-bit computer
     /// </summary>
     /// <returns>True if running on 64-bit computer, otherwise false.</returns>
-    API_PROPERTY() static bool Is64BitPlatform() = delete;
+    API_PROPERTY() static bool Is64BitPlatform();
+
+    /// <summary>
+    /// Gets the name of the operating system.
+    /// </summary>
+    API_PROPERTY() static String GetSystemName() = delete;
+
+    /// <summary>
+    /// Gets the version of the operating system version.
+    /// </summary>
+    API_PROPERTY() static Version GetSystemVersion() = delete;
 
     /// <summary>
     /// Gets the CPU information.
     /// </summary>
-    /// <returns>The CPU info.</returns>
-    API_PROPERTY() static CPUInfo GetCPUInfo() = delete;
+    API_PROPERTY() static CPUInfo GetCPUInfo();
 
     /// <summary>
     /// Gets the CPU cache line size.
+    /// [Deprecated in v1.10]
     /// </summary>
     /// <returns>The cache line size.</returns>
-    API_PROPERTY() static int32 GetCacheLineSize() = delete;
+    API_PROPERTY() DEPRECATED("Use CacheLineSize field from CPUInfo.") static int32 GetCacheLineSize();
 
     /// <summary>
     /// Gets the current memory stats.
@@ -401,13 +442,17 @@ public:
     static void SetThreadAffinityMask(uint64 affinityMask) = delete;
 
     /// <summary>
-    /// Suspends the execution of the current thread until the time-out interval elapses
+    /// Suspends the execution of the current thread until the time-out interval elapses.
     /// </summary>
     /// <param name="milliseconds">The time interval for which execution is to be suspended, in milliseconds.</param>
     static void Sleep(int32 milliseconds) = delete;
 
-public:
+    /// <summary>
+    /// Yields the execution of the current thread to another thread that is ready to run on the current processor.
+    /// </summary>
+    static void Yield() = delete;
 
+public:
     /// <summary>
     /// Gets the current time in seconds.
     /// </summary>
@@ -424,7 +469,11 @@ public:
     /// Gets the system clock frequency.
     /// </summary>
     /// <returns>The clock frequency.</returns>
-    API_PROPERTY() static uint64 GetClockFrequency() = delete;
+    API_PROPERTY() static uint64 GetClockFrequency()
+    {
+        // Dummy value
+        return 1000000;
+    }
 
     /// <summary>
     /// Gets current system time based on current computer settings.
@@ -453,39 +502,20 @@ public:
     static void GetUTCTime(int32& year, int32& month, int32& dayOfWeek, int32& day, int32& hour, int32& minute, int32& second, int32& millisecond) = delete;
 
 public:
-
     /// <summary>
     /// Shows the fatal error message to the user.
     /// </summary>
     /// <param name="msg">The message content.</param>
     /// <param name="context">The platform-dependent context for the stack trace collecting (eg. platform exception info).</param>
-    static void Fatal(const Char* msg, void* context = nullptr);
-
-    /// <summary>
-    /// Shows the error message to the user.
-    /// </summary>
-    /// <param name="msg">The message content.</param>
-    static void Error(const Char* msg);
-
-    /// <summary>
-    /// Shows the warning message to the user.
-    /// </summary>
-    /// <param name="msg">The message content.</param>
-    static void Warning(const Char* msg);
-
-    /// <summary>
-    /// Shows the information message to the user.
-    /// </summary>
-    /// <param name="msg">The message content.</param>
-    static void Info(const Char* msg);
-
-public:
+    /// <param name="error">The fatal error type.</param>
+    API_FUNCTION() static void Fatal(const StringView& msg, void* context, FatalErrorType error = FatalErrorType::Unknown);
 
     /// <summary>
     /// Shows the fatal error message to the user.
     /// </summary>
     /// <param name="msg">The message content.</param>
-    API_FUNCTION() static void Fatal(const StringView& msg);
+    /// <param name="error">The fatal error type.</param>
+    API_FUNCTION() static void Fatal(const StringView& msg, FatalErrorType error = FatalErrorType::Unknown);
 
     /// <summary>
     /// Shows the error message to the user.
@@ -509,7 +539,8 @@ public:
     /// Logs the specified message to the platform-dependant logging stream.
     /// </summary>
     /// <param name="msg">The message.</param>
-    static void Log(const StringView& msg);
+    /// <param name="logType">The type of the log matching LogType enum. 1 - log, 2 - warning, 4 - error</param>
+    static void Log(const StringView& msg, int32 logType = 1);
 
     /// <summary>
     /// Checks whenever program is running with debugger attached.
@@ -518,7 +549,6 @@ public:
     static bool IsDebuggerPresent();
 
 public:
-
     /// <summary>
     /// Performs a fatal crash.
     /// </summary>
@@ -531,7 +561,7 @@ public:
     /// </summary>
     /// <param name="line">The source line.</param>
     /// <param name="file">The source file.</param>
-    NO_RETURN static void OutOfMemory(int32 line, const char* file);
+    NO_RETURN static void OutOfMemory(int32 line = -1, const char* file = nullptr);
 
     /// <summary>
     /// Performs a fatal crash due to code not being implemented.
@@ -558,7 +588,6 @@ public:
     static void CheckFailed(const char* message, const char* file, int line);
 
 public:
-
     /// <summary>
     /// Sets the High DPI awareness.
     /// </summary>
@@ -595,7 +624,12 @@ public:
     API_PROPERTY() static ScreenOrientationType GetScreenOrientationType();
 
     /// <summary>
-    /// Gets the current  locale culture (eg. "pl-PL" or "en-US").
+    /// Gets the current user display language used to localize texts. Returns name of the culture (eg. "pl-PL" or "en-US"), use CultureInfo for display name of the language.
+    /// </summary>
+    API_PROPERTY() static String GetUserLanguage();
+
+    /// <summary>
+    /// Gets the current user locale culture used to localize numbers, currency and dates. Returns name of the culture (eg. "pl-PL" or "en-US"), use CultureInfo for display name of the language.
     /// </summary>
     API_PROPERTY() static String GetUserLocaleName() = delete;
 
@@ -607,7 +641,7 @@ public:
     /// <summary>
     /// Gets the user name.
     /// </summary>
-    API_PROPERTY() static String GetUserName() = delete;
+    API_PROPERTY() static String GetUserName();
 
     /// <summary>
     /// Returns true if app has user focus.
@@ -626,48 +660,73 @@ public:
     static void CreateGuid(Guid& result);
 
 public:
+    /// <summary>
+    /// The list of users.
+    /// </summary>
+    API_FIELD(ReadOnly) static Array<User*, FixedAllocation<8>> Users;
 
+    /// <summary>
+    /// Event called when user gets added (eg. logged in).
+    /// </summary>
+    API_EVENT() static Delegate<User*> UserAdded;
+
+    /// <summary>
+    /// Event called when user gets removed (eg. logged out).
+    /// </summary>
+    API_EVENT() static Delegate<User*> UserRemoved;
+
+public:
     /// <summary>
     /// Returns a value indicating whether can open a given URL in a web browser.
     /// </summary>
     /// <param name="url">The URI to assign to web browser.</param>
     /// <returns>True if can open URL, otherwise false.</returns>
-    API_FUNCTION() static bool CanOpenUrl(const StringView& url) = delete;
+    API_FUNCTION() static bool CanOpenUrl(const StringView& url);
 
     /// <summary>
     /// Launches a web browser and opens a given URL.
     /// </summary>
     /// <param name="url">The URI to assign to web browser.</param>
-    API_FUNCTION() static void OpenUrl(const StringView& url) = delete;
+    API_FUNCTION() static void OpenUrl(const StringView& url);
 
 public:
+    /// <summary>
+    /// Gets the mouse cursor position in screen-space coordinates.
+    /// </summary>
+    /// <returns>Mouse cursor coordinates.</returns>
+    API_PROPERTY() static Float2 GetMousePosition();
+
+    /// <summary>
+    /// Sets the mouse cursor position in screen-space coordinates.
+    /// </summary>
+    /// <param name="position">Cursor position to set.</param>
+    API_PROPERTY() static void SetMousePosition(const Float2& position);
 
     /// <summary>
     /// Gets the origin position and size of the monitor at the given screen-space location.
     /// </summary>
     /// <param name="screenPos">The screen position (in pixels).</param>
     /// <returns>The monitor bounds.</returns>
-    API_FUNCTION() static Rectangle GetMonitorBounds(const Vector2& screenPos) = delete;
+    API_FUNCTION() static Rectangle GetMonitorBounds(const Float2& screenPos);
 
     /// <summary>
     /// Gets size of the primary desktop.
     /// </summary>
     /// <returns>Desktop size.</returns>
-    API_PROPERTY() static Vector2 GetDesktopSize() = delete;
+    API_PROPERTY() static Float2 GetDesktopSize() = delete;
 
     /// <summary>
     /// Gets virtual bounds of the desktop made of all the monitors outputs attached.
     /// </summary>
     /// <returns>Whole desktop size.</returns>
-    API_PROPERTY() static Rectangle GetVirtualDesktopBounds() = delete;
+    API_PROPERTY() static Rectangle GetVirtualDesktopBounds();
 
     /// <summary>
     /// Gets virtual size of the desktop made of all the monitors outputs attached.
     /// </summary>
-    API_PROPERTY() static Vector2 GetVirtualDesktopSize();
+    API_PROPERTY() static Float2 GetVirtualDesktopSize();
 
 public:
-
     /// <summary>
     /// Gets full path of the main engine directory.
     /// </summary>
@@ -700,7 +759,6 @@ public:
     static bool SetWorkingDirectory(const String& path);
 
 public:
-
     /// <summary>
     /// Gets the process environment variables (pairs of key and value).
     /// </summary>
@@ -724,36 +782,45 @@ public:
     static bool SetEnvironmentVariable(const String& name, const String& value);
 
 public:
-
     /// <summary>
-    /// Starts a new process.
+    /// Starts a new process (runs app).
+    /// [Deprecated in v1.6]
     /// </summary>
-    /// <param name="filename">The path to the file.</param>
+    /// <param name="filename">The path to the executable file.</param>
     /// <param name="args">Custom arguments for command line</param>
     /// <param name="workingDir">The custom name of the working directory</param>
     /// <param name="hiddenWindow">True if start process with hidden window</param>
     /// <param name="waitForEnd">True if wait for process competition</param>
     /// <returns>Retrieves the termination status of the specified process. Valid only if processed ended.</returns>
-    API_FUNCTION() static int32 StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow = false, bool waitForEnd = false);
+    API_FUNCTION() DEPRECATED("Use CreateProcess instead") static int32 StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow = false, bool waitForEnd = false);
 
     /// <summary>
-    /// Starts a new process. Waits for it's end and captures its output.
+    /// Starts a new process (runs commandline). Waits for it's end and captures its output.
+    /// [Deprecated in v1.6]
     /// </summary>
     /// <param name="cmdLine">Command line to execute</param>
     /// <param name="workingDir">The custom path of the working directory.</param>
     /// <param name="hiddenWindow">True if start process with hidden window.</param>
     /// <returns>Retrieves the termination status of the specified process. Valid only if processed ended.</returns>
-    API_FUNCTION() static int32 RunProcess(const StringView& cmdLine, const StringView& workingDir, bool hiddenWindow = true);
+    API_FUNCTION() DEPRECATED("Use CreateProcess instead") static int32 RunProcess(const StringView& cmdLine, const StringView& workingDir, bool hiddenWindow = true);
 
     /// <summary>
-    /// Starts a new process. Waits for it's end and captures its output.
+    /// Starts a new process (runs commandline). Waits for it's end and captures its output.
+    /// [Deprecated in v1.6]
     /// </summary>
     /// <param name="cmdLine">Command line to execute</param>
     /// <param name="workingDir">The custom path of the working directory.</param>
     /// <param name="environment">The process environment variables. If null the current process environment is used.</param>
     /// <param name="hiddenWindow">True if start process with hidden window.</param>
     /// <returns>Retrieves the termination status of the specified process. Valid only if processed ended.</returns>
-    API_FUNCTION() static int32 RunProcess(const StringView& cmdLine, const StringView& workingDir, const Dictionary<String, String, HeapAllocation>& environment, bool hiddenWindow = true);
+    API_FUNCTION() DEPRECATED("Use CreateProcess instead") static int32 RunProcess(const StringView& cmdLine, const StringView& workingDir, const Dictionary<String, String, HeapAllocation>& environment, bool hiddenWindow = true);
+
+    /// <summary>
+    /// Creates a new process.
+    /// </summary>
+    /// <param name="settings">The process settings.</param>
+    /// <returns>Retrieves the termination status of the specified process. Valid only if processed ended.</returns>
+    API_FUNCTION() static int32 CreateProcess(API_PARAM(Ref) CreateProcessSettings& settings);
 
     /// <summary>
     /// Creates the window.
@@ -815,7 +882,28 @@ public:
 
     // Crash dump data handling
     static void CollectCrashData(const String& crashDataFolder, void* context = nullptr);
+
+public:
+#if USE_EDITOR
+    /// <summary>
+    /// Gets the pixel color at the specified coordinates.
+    /// </summary>
+    /// <param name="pos">Screen-space coordinate to read.</param>
+    /// <returns>Pixel color at the specified coordinates, or transparent color when color couldn't be picked up.</returns>
+    API_FUNCTION() static Color32 GetScreenColorAt(const Float2& pos);
+
+    /// <summary>
+    /// Starts async color picking. Color will be returned through PickColorDone event when the action ends (user selected the final color with a mouse). When action is active, GetColorAt can be used to read the current value.
+    /// </summary>
+    API_FUNCTION() static void PickScreenColor();
+
+    /// <summary>
+    /// Called when PickColor action is finished.
+    /// </summary>
+    API_EVENT() static Delegate<Color32> PickScreenColorDone;
+#endif
 };
 
 extern FLAXENGINE_API const Char* ToString(PlatformType type);
+extern FLAXENGINE_API const Char* ToStringExact(PlatformType type);
 extern FLAXENGINE_API const Char* ToString(ArchitectureType type);

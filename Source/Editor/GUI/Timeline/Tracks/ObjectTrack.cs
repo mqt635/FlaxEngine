@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using FlaxEditor.Content;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.Scripting;
@@ -80,7 +81,8 @@ namespace FlaxEditor.GUI.Timeline.Tracks
 
             var obj = Object;
             var hasObject = obj != null;
-            TitleTintColor = hasObject ? Color.White : Color.Red;
+            var style = Style.Current;
+            TextColor = hasObject ? (Flags.HasFlag(TrackFlags.PrefabObject) ? Color.FromRGB(Utilities.Constants.ColorPrefab) : style.Foreground) : style.ProgressError;
             if (hasObject != _hasObject)
                 OnObjectExistenceChanged(obj);
             _hasObject = hasObject;
@@ -100,6 +102,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         /// <param name="obj">The object.</param>
         protected virtual void OnObjectExistenceChanged(object obj)
         {
+            TooltipText = obj != null ? Editor.Instance.CodeDocs.GetTooltip(obj.GetType()) : "null";
         }
 
         /// <summary>
@@ -113,6 +116,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         /// <summary>
         /// The data for add property track buttons tag.
         /// </summary>
+        [HideInEditor]
         public struct AddMemberTag
         {
             /// <summary>
@@ -411,12 +415,19 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             { typeof(Vector2), CurvePropertyTrack.GetArchetype() },
             { typeof(Vector3), CurvePropertyTrack.GetArchetype() },
             { typeof(Vector4), CurvePropertyTrack.GetArchetype() },
+            { typeof(Float2), CurvePropertyTrack.GetArchetype() },
+            { typeof(Float3), CurvePropertyTrack.GetArchetype() },
+            { typeof(Float4), CurvePropertyTrack.GetArchetype() },
+            { typeof(Double2), CurvePropertyTrack.GetArchetype() },
+            { typeof(Double3), CurvePropertyTrack.GetArchetype() },
+            { typeof(Double4), CurvePropertyTrack.GetArchetype() },
             { typeof(Quaternion), CurvePropertyTrack.GetArchetype() },
             { typeof(Color), CurvePropertyTrack.GetArchetype() },
             { typeof(Color32), CurvePropertyTrack.GetArchetype() },
             { typeof(Guid), KeyframesPropertyTrack.GetArchetype() },
             { typeof(DateTime), KeyframesPropertyTrack.GetArchetype() },
             { typeof(TimeSpan), KeyframesPropertyTrack.GetArchetype() },
+            { typeof(LocalizedString), KeyframesPropertyTrack.GetArchetype() },
             { typeof(string), StringPropertyTrack.GetArchetype() },
         };
     }

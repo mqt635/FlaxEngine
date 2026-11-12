@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -20,12 +20,18 @@ namespace FlaxEditor.GUI
 
         private SpriteHandle _icon;
         private string _text;
-        private bool _mouseDown;
+        private bool _primaryMouseDown;
+        private bool _secondaryMouseDown;
 
         /// <summary>
         /// Event fired when user clicks the button.
         /// </summary>
         public Action Clicked;
+
+        /// <summary>
+        /// Event fired when user clicks the button.
+        /// </summary>
+        public Action SecondaryClicked;
 
         /// <summary>
         /// The checked state.
@@ -64,6 +70,11 @@ namespace FlaxEditor.GUI
         }
 
         /// <summary>
+        /// A reference to a context menu to raise when the secondary mouse button is pressed.
+        /// </summary>
+        public ContextMenu.ContextMenu ContextMenu;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ToolStripButton"/> class.
         /// </summary>
         /// <param name="height">The height.</param>
@@ -96,6 +107,29 @@ namespace FlaxEditor.GUI
             return this;
         }
 
+        /// <summary>
+        /// Links the tooltip with input binding info.
+        /// </summary>
+        /// <param name="text">The text.</param>
+        /// <param name="inputBinding">The input key binding.</param>
+        /// <returns>This tooltip.</returns>
+        public ToolStripButton LinkTooltip(string text, ref Options.InputBinding inputBinding)
+        {
+            var input = inputBinding.ToString();
+            if (input.Length != 0)
+                text = $"{text} ({input})";
+            LinkTooltip(text);
+            return this;
+        }
+
+        private void OnClicked()
+        {
+            if (AutoCheck)
+                Checked = !Checked;
+            Clicked?.Invoke();
+            (Parent as ToolStrip)?.OnButtonClicked(this);
+        }
+
         /// <inheritdoc />
         public override void Draw()
         {
@@ -104,14 +138,15 @@ namespace FlaxEditor.GUI
             // Cache data
             var style = Style.Current;
             float iconSize = Height - DefaultMargin;
-            var clientRect = new Rectangle(Vector2.Zero, Size);
+            var clientRect = new Rectangle(Float2.Zero, Size);
             var iconRect = new Rectangle(DefaultMargin, DefaultMargin, iconSize, iconSize);
             var textRect = new Rectangle(DefaultMargin, 0, 0, Height);
             bool enabled = EnabledInHierarchy;
+            bool mouseButtonDown = _primaryMouseDown || _secondaryMouseDown;
 
             // Draw background
-            if (enabled && (IsMouseOver || Checked))
-                Render2D.FillRectangle(clientRect, Checked ? style.BackgroundSelected : _mouseDown ? style.BackgroundHighlighted : (style.LightBackground * 1.3f));
+            if (enabled && (IsMouseOver || IsNavFocused || Checked))
+                Render2D.FillRectangle(clientRect, Checked || mouseButtonDown ? style.BackgroundSelected : style.BackgroundHighlighted);
 
             // Draw icon
             if (_icon.IsValid)
@@ -124,13 +159,7 @@ namespace FlaxEditor.GUI
             if (!string.IsNullOrEmpty(_text))
             {
                 textRect.Size.X = Width - DefaultMargin - textRect.Left;
-                Render2D.DrawText(
-                    style.FontMedium,
-                    _text,
-                    textRect,
-                    enabled ? style.Foreground : style.ForegroundDisabled,
-                    TextAlignment.Near,
-                    TextAlignment.Center);
+                Render2D.DrawText(style.FontMedium, _text, textRect, enabled ? style.Foreground : style.ForegroundDisabled, TextAlignment.Near, TextAlignment.Center);
             }
         }
 
@@ -151,13 +180,17 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left)
             {
-                // Set flag
-                _mouseDown = true;
-
+                _primaryMouseDown = true;
+                Focus();
+                return true;
+            }
+            if (button == MouseButton.Right)
+            {
+                _secondaryMouseDown = true;
                 Focus();
                 return true;
             }
@@ -166,19 +199,20 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
-            if (button == MouseButton.Left && _mouseDown)
+            if (button == MouseButton.Left && _primaryMouseDown)
             {
-                // Clear flag
-                _mouseDown = false;
-
-                // Fire events
-                if (AutoCheck)
-                    Checked = !Checked;
-                Clicked?.Invoke();
-                (Parent as ToolStrip)?.OnButtonClicked(this);
-
+                _primaryMouseDown = false;
+                OnClicked();
+                return true;
+            }
+            if (button == MouseButton.Right && _secondaryMouseDown)
+            {
+                _secondaryMouseDown = false;
+                SecondaryClicked?.Invoke();
+                (Parent as ToolStrip)?.OnSecondaryButtonClicked(this);
+                ContextMenu?.Show(this, new Float2(0, Height));
                 return true;
             }
 
@@ -186,10 +220,22 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left)
+            {
+                OnClicked();
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <inheritdoc />
         public override void OnMouseLeave()
         {
-            // Clear flag
-            _mouseDown = false;
+            _primaryMouseDown = false;
+            _secondaryMouseDown = false;
 
             base.OnMouseLeave();
         }
@@ -197,8 +243,8 @@ namespace FlaxEditor.GUI
         /// <inheritdoc />
         public override void OnLostFocus()
         {
-            // Clear flag
-            _mouseDown = false;
+            _primaryMouseDown = false;
+            _secondaryMouseDown = false;
 
             base.OnLostFocus();
         }

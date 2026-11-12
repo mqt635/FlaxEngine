@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,7 @@
 #include <vulkan/vulkan.h>
 #undef VK_EXT_debug_utils
 #undef VK_EXT_validation_cache
-#define VMA_DEDICATED_ALLOCATION 0
+#define VULKAN_USE_VALIDATION_CACHE 0
 #pragma clang diagnostic ignored "-Wpointer-bool-conversion"
 #pragma clang diagnostic ignored "-Wtautological-pointer-compare"
 
@@ -37,8 +37,22 @@
 #define VMA_MIN(v1, v2) (Math::Min((v1), (v2)))
 #define VMA_MAX(v1, v2) (Math::Max((v1), (v2)))
 #define VMA_SWAP(v1, v2) (::Swap((v1), (v2)))
+#define VMA_SYSTEM_ALIGNED_MALLOC(size, alignment) Platform::Allocate(uint64(size), uint64(alignment))
+#define VMA_SYSTEM_ALIGNED_FREE(ptr) Platform::Free(ptr)
 #define VMA_NULLABLE
 #define VMA_NOT_NULL
+#define VMA_STATS_STRING_ENABLED 0
 #include <ThirdParty/VulkanMemoryAllocator/vk_mem_alloc.h>
+
+#if PLATFORM_APPLE_FAMILY
+// Declare potentially missing extensions from newer SDKs
+#ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+#define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
+#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+#ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#endif
+#endif
 
 #endif

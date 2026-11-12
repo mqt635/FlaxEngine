@@ -1,12 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS
 
+#include "WindowsWindow.h"
 #include "WindowsFileSystem.h"
 #include "Engine/Platform/File.h"
 #include "Engine/Platform/Window.h"
 #include "Engine/Platform/Windows/ComPtr.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Core/Types/StringView.h"
+#include "Engine/Core/Collections/Array.h"
 #include "../Win32/IncludeWindowsHeaders.h"
 
 // Hack this stuff (the problem is that GDI has function named Rectangle -> like one of the Flax core types)
@@ -14,8 +17,9 @@
 #define __shobjidl_h__
 #define LPFNADDPROPSHEETPAGE void*
 #include <ShlObj.h>
-#include <ShellAPI.h>
+#include <shellapi.h>
 #include <KnownFolders.h>
+#undef ShellExecute
 
 namespace Windows
 {
@@ -107,7 +111,7 @@ bool WindowsFileSystem::MoveFileToRecycleBin(const StringView& path)
     op.wFunc = FO_DELETE;
     op.pFrom = pathNullNull;
     op.pTo = nullptr;
-    op.fFlags = FOF_ALLOWUNDO | FOF_NO_UI;
+    op.fFlags = FOF_ALLOWUNDO | FOF_NO_UI | FOF_NOCONFIRMATION;
     op.fAnyOperationsAborted = FALSE;
     op.hNameMappings = nullptr;
     op.lpszProgressTitle = nullptr;
@@ -290,7 +294,7 @@ bool WindowsFileSystem::ShowSaveFileDialog(Window* parentWindow, const StringVie
     return result;
 }
 
-bool WindowsFileSystem::ShowBrowseFolderDialog(Window* parentWindow, const StringView& initialDirectory, const StringView& title, StringView& path)
+bool WindowsFileSystem::ShowBrowseFolderDialog(Window* parentWindow, const StringView& initialDirectory, const StringView& title, String& path)
 {
     bool result = true;
 
@@ -314,7 +318,8 @@ bool WindowsFileSystem::ShowBrowseFolderDialog(Window* parentWindow, const Strin
         if (SUCCEEDED(SHCreateItemFromParsingName(initialDirectory.Get(), NULL, IID_PPV_ARGS(&defaultFolder))))
             fd->SetFolder(defaultFolder);
 
-        if (SUCCEEDED(fd->Show(parentWindow->GetHWND())))
+        HWND hwndOwner = parentWindow ? (HWND)parentWindow->GetNativePtr() : NULL;
+        if (SUCCEEDED(fd->Show(hwndOwner)))
         {
             ComPtr<IShellItem> si;
             if (SUCCEEDED(fd->GetResult(&si)))
@@ -335,7 +340,14 @@ bool WindowsFileSystem::ShowBrowseFolderDialog(Window* parentWindow, const Strin
 
 bool WindowsFileSystem::ShowFileExplorer(const StringView& path)
 {
-    return Platform::StartProcess(path, StringView::Empty, StringView::Empty) != 0;
+    CreateProcessSettings procSettings;
+    procSettings.FileName = path;
+    procSettings.FileName = path;
+    procSettings.HiddenWindow = false;
+    procSettings.WaitForEnd = false;
+    procSettings.LogOutput = false;
+    procSettings.ShellExecute = true;
+    return Platform::CreateProcess(procSettings) != 0;
 }
 
 #endif

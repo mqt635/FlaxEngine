@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using FlaxEngine;
@@ -78,10 +78,9 @@ namespace FlaxEditor.GUI.Docking
         /// <param name="position">Screen space position to test.</param>
         /// <param name="excluded">Floating window to omit during searching (and all docked to that one).</param>
         /// <returns>Dock panel that has been hit or null if nothing found.</returns>
-        public DockPanel HitTest(ref Vector2 position, FloatWindowDockPanel excluded)
+        public DockPanel HitTest(ref Float2 position, FloatWindowDockPanel excluded)
         {
             // Check all floating windows
-            // TODO: gather windows order and take it into account when performing test
             for (int i = 0; i < FloatingPanels.Count; i++)
             {
                 var win = FloatingPanels[i];
@@ -94,7 +93,42 @@ namespace FlaxEditor.GUI.Docking
             }
 
             // Base
+            //if (!Root?.RootWindow.Window.IsFocused ?? false)
+            //    return null;
             return base.HitTest(ref position);
+        }
+
+        /// <summary>
+        /// Performs hit test over dock panel.
+        /// </summary>
+        /// <param name="position">Window space position to test.</param>
+        /// <param name="excluded">Floating window to omit during searching (and all docked to that one).</param>
+        /// <param name="hitResults">Results of the hit test</param>
+        /// <returns>True if any dock panels were hit, otherwise false.</returns>
+        public bool HitTest(ref Float2 position, FloatWindowDockPanel excluded, out DockPanel[] hitResults)
+        {
+            // Check all floating windows
+            List<DockPanel> results = new(FloatingPanels.Count);
+            for (int i = 0; i < FloatingPanels.Count; i++)
+            {
+                var win = FloatingPanels[i];
+                if (win.Visible && win != excluded)
+                {
+                    var result = win.HitTest(ref position);
+                    if (result != null)
+                        results.Add(result);
+                }
+            }
+
+            // Base
+            //if (!Root?.RootWindow.Window.IsFocused ?? false)
+            //    return null;
+            var baseResult = base.HitTest(ref position);
+            if (baseResult != null)
+                results.Add(baseResult);
+
+            hitResults = results.ToArray();
+            return hitResults.Length > 0;
         }
 
         internal void LinkWindow(DockWindow window)
@@ -132,7 +166,7 @@ namespace FlaxEditor.GUI.Docking
         public override DockState TryGetDockState(out float splitterValue)
         {
             splitterValue = 0.5f;
-            return DockState.Unknown;
+            return DockState.DockFill;
         }
     }
 }

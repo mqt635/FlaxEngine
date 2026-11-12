@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
 
 namespace FlaxEngine.Json.JsonCustomSerializers
@@ -33,6 +34,15 @@ namespace FlaxEngine.Json.JsonCustomSerializers
             _attributesIgnoreList = isManagedOnly ? AttributesIgnoreListManaged : AttributesIgnoreList;
         }
 
+        private void SetupProperty(JsonProperty jsonProperty, Type type, IEnumerable<Attribute> attributes)
+        {
+            if (_flaxType.IsAssignableFrom(type))
+            {
+                jsonProperty.ReferenceLoopHandling = ReferenceLoopHandling.Serialize;
+                jsonProperty.Converter = JsonSerializer.ObjectConverter;
+            }
+        }
+
         /// <inheritdoc />
         protected override JsonContract CreateContract(Type objectType)
         {
@@ -44,6 +54,13 @@ namespace FlaxEngine.Json.JsonCustomSerializers
                 ((JsonObjectContract)contract).ItemReferenceLoopHandling = ReferenceLoopHandling.Serialize;
             }
 
+            // Check if use enum serialization as string
+            var type = Nullable.GetUnderlyingType(objectType) ?? objectType;
+            if (type.IsEnum && type.GetCustomAttribute<EnumStringAttribute>() != null)
+            {
+                contract.Converter = new StringEnumConverter();
+            }
+
             return contract;
         }
 
@@ -53,19 +70,19 @@ namespace FlaxEngine.Json.JsonCustomSerializers
             var contract = base.CreateDictionaryContract(objectType);
 
             // Override contract to save enums keys as integer
-            if (contract.DictionaryKeyType?.IsEnum ?? false)
+            var keyType = contract.DictionaryKeyType;
+            if ((keyType?.IsEnum ?? false) && keyType.GetCustomAttribute<EnumStringAttribute>() == null)
             {
-                var enumType = contract.DictionaryKeyType;
                 contract.DictionaryKeyResolver = name =>
                 {
                     try
                     {
-                        var e = Enum.Parse(enumType, name);
+                        var e = Enum.Parse(keyType, name);
                         name = Convert.ToInt32(e).ToString();
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // Ignore errors
+                        Debug.Logger.LogHandler.LogWrite(LogType.Warning, $"Failed to parse enum '{name}' as {keyType.Name}: {ex.Message}");
                     }
                     return name;
                 };
@@ -108,11 +125,7 @@ namespace FlaxEngine.Json.JsonCustomSerializers
                 jsonProperty.Writable = true;
                 jsonProperty.Readable = true;
 
-                if (_flaxType.IsAssignableFrom(f.FieldType))
-                {
-                    jsonProperty.ReferenceLoopHandling = ReferenceLoopHandling.Serialize;
-                    jsonProperty.Converter = JsonSerializer.ObjectConverter;
-                }
+                SetupProperty(jsonProperty, f.FieldType, attributes);
 
                 result.Add(jsonProperty);
             }
@@ -151,11 +164,7 @@ namespace FlaxEngine.Json.JsonCustomSerializers
                 jsonProperty.Writable = true;
                 jsonProperty.Readable = !isObsolete;
 
-                if (_flaxType.IsAssignableFrom(p.PropertyType))
-                {
-                    jsonProperty.ReferenceLoopHandling = ReferenceLoopHandling.Serialize;
-                    jsonProperty.Converter = JsonSerializer.ObjectConverter;
-                }
+                SetupProperty(jsonProperty, p.PropertyType, attributes);
 
                 result.Add(jsonProperty);
             }

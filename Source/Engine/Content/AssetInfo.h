@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 /// </summary>
 API_STRUCT() struct AssetInfo
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(AssetInfo);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(AssetInfo);
 
     /// <summary>
     /// Unique ID.
@@ -28,7 +28,6 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(AssetInfo);
     API_FIELD() String Path;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="AssetInfo"/> struct.
     /// </summary>
@@ -51,13 +50,9 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the string.
     /// </summary>
     /// <returns>The string.</returns>
-    String ToString() const
-    {
-        return String::Format(TEXT("ID: {0}, TypeName: {1}, Path: \'{2}\'"), ID, TypeName, Path);
-    }
+    String ToString() const;
 };

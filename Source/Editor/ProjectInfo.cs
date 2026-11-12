@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -8,6 +8,99 @@ using Newtonsoft.Json;
 
 namespace FlaxEditor
 {
+    /// <summary>
+    /// 
+    /// </summary>
+    public class FlaxVersionConverter : JsonConverter
+    {
+        // Original implementation is based on Newtonsoft.Json VersionConverter
+        /// <summary>
+        /// Writes the JSON representation of the object.
+        /// </summary>
+        /// <param name="writer">The <see cref="JsonWriter"/> to write to.</param>
+        /// <param name="value">The value.</param>
+        /// <param name="serializer">The calling serializer.</param>
+        public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+        {
+            if (value == null)
+                writer.WriteNull();
+            else if (value is Version)
+                writer.WriteValue(value.ToString());
+            else
+                throw new JsonSerializationException("Expected Version object value");
+        }
+
+        /// <summary>
+        /// Reads the JSON representation of the object.
+        /// </summary>
+        /// <param name="reader">The <see cref="JsonReader"/> to read from.</param>
+        /// <param name="objectType">Type of the object.</param>
+        /// <param name="existingValue">The existing property value of the JSON that is being converted.</param>
+        /// <param name="serializer">The calling serializer.</param>
+        /// <returns>The object value.</returns>
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+        {
+            if (reader.TokenType == JsonToken.Null)
+                return null;
+
+            if (reader.TokenType == JsonToken.StartObject)
+            {
+                try
+                {
+                    reader.Read();
+                    var values = new Dictionary<string, int>();
+                    while (reader.TokenType == JsonToken.PropertyName)
+                    {
+                        var key = reader.Value as string;
+                        reader.Read();
+                        var val = (long)reader.Value;
+                        reader.Read();
+                        values.Add(key, (int)val);
+                    }
+
+                    values.TryGetValue("Major", out var major);
+                    values.TryGetValue("Minor", out var minor);
+                    if (!values.TryGetValue("Build", out var build))
+                        build = -1;
+                    if (!values.TryGetValue("Revision", out var revision))
+                        revision = -1;
+
+                    if (build <= 0)
+                        return new Version(major, minor);
+                    if (revision <= 0)
+                        return new Version(major, minor, build);
+                    return new Version(major, minor, build, revision);
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception(String.Format("Error parsing version string: {0}", reader.Value), ex);
+                }
+            }
+            if (reader.TokenType == JsonToken.String)
+            {
+                try
+                {
+                    return new Version((string)reader.Value!);
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception(String.Format("Error parsing version string: {0}", reader.Value), ex);
+                }
+            }
+            throw new Exception(String.Format("Unexpected token or value when parsing version. Token: {0}, Value: {1}", reader.TokenType, reader.Value));
+        }
+
+        /// <summary>
+        /// Determines whether this instance can convert the specified object type.
+        /// </summary>
+        /// <param name="objectType">Type of the object.</param>
+        /// <returns><c>true</c> if this instance can convert the specified object type; otherwise, <c>false</c>.</returns>
+        public override bool CanConvert(Type objectType)
+        {
+            return objectType == typeof(Version);
+        }
+    }
+
     /// <summary>
     /// Contains information about Flax project.
     /// </summary>
@@ -56,7 +149,7 @@ namespace FlaxEditor
         public string ProjectFolderPath;
 
         /// <summary>
-        /// The project version.
+        /// The project version. In format: *major.minor.build.revision*.
         /// </summary>
         public Version Version;
 
@@ -81,7 +174,7 @@ namespace FlaxEditor
         public string EditorTarget;
 
         /// <summary>
-        /// The project references.
+        /// The list of project references.
         /// </summary>
         public Reference[] References = new Reference[0];
 
@@ -149,11 +242,12 @@ namespace FlaxEditor
                     return _projectsCache[i];
             }
 
+            Profiler.BeginEvent(path);
             try
             {
                 // Load
                 var contents = File.ReadAllText(path);
-                var project = JsonConvert.DeserializeObject<ProjectInfo>(contents);
+                var project = JsonConvert.DeserializeObject<ProjectInfo>(contents, new JsonSerializerSettings() { Converters = new[] { new FlaxVersionConverter() } });
                 project.ProjectPath = path;
                 project.ProjectFolderPath = StringUtils.NormalizePath(Path.GetDirectoryName(path));
 
@@ -204,6 +298,10 @@ namespace FlaxEditor
                 // Failed to load project
                 Editor.LogError("Failed to load project \"" + path + "\".");
                 throw;
+            }
+            finally
+            {
+                Profiler.EndEvent();
             }
         }
 

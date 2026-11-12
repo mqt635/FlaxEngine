@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 //#define DEBUG_OBJECT_SNAPSHOT_COMPARISION
 
@@ -10,6 +10,7 @@ using System.Reflection;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.Json;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Utilities
 {
@@ -64,11 +65,11 @@ namespace FlaxEditor.Utilities
                 && memberValue != null
                 && !refStack.Contains(memberValue))
             {
-                if (memberType.IsArray && !typeof(FlaxEngine.Object).IsAssignableFrom(memberType.GetElementType()))
+                if (memberType.IsArray && !memberType.GetElementType().IsScriptingObject)
                 {
                     // Array
                     var array = (Array)memberValue;
-                    var elementType = new ScriptType(memberType.GetElementType());
+                    var elementType = memberType.GetElementType();
                     var length = array.Length;
                     refStack.Push(memberValue);
                     for (int i = 0; i < length; i++)
@@ -78,7 +79,7 @@ namespace FlaxEditor.Utilities
                     }
                     refStack.Pop();
                 }
-                else if (typeof(IList).IsAssignableFrom(memberType.Type) && !typeof(FlaxEngine.Object).IsAssignableFrom(memberType.GetElementType()))
+                else if (typeof(IList).IsAssignableFrom(memberType.Type) && !memberType.GetElementType().IsScriptingObject)
                 {
                     // List
                     var list = (IList)memberValue;
@@ -105,7 +106,7 @@ namespace FlaxEditor.Utilities
                         GetEntries(new MemberInfoPath.Entry(member.Member, key), membersPath, result, values, refStack, valueType, value);
                     }
                 }
-                else if (memberType.IsClass && !new ScriptType(typeof(FlaxEngine.Object)).IsAssignableFrom(memberType))
+                else if (memberType.IsClass && !memberType.IsScriptingObject)
                 {
                     // Object
                     refStack.Push(memberValue);

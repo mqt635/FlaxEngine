@@ -1,5 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+#if PLATFORM_WINDOWS || PLATFORM_SDL || PLATFORM_MAC
+#define USE_IS_FOREGROUND
+#else
+#endif
+#if PLATFORM_SDL || PLATFORM_MAC
+#define USE_SDL_WORKAROUNDS
+#endif
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.Collections.Generic;
 using FlaxEngine;
 using FlaxEngine.Assertions;
 using FlaxEngine.GUI;
@@ -47,6 +55,21 @@ namespace FlaxEditor.GUI.ContextMenu
         private Window _window;
         private Control _previouslyFocused;
 
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private static bool IsValidWindowBounds(Float2 location, Float2 size)
+        {
+            return IsFinite(location.X) &&
+                   IsFinite(location.Y) &&
+                   IsFinite(size.X) &&
+                   IsFinite(size.Y) &&
+                   size.X > 0.0f &&
+                   size.Y > 0.0f;
+        }
+
         /// <summary>
         /// Gets a value indicating whether use automatic popup direction fix based on the screen dimensions.
         /// </summary>
@@ -68,6 +91,11 @@ namespace FlaxEditor.GUI.ContextMenu
         public bool HasChildCMOpened => _childCM != null;
 
         /// <summary>
+        /// Gets the parent context menu (if exists).
+        /// </summary>
+        public ContextMenuBase ParentCM => _parentCM;
+
+        /// <summary>
         /// Gets the topmost context menu.
         /// </summary>
         public ContextMenuBase TopmostCM
@@ -76,9 +104,7 @@ namespace FlaxEditor.GUI.ContextMenu
             {
                 var cm = this;
                 while (cm._parentCM != null && cm._isSubMenu)
-                {
                     cm = cm._parentCM;
-                }
                 return cm;
             }
         }
@@ -89,15 +115,55 @@ namespace FlaxEditor.GUI.ContextMenu
         public bool IsSubMenu => _isSubMenu;
 
         /// <summary>
+        /// External dialog popups opened within the context window (eg. color picker) that should preserve context menu visibility (prevent from closing context menu).
+        /// </summary>
+        public List<Window> ExternalPopups = new List<Window>();
+
+        /// <summary>
+        /// Optional flag that can disable popup visibility based on window focus and use external control via Hide.
+        /// </summary>
+        public bool UseVisibilityControl = true;
+
+        /// <summary>
+        /// Optional flag that can disable popup input capturing. Useful for transparent or visual-only popups.
+        /// </summary>
+        public bool UseInput = true;
+
+        /// <summary>
+        /// Optional flag that can disable UI navigation (tab/enter).
+        /// </summary>
+        public bool UseNavigation = true;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ContextMenuBase"/> class.
         /// </summary>
         public ContextMenuBase()
         : base(0, 0, 120, 32)
         {
-            _direction = ContextMenuDirection.RightDown;
             Visible = false;
+            AutoFocus = true;
 
+            _direction = ContextMenuDirection.RightDown;
             _isSubMenu = true;
+        }
+
+        /// <summary>
+        /// Shows the empty menu popup on a screen.
+        /// </summary>
+        /// <param name="control">The target control.</param>
+        /// <param name="area">The target control area to cover.</param>
+        /// <returns>Created popup.</returns>
+        public static ContextMenuBase ShowEmptyMenu(Control control, Rectangle area)
+        {
+            // Calculate the control size in the window space to handle scaled controls
+            var upperLeft = control.PointToWindow(area.UpperLeft);
+            var bottomRight = control.PointToWindow(area.BottomRight);
+            var size = bottomRight - upperLeft;
+
+            var popup = new ContextMenuBase();
+            popup.Size = size;
+            popup.Show(control, area.Location + new Float2(0, (size.Y - popup.Height) * 0.5f));
+            return popup;
         }
 
         /// <summary>
@@ -105,56 +171,94 @@ namespace FlaxEditor.GUI.ContextMenu
         /// </summary>
         /// <param name="parent">Parent control to attach to it.</param>
         /// <param name="location">Popup menu origin location in parent control coordinates.</param>
-        public virtual void Show(Control parent, Vector2 location)
+        /// <param name="direction">The custom popup direction. Null to use automatic direction.</param>
+        public virtual void Show(Control parent, Float2 location, ContextMenuDirection? direction = null)
         {
             Assert.IsNotNull(parent);
-
-            // Ensure to be closed
-            Hide();
+            bool isAlreadyVisible = Visible && _window;
+            if (!isAlreadyVisible)
+                Hide();
 
             // Peek parent control window
             var parentWin = parent.RootWindow;
             if (parentWin == null)
+            {
+                Hide();
                 return;
+            }
 
             // Check if show menu inside the other menu - then link as a child to prevent closing the calling menu window on lost focus
             if (_parentCM == null && parentWin.ChildrenCount == 1 && parentWin.Children[0] is ContextMenuBase parentCM)
             {
+                Hide();
                 parentCM.ShowChild(this, parentCM.PointFromScreen(parent.PointToScreen(location)), false);
                 return;
             }
 
             // Unlock and perform controls update
+            Location = Float2.Zero;
             UnlockChildrenRecursive();
             PerformLayout();
 
             // Calculate popup direction and initial location (fit on a single monitor)
             var dpiScale = parentWin.DpiScale;
-            Vector2 dpiSize = Size * dpiScale;
-            Vector2 locationWS = parent.PointToWindow(location);
-            Vector2 locationSS = parentWin.PointToScreen(locationWS);
-            Location = Vector2.Zero;
-            Rectangle monitorBounds = Platform.GetMonitorBounds(locationSS);
-            Vector2 rightBottomLocationSS = locationSS + dpiSize;
-            bool isUp = false, isLeft = false;
-            if (UseAutomaticDirectionFix)
+            var dpiSize = Size * dpiScale;
+            var locationWS = parent.PointToWindow(location);
+            var locationSS = parentWin.PointToScreen(locationWS);
+            if (!IsValidWindowBounds(locationSS, dpiSize))
             {
+                Hide();
+                return;
+            }
+            var monitorBounds = Platform.GetMonitorBounds(locationSS);
+            var rightBottomLocationSS = locationSS + dpiSize;
+            bool isUp = false, isLeft = false;
+            if (UseAutomaticDirectionFix && direction == null)
+            {
+                var parentMenu = parent as ContextMenu;
                 if (monitorBounds.Bottom < rightBottomLocationSS.Y)
                 {
-                    // Direction: up
                     isUp = true;
                     locationSS.Y -= dpiSize.Y;
-
-                    // Offset to fix sub-menu location
-                    if (parent is ContextMenu menu && menu._childCM != null)
+                    if (parentMenu != null && parentMenu._childCM != null)
                         locationSS.Y += 30.0f * dpiScale;
                 }
-                if (monitorBounds.Right < rightBottomLocationSS.X)
+                if (parentMenu == null)
                 {
-                    // Direction: left
-                    isLeft = true;
-                    locationSS.X -= dpiSize.X;
+                    if (monitorBounds.Right < rightBottomLocationSS.X)
+                    {
+                        isLeft = true;
+                        locationSS.X -= dpiSize.X;
+                    }
                 }
+                else if (monitorBounds.Right < rightBottomLocationSS.X || _parentCM?.Direction == ContextMenuDirection.LeftDown || _parentCM?.Direction == ContextMenuDirection.LeftUp)
+                {
+                    isLeft = true;
+                    if (IsSubMenu && _parentCM != null)
+                        locationSS.X -= _parentCM.Width + dpiSize.X;
+                    else
+                        locationSS.X -= dpiSize.X;
+                }
+            }
+            else if (direction.HasValue)
+            {
+                switch (direction.Value)
+                {
+                case ContextMenuDirection.RightUp:
+                    isUp = true;
+                    break;
+                case ContextMenuDirection.LeftDown:
+                    isLeft = true;
+                    break;
+                case ContextMenuDirection.LeftUp:
+                    isLeft = true;
+                    isUp = true;
+                    break;
+                }
+                if (isLeft)
+                    locationSS.X -= dpiSize.X;
+                if (isUp)
+                    locationSS.Y -= dpiSize.Y;
             }
 
             // Update direction flag
@@ -163,40 +267,75 @@ namespace FlaxEditor.GUI.ContextMenu
             else
                 _direction = isLeft ? ContextMenuDirection.LeftDown : ContextMenuDirection.RightDown;
 
-            // Create window
-            var desc = CreateWindowSettings.Default;
-            desc.Position = locationSS;
-            desc.StartPosition = WindowStartPosition.Manual;
-            desc.Size = dpiSize;
-            desc.Fullscreen = false;
-            desc.HasBorder = false;
-            desc.SupportsTransparency = false;
-            desc.ShowInTaskbar = false;
-            desc.ActivateWhenFirstShown = true;
-            desc.AllowInput = true;
-            desc.AllowMinimize = false;
-            desc.AllowMaximize = false;
-            desc.AllowDragAndDrop = false;
-            desc.IsTopmost = true;
-            desc.IsRegularWindow = false;
-            desc.HasSizingFrame = false;
-            OnWindowCreating(ref desc);
-            _window = Platform.CreateWindow(ref desc);
-            _window.LostFocus += OnWindowLostFocus;
+            if (isAlreadyVisible)
+            {
+                _window.ClientBounds = new Rectangle(locationSS, dpiSize);
+            }
+            else
+            {
+                // Create window
+                var desc = CreateWindowSettings.Default;
+                desc.Position = locationSS;
+                desc.StartPosition = WindowStartPosition.Manual;
+                desc.Size = dpiSize;
+                desc.Fullscreen = false;
+                desc.HasBorder = false;
+                desc.SupportsTransparency = false;
+                desc.ShowInTaskbar = false;
+                desc.ActivateWhenFirstShown = UseInput;
+                desc.AllowInput = UseInput;
+                desc.AllowMinimize = false;
+                desc.AllowMaximize = false;
+                desc.AllowDragAndDrop = false;
+                desc.IsTopmost = true;
+                desc.Type = WindowType.Popup;
+                desc.Parent = parentWin.Window;
+                desc.Title = "ContextMenu";
+                desc.HasSizingFrame = false;
+                OnWindowCreating(ref desc);
+                _window = Platform.CreateWindow(ref desc);
+                if (UseVisibilityControl)
+                {
+                    _window.GotFocus += OnWindowGotFocus;
+                    _window.LostFocus += OnWindowLostFocus;
+                }
 
-            // Attach to the window
-            _parentCM = parent as ContextMenuBase;
-            Parent = _window.GUI;
+#if USE_IS_FOREGROUND && USE_SDL_WORKAROUNDS
+                // The focus between popup and parent windows doesn't change, force hide the popup when clicked on parent
+                parentWin.Window.MouseDown += OnWindowMouseDown;
+                _window.Closed += () => parentWin.Window.MouseDown -= OnWindowMouseDown;
+#endif
 
-            // Show
-            Visible = true;
-            if (_window == null)
-                return;
-            _window.Show();
+                // Attach to the window
+                _parentCM = parent as ContextMenuBase;
+                Parent = _window.GUI;
+
+                // Show
+                Visible = true;
+                if (_window == null)
+                    return;
+                _window.Show();
+            }
             PerformLayout();
-            _previouslyFocused = parentWin.FocusedControl;
-            Focus();
-            OnShow();
+            if (UseVisibilityControl)
+            {
+#if !PLATFORM_SDL
+                _previouslyFocused = parentWin.FocusedControl;
+#endif
+                Focus();
+                OnShow();
+            }
+        }
+
+        private static void ForceDefocus(ContainerControl c)
+        {
+            foreach (var cc in c.Children)
+            {
+                if (cc.ContainsFocus)
+                    cc.Defocus();
+                if (cc is ContainerControl ccc)
+                    ForceDefocus(ccc);
+            }
         }
 
         /// <summary>
@@ -212,6 +351,9 @@ namespace FlaxEditor.GUI.ContextMenu
 
             // Close child
             HideChild();
+
+            // Force defocus
+            ForceDefocus(this);
 
             // Unlink from window
             Parent = null;
@@ -235,7 +377,7 @@ namespace FlaxEditor.GUI.ContextMenu
             if (_previouslyFocused != null)
             {
                 _previouslyFocused.RootWindow?.Focus();
-                _previouslyFocused.Focus();
+                _previouslyFocused?.Focus();
                 _previouslyFocused = null;
             }
 
@@ -250,7 +392,7 @@ namespace FlaxEditor.GUI.ContextMenu
         /// <param name="child">The child menu.</param>
         /// <param name="location">The child menu initial location.</param>
         /// <param name="isSubMenu">True if context menu is a normal sub-menu, otherwise it is a custom menu popup linked as child.</param>
-        public void ShowChild(ContextMenuBase child, Vector2 location, bool isSubMenu = true)
+        public void ShowChild(ContextMenuBase child, Float2 location, bool isSubMenu = true)
         {
             // Hide current child
             HideChild();
@@ -283,7 +425,31 @@ namespace FlaxEditor.GUI.ContextMenu
         {
             if (_window != null)
             {
-                _window.ClientSize = Size * _window.DpiScale;
+                var size = Size * _window.DpiScale;
+                if (!IsValidWindowBounds(_window.ClientBounds.Location, size))
+                    return;
+                _window.ClientSize = size;
+            }
+        }
+
+        /// <summary>
+        /// Gets the popup window location in screen coordinates.
+        /// </summary>
+        protected Float2 WindowLocation => _window != null ? _window.ClientBounds.Location : Float2.Zero;
+
+        /// <summary>
+        /// Moves the popup window to the given screen-space location.
+        /// </summary>
+        /// <param name="screenLocation">The popup window location in screen coordinates.</param>
+        protected void MoveWindowTo(Float2 screenLocation)
+        {
+            if (_window != null)
+            {
+                var bounds = _window.ClientBounds;
+                if (!IsValidWindowBounds(screenLocation, bounds.Size))
+                    return;
+                bounds.Location = screenLocation;
+                _window.ClientBounds = bounds;
             }
         }
 
@@ -311,6 +477,61 @@ namespace FlaxEditor.GUI.ContextMenu
             // Nothing to do
         }
 
+#if USE_IS_FOREGROUND
+        /// <summary>
+        /// Returns true if context menu is in foreground (eg. context window or any child window has user focus or user opened additional popup within this context).
+        /// </summary>
+        protected virtual bool IsForeground
+        {
+            get
+            {
+                // Any external popup is focused
+                foreach (var externalPopup in ExternalPopups)
+                {
+                    if (externalPopup && externalPopup.IsForegroundWindow)
+                        return true;
+                }
+
+                // Any context menu window is focused
+                var anyForeground = false;
+                var c = this;
+                while (!anyForeground && c != null)
+                {
+                    if (c._window != null && c._window.IsForegroundWindow)
+                        anyForeground = true;
+                    c = c._childCM;
+                }
+
+                return anyForeground;
+            }
+        }
+
+#if USE_SDL_WORKAROUNDS
+        private void OnWindowGotFocus()
+        {
+        }
+        
+        private void OnWindowMouseDown(ref Float2 mousePosition, MouseButton button, ref bool handled)
+        {
+            // The user clicked outside the popup window
+            Hide();
+        }
+#else
+        private void OnWindowGotFocus()
+        {
+            var child = _childCM;
+            if (child != null && _window && _window.IsForegroundWindow)
+            {
+                // Hide child if user clicked over parent (do it next frame to process other events before - eg. child windows focus loss)
+                FlaxEngine.Scripting.InvokeOnUpdate(() =>
+                {
+                    if (child == _childCM)
+                        HideChild();
+                });
+            }
+        }
+#endif
+
         private void OnWindowLostFocus()
         {
             // Skip for parent menus (child should handle lost of focus)
@@ -328,6 +549,57 @@ namespace FlaxEditor.GUI.ContextMenu
                 }
             }
         }
+#else
+        private void OnWindowGotFocus()
+        {
+        }
+
+        private void OnWindowLostFocus()
+        {
+            // Skip for parent menus (child should handle lost of focus)
+            if (_childCM != null)
+                return;
+
+            if (_parentCM != null)
+            {
+                if (IsMouseOver)
+                    return;
+
+                // Check if any external popup is focused
+                foreach (var externalPopup in ExternalPopups)
+                {
+                    if (externalPopup && externalPopup.IsFocused)
+                        return;
+                }
+
+                // Check if mouse is over any of the parents
+                ContextMenuBase focusCM = null;
+                var cm = _parentCM;
+                while (cm != null)
+                {
+                    if (cm.IsMouseOver)
+                        focusCM = cm;
+                    cm = cm._parentCM;
+                }
+
+                if (focusCM != null)
+                {
+                    // Focus on the clicked parent and hide any open sub-menus
+                    focusCM.HideChild();
+                    focusCM._window?.Focus();
+                }
+                else
+                {
+                    // User clicked outside the context menus, hide the whole context menu tree
+                    TopmostCM.Hide();
+                }
+            }
+            else if (!IsMouseOver)
+            {
+                Hide();
+            }
+        }
+#endif
 
         /// <inheritdoc />
         public override bool IsMouseOver
@@ -348,53 +620,79 @@ namespace FlaxEditor.GUI.ContextMenu
             }
         }
 
+#if USE_IS_FOREGROUND
         /// <inheritdoc />
         public override void Update(float deltaTime)
         {
             base.Update(deltaTime);
 
             // Let root context menu to check if none of the popup windows
-            if (_parentCM == null)
+            if (_parentCM == null && UseVisibilityControl && !IsForeground)
             {
-                var anyForeground = false;
-                var c = this;
-                while (!anyForeground && c != null)
-                {
-                    if (c._window != null && c._window.IsForegroundWindow)
-                        anyForeground = true;
-                    c = c._childCM;
-                }
-                if (!anyForeground)
-                {
+#if USE_SDL_WORKAROUNDS
+                if (!IsMouseOver)
                     Hide();
-                }
+#else
+                Hide();
+#endif
             }
         }
+#endif
 
         /// <inheritdoc />
         public override void Draw()
         {
             // Draw background
             var style = Style.Current;
-            var bounds = new Rectangle(Vector2.Zero, Size);
+            var bounds = new Rectangle(Float2.Zero, Size);
             Render2D.FillRectangle(bounds, style.Background);
-            Render2D.DrawRectangle(bounds, Color.Lerp(style.BackgroundSelected, style.Background, 0.6f));
+            Render2D.DrawRectangle(bounds, style.BackgroundSelected);
 
             base.Draw();
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             base.OnMouseDown(location, button);
             return true;
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             base.OnMouseUp(location, button);
             return true;
+        }
+
+        /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            if (base.OnKeyDown(key))
+                return true;
+
+            switch (key)
+            {
+            case KeyboardKeys.Escape:
+                Hide();
+                return true;
+            case KeyboardKeys.Return:
+                if (UseNavigation && Root?.FocusedControl != null)
+                {
+                    Root.SubmitFocused();
+                    return true;
+                }
+                break;
+            case KeyboardKeys.Tab:
+                if (UseNavigation && Root != null)
+                {
+                    bool shiftDown = Root.GetKey(KeyboardKeys.Shift);
+                    Root.Navigate(shiftDown ? NavDirection.Previous : NavDirection.Next);
+                    return true;
+                }
+                break;
+            }
+            return false;
         }
 
         /// <inheritdoc />

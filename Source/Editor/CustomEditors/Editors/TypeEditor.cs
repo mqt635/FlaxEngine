@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Linq;
@@ -9,6 +9,7 @@ using FlaxEditor.GUI.Drag;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -23,7 +24,7 @@ namespace FlaxEditor.CustomEditors.Editors
         private ScriptType _value;
         private string _valueName;
 
-        private Vector2 _mousePos;
+        private Float2 _mousePos;
 
         private bool _hasValidDragOver;
         private DragActors _dragActors;
@@ -31,11 +32,8 @@ namespace FlaxEditor.CustomEditors.Editors
         private DragHandlers _dragHandlers;
 
         /// <summary>
-        /// Gets or sets the allowed type (given type and all sub classes). Must be <see cref="System.Type"/> type of any subclass.
+        /// Gets or sets the allowed type (given type and all subclasses). Must be <see cref="System.Type"/> type of any subclass.
         /// </summary>
-        /// <value>
-        /// The allowed type.
-        /// </value>
         public ScriptType Type
         {
             get => _type;
@@ -57,9 +55,6 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <summary>
         /// Gets or sets the selected types value.
         /// </summary>
-        /// <value>
-        /// The value.
-        /// </value>
         public ScriptType Value
         {
             get => _value;
@@ -109,7 +104,7 @@ namespace FlaxEditor.CustomEditors.Editors
         public event Action<TypePickerControl> TypePickerValueChanged;
 
         /// <summary>
-        /// The custom callback for types validation. Cane be used to implement a rule for types to pick.
+        /// The custom callback for types validation. Can be used to implement a rule for types to pick.
         /// </summary>
         public Func<ScriptType, bool> CheckValid;
 
@@ -119,7 +114,7 @@ namespace FlaxEditor.CustomEditors.Editors
         public TypePickerControl()
         : base(0, 0, 50, 16)
         {
-            _type = new ScriptType(typeof(object));
+            _type = ScriptType.Object;
         }
 
         private bool IsValid(ScriptType obj)
@@ -130,7 +125,7 @@ namespace FlaxEditor.CustomEditors.Editors
         private void ShowDropDownMenu()
         {
             Focus();
-            TypeSearchPopup.Show(this, new Vector2(0, Height), IsValid, scriptType =>
+            TypeSearchPopup.Show(this, new Float2(0, Height), IsValid, scriptType =>
             {
                 Value = scriptType;
                 RootWindow.Focus();
@@ -152,6 +147,7 @@ namespace FlaxEditor.CustomEditors.Editors
             var nameRect = new Rectangle(2, 1, frameRect.Width - 4, 14);
             var button1Rect = new Rectangle(nameRect.Right + 2, 1, 14, 14);
             var button2Rect = new Rectangle(button1Rect.Right + 2, 1, 14, 14);
+            var enabled = EnabledInHierarchy;
 
             // Draw frame
             Render2D.DrawRectangle(frameRect, IsMouseOver ? style.BorderHighlighted : style.BorderNormal);
@@ -161,17 +157,17 @@ namespace FlaxEditor.CustomEditors.Editors
             {
                 // Draw deselect button
                 if (_type == ScriptType.Null)
-                    Render2D.DrawSprite(style.Cross, button1Rect, button1Rect.Contains(_mousePos) ? style.Foreground : style.ForegroundGrey);
+                    Render2D.DrawSprite(style.Cross, button1Rect, enabled ? (button1Rect.Contains(_mousePos) ? style.Foreground : style.ForegroundGrey) : style.ForegroundDisabled);
 
                 // Draw name
                 Render2D.PushClip(nameRect);
-                Render2D.DrawText(style.FontMedium, _valueName, nameRect, style.Foreground, TextAlignment.Near, TextAlignment.Center);
+                Render2D.DrawText(style.FontMedium, _valueName, nameRect, enabled ? style.Foreground : style.ForegroundDisabled, TextAlignment.Near, TextAlignment.Center);
                 Render2D.PopClip();
             }
             else
             {
                 // Draw info
-                Render2D.DrawText(style.FontMedium, "-", nameRect, Color.OrangeRed, TextAlignment.Near, TextAlignment.Center);
+                Render2D.DrawText(style.FontMedium, "-", nameRect, enabled ? Color.OrangeRed : style.ForegroundDisabled, TextAlignment.Near, TextAlignment.Center);
             }
 
             // Draw picker button
@@ -180,11 +176,15 @@ namespace FlaxEditor.CustomEditors.Editors
 
             // Check if drag is over
             if (IsDragOver && _hasValidDragOver)
-                Render2D.FillRectangle(new Rectangle(Vector2.Zero, Size), style.BackgroundSelected * 0.4f);
+            {
+                var bounds = new Rectangle(Float2.Zero, Size);
+                Render2D.FillRectangle(bounds, style.Selection);
+                Render2D.DrawRectangle(bounds, style.SelectionBorder);
+            }
         }
 
         /// <inheritdoc />
-        public override void OnMouseEnter(Vector2 location)
+        public override void OnMouseEnter(Float2 location)
         {
             _mousePos = location;
 
@@ -192,7 +192,7 @@ namespace FlaxEditor.CustomEditors.Editors
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             _mousePos = location;
 
@@ -202,15 +202,14 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <inheritdoc />
         public override void OnMouseLeave()
         {
-            _mousePos = Vector2.Minimum;
+            _mousePos = Float2.Minimum;
 
             base.OnMouseLeave();
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
-            // Cache data
             bool isSelected = _value != ScriptType.Null;
             var frameRect = new Rectangle(0, 0, Width - 16, 16);
             if (isSelected && _type == ScriptType.Null)
@@ -221,24 +220,42 @@ namespace FlaxEditor.CustomEditors.Editors
 
             // Deselect
             if (_value && button1Rect.Contains(ref location) && _type == ScriptType.Null)
+            {
+                Focus();
                 Value = ScriptType.Null;
+                return true;
+            }
 
             // Picker dropdown menu
             if ((isSelected && _type == ScriptType.Null ? button2Rect : button1Rect).Contains(ref location))
+            {
                 ShowDropDownMenu();
+                return true;
+            }
+
+            // Clear value with MMB or show picker with RMB
+            if (button == MouseButton.Middle)
+            {
+                Focus();
+                Value = ScriptType.Null;
+                return true;
+            }
+            if (button == MouseButton.Right)
+            {
+                ShowDropDownMenu();
+            }
 
             return base.OnMouseUp(location, button);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
             // Navigate to types from game project
             if (button == MouseButton.Left && _value != ScriptType.Null)
             {
-                var item = _value.ContentItem;
-                if (item != null)
-                    Editor.Instance.ContentEditing.Open(item);
+                Editor.Instance.ContentEditing.Open(_value.ContentItem);
+                return true;
             }
 
             return base.OnMouseDoubleClick(location, button);
@@ -247,7 +264,7 @@ namespace FlaxEditor.CustomEditors.Editors
         private DragDropEffect DragEffect => _hasValidDragOver ? DragDropEffect.Move : DragDropEffect.None;
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragEnter(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragEnter(ref Float2 location, DragData data)
         {
             base.OnDragEnter(ref location, data);
 
@@ -273,7 +290,7 @@ namespace FlaxEditor.CustomEditors.Editors
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragMove(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragMove(ref Float2 location, DragData data)
         {
             base.OnDragMove(ref location, data);
 
@@ -290,7 +307,7 @@ namespace FlaxEditor.CustomEditors.Editors
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragDrop(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragDrop(ref Float2 location, DragData data)
         {
             var result = DragEffect;
 
@@ -354,7 +371,13 @@ namespace FlaxEditor.CustomEditors.Editors
                     }
                     if (!string.IsNullOrEmpty(typeReference.CheckMethod))
                     {
-                        var parentType = ParentEditor.Values[0].GetType();
+                        var parentEditor = ParentEditor;
+                        // Find actual parent editor if parent editor is collection editor
+                        while (parentEditor.GetType().IsAssignableTo(typeof(CollectionEditor)))
+                            parentEditor = parentEditor.ParentEditor;
+                            
+                        var parentType = parentEditor.Values[0].GetType();
+
                         var method = parentType.GetMethod(typeReference.CheckMethod, BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                         if (method != null)
                         {
@@ -399,11 +422,8 @@ namespace FlaxEditor.CustomEditors.Editors
             if (_element != null)
             {
                 _element.CustomControl.ValueChanged += () => SetValue(_element.CustomControl.Value.Type);
-
-                if (_element.CustomControl.Type == new ScriptType(typeof(object)))
-                {
-                    _element.CustomControl.Type = Values.Type.Type != typeof(object) || Values[0] == null ? new ScriptType(typeof(object)) : TypeUtils.GetObjectType(Values[0]);
-                }
+                if (_element.CustomControl.Type == ScriptType.Object)
+                    _element.CustomControl.Type = Values.Type.Type != typeof(object) || Values[0] == null ? ScriptType.Object : TypeUtils.GetObjectType(Values[0]);
             }
         }
 
@@ -411,10 +431,9 @@ namespace FlaxEditor.CustomEditors.Editors
         public override void Refresh()
         {
             base.Refresh();
+
             if (!HasDifferentValues)
-            {
                 _element.CustomControl.Value = new ScriptType(Values[0] as Type);
-            }
         }
     }
 
@@ -430,18 +449,86 @@ namespace FlaxEditor.CustomEditors.Editors
             base.Initialize(layout);
 
             if (_element != null)
-            {
                 _element.CustomControl.ValueChanged += () => SetValue(_element.CustomControl.Value);
-            }
         }
 
         /// <inheritdoc />
         public override void Refresh()
         {
             base.Refresh();
+
             if (!HasDifferentValues)
-            {
                 _element.CustomControl.Value = (ScriptType)Values[0];
+        }
+    }
+
+    /// <summary>
+    /// Default implementation of the inspector used to edit reference to the <see cref="FlaxEngine.SoftTypeReference"/>. Used to pick classes.
+    /// </summary>
+    [CustomEditor(typeof(SoftTypeReference)), DefaultEditor]
+    public class SoftTypeReferenceEditor : TypeEditorBase
+    {
+        /// <inheritdoc />
+        public override void Initialize(LayoutElementsContainer layout)
+        {
+            base.Initialize(layout);
+
+            if (_element != null)
+                _element.CustomControl.ValueChanged += () => SetValue(new SoftTypeReference(_element.CustomControl.ValueTypeName));
+        }
+
+        /// <inheritdoc />
+        public override void Refresh()
+        {
+            base.Refresh();
+
+            if (!HasDifferentValues)
+                _element.CustomControl.ValueTypeName = ((SoftTypeReference)Values[0]).TypeName;
+        }
+    }
+
+    /// <summary>
+    /// Custom Editor implementation of the inspector used to edit reference but saved as string or text instead of hard reference to the type.
+    /// </summary>
+    public class TypeNameEditor : TypeEditorBase
+    {
+        /// <summary>
+        /// Prevents spamming log if Value contains missing type to skip research in subsequential Refresh ticks.
+        /// </summary>
+        private string _lastTypeNameError;
+
+        /// <inheritdoc />
+        public override void Initialize(LayoutElementsContainer layout)
+        {
+            base.Initialize(layout);
+
+            if (_element != null)
+                _element.CustomControl.ValueChanged += OnValueChanged;
+        }
+
+        private void OnValueChanged()
+        {
+            var type = _element.CustomControl.Value;
+            SetValue(type != ScriptType.Null ? type.TypeName : null);
+        }
+
+        /// <inheritdoc />
+        public override void Refresh()
+        {
+            base.Refresh();
+
+            if (!HasDifferentValues && Values[0] is string asTypename &&
+                !string.Equals(asTypename, _lastTypeNameError, StringComparison.Ordinal))
+            {
+                try
+                {
+                    _element.CustomControl.Value = TypeUtils.GetType(asTypename);
+                }
+                finally
+                {
+                    if (_element.CustomControl.Value == null && asTypename.Length != 0)
+                        _lastTypeNameError = asTypename;
+                }
             }
         }
     }

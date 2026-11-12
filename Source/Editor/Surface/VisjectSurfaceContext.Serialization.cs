@@ -1,17 +1,43 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
-using FlaxEditor.Scripting;
 using FlaxEditor.Surface.Elements;
 using FlaxEditor.Utilities;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 using Utils = FlaxEditor.Utilities.Utils;
 
 namespace FlaxEditor.Surface
 {
+    /// <summary>
+    /// Types of surface actions.
+    /// </summary>
+    public enum SurfaceNodeActions
+    {
+        /// <summary>
+        /// Node has been created by surface load.
+        /// </summary>
+        Load,
+
+        /// <summary>
+        /// Node has been created/deleted by user action.
+        /// </summary>
+        User,
+
+        /// <summary>
+        /// Node has been created/deleted via undo.
+        /// </summary>
+        Undo,
+
+        /// <summary>
+        /// Node has been pasted.
+        /// </summary>
+        Paste,
+    }
+
     /// <summary>
     /// The missing node. Cached the node group, type and stored values information.
     /// </summary>
@@ -24,9 +50,10 @@ namespace FlaxEditor.Surface
         {
             TypeID = originalNodeId,
             Title = "Missing Node :(",
+            Signature = "Missing Node :(",
             Description = ":(",
             Flags = NodeFlags.AllGraphs,
-            Size = new Vector2(200, 70),
+            Size = new Float2(200, 70),
             Elements = new NodeElementArchetype[0],
             DefaultValues = new object[32],
         }, new GroupArchetype
@@ -77,7 +104,8 @@ namespace FlaxEditor.Surface
         /// <returns>True if failed, otherwise false.</returns>
         public bool Load()
         {
-            Surface._isUpdatingBoxTypes++;
+            if (_surface != null)
+                _surface._isUpdatingBoxTypes++;
 
             try
             {
@@ -110,7 +138,7 @@ namespace FlaxEditor.Surface
                 else
                 {
                     // Reset view
-                    CachedSurfaceMeta.ViewCenterPosition = Vector2.Zero;
+                    CachedSurfaceMeta.ViewCenterPosition = Float2.Zero;
                     CachedSurfaceMeta.Scale = 1.0f;
                 }
 
@@ -133,7 +161,7 @@ namespace FlaxEditor.Surface
                             if (comment == null)
                                 throw new InvalidOperationException("Failed to create comment.");
 
-                            OnControlLoaded(comment);
+                            OnControlLoaded(comment, SurfaceNodeActions.Load);
                         }
                     }
                 }
@@ -142,26 +170,38 @@ namespace FlaxEditor.Surface
                 for (int i = 0; i < RootControl.Children.Count; i++)
                 {
                     if (RootControl.Children[i] is SurfaceControl control)
-                        control.OnSurfaceLoaded();
+                        control.OnSurfaceLoaded(SurfaceNodeActions.Load);
                 }
 
                 RootControl.UnlockChildrenRecursive();
 
                 // Update boxes types for nodes that dependant box types based on incoming connections
                 {
-                    bool keepUpdating = false;
-                    int updateLimit = 100;
+                    bool keepUpdating = true;
+                    int updatesMin = 2, updatesMax = 100;
                     do
                     {
+                        keepUpdating = false;
                         for (int i = 0; i < RootControl.Children.Count; i++)
                         {
-                            if (RootControl.Children[i] is SurfaceNode node && !node.HasDependentBoxesSetup)
+                            if (RootControl.Children[i] is SurfaceNode node)
                             {
                                 node.UpdateBoxesTypes();
-                                keepUpdating = true;
+                                var arch = node.Archetype;
+                                if (arch.DependentBoxes != null && arch.IndependentBoxes != null)
+                                {
+                                    foreach (var boxId in arch.DependentBoxes)
+                                    {
+                                        var b = node.GetBox(boxId);
+                                        if (b != null && b.CurrentType == b.DefaultType)
+                                        {
+                                            keepUpdating = true;
+                                        }
+                                    }
+                                }
                             }
                         }
-                    } while (keepUpdating && updateLimit-- > 0);
+                    } while ((keepUpdating && --updatesMax > 0) || --updatesMin > 0);
                 }
 
                 Loaded?.Invoke(this);
@@ -178,7 +218,8 @@ namespace FlaxEditor.Surface
             }
             finally
             {
-                Surface._isUpdatingBoxTypes--;
+                if (_surface != null)
+                    _surface._isUpdatingBoxTypes--;
             }
 
             return false;
@@ -308,9 +349,9 @@ namespace FlaxEditor.Surface
             case GraphParamType_Deprecated.Bool: return typeof(bool);
             case GraphParamType_Deprecated.Integer: return typeof(int);
             case GraphParamType_Deprecated.Float: return typeof(float);
-            case GraphParamType_Deprecated.Vector2: return typeof(Vector2);
-            case GraphParamType_Deprecated.Vector3: return typeof(Vector3);
-            case GraphParamType_Deprecated.Vector4: return typeof(Vector4);
+            case GraphParamType_Deprecated.Vector2: return typeof(Float2);
+            case GraphParamType_Deprecated.Vector3: return typeof(Float3);
+            case GraphParamType_Deprecated.Vector4: return typeof(Float4);
             case GraphParamType_Deprecated.Color: return typeof(Color);
             case GraphParamType_Deprecated.Texture: return typeof(Texture);
             case GraphParamType_Deprecated.NormalMap: return typeof(Texture);
@@ -342,9 +383,9 @@ namespace FlaxEditor.Surface
             case GraphConnectionType_Deprecated.Bool: return typeof(bool);
             case GraphConnectionType_Deprecated.Integer: return typeof(int);
             case GraphConnectionType_Deprecated.Float: return typeof(float);
-            case GraphConnectionType_Deprecated.Vector2: return typeof(Vector2);
-            case GraphConnectionType_Deprecated.Vector3: return typeof(Vector3);
-            case GraphConnectionType_Deprecated.Vector4: return typeof(Vector4);
+            case GraphConnectionType_Deprecated.Vector2: return typeof(Float2);
+            case GraphConnectionType_Deprecated.Vector3: return typeof(Float3);
+            case GraphConnectionType_Deprecated.Vector4: return typeof(Float4);
             case GraphConnectionType_Deprecated.String: return typeof(string);
             case GraphConnectionType_Deprecated.Object: return typeof(FlaxEngine.Object);
             case GraphConnectionType_Deprecated.Rotation: return typeof(Quaternion);
@@ -445,6 +486,9 @@ namespace FlaxEditor.Surface
         {
             // IMPORTANT! This must match C++ Graph format
 
+            var nodeArchetypes = _surface?.NodeArchetypes ?? NodeFactory.DefaultGroups;
+            var customNodes = _surface?.GetCustomNodes();
+
             // Magic Code
             int tmp = stream.ReadInt32();
             if (tmp != 1963542358)
@@ -458,197 +502,8 @@ namespace FlaxEditor.Surface
             var tmpHints = _cachedConnections.Value;
             var guidBytes = new byte[16];
             if (version < 7000)
-            {
-                // Time saved (not used anymore to prevent binary diffs after saving unmodified surface)
-                stream.ReadInt64();
-
-                // Nodes count
-                int nodesCount = stream.ReadInt32();
-                if (Nodes.Capacity < nodesCount)
-                    Nodes.Capacity = nodesCount;
-                tmpHints.Clear();
-                tmpHints.Capacity = Mathf.Max(tmpHints.Capacity, nodesCount * 4);
-
-                // Parameters count
-                int parametersCount = stream.ReadInt32();
-                if (Parameters.Capacity < parametersCount)
-                    Parameters.Capacity = parametersCount;
-
-                // For each node
-                for (int i = 0; i < nodesCount; i++)
-                {
-                    // ID
-                    uint id = stream.ReadUInt32();
-
-                    // Type
-                    ushort typeId = stream.ReadUInt16();
-                    ushort groupId = stream.ReadUInt16();
-
-                    // Create node
-                    SurfaceNode node;
-                    if (groupId == Archetypes.Custom.GroupID)
-                        node = new DummyCustomNode(id, this);
-                    else
-                        node = NodeFactory.CreateNode(_surface.NodeArchetypes, id, this, groupId, typeId);
-                    if (node == null)
-                        node = new MissingNode(id, this, groupId, typeId);
-                    Nodes.Add(node);
-                }
-
-                // For each param
-                for (int i = 0; i < parametersCount; i++)
-                {
-                    // Create param
-                    var param = new SurfaceParameter();
-                    Parameters.Add(param);
-
-                    // Properties
-                    param.Type = new ScriptType(GetGraphParameterValueType((GraphParamType_Deprecated)stream.ReadByte()));
-                    stream.Read(guidBytes, 0, 16);
-                    param.ID = new Guid(guidBytes);
-                    param.Name = stream.ReadStr(97);
-                    param.IsPublic = stream.ReadByte() != 0;
-                    bool isStatic = stream.ReadByte() != 0;
-                    bool isUIVisible = stream.ReadByte() != 0;
-                    bool isUIEditable = stream.ReadByte() != 0;
-
-                    // References [Deprecated]
-                    int refsCount = stream.ReadInt32();
-                    for (int j = 0; j < refsCount; j++)
-                    {
-                        uint refID = stream.ReadUInt32();
-                    }
-
-                    // Value
-                    stream.ReadCommonValue(ref param.Value);
-
-                    // Meta
-                    param.Meta.Load(stream);
-                }
-
-                // For each node
-                for (int i = 0; i < nodesCount; i++)
-                {
-                    var node = Nodes[i];
-
-                    int valuesCnt = stream.ReadInt32();
-                    int firstValueReadIdx = 0;
-
-                    // Special case for missing nodes
-                    if (node is DummyCustomNode customNode)
-                    {
-                        node = null;
-
-                        // Values check
-                        if (valuesCnt < 2)
-                            throw new Exception("Missing custom nodes data.");
-
-                        // Node typename check
-                        object typeNameValue = null;
-                        stream.ReadCommonValue(ref typeNameValue);
-                        firstValueReadIdx = 1;
-                        string typeName = typeNameValue as string ?? string.Empty;
-
-                        // Find custom node archetype that matches this node type (it must be unique)
-                        var customNodes = _surface.GetCustomNodes();
-                        if (customNodes?.Archetypes != null && typeName.Length != 0)
-                        {
-                            NodeArchetype arch = null;
-                            foreach (var nodeArchetype in customNodes.Archetypes)
-                            {
-                                if (string.Equals(Archetypes.Custom.GetNodeTypeName(nodeArchetype), typeName, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    arch = nodeArchetype;
-                                    break;
-                                }
-                            }
-                            if (arch != null)
-                                node = NodeFactory.CreateNode(customNode.ID, this, customNodes, arch);
-                        }
-
-                        // Fallback to the
-                        if (node == null)
-                        {
-                            Editor.LogWarning(string.Format("Cannot find custom node archetype for {0}", typeName));
-                            node = new MissingNode(customNode.ID, this, Archetypes.Custom.GroupID, customNode.Archetype.TypeID);
-                        }
-                        Nodes[i] = node;
-
-                        // Store node typename in values container
-                        node.Values[0] = typeName;
-                    }
-                    if (node is MissingNode)
-                    {
-                        // Read all values
-                        Array.Resize(ref node.Values, valuesCnt);
-                        for (int j = firstValueReadIdx; j < valuesCnt; j++)
-                        {
-                            // ReSharper disable once PossibleNullReferenceException
-                            stream.ReadCommonValue(ref node.Values[j]);
-                        }
-                        firstValueReadIdx = valuesCnt = node.Values.Length;
-                    }
-
-                    // Values
-                    int nodeValuesCnt = node.Values?.Length ?? 0;
-                    if (valuesCnt == nodeValuesCnt)
-                    {
-                        for (int j = firstValueReadIdx; j < valuesCnt; j++)
-                        {
-                            // ReSharper disable once PossibleNullReferenceException
-                            stream.ReadCommonValue(ref node.Values[j]);
-                        }
-                    }
-                    else
-                    {
-                        Editor.LogWarning(string.Format("Invalid node values. Loaded: {0}, expected: {1}. Type: {2}, {3}", valuesCnt, nodeValuesCnt, node.Archetype.Title, node.Archetype.TypeID));
-
-                        object dummy = null;
-                        for (int j = firstValueReadIdx; j < valuesCnt; j++)
-                        {
-                            stream.ReadCommonValue(ref dummy);
-
-                            if (j < nodeValuesCnt &&
-                                dummy != null &&
-                                node.Values[j] != null &&
-                                node.Values[j].GetType() == dummy.GetType())
-                            {
-                                node.Values[j] = dummy;
-                            }
-                        }
-                    }
-
-                    // Boxes
-                    ushort boxesCount = stream.ReadUInt16();
-                    for (int j = 0; j < boxesCount; j++)
-                    {
-                        var id = stream.ReadByte();
-                        stream.ReadUInt32(); // Skip type
-                        ushort connectionsCnt = stream.ReadUInt16();
-
-                        ConnectionHint hint;
-                        hint.NodeB = node.ID;
-                        hint.BoxB = id;
-
-                        for (int k = 0; k < connectionsCnt; k++)
-                        {
-                            uint targetNodeID = stream.ReadUInt32();
-                            byte targetBoxID = stream.ReadByte();
-
-                            hint.NodeA = targetNodeID;
-                            hint.BoxA = targetBoxID;
-
-                            tmpHints.Add(hint);
-                        }
-                    }
-
-                    // Meta
-                    node.Meta.Load(stream);
-
-                    OnControlLoaded(node);
-                }
-            }
-            else if (version == 7000)
+                throw new Exception("Not supported Visject Surface version. Open and re-save asset with Flax 1.11.");
+            if (version == 7000)
             {
                 // Nodes count
                 int nodesCount = stream.ReadInt32();
@@ -674,7 +529,7 @@ namespace FlaxEditor.Surface
                     if (groupId == Archetypes.Custom.GroupID)
                         node = new DummyCustomNode(id, this);
                     else
-                        node = NodeFactory.CreateNode(_surface.NodeArchetypes, id, this, groupId, typeId);
+                        node = NodeFactory.CreateNode(nodeArchetypes, id, this, groupId, typeId);
                     if (node == null)
                         node = new MissingNode(id, this, groupId, typeId);
                     Nodes.Add(node);
@@ -722,7 +577,6 @@ namespace FlaxEditor.Surface
                         string typeName = typeNameValue as string ?? string.Empty;
 
                         // Find custom node archetype that matches this node type (it must be unique)
-                        var customNodes = _surface.GetCustomNodes();
                         if (customNodes?.Archetypes != null && typeName.Length != 0)
                         {
                             NodeArchetype arch = null;
@@ -762,6 +616,12 @@ namespace FlaxEditor.Surface
                     int nodeValuesCnt = node.Values?.Length ?? 0;
                     if (valuesCnt == nodeValuesCnt)
                     {
+                        for (int j = firstValueReadIdx; j < valuesCnt; j++)
+                            node.Values[j] = stream.ReadVariant();
+                    }
+                    else if ((node.Archetype.Flags & NodeFlags.VariableValuesSize) != 0)
+                    {
+                        node.Values = new object[valuesCnt];
                         for (int j = firstValueReadIdx; j < valuesCnt; j++)
                             node.Values[j] = stream.ReadVariant();
                     }
@@ -809,7 +669,7 @@ namespace FlaxEditor.Surface
                     // Meta
                     node.Meta.Load(stream);
 
-                    OnControlLoaded(node);
+                    OnControlLoaded(node, SurfaceNodeActions.Load);
                 }
             }
             else
@@ -852,11 +712,12 @@ namespace FlaxEditor.Surface
         /// Called when control gets added to the surface as spawn operation (eg. add new comment or add new node).
         /// </summary>
         /// <param name="control">The control.</param>
-        public virtual void OnControlSpawned(SurfaceControl control)
+        /// <param name="action">The action node.</param>
+        public virtual void OnControlSpawned(SurfaceControl control, SurfaceNodeActions action)
         {
-            control.OnSpawned();
+            control.OnSpawned(action);
             ControlSpawned?.Invoke(control);
-            if (control is SurfaceNode node)
+            if (Surface != null && control is SurfaceNode node)
                 Surface.OnNodeSpawned(node);
         }
 
@@ -864,10 +725,11 @@ namespace FlaxEditor.Surface
         /// Called when control gets removed from the surface as delete/cut operation (eg. remove comment or cut node).
         /// </summary>
         /// <param name="control">The control.</param>
-        public virtual void OnControlDeleted(SurfaceControl control)
+        /// <param name="action">The action node.</param>
+        public virtual void OnControlDeleted(SurfaceControl control, SurfaceNodeActions action)
         {
             ControlDeleted?.Invoke(control);
-            control.OnDeleted();
+            control.OnDeleted(action);
             if (control is SurfaceNode node)
                 Surface.OnNodeDeleted(node);
         }
@@ -876,30 +738,28 @@ namespace FlaxEditor.Surface
         /// Called when control gets loaded and should be added to the surface. Handles surface nodes initialization.
         /// </summary>
         /// <param name="control">The control.</param>
-        public virtual void OnControlLoaded(SurfaceControl control)
+        /// <param name="action">The action node.</param>
+        public virtual void OnControlLoaded(SurfaceControl control, SurfaceNodeActions action)
         {
+            control.OnLoading(action);
+
             if (control is SurfaceNode node)
             {
                 // Initialize node
-                OnNodeLoaded(node);
+                OnNodeLoaded(node, action);
             }
 
             // Link control
-            control.OnLoaded();
+            control.OnLoaded(action);
             control.Parent = RootControl;
-
-            if (control is SurfaceComment)
-            {
-                // Move comments to the background
-                control.IndexInParent = 0;
-            }
         }
 
         /// <summary>
         /// Called when node gets loaded and should be added to the surface. Creates node elements from the archetype.
         /// </summary>
         /// <param name="node">The node.</param>
-        public virtual void OnNodeLoaded(SurfaceNode node)
+        /// <param name="action">The action node.</param>
+        public virtual void OnNodeLoaded(SurfaceNode node, SurfaceNodeActions action)
         {
             // Create child elements of the node based on it's archetype
             int elementsCount = node.Archetype.Elements?.Length ?? 0;

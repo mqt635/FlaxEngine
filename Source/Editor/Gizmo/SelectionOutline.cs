@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -85,6 +85,8 @@ namespace FlaxEditor.Gizmo
         /// </summary>
         public SelectionOutline()
         {
+            Order = -90000; // Draw before any other editor shapes (except grid gizmo)
+
             _outlineMaterial = FlaxEngine.Content.LoadAsyncInternal<Material>("Editor/Gizmo/SelectionOutlineMaterial");
             if (_outlineMaterial)
             {
@@ -114,7 +116,10 @@ namespace FlaxEditor.Gizmo
         protected bool HasDataReady => _enabled && _material && _outlineMaterial.IsLoaded;
 
         /// <inheritdoc />
-        public override bool CanRender => _enabled && _material && _outlineMaterial.IsLoaded && SelectionGetter().Count > 0;
+        public override bool CanRender()
+        {
+            return _enabled && _material && _outlineMaterial.IsLoaded && SelectionGetter().Count > 0;
+        }
 
         /// <inheritdoc />
         public override void Render(GPUContext context, ref RenderContext renderContext, GPUTexture input, GPUTexture output)
@@ -134,15 +139,11 @@ namespace FlaxEditor.Gizmo
             DrawSelectionDepth(context, renderContext.Task, customDepth);
             _actors.Clear();
 
-            var near = renderContext.View.Near;
-            var far = renderContext.View.Far;
-            var projection = renderContext.View.Projection;
-
             // Render outline
             _material.SetParameterValue("OutlineColor0", _color0);
             _material.SetParameterValue("OutlineColor1", _color1);
             _material.SetParameterValue("CustomDepth", customDepth);
-            _material.SetParameterValue("ViewInfo", new Vector4(1.0f / projection.M11, 1.0f / projection.M22, far / (far - near), (-far * near) / (far - near) / far));
+            _material.SetParameterValue("ViewInfo", renderContext.View.ViewInfo);
             Renderer.DrawPostFxMaterial(context, ref renderContext, _material, output, input.View());
 
             // Cleanup
@@ -175,6 +176,8 @@ namespace FlaxEditor.Gizmo
                 if (selection[i] is ActorNode actorNode && actorNode.Actor != null)
                     CollectActors(actorNode.Actor);
             }
+            if (_actors.Count == 0)
+                return;
 
             // Render selected objects depth
             Renderer.DrawSceneDepth(context, task, customDepth, _actors);

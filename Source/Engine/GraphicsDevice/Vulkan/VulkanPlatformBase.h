@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,18 +17,19 @@ enum class VulkanValidationLevel
     All = 5,
 };
 
+class GPUDeviceVulkan;
+
 /// <summary>
 /// The base implementation for the Vulkan API platform support.
 /// </summary>
 class VulkanPlatformBase
 {
 public:
-
     static void GetInstanceExtensions(Array<const char*>& extensions, Array<const char*>& layers)
     {
     }
 
-    static void GetDeviceExtensions(Array<const char*>& extensions, Array<const char*>& layers)
+    static void GetDeviceExtensions(Array<const char*>& extensions)
     {
     }
 
@@ -50,6 +51,9 @@ public:
         featuresToEnable.sparseResidency8Samples = VK_FALSE;
         featuresToEnable.sparseResidencyAliased = VK_FALSE;
     }
+
+    static bool LoadCache(const String& folder, const Char* filename, Array<byte>& data);
+    static bool SaveCache(const String& folder, const Char* filename, const Array<byte>& data);
 };
 
 #endif

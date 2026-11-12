@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections;
@@ -103,7 +103,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             RenderView view = new RenderView();
             var track = (CameraCutTrack)Track;
             Camera cam = track.Camera;
-            var viewport = new FlaxEngine.Viewport(Vector2.Zero, task.Buffers.Size);
+            var viewport = new FlaxEngine.Viewport(Float2.Zero, task.Buffers.Size);
             Quaternion orientation = Quaternion.Identity;
             view.Near = 10.0f;
             view.Far = 20000.0f;
@@ -125,6 +125,8 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 fov = cam.FieldOfView;
                 customAspectRatio = cam.CustomAspectRatio;
                 view.RenderLayersMask = cam.RenderLayersMask;
+                view.Flags = cam.RenderFlags;
+                view.Mode = cam.RenderMode;
             }
 
             // Try to evaluate camera properties based on the animated tracks
@@ -169,7 +171,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             }
 
             // Build view
-            view.Direction = Vector3.Forward * orientation;
+            view.Direction = Float3.Forward * orientation;
             if (usePerspective)
             {
                 float aspect = customAspectRatio <= 0.0f ? viewport.AspectRatio : customAspectRatio;
@@ -181,10 +183,10 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             }
 
             Vector3 target = view.Position + view.Direction;
-            var up = Vector3.Transform(Vector3.Up, orientation);
+            var up = Float3.Transform(Float3.Up, orientation);
             view.View = Matrix.LookAt(view.Position, target, up);
             view.NonJitteredProjection = view.Projection;
-            view.TemporalAAJitter = Vector4.Zero;
+            view.TemporalAAJitter = Float4.Zero;
             view.ModelLODDistanceFactor = 100.0f;
             view.Flags = ViewFlags.DefaultGame & ~(ViewFlags.MotionBlur);
             view.UpdateCachedData();
@@ -324,12 +326,12 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         }
 
         /// <inheritdoc />
-        public override void OnTimelineShowContextMenu(ContextMenu.ContextMenu menu, Control controlUnderMouse)
+        public override void OnTimelineContextMenu(ContextMenu.ContextMenu menu, float time, Control controlUnderMouse)
         {
             if (((CameraCutTrack)Track).Camera)
                 menu.AddButton("Refresh thumbnails", () => UpdateThumbnails());
 
-            base.OnTimelineShowContextMenu(menu, controlUnderMouse);
+            base.OnTimelineContextMenu(menu, time, controlUnderMouse);
         }
 
         /// <inheritdoc />
@@ -591,7 +593,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 spriteAtlas.Init(ref initData);
 
                 // Setup sprite atlas slots (each per thumbnail)
-                var thumbnailSizeUV = new Vector2(width / atlasSize, height / atlasSize);
+                var thumbnailSizeUV = new Float2(width / atlasSize, height / atlasSize);
                 for (int i = 0; i < count; i++)
                 {
                     var x = i % countX;
@@ -599,7 +601,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                     var s = new Sprite
                     {
                         Name = string.Empty,
-                        Area = new Rectangle(new Vector2(x, y) * thumbnailSizeUV, thumbnailSizeUV),
+                        Area = new Rectangle(new Float2(x, y) * thumbnailSizeUV, thumbnailSizeUV),
                     };
                     spriteAtlas.AddSprite(s);
                 }
@@ -631,7 +633,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                 }
             }
             if (spriteIndex == -1)
-                throw new FlaxException();
+                throw new Exception();
             atlas.Count++;
             _atlases[atlasIndex] = atlas;
             var sprite = new SpriteHandle(atlas.Texture, spriteIndex);

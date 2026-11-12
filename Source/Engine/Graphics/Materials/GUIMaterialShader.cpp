@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GUIMaterialShader.h"
 #include "MaterialParams.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Viewport.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/RenderView.h"
@@ -14,12 +16,15 @@ PACK_STRUCT(struct GUIMaterialShaderData {
     Matrix ViewProjectionMatrix;
     Matrix WorldMatrix;
     Matrix ViewMatrix;
-    Vector3 ViewPos;
+    Float3 ViewPos;
     float ViewFar;
-    Vector3 ViewDir;
+    Float3 ViewDir;
     float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
+    Float4 ViewInfo;
+    Float4 ScreenSize;
+    Float4 ViewSize;
+    Float3 ViewPadding0;
+    float ScaledTimeParam;
     });
 
 void GUIMaterialShader::Bind(BindParameters& params)
@@ -29,9 +34,10 @@ void GUIMaterialShader::Bind(BindParameters& params)
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(GUIMaterialShaderData));
     auto materialData = reinterpret_cast<GUIMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(GUIMaterialShaderData), cb.Length() - sizeof(GUIMaterialShaderData));
+    cb = cb.Slice(sizeof(GUIMaterialShaderData));
     int32 srv = 0;
-    const auto ps = context->IsDepthBufferBinded() ? _cache.Depth : _cache.NoDepth;
+    auto customData = (Render2D::CustomData*)params.CustomData;
+    const auto ps = customData->UseDepthBuffer ? _cache.Depth : _cache.NoDepth;
 
     // Setup parameters
     MaterialParameter::BindMeta bindMeta;
@@ -45,17 +51,18 @@ void GUIMaterialShader::Bind(BindParameters& params)
 
     // Setup material constants
     {
-        const auto viewProjectionMatrix = (Matrix*)params.CustomData;
-        Matrix::Transpose(*viewProjectionMatrix, materialData->ViewProjectionMatrix);
+        Matrix::Transpose(customData->ViewProjection, materialData->ViewProjectionMatrix);
         Matrix::Transpose(Matrix::Identity, materialData->WorldMatrix);
         Matrix::Transpose(Matrix::Identity, materialData->ViewMatrix);
-        materialData->ViewPos = Vector3::Zero;
+        materialData->ViewPos = Float3::Zero;
         materialData->ViewFar = 0.0f;
-        materialData->ViewDir = Vector3::Forward;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = Vector4::Zero;
+        materialData->ViewDir = Float3::Forward;
+        materialData->TimeParam = params.Time;
+        materialData->ScaledTimeParam = params.ScaledTime;
+        materialData->ViewInfo = Float4::Zero;
         auto& viewport = Render2D::GetViewport();
-        materialData->ScreenSize = Vector4(viewport.Width, viewport.Height, 1.0f / viewport.Width, 1.0f / viewport.Height);
+        materialData->ScreenSize = Float4(viewport.Width, viewport.Height, 1.0f / viewport.Width, 1.0f / viewport.Height);
+        materialData->ViewSize = Float4(customData->ViewSize.X, customData->ViewSize.Y, 1.0f / customData->ViewSize.X, 1.0f / customData->ViewSize.Y);
     }
 
     // Bind constants
@@ -79,26 +86,21 @@ void GUIMaterialShader::Unload()
 
 bool GUIMaterialShader::Load()
 {
-    GPUPipelineState::Description psDesc0 = GPUPipelineState::Description::DefaultFullscreenTriangle;
-    psDesc0.Wireframe = (_info.FeaturesFlags & MaterialFeaturesFlags::Wireframe) != 0;
-    psDesc0.VS = _shader->GetVS("VS_GUI");
-    psDesc0.PS = _shader->GetPS("PS_GUI");
-    psDesc0.BlendMode = BlendingMode::AlphaBlend;
-
-    psDesc0.DepthTestEnable = psDesc0.DepthWriteEnable = true;
+    auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
+    desc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    desc.VS = _shader->GetVS("VS_GUI");
+    desc.PS = _shader->GetPS("PS_GUI");
+    desc.BlendMode = BlendingMode::AlphaBlend;
+    desc.DepthEnable = true;
     _cache.Depth = GPUDevice::Instance->CreatePipelineState();
     _cache.NoDepth = GPUDevice::Instance->CreatePipelineState();
-
-    bool failed = _cache.Depth->Init(psDesc0);
-
-    psDesc0.DepthTestEnable = psDesc0.DepthWriteEnable = false;
-    failed |= _cache.NoDepth->Init(psDesc0);
-
+    bool failed = _cache.Depth->Init(desc);
+    desc.DepthEnable = false;
+    failed |= _cache.NoDepth->Init(desc);
     if (failed)
     {
         LOG(Warning, "Failed to create GUI material pipeline state.");
         return true;
     }
-
     return false;
 }

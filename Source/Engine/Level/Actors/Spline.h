@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,17 +8,16 @@
 /// <summary>
 /// Spline shape actor that defines spatial curve with utility functions for general purpose usage.
 /// </summary>
-API_CLASS() class FLAXENGINE_API Spline : public Actor
+API_CLASS(Attributes="ActorContextMenu(\"New/Other/Spline\"), ActorToolbox(\"Other\")")
+class FLAXENGINE_API Spline : public Actor
 {
-DECLARE_SCENE_OBJECT(Spline);
+    DECLARE_SCENE_OBJECT(Spline);
     typedef BezierCurveKeyframe<Transform> Keyframe;
 private:
-
     bool _loop = false;
     BoundingBox _localBounds;
 
 public:
-
     /// <summary>
     /// The spline bezier curve points represented as series of transformations in 3D space (with tangents). Points are stored in local-space of the actor.
     /// </summary>
@@ -37,74 +36,73 @@ public:
     API_PROPERTY() void SetIsLoop(bool value);
 
 public:
-
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point location in 3D (world-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point location (world-space).</returns>
     API_FUNCTION() Vector3 GetSplinePoint(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point location in 3D (local-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point location (local-space).</returns>
     API_FUNCTION() Vector3 GetSplineLocalPoint(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point rotation in 3D (world-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point rotation (world-space).</returns>
     API_FUNCTION() Quaternion GetSplineOrientation(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point rotation in 3D (local-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point rotation (local-space).</returns>
     API_FUNCTION() Quaternion GetSplineLocalOrientation(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point scale in 3D (world-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point scale (world-space).</returns>
     API_FUNCTION() Vector3 GetSplineScale(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the point scale in 3D (local-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point scale (local-space).</returns>
     API_FUNCTION() Vector3 GetSplineLocalScale(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the transformation in 3D (world-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point transformation (world-space).</returns>
     API_FUNCTION() Transform GetSplineTransform(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve at the given time and calculates the transformation in 3D (local-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve point transformation (local-space).</returns>
     API_FUNCTION() Transform GetSplineLocalTransform(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve direction (forward vector, aka position 1st derivative) at the given time in 3D (world-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve direction (world-space).</returns>
     API_FUNCTION() Vector3 GetSplineDirection(float time) const;
 
     /// <summary>
     /// Evaluates the spline curve direction (forward vector, aka position 1st derivative) at the given time in 3D (local-space).
     /// </summary>
-    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp).</param>
+    /// <param name="time">The time value. Can be negative or larger than curve length (curve will loop or clamp). Time corresponds to curve keyframes Time, not the length.</param>
     /// <returns>The calculated curve direction (local-space).</returns>
     API_FUNCTION() Vector3 GetSplineLocalDirection(float time) const;
 
@@ -170,6 +168,13 @@ public:
     API_PROPERTY() float GetSplineLength() const;
 
     /// <summary>
+    /// Gets the length of the spline segment (distance between pair of two points).
+    /// </summary>
+    /// <param name="index">The index of the segment end index. Zero-based, smaller than GetSplinePointsCount().</param>
+    /// <returns>The spline segment length.</returns>
+    API_FUNCTION() float GetSplineSegmentLength(int32 index) const;
+
+    /// <summary>
     /// Gets the time of the spline keyframe.
     /// </summary>
     /// <param name="index">The curve keyframe index. Zero-based, smaller than GetSplinePointsCount().</param>
@@ -215,7 +220,6 @@ public:
     API_FUNCTION() void GetSplineLocalPoints(API_PARAM(Out) Array<Transform>& points) const;
 
 public:
-
     /// <summary>
     /// Clears the spline to be empty.
     /// </summary>
@@ -345,7 +349,6 @@ public:
     API_FUNCTION() void SetTangentsSmooth();
 
 public:
-
     /// <summary>
     /// Called when spline gets updated (eg. after curve modification).
     /// </summary>
@@ -357,8 +360,8 @@ public:
     API_FUNCTION() virtual void UpdateSpline();
 
 protected:
-
 #if USE_EDITOR
+    // Spline color getter for debug drawing, can be overriden by custom spline types.
     virtual Color GetSplineColor()
     {
         return Color::White;
@@ -366,20 +369,20 @@ protected:
 #endif
 
 private:
-
     // Internal bindings
-    API_FUNCTION(NoProxy) void GetKeyframes(MonoArray* data);
-    API_FUNCTION(NoProxy) void SetKeyframes(MonoArray* data);
+#if !COMPILE_WITHOUT_CSHARP
+    API_FUNCTION(NoProxy) void GetKeyframes(MArray* data);
+    API_FUNCTION(NoProxy) void SetKeyframes(MArray* data, int32 keySize);
+#endif
 
 public:
-
     // [Actor]
 #if USE_EDITOR
     void OnDebugDraw() override;
     void OnDebugDrawSelected() override;
 #endif
     void OnTransformChanged() override;
-    void PostLoad() override;
+    void Initialize() override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 };

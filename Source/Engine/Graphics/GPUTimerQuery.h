@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,12 +7,12 @@
 /// <summary>
 /// Represents a GPU query that measures execution time of GPU operations.
 /// The query will measure any GPU operations that take place between its Begin() and End() calls.
+/// [Deprecated in v1.12]
 /// </summary>
 /// <seealso cref="GPUResource" />
 class FLAXENGINE_API GPUTimerQuery : public GPUResource
 {
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="GPUTimerQuery"/> class.
     /// </summary>
@@ -21,7 +21,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Starts the counter.
     /// </summary>
@@ -45,20 +44,13 @@ public:
     virtual float GetResult() = 0;
 
 public:
-
     // [GPUResource]
     String ToString() const override
     {
         return TEXT("TimerQuery");
     }
-
-    ResourceType GetResourceType() const final override
+    GPUResourceType GetResourceType() const final override
     {
-        return ResourceType::Query;
-    }
-
-    ObjectType GetObjectType() const final override
-    {
-        return ObjectType::Other;
+        return GPUResourceType::Query;
     }
 };

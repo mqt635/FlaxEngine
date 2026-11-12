@@ -1,16 +1,19 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace Flax.Build.Bindings
 {
     /// <summary>
     /// The native type information for bindings generator.
     /// </summary>
-    public class ApiTypeInfo : IBindingsCache
+    public class ApiTypeInfo : IBindingsCache, ICloneable
     {
         public ApiTypeInfo Parent;
+        public Dictionary<string, string> Tags;
         public List<ApiTypeInfo> Children = new List<ApiTypeInfo>();
         public string NativeName;
         public string Name;
@@ -18,7 +21,10 @@ namespace Flax.Build.Bindings
         public string Attributes;
         public string[] Comment;
         public bool IsInBuild;
+        public string DeprecatedMessage;
+        public TypeInfo MarshalAs;
         internal bool IsInited;
+        internal TypedefInfo Instigator;
 
         public virtual bool IsClass => false;
         public virtual bool IsStruct => false;
@@ -27,6 +33,8 @@ namespace Flax.Build.Bindings
         public virtual bool IsValueType => false;
         public virtual bool IsScriptingObject => false;
         public virtual bool IsPod => false;
+        public virtual bool SkipGeneration => IsInBuild;
+        public virtual bool IsDeprecated => DeprecatedMessage != null;
 
         public FileInfo File
         {
@@ -36,6 +44,17 @@ namespace Flax.Build.Bindings
                 while (result != null && !(result is FileInfo))
                     result = result.Parent;
                 return result as FileInfo;
+            }
+        }
+
+        public ModuleInfo ParentModule
+        {
+            get
+            {
+                var result = this;
+                while (result != null && !(result is ModuleInfo))
+                    result = result.Parent;
+                return result as ModuleInfo;
             }
         }
 
@@ -71,6 +90,20 @@ namespace Flax.Build.Bindings
             }
         }
 
+        /// <summary>
+        /// Gets the name of the internal type in generated bindings code.
+        /// </summary>
+        public string FullNameNativeInternal
+        {
+            get
+            {
+                var result = NativeName;
+                if (Parent != null && !(Parent is FileInfo))
+                    result = Parent.FullNameNative.Replace("::", "_") + '_' + result;
+                return result;
+            }
+        }
+
         public void EnsureInited(Builder.BuildData buildData)
         {
             if (IsInited)
@@ -93,6 +126,25 @@ namespace Flax.Build.Bindings
             }
         }
 
+        public bool HasTag(string tag)
+        {
+            return Tags != null && Tags.ContainsKey(tag);
+        }
+
+        public string GetTag(string tag)
+        {
+            if (Tags != null && Tags.TryGetValue(tag, out var value))
+                return value;
+            return null;
+        }
+
+        public void SetTag(string tag, string value)
+        {
+            if (Tags == null)
+                Tags = new Dictionary<string, string>();
+            Tags[tag] = value;
+        }
+
         public virtual void AddChild(ApiTypeInfo apiTypeInfo)
         {
             apiTypeInfo.Parent = this;
@@ -106,7 +158,10 @@ namespace Flax.Build.Bindings
             BindingsGenerator.Write(writer, Namespace);
             BindingsGenerator.Write(writer, Attributes);
             BindingsGenerator.Write(writer, Comment);
+            BindingsGenerator.Write(writer, MarshalAs);
             writer.Write(IsInBuild);
+            BindingsGenerator.Write(writer, DeprecatedMessage);
+            BindingsGenerator.Write(writer, Tags);
             BindingsGenerator.Write(writer, Children);
         }
 
@@ -117,7 +172,10 @@ namespace Flax.Build.Bindings
             Namespace = BindingsGenerator.Read(reader, Namespace);
             Attributes = BindingsGenerator.Read(reader, Attributes);
             Comment = BindingsGenerator.Read(reader, Comment);
+            MarshalAs = BindingsGenerator.Read(reader, MarshalAs);
             IsInBuild = reader.ReadBoolean();
+            DeprecatedMessage = BindingsGenerator.Read(reader, DeprecatedMessage);
+            Tags = BindingsGenerator.Read(reader, Tags);
             Children = BindingsGenerator.Read(reader, Children);
 
             // Fix hierarchy
@@ -131,6 +189,21 @@ namespace Flax.Build.Bindings
         public override string ToString()
         {
             return Name;
+        }
+
+        /// <inheritdoc />
+        public object Clone()
+        {
+            var clone = (ApiTypeInfo)Activator.CreateInstance(GetType());
+            using (var stream = new MemoryStream(1024))
+            {
+                using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
+                    Write(writer);
+                stream.Position = 0;
+                using (var reader = new BinaryReader(stream))
+                    clone.Read(reader);
+            }
+            return clone;
         }
     }
 }

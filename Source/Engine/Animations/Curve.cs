@@ -1,8 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using FlaxEngine.Interop;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace FlaxEngine
@@ -24,9 +26,9 @@ namespace FlaxEngine
             /// </summary>
             /// <param name="value">The value.</param>
             /// <param name="tangent">The tangent.</param>
-            /// <param name="lengthThird">The length divided by 3.</param>
+            /// <param name="tangentScale">The tangent scale factor.</param>
             /// <param name="result">The result.</param>
-            void GetTangent(ref U value, ref U tangent, float lengthThird, out U result);
+            void GetTangent(ref U value, ref U tangent, float tangentScale, out U result);
 
             /// <summary>
             /// Calculates the linear interpolation at the specified alpha.
@@ -57,11 +59,17 @@ namespace FlaxEngine
         IKeyframeAccess<Vector2>,
         IKeyframeAccess<Vector3>,
         IKeyframeAccess<Vector4>,
+        IKeyframeAccess<Float2>,
+        IKeyframeAccess<Float3>,
+        IKeyframeAccess<Float4>,
+        IKeyframeAccess<Double2>,
+        IKeyframeAccess<Double3>,
+        IKeyframeAccess<Double4>,
         IKeyframeAccess<Quaternion>,
         IKeyframeAccess<Color32>,
         IKeyframeAccess<Color>
         {
-            public void GetTangent(ref bool value, ref bool tangent, float lengthThird, out bool result)
+            public void GetTangent(ref bool value, ref bool tangent, float tangentScale, out bool result)
             {
                 result = value;
             }
@@ -76,9 +84,9 @@ namespace FlaxEngine
                 result = p0;
             }
 
-            public void GetTangent(ref int value, ref int tangent, float lengthThird, out int result)
+            public void GetTangent(ref int value, ref int tangent, float tangentScale, out int result)
             {
-                result = value + (int)(tangent * lengthThird);
+                result = value + (int)(tangent * tangentScale);
             }
 
             public void Linear(ref int a, ref int b, float alpha, out int result)
@@ -96,9 +104,9 @@ namespace FlaxEngine
                 result = Mathf.Lerp(p012, p123, alpha);
             }
 
-            public void GetTangent(ref double value, ref double tangent, float lengthThird, out double result)
+            public void GetTangent(ref double value, ref double tangent, float tangentScale, out double result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref double a, ref double b, float alpha, out double result)
@@ -116,9 +124,9 @@ namespace FlaxEngine
                 result = Mathf.Lerp(p012, p123, alpha);
             }
 
-            public void GetTangent(ref float value, ref float tangent, float lengthThird, out float result)
+            public void GetTangent(ref float value, ref float tangent, float tangentScale, out float result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref float a, ref float b, float alpha, out float result)
@@ -136,9 +144,9 @@ namespace FlaxEngine
                 result = Mathf.Lerp(p012, p123, alpha);
             }
 
-            public void GetTangent(ref Vector2 value, ref Vector2 tangent, float lengthThird, out Vector2 result)
+            public void GetTangent(ref Vector2 value, ref Vector2 tangent, float tangentScale, out Vector2 result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref Vector2 a, ref Vector2 b, float alpha, out Vector2 result)
@@ -156,9 +164,9 @@ namespace FlaxEngine
                 Vector2.Lerp(ref p012, ref p123, alpha, out result);
             }
 
-            public void GetTangent(ref Vector3 value, ref Vector3 tangent, float lengthThird, out Vector3 result)
+            public void GetTangent(ref Vector3 value, ref Vector3 tangent, float tangentScale, out Vector3 result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref Vector3 a, ref Vector3 b, float alpha, out Vector3 result)
@@ -176,9 +184,9 @@ namespace FlaxEngine
                 Vector3.Lerp(ref p012, ref p123, alpha, out result);
             }
 
-            public void GetTangent(ref Vector4 value, ref Vector4 tangent, float lengthThird, out Vector4 result)
+            public void GetTangent(ref Vector4 value, ref Vector4 tangent, float tangentScale, out Vector4 result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref Vector4 a, ref Vector4 b, float alpha, out Vector4 result)
@@ -196,7 +204,127 @@ namespace FlaxEngine
                 Vector4.Lerp(ref p012, ref p123, alpha, out result);
             }
 
-            public void GetTangent(ref Quaternion value, ref Quaternion tangent, float lengthThird, out Quaternion result)
+            public void GetTangent(ref Float2 value, ref Float2 tangent, float tangentScale, out Float2 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Float2 a, ref Float2 b, float alpha, out Float2 result)
+            {
+                Float2.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Float2 p0, ref Float2 p1, ref Float2 p2, ref Float2 p3, float alpha, out Float2 result)
+            {
+                Float2.Lerp(ref p0, ref p1, alpha, out var p01);
+                Float2.Lerp(ref p1, ref p2, alpha, out var p12);
+                Float2.Lerp(ref p2, ref p3, alpha, out var p23);
+                Float2.Lerp(ref p01, ref p12, alpha, out var p012);
+                Float2.Lerp(ref p12, ref p23, alpha, out var p123);
+                Float2.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Float3 value, ref Float3 tangent, float tangentScale, out Float3 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Float3 a, ref Float3 b, float alpha, out Float3 result)
+            {
+                Float3.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Float3 p0, ref Float3 p1, ref Float3 p2, ref Float3 p3, float alpha, out Float3 result)
+            {
+                Float3.Lerp(ref p0, ref p1, alpha, out var p01);
+                Float3.Lerp(ref p1, ref p2, alpha, out var p12);
+                Float3.Lerp(ref p2, ref p3, alpha, out var p23);
+                Float3.Lerp(ref p01, ref p12, alpha, out var p012);
+                Float3.Lerp(ref p12, ref p23, alpha, out var p123);
+                Float3.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Float4 value, ref Float4 tangent, float tangentScale, out Float4 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Float4 a, ref Float4 b, float alpha, out Float4 result)
+            {
+                Float4.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Float4 p0, ref Float4 p1, ref Float4 p2, ref Float4 p3, float alpha, out Float4 result)
+            {
+                Float4.Lerp(ref p0, ref p1, alpha, out var p01);
+                Float4.Lerp(ref p1, ref p2, alpha, out var p12);
+                Float4.Lerp(ref p2, ref p3, alpha, out var p23);
+                Float4.Lerp(ref p01, ref p12, alpha, out var p012);
+                Float4.Lerp(ref p12, ref p23, alpha, out var p123);
+                Float4.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Double2 value, ref Double2 tangent, float tangentScale, out Double2 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Double2 a, ref Double2 b, float alpha, out Double2 result)
+            {
+                Double2.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Double2 p0, ref Double2 p1, ref Double2 p2, ref Double2 p3, float alpha, out Double2 result)
+            {
+                Double2.Lerp(ref p0, ref p1, alpha, out var p01);
+                Double2.Lerp(ref p1, ref p2, alpha, out var p12);
+                Double2.Lerp(ref p2, ref p3, alpha, out var p23);
+                Double2.Lerp(ref p01, ref p12, alpha, out var p012);
+                Double2.Lerp(ref p12, ref p23, alpha, out var p123);
+                Double2.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Double3 value, ref Double3 tangent, float tangentScale, out Double3 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Double3 a, ref Double3 b, float alpha, out Double3 result)
+            {
+                Double3.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Double3 p0, ref Double3 p1, ref Double3 p2, ref Double3 p3, float alpha, out Double3 result)
+            {
+                Double3.Lerp(ref p0, ref p1, alpha, out var p01);
+                Double3.Lerp(ref p1, ref p2, alpha, out var p12);
+                Double3.Lerp(ref p2, ref p3, alpha, out var p23);
+                Double3.Lerp(ref p01, ref p12, alpha, out var p012);
+                Double3.Lerp(ref p12, ref p23, alpha, out var p123);
+                Double3.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Double4 value, ref Double4 tangent, float tangentScale, out Double4 result)
+            {
+                result = value + tangent * tangentScale;
+            }
+
+            public void Linear(ref Double4 a, ref Double4 b, float alpha, out Double4 result)
+            {
+                Double4.Lerp(ref a, ref b, alpha, out result);
+            }
+
+            public void Bezier(ref Double4 p0, ref Double4 p1, ref Double4 p2, ref Double4 p3, float alpha, out Double4 result)
+            {
+                Double4.Lerp(ref p0, ref p1, alpha, out var p01);
+                Double4.Lerp(ref p1, ref p2, alpha, out var p12);
+                Double4.Lerp(ref p2, ref p3, alpha, out var p23);
+                Double4.Lerp(ref p01, ref p12, alpha, out var p012);
+                Double4.Lerp(ref p12, ref p23, alpha, out var p123);
+                Double4.Lerp(ref p012, ref p123, alpha, out result);
+            }
+
+            public void GetTangent(ref Quaternion value, ref Quaternion tangent, float tangentScale, out Quaternion result)
             {
                 Quaternion.Slerp(ref value, ref tangent, 1.0f / 3.0f, out result);
             }
@@ -216,9 +344,9 @@ namespace FlaxEngine
                 Quaternion.Slerp(ref p012, ref p123, alpha, out result);
             }
 
-            public void GetTangent(ref Color32 value, ref Color32 tangent, float lengthThird, out Color32 result)
+            public void GetTangent(ref Color32 value, ref Color32 tangent, float tangentScale, out Color32 result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref Color32 a, ref Color32 b, float alpha, out Color32 result)
@@ -236,9 +364,9 @@ namespace FlaxEngine
                 Color32.Lerp(ref p012, ref p123, alpha, out result);
             }
 
-            public void GetTangent(ref Color value, ref Color tangent, float lengthThird, out Color result)
+            public void GetTangent(ref Color value, ref Color tangent, float tangentScale, out Color result)
             {
-                result = value + tangent * lengthThird;
+                result = value + tangent * tangentScale;
             }
 
             public void Linear(ref Color a, ref Color b, float alpha, out Color result)
@@ -328,6 +456,40 @@ namespace FlaxEngine
                     time = end;
             }
         }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="keyframes">The keyframes array.</param>
+        /// <returns>The raw keyframes data.</returns>
+        protected static unsafe byte[] MarshalKeyframes<Keyframe>(Keyframe[] keyframes)
+        {
+            if (keyframes == null || keyframes.Length == 0)
+                return null;
+            var keyframeSize = Unsafe.SizeOf<Keyframe>();
+            var result = new byte[keyframes.Length * keyframeSize];
+            fixed (byte* resultPtr = result)
+            {
+                var keyframesHandle = ManagedHandle.Alloc(keyframes, GCHandleType.Pinned);
+                var keyframesPtr = Marshal.UnsafeAddrOfPinnedArrayElement(keyframes, 0);
+                Buffer.MemoryCopy((void*)keyframesPtr, resultPtr, (uint)result.Length, (uint)result.Length);
+                keyframesHandle.Free();
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="raw">The raw keyframes data.</param>
+        /// <returns>The keyframes array.</returns>
+        protected static unsafe Keyframe[] MarshalKeyframes<Keyframe>(byte[] raw) where Keyframe : struct
+        {
+            if (raw == null || raw.Length == 0)
+                return null;
+            fixed (byte* rawPtr = raw)
+                return MemoryMarshal.Cast<byte, Keyframe>(new Span<byte>(rawPtr, raw.Length)).ToArray();
+        }
     }
 
     /// <summary>
@@ -339,7 +501,7 @@ namespace FlaxEngine
         /// <summary>
         /// A single keyframe that can be injected into linear curve.
         /// </summary>
-        [StructLayout(LayoutKind.Sequential)]
+        [StructLayout(LayoutKind.Sequential, Pack = 2)]
         public struct Keyframe : IComparable, IComparable<Keyframe>
         {
             /// <summary>
@@ -397,7 +559,7 @@ namespace FlaxEngine
         /// </summary>
         public LinearCurve()
         {
-            Keyframes = Utils.GetEmptyArray<Keyframe>();
+            Keyframes = Array.Empty<Keyframe>();
         }
 
         /// <summary>
@@ -432,7 +594,7 @@ namespace FlaxEngine
                 return;
             }
 
-            float start = 0;
+            float start = Mathf.Min(Keyframes.First().Time, 0.0f);
             float end = Keyframes.Last().Time;
             WrapTime(ref time, start, end, loop);
 
@@ -463,7 +625,7 @@ namespace FlaxEngine
                 return;
             }
 
-            float start = 0;
+            float start = Mathf.Min(Keyframes.First().Time, 0.0f);
             float end = Keyframes.Last().Time;
             WrapTime(ref time, start, end, loop);
 
@@ -493,7 +655,7 @@ namespace FlaxEngine
             if (end - start <= Mathf.Epsilon)
             {
                 // Erase the curve
-                Keyframes = Utils.GetEmptyArray<Keyframe>();
+                Keyframes = Array.Empty<Keyframe>();
                 return;
             }
 
@@ -583,6 +745,30 @@ namespace FlaxEngine
             leftKey = Mathf.Max(0, start - 1);
             rightKey = Mathf.Min(start, Keyframes.Length - 1);
         }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="curve">The curve to copy.</param>
+        /// <returns>The raw keyframes data.</returns>
+        public static unsafe implicit operator byte[](LinearCurve<T> curve)
+        {
+            if (curve == null)
+                return null;
+            return MarshalKeyframes<Keyframe>(curve.Keyframes);
+        }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="raw">The raw keyframes data.</param>
+        /// <returns>The curve.</returns>
+        public static unsafe implicit operator LinearCurve<T>(byte[] raw)
+        {
+            if (raw == null || raw.Length == 0)
+                return null;
+            return new LinearCurve<T>(MarshalKeyframes<Keyframe>(raw));
+        }
     }
 
     /// <summary>
@@ -594,7 +780,7 @@ namespace FlaxEngine
         /// <summary>
         /// A single keyframe that can be injected into Bezier curve.
         /// </summary>
-        [StructLayout(LayoutKind.Sequential)]
+        [StructLayout(LayoutKind.Sequential, Pack = 2)]
         public struct Keyframe : IComparable, IComparable<Keyframe>
         {
             /// <summary>
@@ -680,7 +866,7 @@ namespace FlaxEngine
         /// </summary>
         public BezierCurve()
         {
-            Keyframes = Utils.GetEmptyArray<Keyframe>();
+            Keyframes = Array.Empty<Keyframe>();
         }
 
         /// <summary>
@@ -715,7 +901,7 @@ namespace FlaxEngine
                 return;
             }
 
-            float start = 0;
+            float start = Mathf.Min(Keyframes.First().Time, 0.0f);
             float end = Keyframes.Last().Time;
             WrapTime(ref time, start, end, loop);
 
@@ -734,9 +920,9 @@ namespace FlaxEngine
 
             // Evaluate the key at the curve
             result.Time = leftKey.Time + length * t;
-            float lengthThird = length / 3.0f;
-            _accessor.GetTangent(ref leftKey.Value, ref leftKey.TangentOut, lengthThird, out var leftTangent);
-            _accessor.GetTangent(ref rightKey.Value, ref rightKey.TangentIn, lengthThird, out var rightTangent);
+            float tangentScale = length / 3.0f;
+            _accessor.GetTangent(ref leftKey.Value, ref leftKey.TangentOut, tangentScale, out var leftTangent);
+            _accessor.GetTangent(ref rightKey.Value, ref rightKey.TangentIn, tangentScale, out var rightTangent);
             _accessor.Bezier(ref leftKey.Value, ref leftTangent, ref rightTangent, ref rightKey.Value, t, out result.Value);
             result.TangentIn = leftKey.TangentOut;
             result.TangentOut = rightKey.TangentIn;
@@ -751,7 +937,7 @@ namespace FlaxEngine
                 return;
             }
 
-            float start = 0;
+            float start = Mathf.Min(Keyframes.First().Time, 0.0f);
             float end = Keyframes.Last().Time;
             WrapTime(ref time, start, end, loop);
 
@@ -769,9 +955,9 @@ namespace FlaxEngine
             float t = Mathf.NearEqual(length, 0.0f) ? 0.0f : (time - leftKey.Time) / length;
 
             // Evaluate the value at the curve
-            float lengthThird = length / 3.0f;
-            _accessor.GetTangent(ref leftKey.Value, ref leftKey.TangentOut, lengthThird, out var leftTangent);
-            _accessor.GetTangent(ref rightKey.Value, ref rightKey.TangentIn, lengthThird, out var rightTangent);
+            float tangentScale = length / 3.0f;
+            _accessor.GetTangent(ref leftKey.Value, ref leftKey.TangentOut, tangentScale, out var leftTangent);
+            _accessor.GetTangent(ref rightKey.Value, ref rightKey.TangentIn, tangentScale, out var rightTangent);
             _accessor.Bezier(ref leftKey.Value, ref leftTangent, ref rightTangent, ref rightKey.Value, t, out result);
         }
 
@@ -784,7 +970,7 @@ namespace FlaxEngine
             if (end - start <= Mathf.Epsilon)
             {
                 // Erase the curve
-                Keyframes = Utils.GetEmptyArray<Keyframe>();
+                Keyframes = Array.Empty<Keyframe>();
                 return;
             }
 
@@ -873,6 +1059,30 @@ namespace FlaxEngine
 
             leftKey = Mathf.Max(0, start - 1);
             rightKey = Mathf.Min(start, Keyframes.Length - 1);
+        }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="curve">The curve to copy.</param>
+        /// <returns>The raw keyframes data.</returns>
+        public static unsafe implicit operator byte[](BezierCurve<T> curve)
+        {
+            if (curve == null)
+                return null;
+            return MarshalKeyframes<Keyframe>(curve.Keyframes);
+        }
+
+        /// <summary>
+        /// Raw memory copy (used by scripting bindings - see MarshalAs tag).
+        /// </summary>
+        /// <param name="raw">The raw keyframes data.</param>
+        /// <returns>The curve.</returns>
+        public static unsafe implicit operator BezierCurve<T>(byte[] raw)
+        {
+            if (raw == null || raw.Length == 0)
+                return null;
+            return new BezierCurve<T>(MarshalKeyframes<Keyframe>(raw));
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Color.h"
 #include "../Types/String.h"
@@ -8,7 +8,7 @@
 
 static_assert(sizeof(Color) == 16, "Invalid Color type size.");
 
-Color::Color(const Vector3& rgb, float a)
+Color::Color(const Float3& rgb, float a)
     : R(rgb.X)
     , G(rgb.Y)
     , B(rgb.Z)
@@ -16,7 +16,7 @@ Color::Color(const Vector3& rgb, float a)
 {
 }
 
-Color::Color(const Vector4& rgba)
+Color::Color(const Float4& rgba)
     : R(rgba.X)
     , G(rgba.Y)
     , B(rgba.Z)
@@ -32,41 +32,39 @@ Color::Color(const Color32& color)
 {
 }
 
-Color Color::FromHex(const String& hexString, bool& isValid)
+Color Color::FromHex(const String& hex, bool& isValid)
 {
     int32 r, g, b, a = 255;
     isValid = true;
-
-    int32 startIndex = !hexString.IsEmpty() && hexString[0] == Char('#') ? 1 : 0;
-    if (hexString.Length() == 3 + startIndex)
+    int32 startIndex = !hex.IsEmpty() && hex[0] == Char('#') ? 1 : 0;
+    if (hex.Length() == 3 + startIndex)
     {
-        r = StringUtils::HexDigit(hexString[startIndex++]);
-        g = StringUtils::HexDigit(hexString[startIndex++]);
-        b = StringUtils::HexDigit(hexString[startIndex]);
+        r = StringUtils::HexDigit(hex[startIndex++]);
+        g = StringUtils::HexDigit(hex[startIndex++]);
+        b = StringUtils::HexDigit(hex[startIndex]);
 
         r = (r << 4) + r;
         g = (g << 4) + g;
         b = (b << 4) + b;
     }
-    else if (hexString.Length() == 6 + startIndex)
+    else if (hex.Length() == 6 + startIndex)
     {
-        r = (StringUtils::HexDigit(hexString[startIndex + 0]) << 4) + StringUtils::HexDigit(hexString[startIndex + 1]);
-        g = (StringUtils::HexDigit(hexString[startIndex + 2]) << 4) + StringUtils::HexDigit(hexString[startIndex + 3]);
-        b = (StringUtils::HexDigit(hexString[startIndex + 4]) << 4) + StringUtils::HexDigit(hexString[startIndex + 5]);
+        r = (StringUtils::HexDigit(hex[startIndex + 0]) << 4) + StringUtils::HexDigit(hex[startIndex + 1]);
+        g = (StringUtils::HexDigit(hex[startIndex + 2]) << 4) + StringUtils::HexDigit(hex[startIndex + 3]);
+        b = (StringUtils::HexDigit(hex[startIndex + 4]) << 4) + StringUtils::HexDigit(hex[startIndex + 5]);
     }
-    else if (hexString.Length() == 8 + startIndex)
+    else if (hex.Length() == 8 + startIndex)
     {
-        r = (StringUtils::HexDigit(hexString[startIndex + 0]) << 4) + StringUtils::HexDigit(hexString[startIndex + 1]);
-        g = (StringUtils::HexDigit(hexString[startIndex + 2]) << 4) + StringUtils::HexDigit(hexString[startIndex + 3]);
-        b = (StringUtils::HexDigit(hexString[startIndex + 4]) << 4) + StringUtils::HexDigit(hexString[startIndex + 5]);
-        a = (StringUtils::HexDigit(hexString[startIndex + 6]) << 4) + StringUtils::HexDigit(hexString[startIndex + 7]);
+        r = (StringUtils::HexDigit(hex[startIndex + 0]) << 4) + StringUtils::HexDigit(hex[startIndex + 1]);
+        g = (StringUtils::HexDigit(hex[startIndex + 2]) << 4) + StringUtils::HexDigit(hex[startIndex + 3]);
+        b = (StringUtils::HexDigit(hex[startIndex + 4]) << 4) + StringUtils::HexDigit(hex[startIndex + 5]);
+        a = (StringUtils::HexDigit(hex[startIndex + 6]) << 4) + StringUtils::HexDigit(hex[startIndex + 7]);
     }
     else
     {
         r = g = b = 0;
         isValid = false;
     }
-
     return FromBytes(r, g, b, a);
 }
 
@@ -100,7 +98,7 @@ Color Color::FromHSV(float hue, float saturation, float value, float alpha)
                  alpha);
 }
 
-Color Color::FromHSV(const Vector3& hsv, float alpha)
+Color Color::FromHSV(const Float3& hsv, float alpha)
 {
     return FromHSV(hsv.X, hsv.Y, hsv.Z, alpha);
 }
@@ -122,8 +120,9 @@ String Color::ToHexString() const
     const byte r = static_cast<byte>(R * MAX_uint8);
     const byte g = static_cast<byte>(G * MAX_uint8);
     const byte b = static_cast<byte>(B * MAX_uint8);
+    const byte a = static_cast<byte>(A * MAX_uint8);
 
-    Char result[6];
+    Char result[8];
 
     result[0] = digits[r >> 4 & 0x0f];
     result[1] = digits[r & 0x0f];
@@ -134,7 +133,10 @@ String Color::ToHexString() const
     result[4] = digits[b >> 4 & 0x0f];
     result[5] = digits[b & 0x0f];
 
-    return String(result, 6);
+    result[6] = digits[a >> 4 & 0x0f];
+    result[7] = digits[a & 0x0f];
+
+    return String(result, 8);
 }
 
 bool Color::IsTransparent() const
@@ -157,17 +159,17 @@ bool Color::NearEqual(const Color& a, const Color& b, float epsilon)
     return Math::NearEqual(a.R, b.R, epsilon) && Math::NearEqual(a.G, b.G, epsilon) && Math::NearEqual(a.B, b.B, epsilon) && Math::NearEqual(a.A, b.A, epsilon);
 }
 
-Vector3 Color::ToVector3() const
+Float3 Color::ToFloat3() const
 {
-    return Vector3(R, G, B);
+    return Float3(R, G, B);
 }
 
-Vector4 Color::ToVector4() const
+Float4 Color::ToFloat4() const
 {
-    return Vector4(R, G, B, A);
+    return Float4(R, G, B, A);
 }
 
-Vector3 Color::ToHSV() const
+Float3 Color::ToHSV() const
 {
     const float rgbMin = Math::Min(R, G, B);
     const float rgbMax = Math::Max(R, G, B);
@@ -175,7 +177,7 @@ Vector3 Color::ToHSV() const
     const float hue = rgbMax == rgbMin ? 0.0f : rgbMax == R ? Math::Mod((G - B) / rgbRange * 60.0f + 360.0f, 360.0f) : rgbMax == G ? (B - R) / rgbRange * 60.0f + 120.0f : rgbMax == B ? (R - G) / rgbRange * 60.0f + 240.0f : 0.0f;
     const float saturation = rgbMax == 0.0f ? 0.0f : rgbRange / rgbMax;
     const float value = rgbMax;
-    return Vector3(hue, saturation, value);
+    return Float3(hue, saturation, value);
 }
 
 void Color::Lerp(const Color& start, const Color& end, float amount, Color& result)
@@ -196,14 +198,14 @@ Color Color::Lerp(const Color& start, const Color& end, float amount)
 Color Color::LinearToSrgb(const Color& linear)
 {
 #define LINEAR_TO_SRGB(value) value < 0.00313067f ? value * 12.92f : Math::Pow(value, (1.0f / 2.4f)) * 1.055f - 0.055f
-    return Color(LINEAR_TO_SRGB(linear.R), LINEAR_TO_SRGB(linear.G), LINEAR_TO_SRGB(linear.B), LINEAR_TO_SRGB(linear.A));
+    return Color(LINEAR_TO_SRGB(linear.R), LINEAR_TO_SRGB(linear.G), LINEAR_TO_SRGB(linear.B), linear.A);
 #undef LINEAR_TO_SRGB
 }
 
 Color Color::SrgbToLinear(const Color& srgb)
 {
 #define SRGB_TO_LINEAR(value) value < 0.04045f ? value / 12.92f : Math::Pow((value + 0.055f) / 1.055f, 2.4f)
-    return Color(SRGB_TO_LINEAR(srgb.R), SRGB_TO_LINEAR(srgb.G), SRGB_TO_LINEAR(srgb.B), SRGB_TO_LINEAR(srgb.A));
+    return Color(SRGB_TO_LINEAR(srgb.R), SRGB_TO_LINEAR(srgb.G), SRGB_TO_LINEAR(srgb.B), srgb.A);
 #undef LINEAR_TO_SRGB
 }
 

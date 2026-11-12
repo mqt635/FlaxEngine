@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -124,7 +124,7 @@ API_ENUM() enum class D6JointDriveType
 /// </summary>
 API_STRUCT() struct D6JointDrive
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(D6JointDrive);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(D6JointDrive);
 
     /// <summary>
     /// The spring strength. Force proportional to the position error.
@@ -147,18 +147,9 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(D6JointDrive);
     API_FIELD() bool Acceleration = false;
 
 public:
-
-    /// <summary>
-    /// Compares two objects.
-    /// </summary>
-    /// <param name="other">The other.</param>
-    /// <returns>True if both objects are equal.</returns>
     bool operator==(const D6JointDrive& other) const
     {
-        return Stiffness == other.Stiffness
-                && Damping == other.Damping
-                && ForceLimit == other.ForceLimit
-                && Acceleration == other.Acceleration;
+        return Stiffness == other.Stiffness && Damping == other.Damping && ForceLimit == other.ForceLimit && Acceleration == other.Acceleration;
     }
 };
 
@@ -169,11 +160,11 @@ public:
 /// It also allows you to constrain limits to only specific axes or completely lock specific axes.
 /// </summary>
 /// <seealso cref="Joint" />
-API_CLASS() class FLAXENGINE_API D6Joint : public Joint
+API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Joints/D6 Joint\"), ActorToolbox(\"Physics\")")
+class FLAXENGINE_API D6Joint : public Joint
 {
-DECLARE_SCENE_OBJECT(D6Joint);
+    DECLARE_SCENE_OBJECT(D6Joint);
 private:
-
     D6JointMotion _motion[static_cast<int32>(D6JointAxis::MAX)];
     D6JointDrive _drive[static_cast<int32>(D6JointDriveType::MAX)];
     LimitLinear _limitLinear;
@@ -181,13 +172,10 @@ private:
     LimitConeRange _limitSwing;
 
 public:
-
     /// <summary>
     /// Gets the motion type around the specified axis.
     /// </summary>
-    /// <remarks>
-    /// Each axis may independently specify that the degree of freedom is locked (blocking relative movement along or around this axis), limited by the corresponding limit, or free.
-    /// </remarks>
+    /// <remarks>Each axis may independently specify that the degree of freedom is locked (blocking relative movement along or around this axis), limited by the corresponding limit, or free.</remarks>
     /// <param name="axis">The axis the degree of freedom around which the motion type is specified.</param>
     /// <returns>The value.</returns>
     API_FUNCTION() FORCE_INLINE D6JointMotion GetMotion(const D6JointAxis axis) const
@@ -198,9 +186,7 @@ public:
     /// <summary>
     /// Sets the motion type around the specified axis.
     /// </summary>
-    /// <remarks>
-    /// Each axis may independently specify that the degree of freedom is locked (blocking relative movement along or around this axis), limited by the corresponding limit, or free.
-    /// </remarks>
+    /// <remarks>Each axis may independently specify that the degree of freedom is locked (blocking relative movement along or around this axis), limited by the corresponding limit, or free.</remarks>
     /// <param name="axis">The axis the degree of freedom around which the motion type is specified.</param>
     /// <param name="value">The value.</param>
     API_FUNCTION() void SetMotion(const D6JointAxis axis, const D6JointMotion value);
@@ -223,7 +209,6 @@ public:
     API_FUNCTION() void SetDrive(const D6JointDriveType index, const D6JointDrive& value);
 
 public:
-
     /// <summary>
     /// Determines the linear limit used for constraining translation degrees of freedom.
     /// </summary>
@@ -267,7 +252,6 @@ public:
     API_PROPERTY() void SetLimitSwing(const LimitConeRange& value);
 
 public:
-
     /// <summary>
     /// Gets the drive's target position relative to the joint's first body.
     /// </summary>
@@ -309,24 +293,22 @@ public:
     API_PROPERTY() void SetDriveAngularVelocity(const Vector3& value);
 
 public:
-
     /// <summary>
-    /// Gets the twist angle of the joint.
+    /// Gets the twist angle of the joint (in the range (-2*Pi, 2*Pi]).
     /// </summary>
     API_PROPERTY() float GetCurrentTwist() const;
 
     /// <summary>
     /// Gets the current swing angle of the joint from the Y axis.
     /// </summary>
-    API_PROPERTY() float GetCurrentSwingYAngle() const;
+    API_PROPERTY() float GetCurrentSwingY() const;
 
     /// <summary>
     /// Gets the current swing angle of the joint from the Z axis.
     /// </summary>
-    API_PROPERTY() float GetCurrentSwingZAngle() const;
+    API_PROPERTY() float GetCurrentSwingZ() const;
 
 public:
-
     // [Joint]
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
@@ -335,7 +317,6 @@ public:
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 
 protected:
-
     // [Joint]
-    PxJoint* CreateJoint(JointData& data) override;
+    void* CreateJoint(const PhysicsJointDesc& desc) override;
 };

@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Surface.Elements
 {
@@ -26,7 +27,7 @@ namespace FlaxEditor.Surface.Elements
         /// <param name="parentNode">The parent node.</param>
         /// <param name="archetype">The archetype.</param>
         public AssetSelect(SurfaceNode parentNode, NodeElementArchetype archetype)
-        : base(Scripting.TypeUtils.GetType(archetype.Text), archetype.ActualPosition)
+        : base(TypeUtils.GetType(archetype.Text), archetype.ActualPosition)
         {
             ParentNode = parentNode;
             Archetype = archetype;
@@ -37,13 +38,13 @@ namespace FlaxEditor.Surface.Elements
 
         private void OnNodeValuesChanged()
         {
-            SelectedID = (Guid)ParentNode.Values[Archetype.ValueIndex];
+            Validator.SelectedID = (Guid)ParentNode.Values[Archetype.ValueIndex];
         }
 
         /// <inheritdoc />
         protected override void OnSelectedItemChanged()
         {
-            var selectedId = SelectedID;
+            var selectedId = Validator.SelectedID;
             if (ParentNode != null && (Guid)ParentNode.Values[Archetype.ValueIndex] != selectedId)
             {
                 ParentNode.SetValue(Archetype.ValueIndex, selectedId);

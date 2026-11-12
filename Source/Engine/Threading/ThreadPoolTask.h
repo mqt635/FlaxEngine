@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Task.h"
-#include "Engine/Core/Types/String.h"
 
 class ThreadPool;
 
@@ -28,10 +27,7 @@ protected:
 public:
 
     // [Task]
-    String ToString() const override
-    {
-        return String::Format(TEXT("Thread Pool Task ({0})"), ::ToString(GetState()));
-    }
+    String ToString() const override;
 
 protected:
 
@@ -59,7 +55,7 @@ public:
     /// </summary>
     /// <param name="action">The action.</param>
     /// <param name="target">The target object.</param>
-    ThreadPoolActionTask(Function<void()>& action, Object* target = nullptr)
+    ThreadPoolActionTask(const Function<void()>& action, Object* target = nullptr)
         : ThreadPoolTask()
         , _action1(action)
         , _target(target)
@@ -83,7 +79,7 @@ public:
     /// </summary>
     /// <param name="action">The action.</param>
     /// <param name="target">The target object.</param>
-    ThreadPoolActionTask(Function<bool()>& action, Object* target = nullptr)
+    ThreadPoolActionTask(const Function<bool()>& action, Object* target = nullptr)
         : ThreadPoolTask()
         , _action2(action)
         , _target(target)

@@ -1,4 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+using Mathr = FlaxEngine.Mathd;
+#else
+using Real = System.Single;
+using Mathr = FlaxEngine.Mathf;
+#endif
 
 using System;
 using System.Collections.Generic;
@@ -30,32 +38,26 @@ namespace FlaxEditor.Gizmo
         protected BoundingBox _startBounds = BoundingBox.Empty;
 
         private Vector3 _accMoveDelta;
-        private Matrix _axisAlignedWorld = Matrix.Identity;
-
-        private Matrix _gizmoWorld = Matrix.Identity;
+        private Transform _gizmoWorld = Transform.Identity;
         private Vector3 _intersectPosition;
         private bool _isActive;
         private bool _isDuplicating;
 
         private bool _isTransforming;
+        private bool _isSelected;
         private Vector3 _lastIntersectionPosition;
 
-        private Vector3 _localForward = Vector3.Forward;
-        private Vector3 _localRight = Vector3.Right;
-        private Vector3 _localUp = Vector3.Up;
-
-        private Matrix _objectOrientedWorld = Matrix.Identity;
-
         private Quaternion _rotationDelta = Quaternion.Identity;
-        private Matrix _rotationMatrix;
         private float _rotationSnapDelta;
         private Vector3 _scaleDelta;
         private float _screenScale;
 
-        private Matrix _screenScaleMatrix;
         private Vector3 _tDelta;
         private Vector3 _translationDelta;
         private Vector3 _translationScaleSnapDelta;
+
+        private SceneGraphNode _vertexSnapObject, _vertexSnapObjectTo;
+        private Vector3 _vertexSnapPoint, _vertexSnapPointTo;
 
         /// <summary>
         /// Gets the gizmo position.
@@ -85,12 +87,13 @@ namespace FlaxEditor.Gizmo
         : base(owner)
         {
             InitDrawing();
+            ModeChanged += ResetTranslationScale;
         }
 
         /// <summary>
         /// Starts the objects transforming (optionally with duplicate).
         /// </summary>
-        protected void StartTransforming()
+        public void StartTransforming()
         {
             // Check if can start new action
             var count = SelectionCount;
@@ -111,7 +114,7 @@ namespace FlaxEditor.Gizmo
                 _startTransforms.Capacity = Mathf.NextPowerOfTwo(count);
             for (var i = 0; i < count; i++)
             {
-                _startTransforms.Add(GetSelectedObject(i));
+                _startTransforms.Add(GetSelectedTransform(i));
             }
             GetSelectedObjectsBounds(out _startBounds, out _navigationDirty);
 
@@ -123,7 +126,7 @@ namespace FlaxEditor.Gizmo
         /// <summary>
         /// Ends the objects transforming.
         /// </summary>
-        protected void EndTransforming()
+        public void EndTransforming()
         {
             // Check if wasn't working at all
             if (!_isTransforming)
@@ -138,20 +141,31 @@ namespace FlaxEditor.Gizmo
 
         private void UpdateGizmoPosition()
         {
+            var position = Vector3.Zero;
+
+            // Get gizmo pivot
             switch (_activePivotType)
             {
             case PivotType.ObjectCenter:
                 if (SelectionCount > 0)
-                    Position = GetSelectedObject(0).Translation;
+                    position = GetSelectedTransform(0).Translation;
                 break;
             case PivotType.SelectionCenter:
-                Position = GetSelectionCenter();
-                break;
-            case PivotType.WorldOrigin:
-                Position = Vector3.Zero;
+                position = GetSelectionCenter();
                 break;
             }
-            Position += _translationDelta;
+
+            // Apply vertex snapping
+            if (_vertexSnapObject != null)
+            {
+                Vector3 vertexSnapPoint = _vertexSnapObject.Transform.LocalToWorld(_vertexSnapPoint);
+                position += vertexSnapPoint - position;
+            }
+
+            // Apply current movement
+            position += _translationDelta;
+
+            Position = position;
         }
 
         private void UpdateMatrices()
@@ -164,43 +178,31 @@ namespace FlaxEditor.Gizmo
             UpdateGizmoPosition();
 
             // Scale gizmo to fit on-screen
-            Vector3 vLength = Owner.ViewPosition - Position;
-            float gizmoSize = Editor.Instance.Options.Options.Visual.GizmoSize;
-            _screenScale = vLength.Length / GizmoScaleFactor * gizmoSize;
-            Matrix.Scaling(_screenScale, out _screenScaleMatrix);
-
-            Quaternion orientation = GetSelectedObject(0).Orientation;
-            Matrix.RotationQuaternion(ref orientation, out Matrix rotation);
-            _localForward = rotation.Forward;
-            _localUp = rotation.Up;
-
-            // Vector Rotation (Local/World)
-            _localForward.Normalize();
-            Vector3.Cross(ref _localForward, ref _localUp, out _localRight);
-            Vector3.Cross(ref _localRight, ref _localForward, out _localUp);
-            _localRight.Normalize();
-            _localUp.Normalize();
-
-            // Create both world matrices
-            _objectOrientedWorld = _screenScaleMatrix * Matrix.CreateWorld(Position, _localForward, _localUp);
-            _axisAlignedWorld = _screenScaleMatrix * Matrix.CreateWorld(Position, Vector3.Backward, Vector3.Up);
-
-            // Assign world
-            if (_activeTransformSpace == TransformSpace.World && _activeMode != Mode.Scale)
+            Vector3 position = Position;
+            if (Owner.Viewport.UseOrthographicProjection)
             {
-                _gizmoWorld = _axisAlignedWorld;
-
-                // Align lines, boxes etc. with the grid-lines
-                _rotationMatrix = Matrix.Identity;
+                //[hack] this is far form ideal the View Position is in wrong location, any think using the View Position will have problem
+                //the camera system needs rewrite the to be a camera on springarm, similar how the ArcBallCamera is handled
+                //the ortho projection cannot exist with fps camera because there is no
+                // - focus point to calculate correct View Position with Orthographic Scale as a reference and Orthographic Scale from View Position
+                // with make the camera jump
+                // - and deaph so w and s movment in orto mode moves the cliping plane now
+                float gizmoSize = Editor.Instance.Options.Options.Visual.GizmoSize;
+                _screenScale = gizmoSize * (50 * Owner.Viewport.OrthographicScale);
             }
             else
             {
-                _gizmoWorld = _objectOrientedWorld;
+                Vector3 vLength = Owner.ViewPosition - position;
+                float gizmoSize = Editor.Instance.Options.Options.Visual.GizmoSize;
+                _screenScale = (float)(vLength.Length / GizmoScaleFactor * gizmoSize);
+            }
 
-                // Align lines, boxes etc. with the selected object
-                _rotationMatrix.Forward = _localForward;
-                _rotationMatrix.Up = _localUp;
-                _rotationMatrix.Right = _localRight;
+            // Setup world
+            Quaternion orientation = GetSelectedTransform(0).Orientation;
+            _gizmoWorld = new Transform(position, orientation, new Float3(_screenScale));
+            if (_activeTransformSpace == TransformSpace.World && _activeMode != Mode.Scale)
+            {
+                _gizmoWorld.Orientation = Quaternion.Identity;
             }
         }
 
@@ -210,27 +212,30 @@ namespace FlaxEditor.Gizmo
             Vector3 delta = Vector3.Zero;
             Ray ray = Owner.MouseRay;
 
-            Matrix.Invert(ref _rotationMatrix, out var invRotationMatrix);
+            Matrix.RotationQuaternion(ref _gizmoWorld.Orientation, out var rotationMatrix);
+            Matrix.Invert(ref rotationMatrix, out var invRotationMatrix);
             ray.Position = Vector3.Transform(ray.Position, invRotationMatrix);
             Vector3.TransformNormal(ref ray.Direction, ref invRotationMatrix, out ray.Direction);
 
-            var planeXY = new Plane(Vector3.Backward, Vector3.Transform(Position, invRotationMatrix).Z);
-            var planeYZ = new Plane(Vector3.Left, Vector3.Transform(Position, invRotationMatrix).X);
-            var planeZX = new Plane(Vector3.Down, Vector3.Transform(Position, invRotationMatrix).Y);
-            var dir = Vector3.Normalize(ray.Position - Position);
+            var position = Position;
+            var planeXY = new Plane(Vector3.Backward, Vector3.Transform(position, invRotationMatrix).Z);
+            var planeYZ = new Plane(Vector3.Left, Vector3.Transform(position, invRotationMatrix).X);
+            var planeZX = new Plane(Vector3.Down, Vector3.Transform(position, invRotationMatrix).Y);
+            var dir = Vector3.Normalize(ray.Position - position);
             var planeDotXY = Mathf.Abs(Vector3.Dot(planeXY.Normal, dir));
             var planeDotYZ = Mathf.Abs(Vector3.Dot(planeYZ.Normal, dir));
             var planeDotZX = Mathf.Abs(Vector3.Dot(planeZX.Normal, dir));
 
+            Real intersection;
             switch (_activeAxis)
             {
             case Axis.X:
             {
                 var plane = planeDotXY > planeDotZX ? planeXY : planeZX;
-                if (ray.Intersects(ref plane, out float intersection))
+                if (ray.Intersects(ref plane, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
                     delta = new Vector3(_tDelta.X, 0, 0);
                 }
@@ -239,10 +244,10 @@ namespace FlaxEditor.Gizmo
             case Axis.Y:
             {
                 var plane = planeDotXY > planeDotYZ ? planeXY : planeYZ;
-                if (ray.Intersects(ref plane, out float intersection))
+                if (ray.Intersects(ref plane, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
                     delta = new Vector3(0, _tDelta.Y, 0);
                 }
@@ -251,10 +256,10 @@ namespace FlaxEditor.Gizmo
             case Axis.Z:
             {
                 var plane = planeDotZX > planeDotYZ ? planeZX : planeYZ;
-                if (ray.Intersects(ref plane, out float intersection))
+                if (ray.Intersects(ref plane, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
                     delta = new Vector3(0, 0, _tDelta.Z);
                 }
@@ -262,34 +267,64 @@ namespace FlaxEditor.Gizmo
             }
             case Axis.YZ:
             {
-                if (ray.Intersects(ref planeYZ, out float intersection))
+                if (ray.Intersects(ref planeYZ, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
-                    delta = new Vector3(0, _tDelta.Y, _tDelta.Z);
+                    if (isScaling)
+                    {
+                        var tDeltaAbs = Vector3.Abs(_tDelta);
+                        var maxDelta = Math.Max(tDeltaAbs.Y, tDeltaAbs.Z);
+                        var sign = Math.Sign(tDeltaAbs.Y > tDeltaAbs.Z ? _tDelta.Y : _tDelta.Z);
+                        delta = new Vector3(0, maxDelta * sign, maxDelta * sign);
+                    }
+                    else
+                    {
+                        delta = new Vector3(0, _tDelta.Y, _tDelta.Z);
+                    }
                 }
                 break;
             }
             case Axis.XY:
             {
-                if (ray.Intersects(ref planeXY, out float intersection))
+                if (ray.Intersects(ref planeXY, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
-                    delta = new Vector3(_tDelta.X, _tDelta.Y, 0);
+                    if (isScaling)
+                    {
+                        var tDeltaAbs = Vector3.Abs(_tDelta);
+                        var maxDelta = Math.Max(tDeltaAbs.X, tDeltaAbs.Y);
+                        var sign = Math.Sign(tDeltaAbs.X > tDeltaAbs.Y ? _tDelta.X : _tDelta.Y);
+                        delta = new Vector3(maxDelta * sign, maxDelta * sign, 0);
+                    }
+                    else
+                    {
+                        delta = new Vector3(_tDelta.X, _tDelta.Y, 0);
+                    }
                 }
                 break;
             }
             case Axis.ZX:
             {
-                if (ray.Intersects(ref planeZX, out float intersection))
+                if (ray.Intersects(ref planeZX, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
-                    delta = new Vector3(_tDelta.X, 0, _tDelta.Z);
+                    if (isScaling)
+                    {
+                        var tDeltaAbs = Vector3.Abs(_tDelta);
+                        var maxDelta = Math.Max(tDeltaAbs.X, tDeltaAbs.Z);
+                        var sign = Math.Sign(tDeltaAbs.X > tDeltaAbs.Z ? _tDelta.X : _tDelta.Z);
+                        delta = new Vector3(maxDelta * sign, 0, maxDelta * sign);
+                    }
+                    else
+                    {
+                        delta = new Vector3(_tDelta.X, 0, _tDelta.Z);
+                    }
                 }
                 break;
             }
@@ -297,13 +332,30 @@ namespace FlaxEditor.Gizmo
             {
                 var gizmoToView = Position - Owner.ViewPosition;
                 var plane = new Plane(-Vector3.Normalize(gizmoToView), gizmoToView.Length);
-                if (ray.Intersects(ref plane, out float intersection))
+                if (ray.Intersects(ref plane, out intersection))
                 {
-                    _intersectPosition = ray.Position + ray.Direction * intersection;
-                    if (_lastIntersectionPosition != Vector3.Zero)
+                    _intersectPosition = ray.GetPoint(intersection);
+                    if (!_lastIntersectionPosition.IsZero)
                         _tDelta = _intersectPosition - _lastIntersectionPosition;
                 }
-                delta = _tDelta;
+                if (isScaling)
+                {
+                    var tDeltaAbs = Vector3.Abs(_tDelta);
+                    var maxDelta = Math.Max(tDeltaAbs.X, tDeltaAbs.Y);
+                    maxDelta = Math.Max(maxDelta, tDeltaAbs.Z);
+                    Real sign = 0;
+                    if (Mathf.NearEqual(maxDelta, tDeltaAbs.X))
+                        sign = Math.Sign(_tDelta.X);
+                    else if (Mathf.NearEqual(maxDelta, tDeltaAbs.Y))
+                        sign = Math.Sign(_tDelta.Y);
+                    else if (Mathf.NearEqual(maxDelta, tDeltaAbs.Z))
+                        sign = Math.Sign(_tDelta.Z);
+                    delta = new Vector3(maxDelta * sign);
+                }
+                else
+                {
+                    delta = _tDelta;
+                }
                 break;
             }
             }
@@ -315,19 +367,50 @@ namespace FlaxEditor.Gizmo
                 delta *= 0.5f;
             if ((isScaling ? ScaleSnapEnabled : TranslationSnapEnable) || Owner.UseSnapping)
             {
-                float snapValue = isScaling ? ScaleSnapValue : TranslationSnapValue;
+                var snapValue = new Vector3(isScaling ? ScaleSnapValue : TranslationSnapValue);
+
                 _translationScaleSnapDelta += delta;
+                if (!isScaling && snapValue.X < 0.0f)
+                {
+                    // Snap to object bounding box
+                    GetSelectedObjectsBounds(out var b, out _);
+                    if (b.Minimum.X < 0.0f)
+                        snapValue.X = (Real)Math.Abs(b.Minimum.X) + b.Maximum.X;
+                    else
+                        snapValue.X = (Real)b.Minimum.X - b.Maximum.X;
+                    if (b.Minimum.Y < 0.0f)
+                        snapValue.Y = (Real)Math.Abs(b.Minimum.Y) + b.Maximum.Y;
+                    else
+                        snapValue.Y = (Real)b.Minimum.Y - b.Maximum.Y;
+                    if (b.Minimum.Z < 0.0f)
+                        snapValue.Z = (Real)Math.Abs(b.Minimum.Z) + b.Maximum.Z;
+                    else
+                        snapValue.Z = (Real)b.Minimum.Z - b.Maximum.Z;
+                }
+
+                Vector3 absoluteDelta = Vector3.Zero;
+                if (AbsoluteSnapEnabled && ActiveTransformSpace == TransformSpace.World)
+                {
+                    // Remove delta to offset local-space grid into the world-space grid
+                    Vector3 currentTranslationScale = isScaling ? GetSelectedTransform(0).Scale : GetSelectedTransform(0).Translation; 
+                    absoluteDelta = currentTranslationScale - new Vector3(
+                        Mathr.Round(currentTranslationScale.X / snapValue.X) * snapValue.X,
+                        Mathr.Round(currentTranslationScale.Y / snapValue.Y) * snapValue.Y,
+                        Mathr.Round(currentTranslationScale.Z / snapValue.Z) * snapValue.Z);
+                }
+
                 delta = new Vector3(
-                                    (int)(_translationScaleSnapDelta.X / snapValue) * snapValue,
-                                    (int)(_translationScaleSnapDelta.Y / snapValue) * snapValue,
-                                    (int)(_translationScaleSnapDelta.Z / snapValue) * snapValue);
+                                    (int)(_translationScaleSnapDelta.X / snapValue.X) * snapValue.X,
+                                    (int)(_translationScaleSnapDelta.Y / snapValue.Y) * snapValue.Y,
+                                    (int)(_translationScaleSnapDelta.Z / snapValue.Z) * snapValue.Z);
                 _translationScaleSnapDelta -= delta;
+                delta -= absoluteDelta;
             }
 
             if (_activeMode == Mode.Translate)
             {
                 // Transform (local or world)
-                delta = Vector3.Transform(delta, _rotationMatrix);
+                delta = Vector3.Transform(delta, rotationMatrix);
                 _translationDelta = delta;
             }
             else if (_activeMode == Mode.Scale)
@@ -335,6 +418,11 @@ namespace FlaxEditor.Gizmo
                 // Scale
                 _scaleDelta = delta;
             }
+        }
+
+        private void ResetTranslationScale()
+        {
+            _translationScaleSnapDelta.Normalize();
         }
 
         private void UpdateRotate(float dt)
@@ -346,12 +434,28 @@ namespace FlaxEditor.Gizmo
             if (RotationSnapEnabled || Owner.UseSnapping)
             {
                 float snapValue = RotationSnapValue * Mathf.DegreesToRadians;
+
+                float absoluteDelta = 0.0f;
+                if (AbsoluteSnapEnabled && ActiveTransformSpace == TransformSpace.World)
+                {
+                    // Remove delta to offset world-space grid into the local-space grid
+                    float currentAngle = 0.0f;
+                    switch (_activeAxis)
+                    {
+                        case Axis.X: currentAngle = GetSelectedTransform(0).Orientation.EulerAngles.X; break;
+                        case Axis.Y: currentAngle = GetSelectedTransform(0).Orientation.EulerAngles.Y; break;
+                        case Axis.Z: currentAngle = GetSelectedTransform(0).Orientation.EulerAngles.Z; break;
+                    }
+                    absoluteDelta = currentAngle - (Mathf.Round(currentAngle / RotationSnapValue) * RotationSnapValue);
+                }
+
                 _rotationSnapDelta += delta;
 
                 float snapped = Mathf.Round(_rotationSnapDelta / snapValue) * snapValue;
                 _rotationSnapDelta -= snapped;
 
                 delta = snapped;
+                delta -= absoluteDelta * Mathf.DegreesToRadians;
             }
 
             switch (_activeAxis)
@@ -360,16 +464,16 @@ namespace FlaxEditor.Gizmo
             case Axis.Y:
             case Axis.Z:
             {
-                Vector3 dir;
+                Float3 dir;
                 if (_activeAxis == Axis.X)
-                    dir = _rotationMatrix.Right;
+                    dir = Float3.Right * _gizmoWorld.Orientation;
                 else if (_activeAxis == Axis.Y)
-                    dir = _rotationMatrix.Up;
+                    dir = Float3.Up * _gizmoWorld.Orientation;
                 else
-                    dir = _rotationMatrix.Forward;
+                    dir = Float3.Forward * _gizmoWorld.Orientation;
 
-                Vector3 viewDir = Owner.ViewPosition - Position;
-                Vector3.Dot(ref viewDir, ref dir, out float dot);
+                Float3 viewDir = Owner.ViewPosition - Position;
+                Float3.Dot(ref viewDir, ref dir, out float dot);
                 if (dot < 0.0f)
                     delta *= -1;
 
@@ -384,16 +488,14 @@ namespace FlaxEditor.Gizmo
         }
 
         /// <inheritdoc />
-        public override bool IsControllingMouse => _isTransforming;
+        public override bool IsControllingMouse => _isTransforming || _isSelected;
 
         /// <inheritdoc />
         public override void Update(float dt)
         {
             LastDelta = Transform.Identity;
-
             if (!IsActive)
                 return;
-
             bool isLeftBtnDown = Owner.IsLeftMouseButtonDown;
 
             // Snap to ground
@@ -411,22 +513,33 @@ namespace FlaxEditor.Gizmo
                 // Check if user is holding left mouse button and any axis is selected
                 if (isLeftBtnDown && _activeAxis != Axis.None)
                 {
+                    _isSelected = true; // setting later is too late, need to set here for rubber band selection in GizmoViewport
                     switch (_activeMode)
                     {
-                    case Mode.Scale:
                     case Mode.Translate:
+                        UpdateTranslateScale();
+                        break;
+                    case Mode.Scale:
                         UpdateTranslateScale();
                         break;
                     case Mode.Rotate:
                         UpdateRotate(dt);
                         break;
                     }
+                    if (Owner.SnapToVertex)
+                        UpdateVertexSnapping();
                 }
                 else
                 {
+                    _isSelected = false;
                     // If nothing selected, try to select any axis
                     if (!isLeftBtnDown && !Owner.IsRightMouseButtonDown)
-                        SelectAxis();
+                    {
+                        if (Owner.SnapToVertex)
+                            SelectVertexSnapping();
+                        else
+                            SelectAxis();
+                    }
                 }
 
                 // Set positions of the gizmo
@@ -470,14 +583,13 @@ namespace FlaxEditor.Gizmo
                         _scaleDelta = Vector3.Zero;
 
                         if (ActiveAxis == Axis.Center)
-                            scaleDelta = new Vector3(scaleDelta.AvgValue);
+                            scaleDelta = new Vector3(scaleDelta.ValuesSum);
                     }
 
                     // Apply transformation (but to the parents, not whole selection pool)
-                    if (anyValid)
+                    if (anyValid || (_isTransforming && Owner.UseDuplicate))
                     {
                         StartTransforming();
-
                         LastDelta = new Transform(translationDelta, rotationDelta, scaleDelta);
                         OnApplyTransformation(ref translationDelta, ref rotationDelta, ref scaleDelta);
                     }
@@ -486,6 +598,8 @@ namespace FlaxEditor.Gizmo
                 {
                     // Clear cache
                     _accMoveDelta = Vector3.Zero;
+                    _lastIntersectionPosition = _intersectPosition = Vector3.Zero;
+                    _isSelected = false;
                     EndTransforming();
                 }
             }
@@ -496,6 +610,7 @@ namespace FlaxEditor.Gizmo
                 // Deactivate
                 _isActive = false;
                 _activeAxis = Axis.None;
+                EndVertexSnapping();
                 return;
             }
 
@@ -510,37 +625,79 @@ namespace FlaxEditor.Gizmo
             UpdateMatrices();
         }
 
-        /// <inheritdoc />
-        public override void SnapToGround()
+        private void SelectVertexSnapping()
         {
+            // Find the closest object in selection that is hit by the mouse ray
+            var ray = new SceneGraphNode.RayCastData
+            {
+                Ray = Owner.MouseRay,
+            };
+            var closestDistance = Real.MaxValue;
+            SceneGraphNode closestObject = null;
+            for (int i = 0; i < SelectionCount; i++)
+            {
+                var obj = GetSelectedObject(i);
+                if (obj.RayCastSelf(ref ray, out var distance, out _) && distance < closestDistance)
+                {
+                    closestDistance = distance;
+                    closestObject = obj;
+                }
+            }
+            if (closestObject == null)
+                return; // ignore it if there is nothing under the mouse closestObject is only null if ray caster missed everything or Selection Count == 0
+
+            _vertexSnapObject = closestObject;
+            if (!closestObject.OnVertexSnap(ref ray.Ray, closestDistance, out _vertexSnapPoint))
+            {
+                // The OnVertexSnap is unimplemented or failed to get point return because there is nothing to do
+                _vertexSnapPoint = Vector3.Zero;
+                return;
+            }
+
+            // Transform back to the local space of the object to work when moving it
+            _vertexSnapPoint = closestObject.Transform.WorldToLocal(_vertexSnapPoint);
+        }
+
+        private void EndVertexSnapping()
+        {
+            // Clear current vertex snapping data
+            _vertexSnapObject = null;
+            _vertexSnapObjectTo = null;
+            _vertexSnapPoint = _vertexSnapPointTo = Vector3.Zero;
+        }
+
+        private void UpdateVertexSnapping()
+        {
+            _vertexSnapObjectTo = null;
             if (Owner.SceneGraphRoot == null)
                 return;
-            var ray = new Ray(Position, Vector3.Down);
-            while (true)
-            {
-                var view = new Ray(Owner.ViewPosition, Owner.ViewDirection);
-                var rayCastFlags = SceneGraphNode.RayCastData.FlagTypes.SkipEditorPrimitives;
-                var hit = Owner.SceneGraphRoot.RayCast(ref ray, ref view, out var distance, out _, rayCastFlags);
-                if (hit != null)
-                {
-                    // Skip snapping selection to itself
-                    if (IsSelected(hit))
-                    {
-                        GetSelectedObjectsBounds(out var selectionBounds, out _);
-                        ray.Position = ray.GetPoint(selectionBounds.Size.Y * 0.5f);
-                        continue;
-                    }
+            Profiler.BeginEvent("VertexSnap");
 
-                    // Snap
-                    StartTransforming();
-                    var translationDelta = ray.GetPoint(distance) - Position;
-                    var rotationDelta = Quaternion.Identity;
-                    var scaleDelta = Vector3.Zero;
-                    OnApplyTransformation(ref translationDelta, ref rotationDelta, ref scaleDelta);
-                    EndTransforming();
+            // Raycast nearby objects to snap to (excluding selection)
+            var rayCast = new SceneGraphNode.RayCastData
+            {
+                Ray = Owner.MouseRay,
+                Flags = SceneGraphNode.RayCastData.FlagTypes.SkipColliders | SceneGraphNode.RayCastData.FlagTypes.SkipEditorPrimitives,
+                ExcludeObjects = new(),
+            };
+            for (int i = 0; i < SelectionCount; i++)
+                rayCast.ExcludeObjects.Add(GetSelectedObject(i));
+            var hit = Owner.SceneGraphRoot.RayCast(ref rayCast, out var distance, out var _);
+            if (hit != null)
+            {
+                if (hit.OnVertexSnap(ref rayCast.Ray, distance, out var pointSnapped)
+                    //&& Vector3.Distance(point, pointSnapped) <= 25.0f
+                   )
+                {
+                    _vertexSnapObjectTo = hit;
+                    _vertexSnapPointTo = hit.Transform.WorldToLocal(pointSnapped);
+
+                    // Snap current vertex to the target vertex
+                    _translationDelta = pointSnapped - Position;
                 }
-                break;
             }
+
+            Profiler.EndEvent();
         }
 
         /// <summary>
@@ -559,10 +716,18 @@ namespace FlaxEditor.Gizmo
         protected abstract int SelectionCount { get; }
 
         /// <summary>
+        /// Gets the selected object.
+        /// </summary>
+        /// <param name="index">The selected object index.</param>
+        /// <returns>The selected object (eg. actor node).</returns>
+        protected abstract SceneGraphNode GetSelectedObject(int index);
+
+        /// <summary>
         /// Gets the selected object transformation.
         /// </summary>
         /// <param name="index">The selected object index.</param>
-        protected abstract Transform GetSelectedObject(int index);
+        /// <returns>The transformation of the selected object.</returns>
+        protected abstract Transform GetSelectedTransform(int index);
 
         /// <summary>
         /// Gets the selected objects bounding box (contains the whole selection).
@@ -609,6 +774,13 @@ namespace FlaxEditor.Gizmo
         /// </summary>
         protected virtual void OnDuplicate()
         {
+        }
+
+        /// <inheritdoc />
+        public override void OnSelectionChanged(List<SceneGraphNode> newSelection)
+        {
+            EndVertexSnapping();
+            UpdateGizmoPosition();
         }
     }
 }

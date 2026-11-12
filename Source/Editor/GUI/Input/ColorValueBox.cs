@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI.Dialogs;
@@ -14,6 +14,9 @@ namespace FlaxEditor.GUI.Input
     [HideInEditor]
     public class ColorValueBox : Control
     {
+        private bool _isMouseDown;
+        private bool _linear;
+
         /// <summary>
         /// Delegate function used for the color picker events handling.
         /// </summary>
@@ -58,6 +61,11 @@ namespace FlaxEditor.GUI.Input
         protected Color _value;
 
         /// <summary>
+        /// Enables live preview of the selected value from the picker. Otherwise will update the value only when user confirms it on dialog closing.
+        /// </summary>
+        public bool UseDynamicEditing = true;
+
+        /// <summary>
         /// Occurs when value gets changed.
         /// </summary>
         public event Action ValueChanged;
@@ -78,8 +86,6 @@ namespace FlaxEditor.GUI.Input
                 if (_value != value)
                 {
                     _value = value;
-
-                    // Fire event
                     OnValueChanged();
                 }
             }
@@ -96,6 +102,7 @@ namespace FlaxEditor.GUI.Input
         public ColorValueBox()
         : base(0, 0, 32, 18)
         {
+            _linear = !Graphics.GammaColorSpace;
         }
 
         /// <summary>
@@ -108,6 +115,7 @@ namespace FlaxEditor.GUI.Input
         : base(x, y, 32, 18)
         {
             _value = value;
+            _linear = !Graphics.GammaColorSpace;
         }
 
         /// <summary>
@@ -124,20 +132,69 @@ namespace FlaxEditor.GUI.Input
         {
             base.Draw();
 
+            var value = _value;
+            if (_linear)
+                value = value.ToSRgb();
+            var isTransparent = value.A < 1;
             var style = Style.Current;
-            var r = new Rectangle(2, 2, Width - 4, Height - 4);
+            var fullRect = new Rectangle(0, 0, Width, Height);
+            var colorRect = new Rectangle(0, 0, isTransparent ? Width * 0.7f : Width, Height);
 
-            Render2D.FillRectangle(r, _value);
-            Render2D.DrawRectangle(r, IsMouseOver ? style.BackgroundSelected : Color.Black);
+            if (isTransparent)
+            {
+                var alphaRect = new Rectangle(colorRect.Right, 0, Width - colorRect.Right, Height);
+
+                // Draw checkerboard pattern to part of the color value box
+                Render2D.FillRectangle(alphaRect, Color.White);
+                var smallRectSize = 7.9f;
+                var numHor = Mathf.CeilToInt(alphaRect.Width / smallRectSize);
+                var numVer = Mathf.CeilToInt(alphaRect.Height / smallRectSize);
+                for (int i = 0; i < numHor; i++)
+                {
+                    for (int j = 0; j < numVer; j++)
+                    {
+                        if ((i + j) % 2 == 0)
+                        {
+                            var rect = new Rectangle(alphaRect.X + smallRectSize * i, alphaRect.Y + smallRectSize * j, new Float2(smallRectSize));
+                            Render2D.PushClip(alphaRect);
+                            Render2D.FillRectangle(rect, Color.Gray);
+                            Render2D.PopClip();
+                        }
+                    }
+                }
+                Render2D.FillRectangle(alphaRect, value);
+            }
+
+            Render2D.FillRectangle(colorRect, value with { A = 1 });
+            Render2D.DrawRectangle(fullRect, IsMouseOver || IsNavFocused ? style.BackgroundSelected : Color.Black);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
-            // Show color picker dialog
-            _currentDialog = ShowPickColorDialog?.Invoke(this, _value, OnColorChanged, OnPickerClosed);
+            _isMouseDown = true;
+            return base.OnMouseDown(location, button);
+        }
 
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
+            if (_isMouseDown)
+            {
+                _isMouseDown = false;
+                Focus();
+                OnSubmit();
+            }
             return true;
+        }
+
+        /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            base.OnSubmit();
+
+            // Show color picker dialog
+            _currentDialog = ShowPickColorDialog?.Invoke(this, _value, OnColorChanged, OnPickerClosed, UseDynamicEditing);
         }
 
         private void OnColorChanged(Color color, bool sliding)

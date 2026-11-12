@@ -1,9 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.GUI;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.GUI.Tabs;
 using FlaxEditor.Options;
 using FlaxEngine;
@@ -23,7 +24,9 @@ namespace FlaxEditor.Windows
         private Tabs _tabs;
         private EditorOptions _options;
         private ToolStripButton _saveButton;
+        private readonly Undo _undo;
         private readonly List<Tab> _customTabs = new List<Tab>();
+        private SearchBox _searchBox;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EditorOptionsWindow"/> class.
@@ -33,23 +36,34 @@ namespace FlaxEditor.Windows
         : base(editor, true, ScrollBars.None)
         {
             Title = "Editor Options";
+            
+            // Undo
+            _undo = new Undo();
+            _undo.UndoDone += OnUndoRedo;
+            _undo.RedoDone += OnUndoRedo;
+            _undo.ActionDone += OnUndoRedo;
 
             var toolstrip = new ToolStrip
             {
                 Parent = this
             };
-            _saveButton = (ToolStripButton)toolstrip.AddButton(editor.Icons.Save64, SaveData).LinkTooltip("Save");
+            _saveButton = (ToolStripButton)toolstrip.AddButton(editor.Icons.Save64, SaveData).LinkTooltip("Save.");
             _saveButton.Enabled = false;
+
+            // Header panel for search
+            CustomEditorsUtil.BuildSearchBar(this, out _searchBox);
+            _searchBox.TextChanged += ApplySearchFilter;
 
             _tabs = new Tabs
             {
                 Orientation = Orientation.Vertical,
                 AnchorPreset = AnchorPresets.StretchAll,
-                Offsets = new Margin(0, 0, toolstrip.Bottom, 0),
-                TabsSize = new Vector2(120, 32),
+                Offsets = new Margin(0, 0, _searchBox.Parent.Bottom, 0),
+                TabsSize = new Float2(120, 32),
                 UseScroll = true,
                 Parent = this
             };
+            _tabs.SelectedTabChanged += OnSelectedTabChanged;
 
             CreateTab("General", () => _options.General);
             CreateTab("Interface", () => _options.Interface);
@@ -58,8 +72,18 @@ namespace FlaxEditor.Windows
             CreateTab("Visual", () => _options.Visual);
             CreateTab("Source Code", () => _options.SourceCode);
             CreateTab("Theme", () => _options.Theme);
+            
+            // Setup input actions
+            InputActions.Add(options => options.Undo, _undo.PerformUndo);
+            InputActions.Add(options => options.Redo, _undo.PerformRedo);
+            InputActions.Add(options => options.Save, SaveData);
 
             _tabs.SelectedTabIndex = 0;
+        }
+        
+        private void OnUndoRedo(IUndoAction action)
+        {
+            MarkAsEdited();
         }
 
         private Tab CreateTab(string name, Func<object> getValue)
@@ -73,10 +97,17 @@ namespace FlaxEditor.Windows
                 Parent = tab
             };
 
-            var settings = new CustomEditorPresenter(null);
+            var settings = new CustomEditorPresenter(_undo);
             settings.Panel.Parent = panel;
             settings.Panel.Tag = getValue;
             settings.Modified += MarkAsEdited;
+            settings.AfterLayout += layout =>
+            {
+                if (_tabs.SelectedTab == tab)
+                {
+                    ApplySearchFilter();
+                }
+            };
 
             return tab;
         }
@@ -87,6 +118,8 @@ namespace FlaxEditor.Windows
             {
                 _saveButton.Enabled = true;
                 _isDataDirty = true;
+                if (!Title.EndsWith('*'))
+                    Title += "*";
             }
         }
 
@@ -96,6 +129,8 @@ namespace FlaxEditor.Windows
             {
                 _saveButton.Enabled = false;
                 _isDataDirty = false;
+                if (Title.EndsWith('*'))
+                    Title = Title.Remove(Title.Length - 1);
             }
         }
 
@@ -145,7 +180,7 @@ namespace FlaxEditor.Windows
 
             Editor.Options.Apply(_options);
 
-            ClearDirtyFlag();
+            GatherData();
         }
 
         private void SetupCustomTabs()
@@ -215,6 +250,71 @@ namespace FlaxEditor.Windows
             _saveButton = null;
 
             base.OnDestroy();
+        }
+
+        /// <inheritdoc />
+        protected override void OnShow()
+        {
+            if (!_isDataDirty)
+            {
+                // Refresh the data, skip when data is modified during window docking
+                GatherData();
+            }
+
+            base.OnShow();
+        }
+
+        /// <inheritdoc />
+        protected override bool OnClosing(ClosingReason reason)
+        {
+            // Block closing only on user events
+            if (reason == ClosingReason.User)
+            {
+                // Check if asset has been edited and not saved (and still has linked item)
+                if (_isDataDirty && _options != null)
+                {
+                    // Ask user for further action
+                    var result = MessageBox.Show(
+                                                 "Editor options have been edited. Save before closing?",
+                                                 "Save before closing?",
+                                                 MessageBoxButtons.YesNoCancel
+                                                );
+                    if (result == DialogResult.OK || result == DialogResult.Yes)
+                    {
+                        // Save and close
+                        SaveData();
+                    }
+                    else if (result == DialogResult.Cancel || result == DialogResult.Abort)
+                    {
+                        // Cancel closing
+                        return true;
+                    }
+                }
+            }
+
+            return base.OnClosing(reason);
+        }
+
+        private void OnSelectedTabChanged(Tabs tabs)
+        {
+            if (IsDisposing)
+                return;
+            ApplySearchFilter();
+        }
+
+        private CustomEditorPresenter GetTabPresenter(Tab tab)
+        {
+            if (tab == null)
+                return null;
+            var panel = tab.GetChild<Panel>();
+            var settingsPanel = panel?.GetChild<CustomEditorPresenter.PresenterPanel>();
+            return settingsPanel?.Presenter;
+        }
+
+        private void ApplySearchFilter()
+        {
+            var presenter = GetTabPresenter(_tabs.SelectedTab);
+            presenter?.ApplySearchFilter(_searchBox.Text);
         }
     }
 }

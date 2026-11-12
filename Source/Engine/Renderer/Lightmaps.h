@@ -1,15 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Types/Guid.h"
-#include "Engine/Core/Math/Rectangle.h"
-#include "Engine/Serialization/ISerializable.h"
+#include "Engine/Core/Math/Half.h"
+#include "Engine/Core/ISerializable.h"
 
 #if USE_EDITOR
 // Additional options used in editor for lightmaps baking
 extern bool IsRunningRadiancePass;
 extern bool IsBakingLightmaps;
+#endif
+#if GPU_ENABLE_DEVELOPMENT
 extern bool EnableLightmapsUsage;
 #endif
 
@@ -42,21 +44,30 @@ struct LightmapEntry
     /// <summary>
     /// Index of the lightmap
     /// </summary>
-    int32 TextureIndex;
+    int16 TextureIndex;
 
     /// <summary>
     /// Lightmap UVs area that entry occupies
     /// </summary>
-    Rectangle UVsArea;
+    Half4 UVsArea;
 
     /// <summary>
     /// Init
     /// </summary>
     LightmapEntry()
         : TextureIndex(INVALID_INDEX)
-        , UVsArea(Rectangle::Empty)
+        , UVsArea(Half4::Zero)
     {
     }
+
+    void Serialize(ISerializable::SerializeStream& stream) const;
+    void Deserialize(ISerializable::DeserializeStream& stream);
+};
+
+template<>
+struct TIsPODType<LightmapEntry>
+{
+    enum { Value = true };
 };
 
 /// <summary>
@@ -108,19 +119,19 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(LightmapSettings);
     };
 
     /// <summary>
-    /// Controls how much all lights will contribute indirect lighting.
+    /// Controls how much all lights will contribute to indirect lighting.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(0), Limit(0, 100.0f, 0.1f)")
     float IndirectLightingIntensity = 1.0f;
 
     /// <summary>
-    /// Global scale for objects in lightmap to increase quality
+    /// Global scale for objects in the lightmap to increase quality
     /// </summary>
     API_FIELD(Attributes="EditorOrder(10), Limit(0, 100.0f, 0.1f)")
     float GlobalObjectsScale = 1.0f;
 
     /// <summary>
-    /// Amount of pixels space between charts in lightmap atlas
+    /// Amount of pixel space between charts in lightmap atlas
     /// </summary>
     API_FIELD(Attributes="EditorOrder(20), Limit(0, 16, 0.1f)")
     int32 ChartsPadding = 3;

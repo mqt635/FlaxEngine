@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine.GUI;
@@ -17,31 +17,37 @@ namespace FlaxEngine
         /// <summary>
         /// Perform window hit test delegate.
         /// </summary>
-        /// <param name="mouse">The mouse position. The coordinate is relative to the upper-left corner of the screen. Use <see cref="ScreenToClient"/> to convert position into client space coordinates.</param>
+        /// <param name="mousePosition">The mouse position. The coordinate is relative to the upper-left corner of the screen. Use <see cref="ScreenToClient"/> to convert position into client space coordinates.</param>
         /// <returns>Hit result.</returns>
-        public delegate WindowHitCodes HitTestDelegate(ref Vector2 mouse);
+        public delegate WindowHitCodes HitTestDelegate(ref Float2 mousePosition);
 
         /// <summary>
         /// Perform mouse buttons action.
         /// </summary>
-        /// <param name="mouse">The mouse position.</param>
+        /// <param name="mousePosition">The mouse position.</param>
         /// <param name="button">The mouse buttons state.</param>
         /// <param name="handled">The flag that indicated that event has been handled by the custom code and should not be passed further. By default it is set to false.</param>
-        public delegate void MouseButtonDelegate(ref Vector2 mouse, MouseButton button, ref bool handled);
+        public delegate void MouseButtonDelegate(ref Float2 mousePosition, MouseButton button, ref bool handled);
 
         /// <summary>
         /// Perform mouse move action.
         /// </summary>
-        /// <param name="mouse">The mouse position.</param>
-        public delegate void MouseMoveDelegate(ref Vector2 mouse);
+        /// <param name="mousePosition">The mouse position.</param>
+        public delegate void MouseMoveDelegate(ref Float2 mousePosition);
+
+        /// <summary>
+        /// Perform mouse move action in relative mode.
+        /// </summary>
+        /// <param name="motion">The relative mouse motion.</param>
+        public delegate void MouseMoveRelativeDelegate(ref Float2 motion);
 
         /// <summary>
         /// Perform mouse wheel action.
         /// </summary>
-        /// <param name="mouse">The mouse position.</param>
+        /// <param name="mousePosition">The mouse position.</param>
         /// <param name="delta">The mouse wheel move delta (can be positive or negative; normalized to [-1;1] range).</param>
         /// <param name="handled">The flag that indicated that event has been handled by the custom code and should not be passed further. By default it is set to false.</param>
-        public delegate void MouseWheelDelegate(ref Vector2 mouse, float delta, ref bool handled);
+        public delegate void MouseWheelDelegate(ref Float2 mousePosition, float delta, ref bool handled);
 
         /// <summary>
         /// Perform touch action.
@@ -49,7 +55,7 @@ namespace FlaxEngine
         /// <param name="pointerPosition">The touch pointer position.</param>
         /// <param name="pointerId">The touch pointer identifier. Stable for the whole touch gesture/interaction.</param>
         /// <param name="handled">The flag that indicated that event has been handled by the custom code and should not be passed further. By default it is set to false.</param>
-        public delegate void TouchDelegate(ref Vector2 pointerPosition, int pointerId, ref bool handled);
+        public delegate void TouchDelegate(ref Float2 pointerPosition, int pointerId, ref bool handled);
 
         /// <summary>
         /// Perform input character action.
@@ -99,9 +105,14 @@ namespace FlaxEngine
         public event MouseWheelDelegate MouseWheel;
 
         /// <summary>
-        /// Event fired when mouse moves
+        /// Event fired when mouse moves.
         /// </summary>
         public event MouseMoveDelegate MouseMove;
+        
+        /// <summary>
+        /// Event fired when mouse moves in relative mode.
+        /// </summary>
+        public event MouseMoveRelativeDelegate MouseMoveRelative;
 
         /// <summary>
         /// Event fired when mouse leaves window.
@@ -197,7 +208,7 @@ namespace FlaxEngine
 
         internal void Internal_OnResize(int width, int height)
         {
-            GUI.Size = new Vector2(width / DpiScale, height / DpiScale);
+            GUI.Size = new Float2(width / DpiScale, height / DpiScale);
         }
 
         internal void Internal_OnCharInput(char c)
@@ -218,9 +229,9 @@ namespace FlaxEngine
             GUI.OnKeyUp(key);
         }
 
-        internal void Internal_OnMouseDown(ref Vector2 mousePos, MouseButton button)
+        internal void Internal_OnMouseDown(ref Float2 mousePos, MouseButton button)
         {
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
 
             bool handled = false;
             MouseDown?.Invoke(ref pos, button, ref handled);
@@ -230,9 +241,9 @@ namespace FlaxEngine
             GUI.OnMouseDown(pos, button);
         }
 
-        internal void Internal_OnMouseUp(ref Vector2 mousePos, MouseButton button)
+        internal void Internal_OnMouseUp(ref Float2 mousePos, MouseButton button)
         {
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
 
             bool handled = false;
             MouseUp?.Invoke(ref pos, button, ref handled);
@@ -242,9 +253,9 @@ namespace FlaxEngine
             GUI.OnMouseUp(pos, button);
         }
 
-        internal void Internal_OnMouseDoubleClick(ref Vector2 mousePos, MouseButton button)
+        internal void Internal_OnMouseDoubleClick(ref Float2 mousePos, MouseButton button)
         {
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
 
             bool handled = false;
             MouseDoubleClick?.Invoke(ref pos, button, ref handled);
@@ -254,9 +265,9 @@ namespace FlaxEngine
             GUI.OnMouseDoubleClick(pos, button);
         }
 
-        internal void Internal_OnMouseWheel(ref Vector2 mousePos, float delta)
+        internal void Internal_OnMouseWheel(ref Float2 mousePos, float delta)
         {
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
 
             bool handled = false;
             MouseWheel?.Invoke(ref pos, delta, ref handled);
@@ -266,12 +277,18 @@ namespace FlaxEngine
             GUI.OnMouseWheel(pos, delta);
         }
 
-        internal void Internal_OnMouseMove(ref Vector2 mousePos)
+        internal void Internal_OnMouseMove(ref Float2 mousePos)
         {
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
 
             MouseMove?.Invoke(ref pos);
             GUI.OnMouseMove(pos);
+        }
+        
+        internal void Internal_OnMouseMoveRelative(ref Float2 motion)
+        {
+            MouseMoveRelative?.Invoke(ref motion);
+            GUI.OnMouseMoveRelative(motion);
         }
 
         internal void Internal_OnMouseLeave()
@@ -280,9 +297,9 @@ namespace FlaxEngine
             GUI.OnMouseLeave();
         }
 
-        internal void Internal_OnTouchDown(ref Vector2 pointerPosition, int pointerId)
+        internal void Internal_OnTouchDown(ref Float2 pointerPosition, int pointerId)
         {
-            Vector2 pos = pointerPosition / DpiScale;
+            var pos = pointerPosition / DpiScale;
 
             bool handled = false;
             TouchDown?.Invoke(ref pos, pointerId, ref handled);
@@ -292,9 +309,9 @@ namespace FlaxEngine
             GUI.OnTouchDown(pos, pointerId);
         }
 
-        internal void Internal_OnTouchMove(ref Vector2 pointerPosition, int pointerId)
+        internal void Internal_OnTouchMove(ref Float2 pointerPosition, int pointerId)
         {
-            Vector2 pos = pointerPosition / DpiScale;
+            var pos = pointerPosition / DpiScale;
 
             bool handled = false;
             TouchMove?.Invoke(ref pos, pointerId, ref handled);
@@ -304,9 +321,9 @@ namespace FlaxEngine
             GUI.OnTouchMove(pos, pointerId);
         }
 
-        internal void Internal_OnTouchUp(ref Vector2 pointerPosition, int pointerId)
+        internal void Internal_OnTouchUp(ref Float2 pointerPosition, int pointerId)
         {
-            Vector2 pos = pointerPosition / DpiScale;
+            var pos = pointerPosition / DpiScale;
 
             bool handled = false;
             TouchUp?.Invoke(ref pos, pointerId, ref handled);
@@ -328,11 +345,11 @@ namespace FlaxEngine
             GUI.OnLostFocus();
         }
 
-        internal void Internal_OnHitTest(ref Vector2 mousePos, ref WindowHitCodes result, ref bool handled)
+        internal void Internal_OnHitTest(ref Float2 mousePos, ref WindowHitCodes result, ref bool handled)
         {
             if (HitTest != null)
             {
-                Vector2 pos = mousePos / DpiScale;
+                var pos = mousePos / DpiScale;
                 result = HitTest(ref pos);
                 handled = true;
             }
@@ -346,36 +363,36 @@ namespace FlaxEngine
             }
         }
 
-        internal DragDropEffect Internal_OnDragEnter(ref Vector2 mousePos, bool isText, string[] data)
+        internal DragDropEffect Internal_OnDragEnter(ref Float2 mousePos, bool isText, string[] data)
         {
             DragData dragData;
             if (isText)
                 dragData = new DragDataText(data[0]);
             else
                 dragData = new DragDataFiles(data);
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
             return GUI.OnDragEnter(ref pos, dragData);
         }
 
-        internal DragDropEffect Internal_OnDragOver(ref Vector2 mousePos, bool isText, string[] data)
+        internal DragDropEffect Internal_OnDragOver(ref Float2 mousePos, bool isText, string[] data)
         {
             DragData dragData;
             if (isText)
                 dragData = new DragDataText(data[0]);
             else
                 dragData = new DragDataFiles(data);
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
             return GUI.OnDragMove(ref pos, dragData);
         }
 
-        internal DragDropEffect Internal_OnDragDrop(ref Vector2 mousePos, bool isText, string[] data)
+        internal DragDropEffect Internal_OnDragDrop(ref Float2 mousePos, bool isText, string[] data)
         {
             DragData dragData;
             if (isText)
                 dragData = new DragDataText(data[0]);
             else
                 dragData = new DragDataFiles(data);
-            Vector2 pos = mousePos / DpiScale;
+            var pos = mousePos / DpiScale;
             return GUI.OnDragDrop(ref pos, dragData);
         }
 

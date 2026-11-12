@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Engine.h"
 #include "Game.h"
@@ -26,6 +26,7 @@
 #include "Engine/Core/Config/GameSettings.h"
 #include "Engine/Graphics/RenderTargetPool.h"
 #include "Engine/Graphics/RenderTask.h"
+#include "Engine/Platform/CPUInfo.h"
 #include "Engine/Profiler/Profiler.h"
 #include "Engine/Threading/TaskGraph.h"
 #if USE_EDITOR
@@ -39,16 +40,12 @@
 #include "Engine/Scripting/ManagedCLR/MAssembly.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "Engine/Scripting/ManagedCLR/MMethod.h"
-#include "Engine/Scripting/MException.h"
-#include "Engine/Core/Config/PlatformSettings.h"
+#include "Engine/Scripting/ManagedCLR/MException.h"
 #endif
 
 namespace EngineImpl
 {
     bool IsReady = false;
-#if !USE_EDITOR
-    bool RunInBackground = false;
-#endif
     String CommandLine = nullptr;
     int32 Fps = 0, FpsAccumulatedFrames = 0;
     double FpsAccumulated = 0.0;
@@ -60,66 +57,101 @@ namespace EngineImpl
 
 DateTime Engine::StartupTime;
 bool Engine::HasFocus = false;
+uint64 Engine::UpdateCount = 0;
 uint64 Engine::FrameCount = 0;
 Action Engine::FixedUpdate;
 Action Engine::Update;
 TaskGraph* Engine::UpdateGraph = nullptr;
 Action Engine::LateUpdate;
+Action Engine::LateFixedUpdate;
 Action Engine::Draw;
 Action Engine::Pause;
 Action Engine::Unpause;
+Action Engine::RequestingExit;
+Delegate<StringView, void*> Engine::ReportCrash;
+FatalErrorType Engine::FatalError = FatalErrorType::None;
+bool Engine::IsRequestingExit = false;
+int32 Engine::ExitCode = 0;
 Window* Engine::MainWindow = nullptr;
+double EngineIdleTime = 0;
 
-int32 Engine::Main(const Char* cmdLine)
+int32 Engine::OnInit(const Char* cmdLine)
 {
+#if COMPILE_WITH_PROFILER
+    extern void InitProfilerMemory(const Char* cmdLine, int32 stage);
+    InitProfilerMemory(cmdLine, 0);
+#endif
+    PROFILE_MEM_BEGIN(Engine);
     EngineImpl::CommandLine = cmdLine;
     Globals::MainThreadID = Platform::GetCurrentThreadID();
     StartupTime = DateTime::Now();
 
     EngineService::Sort();
 
-    if (CommandLine::Parse(cmdLine))
+    extern bool InitCommandLine(const Char* cmdLine);
+    if (InitCommandLine(cmdLine))
     {
         Platform::Fatal(TEXT("Invalid command line."));
         return -1;
     }
 
+    // Init platform
+    Platform::SetHighDpiAwarenessEnabled(!CommandLine::Options.LowDPI.IsTrue());
     if (Platform::Init())
     {
         Platform::Fatal(TEXT("Cannot init platform."));
         return -1;
     }
-
-    Platform::SetHighDpiAwarenessEnabled(!CommandLine::Options.LowDPI.IsTrue());
-    Time::StartupTime = DateTime::Now();
+    int32 coreLimit;
+    if (CommandLine::Get(TEXT("CoreLimit"), coreLimit) && coreLimit > 0)
+    {
+        // Limit CPU cores availability for the engine
+        extern CPUInfo CpuInfo;
+        CpuInfo.ProcessorCoreCount = Math::Min<uint32>(CpuInfo.ProcessorCoreCount, coreLimit);
+        CpuInfo.LogicalProcessorCount = Math::Min<uint32>(CpuInfo.LogicalProcessorCount, coreLimit);
+    }
 #if COMPILE_WITH_PROFILER
-    ProfilerCPU::Enabled = true;
+    InitProfilerMemory(cmdLine, 1);
 #endif
+    Time::StartupTime = DateTime::Now();
+
+    // Setup paths and folders
     Globals::StartupFolder = Globals::BinariesFolder = Platform::GetMainDirectory();
 #if USE_EDITOR
     Globals::StartupFolder /= TEXT("../../../..");
+#if PLATFORM_MAC
+    if (Globals::BinariesFolder.EndsWith(TEXT(".app/Contents")))
+    {
+        // If running editor from application package on macOS
+        Globals::StartupFolder = Globals::BinariesFolder;
+        Globals::BinariesFolder /= TEXT("MacOS");
+    }
+#endif
 #endif
     StringUtils::PathRemoveRelativeParts(Globals::StartupFolder);
     FileSystem::NormalizePath(Globals::BinariesFolder);
+    FileSystem::GetSpecialFolderPath(SpecialFolder::Temporary, Globals::TemporaryFolder);
+    if (Globals::TemporaryFolder.IsEmpty())
+        Platform::Fatal(TEXT("Failed to gather temporary folder directory."));
+    Globals::TemporaryFolder /= Guid::New().ToString(Guid::FormatType::D);
 
     // Load game info or project info
-    {
-        const int32 result = Application::LoadProduct();
-        if (result != 0)
-            return result;
-    }
+    const int32 result = Application::LoadProduct();
+    if (result != 0)
+        return result;
 
+    // Init logging
     EngineImpl::InitPaths();
-
     EngineImpl::InitLog();
 
 #if USE_EDITOR
     if (Editor::CheckProjectUpgrade())
     {
-        // End
         LOG(Warning, "Loading project cancelled. Closing...");
+#if LOG_ENABLE
         Log::Logger::Dispose();
-        return 0;
+#endif
+        return 1;
     }
 #endif
 
@@ -133,88 +165,109 @@ int32 Engine::Main(const Char* cmdLine)
     Platform::BeforeRun();
     EngineImpl::InitMainWindow();
     Application::BeforeRun();
-#if !USE_EDITOR && (PLATFORM_WINDOWS || PLATFORM_LINUX)
-    EngineImpl::RunInBackground = PlatformSettings::Get()->RunInBackground;
-#endif
-    Log::Logger::WriteFloor();
+    LOG_FLOOR();
     LOG_FLUSH();
-    Time::OnBeforeRun();
+    Time::Synchronize(true);
     EngineImpl::IsReady = true;
+    PROFILE_MEM_END();
 
-    // Main engine loop
-    const bool useSleep = true; // TODO: this should probably be a platform setting
-    while (!ShouldExit())
-    {
-        // Reduce CPU usage by introducing idle time if the engine is running very fast and has enough time to spend
-        if ((useSleep && Time::UpdateFPS > 0) || !Platform::GetHasFocus())
-        {
-            double nextTick = Time::GetNextTick();
-            double timeToTick = nextTick - Platform::GetTimeSeconds();
-
-            // Sleep less than needed, some platforms may sleep slightly more than requested
-            if (timeToTick > 0.002)
-            {
-                PROFILE_CPU_NAMED("Idle");
-                Platform::Sleep(1);
-            }
-        }
-
-        // App paused logic
-        if (Platform::GetIsPaused())
-        {
-            OnPause();
-            do
-            {
-                Platform::Sleep(10);
-                Platform::Tick();
-            } while (Platform::GetIsPaused() && !ShouldExit());
-            if (ShouldExit())
-                break;
-            OnUnpause();
-        }
-
-        // Update game logic
-        if (Time::OnBeginUpdate())
-        {
-            OnUpdate();
-            OnLateUpdate();
-            Time::OnEndUpdate();
-        }
-
-        // Start physics simulation
-        if (Time::OnBeginPhysics())
-        {
-            OnFixedUpdate();
-            Time::OnEndPhysics();
-        }
-
-        // Draw frame
-        if (Time::OnBeginDraw())
-        {
-            OnDraw();
-            Time::OnEndDraw();
-            FrameMark;
-        }
-
-        // Collect physics simulation results (does nothing if Simulate hasn't been called in the previous loop step)
-        Physics::CollectResults();
-    }
-
-    // Call on exit event
-    OnExit();
-
-    // Delete temporary directory only if Engine is closing normally (after crash user/developer can restore some data)
-    if (FileSystem::DirectoryExists(Globals::TemporaryFolder))
-    {
-        FileSystem::DeleteDirectory(Globals::TemporaryFolder);
-    }
-
-    return Globals::ExitCode;
+    return 0;
 }
 
-void Engine::Exit(int32 exitCode)
+void Engine::OnLoop()
+{
+    // Reduce CPU usage by introducing idle time if the engine is running very fast and has enough time to spend
+    const bool useSleep = !PLATFORM_WEB; // TODO: this should probably be a platform setting
+    if ((useSleep && Time::UpdateFPS > ZeroTolerance) || !Platform::GetHasFocus())
+    {
+        double nextTick = Time::GetNextTick();
+        double timeToTick = nextTick - Platform::GetTimeSeconds();
+
+        // Sleep less than needed, some platforms may sleep slightly more than requested
+        if (timeToTick > 0.002)
+        {
+            PROFILE_CPU_NAMED("Idle");
+            auto sleepStart = Platform::GetTimeSeconds();
+            Platform::Sleep(1);
+            auto sleepEnd = Platform::GetTimeSeconds();
+            EngineIdleTime += sleepEnd - sleepStart;
+        }
+    }
+
+    // App paused logic
+    if (Platform::GetIsPaused())
+    {
+        OnPause();
+        do
+        {
+            Platform::Sleep(10);
+            Platform::Tick();
+        } while (Platform::GetIsPaused() && !ShouldExit());
+        if (ShouldExit())
+            return;
+        OnUnpause();
+    }
+
+    // Use the same time for all ticks to improve synchronization
+    const double time = Platform::GetTimeSeconds();
+
+    // Update application (will gather data and other platform related events)
+    {
+        PROFILE_CPU_NAMED("Platform.Tick");
+        Platform::Tick();
+#if COMPILE_WITH_PROFILER
+        extern void TickProfilerMemory();
+        TickProfilerMemory();
+#endif
+    }
+
+    // Update game logic
+    if (Time::OnBeginUpdate(time))
+    {
+        OnUpdate();
+        OnLateUpdate();
+        Time::OnEndUpdate();
+        EngineIdleTime = 0;
+    }
+
+    // Start physics simulation
+    if (Time::OnBeginPhysics(time))
+    {
+        OnFixedUpdate();
+        OnLateFixedUpdate();
+        Time::OnEndPhysics();
+    }
+
+    // Draw frame
+    if (Time::OnBeginDraw(time))
+    {
+        OnDraw();
+        Time::OnEndDraw();
+    }
+}
+
+int32 Engine::Main(const Char* cmdLine)
+{
+    // Initialize
+    ExitCode = OnInit(cmdLine);
+    if (ExitCode != 0)
+        return ExitCode;
+
+    // Main engine loop
+    while (!ShouldExit())
+    {
+        OnLoop();
+    }
+
+    // Shutdown
+    OnExit();
+    return ExitCode;
+}
+
+void Engine::Exit(int32 exitCode, FatalErrorType error)
 {
     ASSERT(IsInMainThread());
+    FatalError = error;
 
     // Call on exit event
     OnExit();
@@ -223,20 +276,42 @@ void Engine::Exit(int32 exitCode)
     exit(exitCode);
 }
 
-void Engine::RequestExit(int32 exitCode)
+void Engine::RequestExit(int32 exitCode, FatalErrorType error)
 {
+    if (IsRequestingExit)
+        return;
 #if USE_EDITOR
     // Send to editor (will leave play mode if need to)
-    if (Editor::Managed->OnAppExit())
-    {
-        Globals::IsRequestingExit = true;
-        Globals::ExitCode = exitCode;
-    }
-#else
+    if (!Editor::Managed->OnAppExit())
+        return;
+#endif
+    IsRequestingExit = true;
+    ExitCode = exitCode;
+    PRAGMA_DISABLE_DEPRECATION_WARNINGS;
     Globals::IsRequestingExit = true;
     Globals::ExitCode = exitCode;
-#endif
+    PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+    FatalError = error;
+    RequestingExit();
 }
+
+#if !BUILD_SHIPPING
+
+void Engine::Crash(FatalErrorType error)
+{
+    switch (error)
+    {
+    case FatalErrorType::None:
+    case FatalErrorType::Exception:
+        *((int32*)3) = 11;
+        break;
+    default:
+        Platform::Fatal(TEXT("Crash Test"), nullptr, error);
+        break;
+    }
+}
+
+#endif
 
 void Engine::OnFixedUpdate()
 {
@@ -250,7 +325,7 @@ void Engine::OnFixedUpdate()
     // Update services
     EngineService::OnFixedUpdate();
 
-    if (!Time::GetGamePaused() && Physics::AutoSimulation)
+    if (!Time::GetGamePaused())
     {
         const float dt = Time::Physics.DeltaTime.GetTotalSeconds();
         Physics::Simulate(dt);
@@ -260,30 +335,28 @@ void Engine::OnFixedUpdate()
     }
 }
 
+void Engine::OnLateFixedUpdate()
+{
+    PROFILE_CPU_NAMED("Late Fixed Update");
+
+    // Collect physics simulation results (does nothing if Simulate hasn't been called in the previous loop step)
+    Physics::CollectResults();
+
+    // Call event
+    LateFixedUpdate();
+
+    // Update services
+    EngineService::OnLateFixedUpdate();
+}
+
 void Engine::OnUpdate()
 {
     PROFILE_CPU_NAMED("Update");
 
-    // Update application (will gather data and other platform related events)
-    {
-        PROFILE_CPU_NAMED("Platform.Tick");
-        Platform::Tick();
-    }
-
-    const auto mainWindow = MainWindow;
-
-#if !USE_EDITOR
-    // Pause game if window lost focus and cannot run in a background
-    bool isGameRunning = true;
-    if (mainWindow && !mainWindow->IsFocused())
-    {
-        isGameRunning = EngineImpl::RunInBackground;
-    }
-    Time::SetGamePaused(!isGameRunning);
-#endif
+    UpdateCount++;
 
     // Determine if application has focus (flag used by the other parts of the engine)
-    HasFocus = (mainWindow && mainWindow->IsFocused()) || Platform::GetHasFocus();
+    HasFocus = (MainWindow && MainWindow->IsFocused()) || Platform::GetHasFocus();
 
     // Simulate lags
     //Platform::Sleep(100);
@@ -292,10 +365,12 @@ void Engine::OnUpdate()
 
     // Call event
     Update();
-    UpdateGraph->Execute();
 
     // Update services
     EngineService::OnUpdate();
+
+    // Run async
+    UpdateGraph->Execute();
 }
 
 void Engine::OnLateUpdate()
@@ -311,9 +386,15 @@ void Engine::OnLateUpdate()
 
 void Engine::OnDraw()
 {
+#if COMPILE_WITH_PROFILER
+    // Auto-enable GPU events when Tracy got connected
+    if (!ProfilerGPU::EventsEnabled && TracyIsConnected)
+        ProfilerGPU::EventsEnabled = true;
+#endif
     PROFILE_CPU_NAMED("Draw");
 
     // Begin frame rendering
+    Globals::RenderThreadID = Platform::GetCurrentThreadID();
     FrameCount++;
     const double time = Platform::GetTimeSeconds();
     auto device = GPUDevice::Instance;
@@ -325,6 +406,7 @@ void Engine::OnDraw()
     device->Draw();
 
     // End frame rendering
+    FrameMark;
 #if COMPILE_WITH_PROFILER
     ProfilerGPU::EndFrame();
 #endif
@@ -364,7 +446,7 @@ bool Engine::IsReady()
 
 bool Engine::ShouldExit()
 {
-    return Globals::IsRequestingExit;
+    return IsRequestingExit;
 }
 
 bool Engine::IsEditor()
@@ -373,6 +455,15 @@ bool Engine::IsEditor()
     return true;
 #else
     return false;
+#endif
+}
+
+bool Engine::IsPlayMode()
+{
+#if USE_EDITOR
+    return Editor::IsPlayMode;
+#else
+    return true;
 #endif
 }
 
@@ -394,6 +485,19 @@ JsonAsset* Engine::GetCustomSettings(const StringView& key)
     Guid assetId = Guid::Empty;
     settings->CustomSettings.TryGet(key, assetId);
     return Content::LoadAsync<JsonAsset>(assetId);
+}
+
+void Engine::FocusGameViewport()
+{
+#if USE_EDITOR
+    Editor::Managed->FocusGameViewport();
+#else
+    if (MainWindow)
+    {
+        MainWindow->BringToFront();
+        MainWindow->Focus();
+    }
+#endif
 }
 
 bool Engine::HasGameViewportFocus()
@@ -418,7 +522,7 @@ void Engine::OnUnpause()
     LOG(Info, "App unpaused");
     Unpause();
 
-    Time::OnBeforeRun();
+    Time::Synchronize();
 }
 
 void Engine::OnExit()
@@ -452,16 +556,26 @@ void Engine::OnExit()
 #if COMPILE_WITH_PROFILER
     ProfilerCPU::Dispose();
     ProfilerGPU::Dispose();
+    ProfilerMemory::Enabled = false;
 #endif
 
+#if LOG_ENABLE
     // Close logging service
     Log::Logger::Dispose();
+#endif
 
     Platform::Exit();
+
+    // Delete temporary directory only if Engine is closing normally (after crash user/developer can restore some data)
+    if (ExitCode == 0 && FileSystem::DirectoryExists(Globals::TemporaryFolder))
+    {
+        FileSystem::DeleteDirectory(Globals::TemporaryFolder);
+    }
 }
 
 void EngineImpl::InitLog()
 {
+#if LOG_ENABLE
     // Initialize logger
     Log::Logger::Init();
 
@@ -478,8 +592,18 @@ void EngineImpl::InitLog()
 #if COMPILE_WITH_DEV_ENV
     LOG(Info, "Compiled for Dev Environment");
 #endif
+#if defined(FLAXENGINE_BRANCH) && defined(FLAXENGINE_COMMIT)
+    LOG(Info, "Version " FLAXENGINE_VERSION_TEXT ", {}, {}", StringAsUTF16<>(FLAXENGINE_BRANCH).Get(), StringAsUTF16<>(FLAXENGINE_COMMIT).Get());
+#else
     LOG(Info, "Version " FLAXENGINE_VERSION_TEXT);
-    LOG(Info, "Compiled: {0} {1}", TEXT(__DATE__), TEXT(__TIME__));
+#endif
+    const Char* cpp = TEXT("?");
+    if (__cplusplus == 202101L) cpp = TEXT("C++23");
+    else if (__cplusplus == 202002L) cpp = TEXT("C++20");
+    else if (__cplusplus == 201703L) cpp = TEXT("C++17");
+    else if (__cplusplus == 201402L) cpp = TEXT("C++14");
+    else if (__cplusplus == 201103L) cpp = TEXT("C++11");
+    LOG(Info, "Compiled: {0} {1} {2}", TEXT(__DATE__), TEXT(__TIME__), cpp);
 #ifdef _MSC_VER
     const String mcsVer = StringUtils::ToString(_MSC_FULL_VER);
     LOG(Info, "Compiled with Visual C++ {0}.{1}.{2}.{3:0^2d}", mcsVer.Substring(0, 2), mcsVer.Substring(2, 2), mcsVer.Substring(4, 5), _MSC_BUILD);
@@ -495,9 +619,10 @@ void EngineImpl::InitLog()
 
     // Log product info
     LOG(Info, "Product: {0}, Company: {1}", Globals::ProductName, Globals::CompanyName);
-    LOG(Info, "Current culture: {0}", Platform::GetUserLocaleName());
+    LOG(Info, "Current language: {}, culture: {}", Platform::GetUserLanguage(), Platform::GetUserLocaleName());
     LOG(Info, "Command line: {0}", CommandLine);
-    LOG(Info, "Base directory: {0}", Globals::StartupFolder);
+    LOG(Info, "Base folder: {0}", Globals::StartupFolder);
+    LOG(Info, "Binaries folder: {0}", Globals::BinariesFolder);
     LOG(Info, "Temporary folder: {0}", Globals::TemporaryFolder);
     LOG(Info, "Project folder: {0}", Globals::ProjectFolder);
 #if USE_EDITOR
@@ -508,16 +633,11 @@ void EngineImpl::InitLog()
     Platform::LogInfo();
 
     LOG_FLUSH();
+#endif
 }
 
 void EngineImpl::InitPaths()
 {
-    // Prepare temp folder path
-    FileSystem::GetSpecialFolderPath(SpecialFolder::Temporary, Globals::TemporaryFolder);
-    if (Globals::TemporaryFolder.IsEmpty())
-        Platform::Fatal(TEXT("Failed to gather temporary folder directory."));
-    Globals::TemporaryFolder /= Guid::New().ToString(Guid::FormatType::D);
-
     // Cache other global paths
     FileSystem::GetSpecialFolderPath(SpecialFolder::LocalAppData, Globals::ProductLocalFolder);
     if (Globals::ProductLocalFolder.IsEmpty())
@@ -527,15 +647,6 @@ void EngineImpl::InitPaths()
 #endif
 #if USE_EDITOR
     Globals::EngineContentFolder = Globals::StartupFolder / TEXT("Content");
-#if PLATFORM_WINDOWS
-    Globals::MonoPath = Globals::StartupFolder / TEXT("Source/Platforms/Editor/Windows/Mono");
-#elif PLATFORM_LINUX
-    Globals::MonoPath = Globals::StartupFolder / TEXT("Source/Platforms/Editor/Linux/Mono");
-#else
-    #error "Please specify the Mono data location for Editor on this platform."
-#endif
-#else
-    Globals::MonoPath = Globals::StartupFolder / TEXT("Mono");
 #endif
     Globals::ProjectContentFolder = Globals::ProjectFolder / TEXT("Content");
 #if USE_EDITOR
@@ -543,13 +654,7 @@ void EngineImpl::InitPaths()
     Globals::ProjectCacheFolder = Globals::ProjectFolder / TEXT("Cache");
 #endif
 
-    // We must ensure that engine is located in folder which path contains only ANSI characters
-    // Why? Mono lib must have etc and lib folders at ANSI path
-    // But project can be located on Unicode path
-    if (!Globals::StartupFolder.IsANSI())
-        Platform::Fatal(TEXT("Cannot start application in directory which name contains non-ANSI characters."));
-
-#if !PLATFORM_SWITCH
+#if !PLATFORM_SWITCH && !FLAX_TESTS
     // Setup directories
     if (FileSystem::DirectoryExists(Globals::TemporaryFolder))
         FileSystem::DeleteDirectory(Globals::TemporaryFolder);
@@ -566,9 +671,9 @@ void EngineImpl::InitPaths()
         FileSystem::CreateDirectory(Globals::ProjectContentFolder);
     if (!FileSystem::DirectoryExists(Globals::ProjectSourceFolder))
         FileSystem::CreateDirectory(Globals::ProjectSourceFolder);
-    if (CommandLine::Options.ClearCache)
+    if (CommandLine::Options.ClearCache.IsTrue())
         FileSystem::DeleteDirectory(Globals::ProjectCacheFolder, true);
-    else if (CommandLine::Options.ClearCookerCache)
+    else if (CommandLine::Options.ClearCookerCache.IsTrue())
         FileSystem::DeleteDirectory(Globals::ProjectCacheFolder / TEXT("Cooker"), true);
     if (!FileSystem::DirectoryExists(Globals::ProjectCacheFolder))
         FileSystem::CreateDirectory(Globals::ProjectCacheFolder);
@@ -605,7 +710,7 @@ void EngineImpl::InitMainWindow()
         return;
     }
 
-#if !USE_EDITOR
+#if !USE_EDITOR && !COMPILE_WITHOUT_CSHARP
     // Inform the managed runtime about the window (game can link GUI to it)
     auto scriptingClass = Scripting::GetStaticClass();
     ASSERT(scriptingClass);
@@ -613,7 +718,7 @@ void EngineImpl::InitMainWindow()
     ASSERT(setWindowMethod);
     void* params[1];
     params[0] = Engine::MainWindow->GetOrCreateManagedInstance();
-    MonoObject* exception = nullptr;
+    MObject* exception = nullptr;
     setWindowMethod->Invoke(nullptr, params, &exception);
     if (exception)
     {

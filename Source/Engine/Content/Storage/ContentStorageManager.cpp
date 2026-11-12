@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ContentStorageManager.h"
 #include "FlaxFile.h"
@@ -6,6 +6,7 @@
 #include "Engine/Core/Log.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/EngineService.h"
+#include "Engine/Engine/Globals.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Threading/TaskGraph.h"
@@ -14,14 +15,9 @@
 namespace
 {
     CriticalSection Locker;
-#if USE_EDITOR
-    Array<FlaxFile*> Files(1024);
-    Array<FlaxPackage*> Packages;
-#else
     Array<FlaxFile*> Files;
-    Array<FlaxPackage*> Packages(64);
-#endif
-    Dictionary<String, FlaxStorage*> StorageMap(2048);
+    Array<FlaxPackage*> Packages;
+    Dictionary<String, FlaxStorage*> StorageMap;
 }
 
 class ContentStorageService : public EngineService
@@ -50,6 +46,7 @@ namespace
 
 ContentStorageService ContentStorageServiceInstance;
 
+TimeSpan ContentStorageManager::UnusedStorageLifetime = TimeSpan::FromSeconds(0.5f);
 TimeSpan ContentStorageManager::UnusedDataChunksLifetime = TimeSpan::FromSeconds(10);
 
 FlaxStorageReference ContentStorageManager::GetStorage(const StringView& path, bool loadIt)
@@ -57,8 +54,9 @@ FlaxStorageReference ContentStorageManager::GetStorage(const StringView& path, b
     Locker.Lock();
 
     // Try fast lookup
-    FlaxStorage* result;
-    if (!StorageMap.TryGet(path, result))
+    bool wasCached = true;
+    FlaxStorage* storage;
+    if (!StorageMap.TryGet(path, storage))
     {
         // Detect storage type and create object
         const bool isPackage = path.EndsWith(StringView(PACKAGE_FILES_EXTENSION));
@@ -66,39 +64,45 @@ FlaxStorageReference ContentStorageManager::GetStorage(const StringView& path, b
         {
             auto package = New<FlaxPackage>(path);
             Packages.Add(package);
-            result = package;
+            storage = package;
         }
         else
         {
             auto file = New<FlaxFile>(path);
             Files.Add(file);
-            result = file;
+            storage = file;
         }
 
         // Register storage container
-        StorageMap.Add(path, result);
+        StorageMap.Add(path, storage);
+        wasCached = false;
     }
+
+    // Build reference (before releasing the lock so ContentStorageSystem::Job won't delete it when running from async thread)
+    FlaxStorageReference result(storage);
 
     Locker.Unlock();
 
     if (loadIt)
     {
         // Initialize storage container
-        result->LockChunks();
-        const bool loadFailed = result->Load();
-        result->UnlockChunks();
+        storage->LockChunks();
+        const bool loadFailed = storage->Load();
+        storage->UnlockChunks();
         if (loadFailed)
         {
             LOG(Error, "Failed to load {0}.", path);
+            if (wasCached)
+                return result;
             Locker.Lock();
             StorageMap.Remove(path);
-            if (result->IsPackage())
-                Packages.Remove((FlaxPackage*)result);
+            if (storage->IsPackage())
+                Packages.Remove((FlaxPackage*)storage);
             else
-                Files.Remove((FlaxFile*)result);
+                Files.Remove((FlaxFile*)storage);
             Locker.Unlock();
-            Delete(result);
-            return nullptr;
+            result = nullptr;
+            Delete(storage);
         }
     }
 
@@ -118,11 +122,8 @@ FlaxStorageReference ContentStorageManager::EnsureAccess(const StringView& path)
     // Note: because we want to create new storage package it may exists.
     // So let's check if any storage container is referencing that location and try to close it.
     auto storage = TryGetStorage(path);
-    if (storage && storage->IsLoaded())
-    {
-        LOG(Info, "File \'{0}\' is in use. Trying to release handle to it.", path);
-        storage->CloseFileHandles();
-    }
+    if (storage && storage->IsLoaded() && storage->CloseFileHandles())
+        LOG(Warning, "Cannot release content storage handle for '{0}'.", path);
     return storage;
 }
 
@@ -185,6 +186,16 @@ void ContentStorageManager::EnsureUnlocked()
     Locker.Unlock();
 }
 
+void ContentStorageManager::FormatPath(String& path)
+{
+    StringUtils::PathRemoveRelativeParts(path);
+    if (FileSystem::IsRelative(path))
+    {
+        // Convert local-project paths into absolute format which is used by Content Storage system
+        path = Globals::ProjectFolder / path;
+    }
+}
+
 bool ContentStorageManager::IsFlaxStoragePath(const String& path)
 {
     auto extension = FileSystem::GetExtension(path).ToLower();
@@ -217,6 +228,12 @@ void ContentStorageManager::GetStorage(Array<FlaxStorage*>& result)
 
 bool ContentStorageService::Init()
 {
+#if USE_EDITOR
+    Files.EnsureCapacity(1024);
+#else
+    Packages.EnsureCapacity(64);
+#endif
+    StorageMap.EnsureCapacity(2048);
     System = New<ContentStorageSystem>();
     Engine::UpdateGraph->AddSystem(System);
     return false;
@@ -238,6 +255,7 @@ void ContentStorageSystem::Job(int32 index)
 {
     PROFILE_CPU_NAMED("ContentStorage.Job");
 
+    const double time = Platform::GetTimeSeconds();
     ScopeLock lock(Locker);
     for (auto i = StorageMap.Begin(); i.IsNotEnd(); ++i)
     {
@@ -257,7 +275,7 @@ void ContentStorageSystem::Job(int32 index)
         }
         else
         {
-            storage->Tick();
+            storage->Tick(time);
         }
     }
 }

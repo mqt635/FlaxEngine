@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CookAssetsStep.h"
 #include "Editor/Cooker/PlatformTools.h"
@@ -28,10 +28,17 @@
 #include "Engine/Streaming/StreamingSettings.h"
 #include "Engine/ShadersCompilation/ShadersCompilation.h"
 #include "Engine/Graphics/RenderTools.h"
+#include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Textures/TextureData.h"
+#include "Engine/Graphics/Materials/MaterialShader.h"
+#include "Engine/Graphics/PixelFormatExtensions.h"
+#include "Engine/Particles/Graph/GPU/ParticleEmitterGraph.GPU.h"
 #include "Engine/Engine/Base/GameBase.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Tools/TextureTool/TextureTool.h"
+#include "Engine/Threading/Threading.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Scripting/Enums.h"
 #if PLATFORM_TOOLS_WINDOWS
 #include "Engine/Platform/Windows/WindowsPlatformSettings.h"
 #endif
@@ -43,7 +50,25 @@
 #endif
 #include "FlaxEngine.Gen.h"
 
+#ifndef REVERSE_Z
+#define REVERSE_Z 0
+#endif
+
 Dictionary<String, CookAssetsStep::ProcessAssetFunc> CookAssetsStep::AssetProcessors;
+
+void IBuildCache::InvalidateCacheShaders()
+{
+    InvalidateCachePerType<Shader>();
+    InvalidateCachePerType<Material>();
+    InvalidateCachePerType<ParticleEmitter>();
+}
+
+void IBuildCache::InvalidateCacheTextures()
+{
+    InvalidateCachePerType<Texture>();
+    InvalidateCachePerType<CubeTexture>();
+    InvalidateCachePerType<SpriteAtlas>();
+}
 
 bool CookAssetsStep::CacheEntry::IsValid(bool withDependencies)
 {
@@ -95,34 +120,12 @@ CookAssetsStep::CacheEntry& CookAssetsStep::CacheData::CreateEntry(const Asset* 
     return entry;
 }
 
-void CookAssetsStep::CacheData::InvalidateShaders()
+void CookAssetsStep::CacheData::InvalidateCachePerType(const StringView& typeName)
 {
-    LOG(Info, "Invalidating cached shader assets.");
+    LOG(Info, "Invalidating cooker cache for {0} assets.", typeName);
     for (auto e = Entries.Begin(); e.IsNotEnd(); ++e)
     {
-        auto& typeName = e->Value.TypeName;
-        if (
-            typeName == Shader::TypeName ||
-            typeName == Material::TypeName ||
-            typeName == ParticleEmitter::TypeName
-        )
-        {
-            Entries.Remove(e);
-        }
-    }
-}
-
-void CookAssetsStep::CacheData::InvalidateTextures()
-{
-    LOG(Info, "Invalidating cached texture assets.");
-    for (auto e = Entries.Begin(); e.IsNotEnd(); ++e)
-    {
-        auto& typeName = e->Value.TypeName;
-        if (
-            typeName == Texture::TypeName ||
-            typeName == CubeTexture::TypeName ||
-            typeName == SpriteAtlas::TypeName
-        )
+        if (e->Value.TypeName == typeName)
         {
             Entries.Remove(e);
         }
@@ -131,20 +134,15 @@ void CookAssetsStep::CacheData::InvalidateTextures()
 
 void CookAssetsStep::CacheData::Load(CookingData& data)
 {
+    PROFILE_CPU();
     HeaderFilePath = data.CacheDirectory / String::Format(TEXT("CookedHeader_{0}.bin"), FLAXENGINE_VERSION_BUILD);
     CacheFolder = data.CacheDirectory / TEXT("Cooked");
     Entries.Clear();
 
     if (!FileSystem::DirectoryExists(CacheFolder))
-    {
         FileSystem::CreateDirectory(CacheFolder);
-    }
-
     if (!FileSystem::FileExists(HeaderFilePath))
-    {
-        LOG(Warning, "Missing incremental build cooking assets cache.");
         return;
-    }
 
     auto file = FileReadStream::Open(HeaderFilePath);
     if (file == nullptr)
@@ -161,20 +159,18 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
         return;
 
     LOG(Info, "Loading incremental build cooking cache (entries count: {0})", entriesCount);
-
-    file->Read(&Settings);
-
-    Entries.EnsureCapacity(Math::RoundUpToPowerOf2(static_cast<int32>(entriesCount * 3.0f)));
+    file->ReadBytes(&Settings, sizeof(Settings));
+    Entries.EnsureCapacity(entriesCount);
 
     Array<Pair<String, DateTime>> fileDependencies;
     for (int32 i = 0; i < entriesCount; i++)
     {
         Guid id;
-        file->Read(&id);
+        file->Read(id);
         String typeName;
-        file->ReadString(&typeName);
+        file->Read(typeName);
         DateTime fileModified;
-        file->Read(&fileModified);
+        file->Read(fileModified);
         int32 fileDependenciesCount;
         file->ReadInt32(&fileDependenciesCount);
         fileDependencies.Clear();
@@ -182,8 +178,8 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
         for (int32 j = 0; j < fileDependenciesCount; j++)
         {
             Pair<String, DateTime>& f = fileDependencies[j];
-            file->ReadString(&f.First, 10);
-            file->Read(&f.Second);
+            file->Read(f.First, 10);
+            file->Read(f.Second);
         }
 
         // Skip missing entries
@@ -197,6 +193,9 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
         e.FileDependencies = fileDependencies;
     }
 
+    Array<byte> platformCache;
+    file->Read(platformCache);
+
     int32 checkChar;
     file->ReadInt32(&checkChar);
     if (checkChar != 13)
@@ -205,19 +204,47 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
         Entries.Clear();
     }
 
+    // Per-platform custom data loading (eg. to invalidate textures/shaders options)
+    data.Tools->LoadCache(data, this, ToSpan(platformCache));
+
     const auto buildSettings = BuildSettings::Get();
     const auto gameSettings = GameSettings::Get();
 
     // Invalidate shaders and assets with shaders if need to rebuild them
     bool invalidateShaders = false;
+    if (GPU_SHADER_CACHE_VERSION != Settings.Global.ShadersVersion)
+    {
+        LOG(Info, "{0} option has been modified.", TEXT("ShadersVersion"));
+        invalidateShaders = true;
+    }
+    if (MATERIAL_GRAPH_VERSION != Settings.Global.MaterialGraphVersion)
+    {
+        LOG(Info, "{0} option has been modified.", TEXT("MaterialGraphVersion"));
+        InvalidateCachePerType<Material>();
+    }
+    if (PARTICLE_GPU_GRAPH_VERSION != Settings.Global.ParticleGraphVersion)
+    {
+        LOG(Info, "{0} option has been modified.", TEXT("ParticleGraphVersion"));
+        InvalidateCachePerType<ParticleEmitter>();
+    }
     if (buildSettings->ShadersNoOptimize != Settings.Global.ShadersNoOptimize)
     {
-        LOG(Info, "ShadersNoOptimize option has been modified.");
+        LOG(Info, "{0} option has been modified.", TEXT("ShadersNoOptimize"));
         invalidateShaders = true;
     }
     if (buildSettings->ShadersGenerateDebugData != Settings.Global.ShadersGenerateDebugData)
     {
-        LOG(Info, "ShadersGenerateDebugData option has been modified.");
+        LOG(Info, "{0} option has been modified.", TEXT("ShadersGenerateDebugData"));
+        invalidateShaders = true;
+    }
+    if (REVERSE_Z != Settings.Global.ShadersReverseZ)
+    {
+        LOG(Info, "{0} option has been modified.", TEXT("ShadersReverseZ"));
+        invalidateShaders = true;
+    }
+    if ((data.Configuration != BuildConfiguration::Release) != Settings.Global.ShadersDevelopment)
+    {
+        LOG(Info, "{0} option has been modified.", TEXT("ShadersDevelopment"));
         invalidateShaders = true;
     }
 #if PLATFORM_TOOLS_WINDOWS
@@ -225,12 +252,13 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
     {
         const auto settings = WindowsPlatformSettings::Get();
         const bool modified =
+                Settings.Windows.SupportDX12 != settings->SupportDX12 ||
                 Settings.Windows.SupportDX11 != settings->SupportDX11 ||
                 Settings.Windows.SupportDX10 != settings->SupportDX10 ||
                 Settings.Windows.SupportVulkan != settings->SupportVulkan;
         if (modified)
         {
-            LOG(Info, "Platform graphics backend options has been modified.");
+            LOG(Info, "{0} option has been modified.", TEXT("Platform graphics backend"));
             invalidateShaders = true;
         }
     }
@@ -244,7 +272,7 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
                 Settings.UWP.SupportDX10 != settings->SupportDX10;
         if (modified)
         {
-            LOG(Info, "Platform graphics backend options has been modified.");
+            LOG(Info, "{0} option has been modified.", TEXT("Platform graphics backend"));
             invalidateShaders = true;
         }
     }
@@ -257,25 +285,31 @@ void CookAssetsStep::CacheData::Load(CookingData& data)
                 Settings.Linux.SupportVulkan != settings->SupportVulkan;
         if (modified)
         {
-            LOG(Info, "Platform graphics backend options has been modified.");
+            LOG(Info, "{0} option has been modified.", TEXT("Platform graphics backend"));
             invalidateShaders = true;
         }
     }
 #endif
     if (invalidateShaders)
-        InvalidateShaders();
+    {
+        InvalidateCachePerType<Shader>();
+        InvalidateCachePerType<Material>();
+        InvalidateCachePerType<ParticleEmitter>();
+    }
 
     // Invalidate textures if streaming settings gets modified
     if (Settings.Global.StreamingSettingsAssetId != gameSettings->Streaming || (Entries.ContainsKey(gameSettings->Streaming) && !Entries[gameSettings->Streaming].IsValid()))
     {
-        InvalidateTextures();
+        InvalidateCachePerType<Texture>();
+        InvalidateCachePerType<CubeTexture>();
+        InvalidateCachePerType<SpriteAtlas>();
     }
 }
 
-void CookAssetsStep::CacheData::Save()
+void CookAssetsStep::CacheData::Save(CookingData& data)
 {
+    PROFILE_CPU();
     LOG(Info, "Saving incremental build cooking cache (entries count: {0})", Entries.Count());
-
     auto file = FileWriteStream::Open(HeaderFilePath);
     if (file == nullptr)
         return;
@@ -284,20 +318,21 @@ void CookAssetsStep::CacheData::Save()
     // Serialize
     file->WriteInt32(FLAXENGINE_VERSION_BUILD);
     file->WriteInt32(Entries.Count());
-    file->Write(&Settings);
+    file->WriteBytes(&Settings, sizeof(Settings));
     for (auto i = Entries.Begin(); i.IsNotEnd(); ++i)
     {
         auto& e = i->Value;
-        file->Write(&e.ID);
-        file->WriteString(e.TypeName);
-        file->Write(&e.FileModified);
-        file->WriteInt32(e.FileDependencies.Count());
+        file->Write(e.ID);
+        file->Write(e.TypeName);
+        file->Write(e.FileModified);
+        file->Write(e.FileDependencies.Count());
         for (auto& f : e.FileDependencies)
         {
-            file->WriteString(f.First, 10);
-            file->Write(&f.Second);
+            file->Write(f.First, 10);
+            file->Write(f.Second);
         }
     }
+    file->Write(data.Tools->SaveCache(data, this));
     file->WriteInt32(13);
 }
 
@@ -324,8 +359,8 @@ bool CookAssetsStep::ProcessDefaultAsset(AssetCookData& options)
     {
         // Use compact json
         rapidjson_flax::StringBuffer buffer;
-        rapidjson_flax::Writer<rapidjson_flax::StringBuffer> writer(buffer);
-        asJsonAsset->Document.Accept(writer);
+        CompactJsonWriter writerObj(buffer);
+        asJsonAsset->Save(writerObj);
 
         // Store json data in the first chunk
         auto chunk = New<FlaxChunk>();
@@ -342,17 +377,27 @@ bool CookAssetsStep::ProcessDefaultAsset(AssetCookData& options)
 
 bool CookAssetsStep::Process(CookingData& data, CacheData& cache, Asset* asset)
 {
-    // Validate asset
+    PROFILE_CPU_ASSET(asset);
     if (asset->IsVirtual())
     {
         // Virtual assets are not included into the build
         return false;
     }
+    const bool wasLoaded = asset->IsLoaded();
     if (asset->WaitForLoaded())
     {
         LOG(Error, "Failed to load asset \'{0}\'", asset->ToString());
-        return false;
+        return true;
     }
+    if (!wasLoaded)
+    {
+        // HACK: give some time to resave any old assets in Asset::onLoad after it's loaded
+        // This assumes that if Load Thread enters Asset::Save then it will get asset lock and hold it until asset is saved
+        // So we can take the same lock to wait for save end but first we need to wait for it to get that lock
+        // (in future try to handle it in a better way)
+        Platform::Sleep(5);
+    }
+    ScopeLock lock(asset->Locker);
 
     // Switch based on an asset type
     const auto asBinaryAsset = dynamic_cast<BinaryAsset*>(asset);
@@ -392,7 +437,9 @@ bool ProcessShaderBase(CookAssetsStep::AssetCookData& data, ShaderAssetBase* ass
     options.NoOptimize = data.Cache.Settings.Global.ShadersNoOptimize;
     options.GenerateDebugData = data.Cache.Settings.Global.ShadersGenerateDebugData;
     options.TreatWarningsAsErrors = false;
+    options.DevelopmentShaders = data.Cache.Settings.Global.ShadersDevelopment;
     options.Output = &cacheStream;
+    options.Platform = data.Data.Tools->GetPlatform();
     Array<String> includes;
 
 #define COMPILE_PROFILE(profile, cacheChunk) \
@@ -406,7 +453,7 @@ bool ProcessShaderBase(CookAssetsStep::AssetCookData& data, ShaderAssetBase* ass
 		assetBase->InitCompilationOptions(options); \
 		if (ShadersCompilation::Compile(options)) \
 		{ \
-			data.Data.Error(TEXT("Failed to compile shader '{0}' (profile: {1})."), asset->ToString(), ::ToString(options.Profile)); \
+			data.Data.Error(String::Format(TEXT("Failed to compile shader '{0}' (profile: {1})."), asset->ToString(), ::ToString(options.Profile))); \
 			return true; \
 		} \
         includes.Clear(); \
@@ -424,6 +471,7 @@ bool ProcessShaderBase(CookAssetsStep::AssetCookData& data, ShaderAssetBase* ass
 #if PLATFORM_TOOLS_WINDOWS
     case BuildPlatform::Windows32:
     case BuildPlatform::Windows64:
+    case BuildPlatform::WindowsARM64:
     {
         const char* platformDefineName = "PLATFORM_WINDOWS";
         const auto settings = WindowsPlatformSettings::Get();
@@ -515,6 +563,39 @@ bool ProcessShaderBase(CookAssetsStep::AssetCookData& data, ShaderAssetBase* ass
         break;
     }
 #endif
+#if PLATFORM_TOOLS_PS5
+    case BuildPlatform::PS5:
+    {
+        const char* platformDefineName = "PLATFORM_PS5";
+        COMPILE_PROFILE(PS5, SHADER_FILE_CHUNK_INTERNAL_GENERIC_CACHE);
+        break;
+    }
+#endif
+#if PLATFORM_TOOLS_MAC
+    case BuildPlatform::MacOSx64:
+    case BuildPlatform::MacOSARM64:
+    {
+        const char* platformDefineName = "PLATFORM_MAC";
+        COMPILE_PROFILE(Vulkan_SM5, SHADER_FILE_CHUNK_INTERNAL_VULKAN_SM5_CACHE);
+        break;
+    }
+#endif
+#if PLATFORM_TOOLS_IOS
+    case BuildPlatform::iOSARM64:
+    {
+        const char* platformDefineName = "PLATFORM_IOS";
+        COMPILE_PROFILE(Vulkan_SM5, SHADER_FILE_CHUNK_INTERNAL_VULKAN_SM5_CACHE);
+        break;
+    }
+#endif
+#if PLATFORM_TOOLS_WEB
+    case BuildPlatform::Web:
+    {
+        const char* platformDefineName = "PLATFORM_WEB";
+        COMPILE_PROFILE(WebGPU, SHADER_FILE_CHUNK_INTERNAL_GENERIC_CACHE);
+        break;
+    }
+#endif
     default:
     {
         LOG(Warning, "Not implemented platform or shaders not supported.");
@@ -595,7 +676,8 @@ bool ProcessTextureBase(CookAssetsStep::AssetCookData& data)
     const auto asset = static_cast<TextureBase*>(data.Asset);
     const auto& assetHeader = asset->StreamingTexture()->GetHeader();
     const auto format = asset->Format();
-    const auto targetFormat = data.Data.Tools->GetTextureFormat(data.Data, asset, format);
+    auto targetFormat = data.Data.Tools->GetTextureFormat(data.Data, asset, format);
+    CHECK_RETURN(!PixelFormatExtensions::IsTypeless(targetFormat), true);
     const auto streamingSettings = StreamingSettings::Get();
     int32 mipLevelsMax = GPU_MAX_TEXTURE_MIP_LEVELS;
     if (assetHeader->TextureGroup >= 0 && assetHeader->TextureGroup < streamingSettings->TextureGroups.Count())
@@ -604,6 +686,11 @@ bool ProcessTextureBase(CookAssetsStep::AssetCookData& data)
         mipLevelsMax = group.MipLevelsMax;
         group.MipLevelsMaxPerPlatform.TryGet(data.Data.Tools->GetPlatform(), mipLevelsMax);
     }
+
+    // If texture is smaller than the block size of the target format (eg. 4x4 texture using ASTC_6x6) then fallback to uncompressed
+    int32 blockSize = PixelFormatExtensions::ComputeBlockSize(targetFormat);
+    if (assetHeader->Width < blockSize || assetHeader->Height < blockSize || (blockSize != 1 && mipLevelsMax < 4))
+        targetFormat = PixelFormatExtensions::FindUncompressedFormat(format);
 
     // Faster path if don't need to modify texture for the target platform
     if (format == targetFormat && assetHeader->MipLevels <= mipLevelsMax)
@@ -628,7 +715,7 @@ bool ProcessTextureBase(CookAssetsStep::AssetCookData& data)
         // Convert texture data to the target format
         if (TextureTool::Convert(textureDataTmp1, *textureData, targetFormat))
         {
-            LOG(Error, "Failed to convert texture {0} from format {1} to {2}", asset->ToString(), (int32)format, (int32)targetFormat);
+            LOG(Error, "Failed to convert texture {0} from format {1} to {2}", asset->ToString(), ScriptingEnum::ToString(format), ScriptingEnum::ToString(targetFormat));
             return true;
         }
         textureData = &textureDataTmp1;
@@ -670,37 +757,8 @@ bool ProcessTextureBase(CookAssetsStep::AssetCookData& data)
     {
         auto chunk = New<FlaxChunk>();
         data.InitData.Header.Chunks[mipIndex] = chunk;
-
-        // Calculate the texture data storage layout
-        uint32 rowPitch, slicePitch;
-        const int32 mipWidth = Math::Max(1, textureData->Width >> mipIndex);
-        const int32 mipHeight = Math::Max(1, textureData->Height >> mipIndex);
-        RenderTools::ComputePitch(textureData->Format, mipWidth, mipHeight, rowPitch, slicePitch);
-        chunk->Data.Allocate(slicePitch * textureData->GetArraySize());
-
-        // Copy array slices into mip data (sequential)
-        for (int32 arrayIndex = 0; arrayIndex < textureData->Items.Count(); arrayIndex++)
-        {
-            auto& mipData = textureData->Items[arrayIndex].Mips[mipIndex];
-            byte* src = mipData.Data.Get();
-            byte* dst = chunk->Data.Get() + (slicePitch * arrayIndex);
-
-            // Faster path if source and destination data layout matches
-            if (rowPitch == mipData.RowPitch && slicePitch == mipData.DepthPitch)
-            {
-                Platform::MemoryCopy(dst, src, slicePitch);
-            }
-            else
-            {
-                const auto copyRowSize = Math::Min(mipData.RowPitch, rowPitch);
-                for (uint32 line = 0; line < mipData.Lines; line++)
-                {
-                    Platform::MemoryCopy(dst, src, copyRowSize);
-                    src += mipData.RowPitch;
-                    dst += rowPitch;
-                }
-            }
-        }
+        if (TextureTool::WriteTextureData(chunk->Data, *textureData, mipIndex))
+            return true;
     }
 
     // Clone any custom asset chunks (eg. sprite atlas data, mips are in 0-13 chunks)
@@ -738,7 +796,10 @@ bool CookAssetsStep::Process(CookingData& data, CacheData& cache, BinaryAsset* a
     // Prepare asset data
     AssetInitData initData;
     if (asset->Storage->LoadAssetHeader(asset->GetID(), initData))
+    {
+        LOG(Warning, "Failed to load asset {} header from storage '{}'", asset->GetID(), asset->Storage->GetPath());
         return true;
+    }
     initData.Header.UnlinkChunks();
     initData.Metadata.Release();
     for (auto& e : initData.Dependencies)
@@ -837,7 +898,6 @@ bool CookAssetsStep::Process(CookingData& data, CacheData& cache, JsonAssetBase*
 class PackageBuilder : public NonCopyable
 {
 private:
-
     int32 _packageIndex;
     int32 MaxAssetsPerPackage;
     int32 MaxPackageSize;
@@ -850,7 +910,6 @@ private:
     uint64 packagesSizeTotal;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="PackageBuilder" /> class.
     /// </summary>
@@ -879,7 +938,6 @@ public:
     }
 
 public:
-
     uint64 GetPackagesSizeTotal() const
     {
         return packagesSizeTotal;
@@ -932,6 +990,7 @@ public:
         const int32 count = addedEntries.Count();
         if (count == 0)
             return false;
+        PROFILE_CPU();
 
         // Get assets init data and load all chunks
         Array<AssetInitData> assetsData;
@@ -987,8 +1046,11 @@ bool CookAssetsStep::Perform(CookingData& data)
     float Step1ProgressEnd = 0.6f;
     String Step1Info = TEXT("Cooking assets");
     float Step2ProgressStart = Step1ProgressEnd;
-    float Step2ProgressEnd = 0.9f;
-    String Step2Info = TEXT("Packaging assets");
+    float Step2ProgressEnd = 0.8f;
+    String Step2Info = TEXT("Cooking files");
+    float Step3ProgressStart = Step2ProgressStart;
+    float Step3ProgressEnd = 0.9f;
+    String Step3Info = TEXT("Packaging assets");
 
     data.StepProgress(TEXT("Loading build cache"), 0);
 
@@ -1007,6 +1069,7 @@ bool CookAssetsStep::Perform(CookingData& data)
 #if PLATFORM_TOOLS_WINDOWS
     {
         const auto settings = WindowsPlatformSettings::Get();
+        cache.Settings.Windows.SupportDX12 = settings->SupportDX12;
         cache.Settings.Windows.SupportDX11 = settings->SupportDX11;
         cache.Settings.Windows.SupportDX10 = settings->SupportDX10;
         cache.Settings.Windows.SupportVulkan = settings->SupportVulkan;
@@ -1028,7 +1091,12 @@ bool CookAssetsStep::Perform(CookingData& data)
     {
         cache.Settings.Global.ShadersNoOptimize = buildSettings->ShadersNoOptimize;
         cache.Settings.Global.ShadersGenerateDebugData = buildSettings->ShadersGenerateDebugData;
+        cache.Settings.Global.ShadersReverseZ = REVERSE_Z;
+        cache.Settings.Global.ShadersDevelopment = data.Configuration != BuildConfiguration::Release;
         cache.Settings.Global.StreamingSettingsAssetId = gameSettings->Streaming;
+        cache.Settings.Global.ShadersVersion = GPU_SHADER_CACHE_VERSION;
+        cache.Settings.Global.MaterialGraphVersion = MATERIAL_GRAPH_VERSION;
+        cache.Settings.Global.ParticleGraphVersion = PARTICLE_GPU_GRAPH_VERSION;
     }
 
     // Note: this step converts all the assets (even the json) into the binary files (FlaxStorage format).
@@ -1041,11 +1109,14 @@ bool CookAssetsStep::Perform(CookingData& data)
 #endif
     int32 subStepIndex = 0;
     AssetReference<Asset> assetRef;
-    assetRef.Unload.Bind([]() { LOG(Error, "Asset gets unloaded while cooking it!"); Platform::Sleep(100); });
+    assetRef.Unload.Bind([]
+    {
+        LOG(Error, "Asset got unloaded while cooking it!");
+        Platform::Sleep(100);
+    });
     for (auto i = data.Assets.Begin(); i.IsNotEnd(); ++i)
     {
         BUILD_STEP_CANCEL_CHECK;
-
         data.StepProgress(Step1Info, Math::Lerp(Step1ProgressStart, Step1ProgressEnd, static_cast<float>(subStepIndex++) / data.Assets.Count()));
         const Guid assetId = i->Item;
 
@@ -1102,25 +1173,65 @@ bool CookAssetsStep::Perform(CookingData& data)
         assetRef = Content::LoadAsync<Asset>(assetId);
         if (assetRef == nullptr)
         {
-            data.Error(TEXT("Failed to load asset included in build."));
+            LOG(Error, "Failed to load asset {} included in build", assetId);
             return true;
         }
         e.Info.TypeName = assetRef->GetTypeName();
 
         // Cook asset
         if (Process(data, cache, assetRef.Get()))
+        {
+            LOG(Error, "Failed to process asset {}", assetRef->ToString());
+            cache.Save(data);
             return true;
+        }
         data.Stats.CookedAssets++;
 
         // Auto save build cache after every few cooked assets (reduces next build time if cooking fails later)
         if (data.Stats.CookedAssets % 50 == 0)
         {
-            cache.Save();
+            cache.Save(data);
         }
     }
 
     // Save build cache header
-    cache.Save();
+    cache.Save(data);
+
+    // Process all files
+    for (auto i = data.Files.Begin(); i.IsNotEnd(); ++i)
+    {
+        BUILD_STEP_CANCEL_CHECK;
+        data.StepProgress(Step2Info, Math::Lerp(Step2ProgressStart, Step2ProgressEnd, (float)subStepIndex++ / data.Files.Count()));
+        const String& filePath = i->Item;
+
+        // Calculate destination path
+        String cookedPath = data.DataOutputPath;
+        if (FileSystem::IsRelative(filePath))
+            cookedPath /= filePath;
+        else
+            cookedPath /= String(TEXT("Content")) / StringUtils::GetFileName(filePath);
+
+        // Copy file
+        if (!FileSystem::FileExists(cookedPath) || FileSystem::GetFileLastEditTime(cookedPath) >= FileSystem::GetFileLastEditTime(filePath))
+        {
+            const String cookedFolder = StringUtils::GetDirectoryName(cookedPath);
+            if (FileSystem::CreateDirectory(cookedFolder))
+            {
+                LOG(Error, "Failed to create directory '{}'", cookedFolder);
+                return true;
+            }
+            if (FileSystem::CopyFile(cookedPath, filePath))
+            {
+                LOG(Error, "Failed to copy file from '{}' to '{}'", filePath, cookedPath);
+                return true;
+            }
+        }
+
+        // Count stats of file extension
+        auto& assetStats = data.Stats.AssetStats[FileSystem::GetExtension(cookedPath)];
+        assetStats.Count++;
+        assetStats.ContentSize += FileSystem::GetFileSize(cookedPath);
+    }
 
     // Create build game header
     {
@@ -1137,7 +1248,6 @@ bool CookAssetsStep::Perform(CookingData& data)
         }
 
         stream->WriteInt32(('x' + 'D') * 131); // think about it as '131 times xD'
-
         stream->WriteInt32(FLAXENGINE_VERSION_BUILD);
 
         Array<byte> bytes;
@@ -1155,7 +1265,7 @@ bool CookAssetsStep::Perform(CookingData& data)
         *(int32*)(bytes.Get() + 804) = contentKey;
         *(Guid*)(bytes.Get() + 808) = gameSettings->SplashScreen;
         Encryption::EncryptBytes(bytes.Get(), bytes.Count());
-        stream->WriteArray(bytes);
+        stream->Write(bytes);
 
         Delete(stream);
     }
@@ -1168,13 +1278,11 @@ bool CookAssetsStep::Perform(CookingData& data)
         for (auto i = AssetsRegistry.Begin(); i.IsNotEnd(); ++i)
         {
             BUILD_STEP_CANCEL_CHECK;
-
-            data.StepProgress(Step2Info, Math::Lerp(Step2ProgressStart, Step2ProgressEnd, static_cast<float>(subStepIndex++) / AssetsRegistry.Count()));
+            data.StepProgress(Step3Info, Math::Lerp(Step3ProgressStart, Step3ProgressEnd, (float)subStepIndex++ / AssetsRegistry.Count()));
             const auto assetId = i->Key;
 
             String cookedFilePath;
             cache.GetFilePath(assetId, cookedFilePath);
-
             if (!FileSystem::FileExists(cookedFilePath))
             {
                 LOG(Warning, "Missing cooked file for asset \'{0}\'", assetId);
@@ -1192,12 +1300,12 @@ bool CookAssetsStep::Perform(CookingData& data)
             return true;
         for (auto& e : data.Stats.AssetStats)
             e.Value.TypeName = e.Key;
-        data.Stats.ContentSizeMB = static_cast<int32>(packageBuilder.GetPackagesSizeTotal() / (1024 * 1024));
+        data.Stats.ContentSize += packageBuilder.GetPackagesSizeTotal();
     }
 
     BUILD_STEP_CANCEL_CHECK;
 
-    data.StepProgress(TEXT("Creating assets cache"), Step2ProgressEnd);
+    data.StepProgress(TEXT("Creating assets cache"), Step3ProgressEnd);
 
     // Create asset paths mapping for the assets.
     // Assets mapping is use to convert paths used in Content::Load(path) into the asset id.
@@ -1230,11 +1338,11 @@ bool CookAssetsStep::Perform(CookingData& data)
     }
 
     // Print stats
-    LOG(Info, "Cooked {0} assets, total assets: {1}, total content packages size: {2} MB", data.Stats.CookedAssets, AssetsRegistry.Count(), data.Stats.ContentSizeMB);
+    LOG(Info, "Cooked {0} assets, total assets: {1}, total content packages size: {2} MB", data.Stats.CookedAssets, AssetsRegistry.Count(), (int32)(data.Stats.ContentSize / (1024 * 1024)));
     {
         Array<CookingData::AssetTypeStatistics> assetTypes;
         data.Stats.AssetStats.GetValues(assetTypes);
-        Sorting::QuickSort(assetTypes.Get(), assetTypes.Count());
+        Sorting::QuickSort(assetTypes);
 
         LOG(Info, "");
         LOG(Info, "Top assets types stats:");
@@ -1256,7 +1364,10 @@ bool CookAssetsStep::Perform(CookingData& data)
             {
                 typeName = e.TypeName;
             }
-            LOG(Info, "{0}: {1:>4} assets of total size {2}", typeName, e.Count, Utilities::BytesToText(e.ContentSize));
+            if (e.Count == 1)
+                LOG(Info, "{0}:    1 asset  of total size {1}", typeName, Utilities::BytesToText(e.ContentSize));
+            else
+                LOG(Info, "{0}: {1:>4} assets of total size {2}", typeName, e.Count, Utilities::BytesToText(e.ContentSize));
         }
         LOG(Info, "");
     }

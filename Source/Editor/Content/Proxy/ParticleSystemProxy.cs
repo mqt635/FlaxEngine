@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content.Thumbnails;
@@ -39,6 +39,7 @@ namespace FlaxEditor.Content
     /// A <see cref="ParticleSystem"/> asset proxy object.
     /// </summary>
     /// <seealso cref="FlaxEditor.Content.BinaryAssetProxy" />
+    [ContentContextMenu("New/Particles/Particle System")]
     public class ParticleSystemProxy : BinaryAssetProxy
     {
         private ParticleSystemPreview _preview;
@@ -74,7 +75,7 @@ namespace FlaxEditor.Content
         /// <inheritdoc />
         public override void Create(string outputPath, object arg)
         {
-            if (Editor.CreateAsset(Editor.NewAssetType.ParticleSystem, outputPath))
+            if (Editor.CreateAsset("ParticleSystem", outputPath))
                 throw new Exception("Failed to create new asset.");
         }
 
@@ -83,19 +84,8 @@ namespace FlaxEditor.Content
         {
             if (_preview == null)
             {
-                _preview = new ParticleEmitterPreview(false)
-                {
-                    RenderOnlyWithWindow = false,
-                    UseAutomaticTaskManagement = false,
-                    AnchorPreset = AnchorPresets.StretchAll,
-                    Offsets = Margin.Zero,
-                };
-                _preview.Task.Enabled = false;
-
-                var eyeAdaptation = _preview.PostFxVolume.EyeAdaptation;
-                eyeAdaptation.Mode = EyeAdaptationMode.None;
-                eyeAdaptation.OverrideFlags |= EyeAdaptationSettingsOverride.Mode;
-                _preview.PostFxVolume.EyeAdaptation = eyeAdaptation;
+                _preview = new ParticleEmitterPreview(false);
+                InitAssetPreview(_preview);
             }
 
             // Mark for initial warmup
@@ -114,7 +104,7 @@ namespace FlaxEditor.Content
                 return false;
 
             // Ensure assets are ready to be used
-            if (!_preview.HasLoadedAssets)
+            if (!_preview.HasContentLoaded)
                 return false;
             var asset = (ParticleSystem)request.Asset;
             if (!asset.IsLoaded)

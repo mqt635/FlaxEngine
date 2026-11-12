@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Threading;
+using FlaxEditor.GUI.Docking;
 using FlaxEditor.States;
 using FlaxEditor.Windows;
 using FlaxEngine;
@@ -20,6 +21,8 @@ namespace FlaxEditor.Modules
         private bool _updateOrFixedUpdateWasCalled;
         private long _breakpointHangFlag;
         private EditorWindow _enterPlayFocusedWindow;
+        private DockWindow _previousWindow;
+        private Guid[] _scenesToReload;
 
         internal SimulationModule(Editor editor)
         : base(editor)
@@ -69,9 +72,20 @@ namespace FlaxEditor.Modules
         }
 
         /// <summary>
-        /// Checks if play mode should start only with single frame update and then enter step mode.
+        /// Delegates between playing game and playing scenes in editor based on the user's editor preference.
         /// </summary>
-        public bool ShouldPlayModeStartWithStep => Editor.UI.IsPauseButtonChecked;
+        public void DelegatePlayOrStopPlayInEditor()
+        {
+            switch (Editor.Options.Options.Interface.PlayButtonAction)
+            {
+            case Options.InterfaceOptions.PlayAction.PlayGame:
+                Editor.Simulation.RequestPlayGameOrStopPlay();
+                return;
+            case Options.InterfaceOptions.PlayAction.PlayScenes:
+                Editor.Simulation.RequestPlayScenesOrStopPlay();
+                return;
+            }
+        }
 
         /// <summary>
         /// Returns true if play mode has been requested.
@@ -81,10 +95,14 @@ namespace FlaxEditor.Modules
         /// <summary>
         /// Requests start playing in editor.
         /// </summary>
-        public void RequestStartPlay()
+        public void RequestStartPlayScenes()
         {
             if (Editor.StateMachine.IsEditMode)
             {
+                // Show Game window if hidden
+                if (Editor.Windows.GameWin.IsHidden)
+                    Editor.Windows.GameWin.Show();
+
                 Editor.Log("[PlayMode] Start");
 
                 if (Editor.Options.Options.General.AutoReloadScriptsOnMainWindowFocus)
@@ -92,6 +110,74 @@ namespace FlaxEditor.Modules
                 _isPlayModeRequested = true;
                 Editor.UI.UpdateToolstrip();
             }
+        }
+
+        /// <summary>
+        /// Requests playing game start or stop in editor from the project's configured FirstScene.
+        /// </summary>
+        public void RequestPlayGameOrStopPlay()
+        {
+            if (Editor.StateMachine.IsPlayMode)
+            {
+                RequestStopPlay();
+            }
+            else
+            {
+                RequestStartPlayGame();
+            }
+        }
+
+        /// <summary>
+        /// Requests start playing in editor from the project's configured FirstScene.
+        /// </summary>
+        public void RequestStartPlayGame()
+        {
+            if (!Editor.StateMachine.IsEditMode)
+                return;
+
+            // Show Game window if hidden
+            if (Editor.Windows.GameWin.IsHidden)
+                Editor.Windows.GameWin.Show();
+
+            var firstScene = Content.Settings.GameSettings.Load().FirstScene;
+            if (firstScene == Guid.Empty)
+            {
+                Editor.LogWarning("No First Scene assigned in Game Settings.");
+                if (Level.IsAnySceneLoaded)
+                    Editor.Simulation.RequestStartPlayScenes();
+                return;
+            }
+            if (!FlaxEngine.Content.GetAssetInfo(firstScene.ID, out var info))
+            {
+                Editor.LogWarning("Invalid First Scene in Game Settings.");
+                if (Level.IsAnySceneLoaded)
+                    Editor.Simulation.RequestStartPlayScenes();
+                return;
+            }
+
+            // Save any modified scenes to prevent loosing local changes
+            if (Editor.Scene.IsEdited())
+                Level.SaveAllScenes();
+
+            // Load scenes after entering the play mode
+            _scenesToReload = new Guid[Level.ScenesCount];
+            for (int i = 0; i < _scenesToReload.Length; i++)
+                _scenesToReload[i] = Level.GetScene(i).ID;
+            Level.UnloadAllScenes();
+            Level.LoadScene(firstScene);
+
+            Editor.PlayModeEnd += OnPlayGameEnd;
+            RequestPlayScenesOrStopPlay();
+        }
+
+        private void OnPlayGameEnd()
+        {
+            Editor.PlayModeEnd -= OnPlayGameEnd;
+
+            Level.UnloadAllScenes();
+
+            foreach (var sceneId in _scenesToReload)
+                Level.LoadScene(sceneId);
         }
 
         /// <summary>
@@ -111,14 +197,14 @@ namespace FlaxEditor.Modules
         }
 
         /// <summary>
-        /// Requests the playing start or stop in editor.
+        /// Requests the playing scenes start or stop in editor.
         /// </summary>
-        public void RequestPlayOrStopPlay()
+        public void RequestPlayScenesOrStopPlay()
         {
             if (Editor.StateMachine.IsPlayMode)
                 RequestStopPlay();
             else
-                RequestStartPlay();
+                RequestStartPlayScenes();
         }
 
         /// <summary>
@@ -181,7 +267,7 @@ namespace FlaxEditor.Modules
         }
 
         /// <inheritdoc />
-        public override void OnPlayBegin()
+        public override void OnPlayBeginning()
         {
             Editor.Windows.FlashMainWindow();
 
@@ -194,18 +280,24 @@ namespace FlaxEditor.Modules
                 _enterPlayFocusedWindow = gameWin;
 
             // Show Game widow if hidden
-            if (gameWin != null && gameWin.FocusOnPlay)
+            if (gameWin != null)
             {
-                if (!gameWin.IsDocked)
+                switch (gameWin.FocusOnPlayOption)
                 {
-                    gameWin.ShowFloating();
+                case Options.InterfaceOptions.PlayModeFocus.None: break;
+
+                case Options.InterfaceOptions.PlayModeFocus.GameWindow:
+                case Options.InterfaceOptions.PlayModeFocus.GameWindowThenRestoreEditor:
+                    gameWin.FocusGameViewport();
+                    break;
+
+                case Options.InterfaceOptions.PlayModeFocus.GameWindowThenRestore:
+                    _previousWindow = gameWin.ParentDockPanel.SelectedTab;
+                    gameWin.FocusGameViewport();
+                    break;
                 }
-                else if (!gameWin.IsSelected)
-                {
-                    gameWin.SelectTab(false);
-                    gameWin.RootWindow?.Window?.Focus();
-                    FlaxEngine.GUI.RootControl.GameRoot.Focus();
-                }
+
+                gameWin.SetWindowMode(Editor.Options.Options.Interface.DefaultGameWindowMode);
             }
 
             Editor.Log("[PlayMode] Enter");
@@ -214,11 +306,27 @@ namespace FlaxEditor.Modules
         /// <inheritdoc />
         public override void OnPlayEnd()
         {
-            // Restore focused window before play mode
-            if (_enterPlayFocusedWindow != null)
+            var gameWin = Editor.Windows.GameWin;
+            if (gameWin != null)
             {
-                _enterPlayFocusedWindow.FocusOrShow();
-                _enterPlayFocusedWindow = null;
+                switch (gameWin.FocusOnPlayOption)
+                {
+                case Options.InterfaceOptions.PlayModeFocus.None: break;
+                case Options.InterfaceOptions.PlayModeFocus.GameWindow: break;
+                case Options.InterfaceOptions.PlayModeFocus.GameWindowThenRestore:
+                    if (_previousWindow != null && !_previousWindow.IsDisposing)
+                    {
+                        if (!Editor.Windows.GameWin.ParentDockPanel.ContainsTab(_previousWindow))
+                            break;
+                        _previousWindow.Focus();
+                    }
+                    break;
+                case Options.InterfaceOptions.PlayModeFocus.GameWindowThenRestoreEditor:
+                    var editorWin = Editor.Windows.EditWin;
+                    if (editorWin != null && !editorWin.IsDisposing)
+                        editorWin.Focus();
+                    break;
+                }
             }
 
             Editor.UI.UncheckPauseButton();
@@ -236,16 +344,15 @@ namespace FlaxEditor.Modules
                 if (_isPlayModeRequested)
                 {
                     // Check if editor has been compiled and scripting reloaded (there is no pending reload action)
-                    if ((ScriptsBuilder.IsReady || !Editor.Options.Options.General.AutoReloadScriptsOnMainWindowFocus) && !Level.IsAnyActionPending)
+                    if ((ScriptsBuilder.IsReady || !Editor.Options.Options.General.AutoReloadScriptsOnMainWindowFocus) && !Level.IsAnyActionPending && Level.IsAnySceneLoaded)
                     {
                         // Clear flag
                         _isPlayModeRequested = false;
 
                         // Enter play mode
+                        var shouldPlayModeStartWithStep = Editor.UI.IsPauseButtonChecked;
                         Editor.StateMachine.GoToState<PlayingState>();
-
-                        // Check if move just by one frame
-                        if (ShouldPlayModeStartWithStep)
+                        if (shouldPlayModeStartWithStep)
                         {
                             RequestPausePlay();
                         }

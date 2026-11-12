@@ -1,24 +1,57 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS
 
-#include "WindowsWindow.h"
+#if PLATFORM_SDL
+#include "Engine/Platform/SDL/SDLWindow.h"
+#endif
+
+#include "Engine/Platform/Windows/WindowsWindow.h"
+
+#if USE_EDITOR
+#include "Engine/Core/Collections/Array.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Platform/IGuiData.h"
+#include "Engine/Platform/Base/DragDropHelper.h"
+#include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Input/Input.h"
+#include "Engine/Input/Mouse.h"
+#endif
+
+#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
+#include <propidl.h>
+#if USE_EDITOR
+#include <oleidl.h>
+#include <shellapi.h>
+#endif
 
 #if USE_EDITOR
 
-#include "Engine/Core/Log.h"
-#include "Engine/Core/Collections/Array.h"
-#include "Engine/Engine/Engine.h"
-#include "Engine/Platform/IGuiData.h"
-#include "Engine/Input/Input.h"
-#include "Engine/Input/Mouse.h"
-#include "Engine/Threading/ThreadPoolTask.h"
-#include "Engine/Threading/ThreadPool.h"
-#include "Engine/Scripting/Scripting.h"
-#include "Engine/Scripting/ManagedCLR/MDomain.h"
-#include "../Win32/IncludeWindowsHeaders.h"
-#include <oleidl.h>
-#include <shellapi.h>
+Windows::HRESULT Window::QueryInterface(const Windows::IID& id, void** ppvObject)
+{
+    // Check to see what interface has been requested
+    if ((const IID&)id == IID_IUnknown || (const IID&)id == IID_IDropTarget)
+    {
+        AddRef();
+        *ppvObject = this;
+        return S_OK;
+    }
+
+    // No interface
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+}
+
+Windows::ULONG Window::AddRef()
+{
+    _InterlockedIncrement(&_refCount);
+    return _refCount;
+}
+
+Windows::ULONG Window::Release()
+{
+    return _InterlockedDecrement(&_refCount);
+}
 
 HGLOBAL duplicateGlobalMem(HGLOBAL hMem)
 {
@@ -115,12 +148,10 @@ HRESULT CreateEnumFormatEtc(UINT nNumFormats, FORMATETC* pFormatEtc, IEnumFORMAT
 class WindowsGuiData : public IGuiData
 {
 private:
-
     Type _type;
     Array<String> _data;
 
 public:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -131,7 +162,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Init from Ole IDataObject
     /// </summary>
@@ -200,13 +230,11 @@ public:
     }
 
 public:
-
     // [IGuiData]
     Type GetType() const override
     {
         return _type;
     }
-
     String GetAsText() const override
     {
         String result;
@@ -216,7 +244,6 @@ public:
         }
         return result;
     }
-
     void GetAsFiles(Array<String>* files) const override
     {
         if (_type == Type::Files)
@@ -232,14 +259,12 @@ public:
 class WindowsEnumFormatEtc : public IEnumFORMATETC
 {
 private:
-
     ULONG _refCount;
     ULONG _index;
     ULONG _formatsCount;
     FORMATETC* _formatEtc;
 
 public:
-
     WindowsEnumFormatEtc(FORMATETC* pFormatEtc, int32 nNumFormats)
         : _refCount(1)
         , _index(0)
@@ -273,8 +298,7 @@ public:
     }
 
 public:
-
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, _COM_Outptr_ void __RPC_FAR *__RPC_FAR * ppvObject) override
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, _COM_Outptr_ void __RPC_FAR* __RPC_FAR* ppvObject) override
     {
         // Check to see what interface has been requested
         if (riid == IID_IEnumFORMATETC || riid == IID_IUnknown)
@@ -288,13 +312,11 @@ public:
         *ppvObject = nullptr;
         return E_NOINTERFACE;
     }
-
     ULONG STDMETHODCALLTYPE AddRef() override
     {
         _InterlockedIncrement(&_refCount);
         return _refCount;
     }
-
     ULONG STDMETHODCALLTYPE Release() override
     {
         ULONG ulRefCount = _InterlockedDecrement(&_refCount);
@@ -329,19 +351,16 @@ public:
         // did we copy all that was requested?
         return (copied == celt) ? S_OK : S_FALSE;
     }
-
     HRESULT STDMETHODCALLTYPE Skip(ULONG celt) override
     {
         _index += celt;
         return (_index <= _formatsCount) ? S_OK : S_FALSE;
     }
-
     HRESULT STDMETHODCALLTYPE Reset() override
     {
         _index = 0;
         return S_OK;
     }
-
     HRESULT STDMETHODCALLTYPE Clone(IEnumFORMATETC** ppEnumFormatEtc) override
     {
         HRESULT result;
@@ -363,10 +382,8 @@ HRESULT CreateEnumFormatEtc(UINT nNumFormats, FORMATETC* pFormatEtc, IEnumFORMAT
 {
     if (nNumFormats == 0 || pFormatEtc == nullptr || ppEnumFormatEtc == nullptr)
         return E_INVALIDARG;
-
     *ppEnumFormatEtc = new WindowsEnumFormatEtc(pFormatEtc, nNumFormats);
-
-    return (*ppEnumFormatEtc) ? S_OK : E_OUTOFMEMORY;
+    return *ppEnumFormatEtc ? S_OK : E_OUTOFMEMORY;
 }
 
 /// <summary>
@@ -375,14 +392,12 @@ HRESULT CreateEnumFormatEtc(UINT nNumFormats, FORMATETC* pFormatEtc, IEnumFORMAT
 class WindowsDragSource : public IDataObject, public IDropSource
 {
 private:
-
     ULONG _refCount;
     int32 _formatsCount;
     FORMATETC* _formatEtc;
     STGMEDIUM* _stgMedium;
 
 public:
-
     WindowsDragSource(FORMATETC* fmtetc, STGMEDIUM* stgmed, int32 count)
         : _refCount(1)
         , _formatsCount(count)
@@ -403,16 +418,13 @@ public:
 
     virtual ~WindowsDragSource()
     {
-        if (_formatEtc)
-            delete[] _formatEtc;
-        if (_stgMedium)
-            delete[] _stgMedium;
+        delete[] _formatEtc;
+        delete[] _stgMedium;
     }
 
 public:
-
     // [IUnknown]
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, _COM_Outptr_ void __RPC_FAR *__RPC_FAR * ppvObject) override
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, _COM_Outptr_ void __RPC_FAR* __RPC_FAR* ppvObject) override
     {
         // Check to see what interface has been requested
         if (riid == IID_IDataObject || riid == IID_IUnknown || riid == IID_IDropSource)
@@ -457,7 +469,6 @@ public:
         // Continue with the drag-drop
         return S_OK;
     }
-
     HRESULT STDMETHODCALLTYPE GiveFeedback(_In_ DWORD dwEffect) override
     {
         // TODO: allow to use custom mouse cursor during drop and drag operation
@@ -492,29 +503,24 @@ public:
 
         return S_OK;
     }
-
     HRESULT STDMETHODCALLTYPE GetDataHere(_In_ FORMATETC* pformatetc, _Inout_ STGMEDIUM* pmedium) override
     {
         return DATA_E_FORMATETC;
     }
-
     HRESULT STDMETHODCALLTYPE QueryGetData(__RPC__in_opt FORMATETC* pformatetc) override
     {
         return lookupFormatEtc(pformatetc) == INVALID_INDEX ? DV_E_FORMATETC : S_OK;
     }
-
     HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(__RPC__in_opt FORMATETC* pformatectIn, __RPC__out FORMATETC* pformatetcOut) override
     {
         // Apparently we have to set this field to NULL even though we don't do anything else
         pformatetcOut->ptd = nullptr;
         return E_NOTIMPL;
     }
-
     HRESULT STDMETHODCALLTYPE SetData(_In_ FORMATETC* pformatetc, _In_ STGMEDIUM* pmedium, BOOL fRelease) override
     {
         return E_NOTIMPL;
     }
-
     HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD dwDirection, __RPC__deref_out_opt IEnumFORMATETC** ppenumFormatEtc) override
     {
         // Only the get direction is supported for OLE
@@ -527,24 +533,20 @@ public:
         // The direction specified is not supported for drag+drop
         return E_NOTIMPL;
     }
-
     HRESULT STDMETHODCALLTYPE DAdvise(__RPC__in FORMATETC* pformatetc, DWORD advf, __RPC__in_opt IAdviseSink* pAdvSink, __RPC__out DWORD* pdwConnection) override
     {
         return OLE_E_ADVISENOTSUPPORTED;
     }
-
     HRESULT STDMETHODCALLTYPE DUnadvise(DWORD dwConnection) override
     {
         return OLE_E_ADVISENOTSUPPORTED;
     }
-
     HRESULT STDMETHODCALLTYPE EnumDAdvise(__RPC__deref_out_opt IEnumSTATDATA** ppenumAdvise) override
     {
         return OLE_E_ADVISENOTSUPPORTED;
     }
 
 private:
-
     int32 lookupFormatEtc(FORMATETC* pFormatEtc) const
     {
         // Check each of our formats in turn to see if one matches
@@ -566,49 +568,13 @@ private:
 
 WindowsGuiData GuiDragDropData;
 
-/// <summary>
-/// Async DoDragDrop helper (used for rendering frames during main thread stall).
-/// </summary>
-class DoDragDropJob : public ThreadPoolTask
-{
-public:
-
-    int64 ExitFlag = 0;
-
-public:
-
-    // [ThreadPoolTask]
-    bool Run() override
-    {
-        const uint64 beginFrame = Engine::FrameCount;
-
-        Scripting::GetScriptsDomain()->Dispatch();
-
-        while (Platform::AtomicRead(&ExitFlag) == 0)
-        {
-            // Render single frame
-            Engine::OnDraw();
-
-            // Wait for a while
-            Platform::Sleep(20);
-        }
-
-        const uint64 endFrame = Engine::FrameCount;
-        LOG(Info, "Rendered {0} frames during DoDragDrop stall.", endFrame - beginFrame);
-
-        return false;
-    }
-};
-
-DragDropEffect WindowsWindow::DoDragDrop(const StringView& data)
+DragDropEffect Window::DoDragDrop(const StringView& data)
 {
     // Create background worker that will keep updating GUI (perform rendering)
     const auto task = New<DoDragDropJob>();
     Task::StartNew(task);
     while (task->GetState() == TaskState::Queued)
-    {
         Platform::Sleep(1);
-    }
 
     // Create descriptors
     FORMATETC fmtetc = { CF_TEXT, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
@@ -634,72 +600,65 @@ DragDropEffect WindowsWindow::DoDragDrop(const StringView& data)
 
     // Fix hanging mouse state (Windows doesn't send WM_LBUTTONUP when we end the drag and drop)
     if (Input::GetMouseButton(MouseButton::Left))
-        Input::Mouse->OnMouseUp(Input::Mouse->GetPosition(), MouseButton::Left, this);
+    {
+        ::POINT point;
+        ::GetCursorPos(&point);
+#if PLATFORM_SDL
+        // Reset the internal button state in SDL
+        SendMessageA((HWND)_handle, WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+#else
+        Input::Mouse->OnMouseUp(Float2((float)point.x, (float)point.y), MouseButton::Left, this);
+#endif
+    }
 
     return SUCCEEDED(result) ? dropEffectFromOleEnum(dwEffect) : DragDropEffect::None;
 }
 
-HRESULT WindowsWindow::DragEnter(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
+HRESULT Window::DragEnter(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
 {
-    // Call GUI
     POINT p = { pt.x, pt.y };
-    ::ScreenToClient(_handle, &p);
+    ::ScreenToClient((HWND)_handle, &p);
     GuiDragDropData.Init((IDataObject*)pDataObj);
     DragDropEffect effect = DragDropEffect::None;
-    OnDragEnter(&GuiDragDropData, Vector2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
-
-    // Focus
+    OnDragEnter(&GuiDragDropData, Float2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
     Focus();
-
-    // Translate effect into Ole Api type
     *pdwEffect = dropEffect2OleEnum(effect);
-
     return S_OK;
 }
 
-HRESULT WindowsWindow::DragOver(Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
+HRESULT Window::DragOver(Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
 {
-    // Call GUI
     POINT p = { pt.x, pt.y };
-    ::ScreenToClient(_handle, &p);
+    ::ScreenToClient((HWND)_handle, &p);
     DragDropEffect effect = DragDropEffect::None;
-    OnDragOver(&GuiDragDropData, Vector2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
-
-    // Translate effect into Ole Api type
+    OnDragOver(&GuiDragDropData, Float2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
     *pdwEffect = dropEffect2OleEnum(effect);
-
     return S_OK;
 }
 
-HRESULT WindowsWindow::DragLeave()
+HRESULT Window::DragLeave()
 {
-    // Call GUI
     OnDragLeave();
-
     return S_OK;
 }
 
-HRESULT WindowsWindow::Drop(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
+HRESULT Window::Drop(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect)
 {
-    // Call GUI
     POINT p = { pt.x, pt.y };
-    ::ScreenToClient(_handle, &p);
+    ::ScreenToClient((HWND)_handle, &p);
     GuiDragDropData.Init((IDataObject*)pDataObj);
     DragDropEffect effect = DragDropEffect::None;
-    OnDragDrop(&GuiDragDropData, Vector2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
-
-    // Translate effect into Ole Api type
+    ScopeLock gpuLock(GPUDevice::Instance->Locker); // Avoid issues when DoDragDropJob is during frame painting
+    OnDragDrop(&GuiDragDropData, Float2(static_cast<float>(p.x), static_cast<float>(p.y)), effect);
     *pdwEffect = dropEffect2OleEnum(effect);
-
     return S_OK;
 }
 
 #else
 
-DragDropEffect WindowsWindow::DoDragDrop(const StringView& data)
+DragDropEffect Window::DoDragDrop(const StringView& data)
 {
-	// Not supported
-	return DragDropEffect::None;
+    return DragDropEffect::None;
 }
 
 #endif

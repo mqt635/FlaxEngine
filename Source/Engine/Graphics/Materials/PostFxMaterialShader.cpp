@@ -1,9 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "PostFxMaterialShader.h"
 #include "MaterialParams.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
@@ -11,13 +13,16 @@
 
 PACK_STRUCT(struct PostFxMaterialShaderData {
     Matrix ViewMatrix;
-    Vector3 ViewPos;
+    Float3 ViewPos;
     float ViewFar;
-    Vector3 ViewDir;
+    Float3 ViewDir;
     float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector4 TemporalAAJitter;
+    Float4 ViewInfo;
+    Float4 ScreenSize;
+    Float4 TemporalAAJitter;
+    Matrix InverseViewProjectionMatrix;
+    Float3 ViewPadding0;
+    float ScaledTimeParam;
     });
 
 void PostFxMaterialShader::Bind(BindParameters& params)
@@ -28,7 +33,7 @@ void PostFxMaterialShader::Bind(BindParameters& params)
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(PostFxMaterialShaderData));
     auto materialData = reinterpret_cast<PostFxMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(PostFxMaterialShaderData), cb.Length() - sizeof(PostFxMaterialShaderData));
+    cb = cb.Slice(sizeof(PostFxMaterialShaderData));
     int32 srv = 0;
 
     // Setup parameters
@@ -44,10 +49,12 @@ void PostFxMaterialShader::Bind(BindParameters& params)
     // Setup material constants
     {
         Matrix::Transpose(view.View, materialData->ViewMatrix);
+        Matrix::Transpose(view.IVP, materialData->InverseViewProjectionMatrix);
         materialData->ViewPos = view.Position;
         materialData->ViewFar = view.Far;
         materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
+        materialData->TimeParam = params.Time;
+        materialData->ScaledTimeParam = params.ScaledTime;
         materialData->ViewInfo = view.ViewInfo;
         materialData->ScreenSize = view.ScreenSize;
         materialData->TemporalAAJitter = view.TemporalAAJitter;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -26,6 +26,9 @@ namespace FlaxEditor.Content
 
         /// <inheritdoc />
         public override ContentItemSearchFilter SearchFilter => ContentItemSearchFilter.Scene;
+
+        /// <inheritdoc />
+        public override string TypeDescription => "Scene";
 
         /// <inheritdoc />
         public override SpriteHandle DefaultThumbnail => Editor.Instance.Icons.Scene128;

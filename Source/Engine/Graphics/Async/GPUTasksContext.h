@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,14 +15,12 @@ class GPUTask;
 class GPUTasksContext
 {
 protected:
-
     CriticalSection _locker;
     GPUSyncPoint _currentSyncPoint;
-    Array<GPUTask*> _tasksDone;
-    int32 _totalTasksDoneCount;
+    int32 _totalTasksDoneCount = 0;
+    Array<GPUTask*> _tasksSyncing;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUTasksContext"/> class.
     /// </summary>
@@ -35,18 +33,15 @@ public:
     ~GPUTasksContext();
 
 public:
-
     /// <summary>
     /// The GPU commands context used for tasks execution (can be only copy/upload without graphics capabilities on some platforms).
     /// </summary>
     GPUContext* GPU;
 
 public:
-
     /// <summary>
     /// Gets graphics device handle
     /// </summary>
-    /// <returns>Graphics device</returns>
     FORCE_INLINE GPUDevice* GetDevice() const
     {
         return GPU->GetDevice();
@@ -55,7 +50,6 @@ public:
     /// <summary>
     /// Gets current synchronization point of that context (CPU position, GPU has some latency)
     /// </summary>
-    /// <returns>Context sync point</returns>
     FORCE_INLINE GPUSyncPoint GetCurrentSyncPoint() const
     {
         return _currentSyncPoint;
@@ -64,7 +58,6 @@ public:
     /// <summary>
     /// Gets total amount of tasks done by this context
     /// </summary>
-    /// <returns>Done tasks count</returns>
     FORCE_INLINE int32 GetTotalTasksDoneCount() const
     {
         return _totalTasksDoneCount;
@@ -79,7 +72,6 @@ public:
     void OnCancelSync(GPUTask* task);
 
 public:
-
     void OnFrameBegin();
 
     void OnFrameEnd();

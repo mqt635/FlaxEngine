@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -24,7 +24,7 @@ namespace Log
         /// <summary>
         /// Creates default exception with additional data
         /// </summary>
-        /// <param name="message">Additional information that help describe error</param>
+        /// <param name="additionalInfo">Additional information that help describe error</param>
         InvalidOperationException(const String& additionalInfo)
             : Exception(TEXT("Current object didn't exists or its state was invalid."), additionalInfo)
         {

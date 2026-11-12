@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.Gizmo;
 using FlaxEditor.SceneGraph.Actors;
 using FlaxEditor.Viewport;
 using FlaxEditor.Viewport.Modes;
@@ -16,7 +17,7 @@ namespace FlaxEditor.Tools.Foliage
         private int _selectedInstanceIndex = -1;
 
         /// <summary>
-        /// The foliage painting gizmo.
+        /// The foliage editing gizmo.
         /// </summary>
         public EditFoliageGizmo Gizmo;
 
@@ -60,13 +61,11 @@ namespace FlaxEditor.Tools.Foliage
         public event Action SelectedInstanceIndexChanged;
 
         /// <inheritdoc />
-        public override void Init(MainEditorGizmoViewport viewport)
+        public override void Init(IGizmoOwner owner)
         {
-            base.Init(viewport);
+            base.Init(owner);
 
-            Gizmo = new EditFoliageGizmo(viewport, this);
-            SelectionOutline = FlaxEngine.Object.New<EditFoliageSelectionOutline>();
-            SelectionOutline.GizmoMode = this;
+            Gizmo = new EditFoliageGizmo(owner, this);
         }
 
         /// <inheritdoc />
@@ -82,15 +81,20 @@ namespace FlaxEditor.Tools.Foliage
         {
             base.OnActivated();
 
-            Viewport.Gizmos.Active = Gizmo;
-            Viewport.OverrideSelectionOutline(SelectionOutline);
+            Owner.Gizmos.Active = Gizmo;
+            if (SelectionOutline == null)
+            {
+                SelectionOutline = FlaxEngine.Object.New<EditFoliageSelectionOutline>();
+                SelectionOutline.GizmoMode = this;
+            }
+            ((MainEditorGizmoViewport)Owner).OverrideSelectionOutline(SelectionOutline);
             SelectedInstanceIndex = -1;
         }
 
         /// <inheritdoc />
         public override void OnDeactivated()
         {
-            Viewport.OverrideSelectionOutline(null);
+            ((MainEditorGizmoViewport)Owner).OverrideSelectionOutline(null);
 
             base.OnDeactivated();
         }

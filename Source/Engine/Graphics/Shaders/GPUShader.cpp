@@ -1,63 +1,51 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GPUShader.h"
 #include "GPUConstantBuffer.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Math.h"
+#include "Engine/Core/Types/Span.h"
+#include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/Shaders/GPUVertexLayout.h"
 #include "Engine/Serialization/MemoryReadStream.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
-GPUShaderProgramsContainer::GPUShaderProgramsContainer()
-    : _shaders(64)
-{
-    // TODO: test different values for _shaders capacity, test performance impact (less hash collisions but more memory?)
-}
-
-GPUShaderProgramsContainer::~GPUShaderProgramsContainer()
-{
-    // Remember to delete all programs
-    _shaders.ClearDelete();
-}
-
-void GPUShaderProgramsContainer::Add(GPUShaderProgram* shader, int32 permutationIndex)
-{
-    // Validate input
-    ASSERT(shader && Math::IsInRange(permutationIndex, 0, SHADER_PERMUTATIONS_MAX_COUNT - 1));
-#if ENABLE_ASSERTION
-    if ((Get(shader->GetName(), permutationIndex) != nullptr))
-    {
-        CRASH;
-    }
-#endif
-
-    // Store shader
-    const int32 hash = CalculateHash(shader->GetName(), permutationIndex);
-    _shaders.Add(hash, shader);
-}
-
-GPUShaderProgram* GPUShaderProgramsContainer::Get(const StringAnsiView& name, int32 permutationIndex) const
-{
-    // Validate input
-    ASSERT(name.Length() > 0 && Math::IsInRange(permutationIndex, 0, SHADER_PERMUTATIONS_MAX_COUNT - 1));
-
-    // Find shader
-    GPUShaderProgram* result = nullptr;
-    const int32 hash = CalculateHash(name, permutationIndex);
-    _shaders.TryGet(hash, result);
-
-    return result;
-}
-
-void GPUShaderProgramsContainer::Clear()
-{
-    _shaders.ClearDelete();
-}
-
-uint32 GPUShaderProgramsContainer::CalculateHash(const StringAnsiView& name, int32 permutationIndex)
+static FORCE_INLINE uint32 HashPermutation(const StringAnsiView& name, int32 permutationIndex)
 {
     return GetHash(name) * 37 + permutationIndex;
 }
 
+void GPUShaderProgram::Init(const GPUShaderProgramInitializer& initializer)
+{
+    _name = initializer.Name;
+    _bindings = initializer.Bindings;
+    _flags = initializer.Flags;
+#if !BUILD_RELEASE
+    _owner = initializer.Owner;
+#endif
+}
+
+#if !BUILD_RELEASE
+
+void GPUShaderProgram::GetDebugName(DebugName& name) const
+{
+    StringView ownerName = StringUtils::GetFileNameWithoutExtension(_owner->GetName());
+    name.AddUninitialized(ownerName.Length() + _name.Length() + 2);
+    char* dst = name.Get();
+    for (int32 i = 0; i < ownerName.Length(); i++)
+        dst[i] = (char)ownerName.Get()[i];
+    dst += ownerName.Length();
+    *dst = ':';
+    dst++;
+    for (int32 i = 0; i < _name.Length(); i++)
+        dst[i] = _name.Get()[i];
+    dst[_name.Length()] = 0;
+}
+
+#endif
+
 GPUShader::GPUShader()
+    : GPUResource(SpawnParams(Guid::New(), TypeInitializer))
 {
     Platform::MemoryClear(_constantBuffers, sizeof(_constantBuffers));
 }
@@ -65,13 +53,14 @@ GPUShader::GPUShader()
 bool GPUShader::Create(MemoryReadStream& stream)
 {
     ReleaseGPU();
+    _memoryUsage = sizeof(GPUShader);
 
     // Version
     int32 version;
     stream.ReadInt32(&version);
     if (version != GPU_SHADER_CACHE_VERSION)
     {
-        LOG(Warning, "Unsupported shader version {0}. The supported version is {1}.", version, GPU_SHADER_CACHE_VERSION);
+        LOG(Warning, "Unsupported shader version {0}. The current version is {1}.", version, GPU_SHADER_CACHE_VERSION);
         return true;
     }
 
@@ -85,7 +74,11 @@ bool GPUShader::Create(MemoryReadStream& stream)
     GPUShaderProgramInitializer initializer;
 #if !BUILD_RELEASE
     initializer.Owner = this;
+    const StringView name = GetName();
+#else
+    const StringView name;
 #endif
+    const bool hasCompute = GPUDevice::Instance->Limits.HasCompute;
     for (int32 i = 0; i < shadersCount; i++)
     {
         const ShaderStage type = static_cast<ShaderStage>(stream.ReadByte());
@@ -93,7 +86,7 @@ bool GPUShader::Create(MemoryReadStream& stream)
         ASSERT(Math::IsInRange(permutationsCount, 1, SHADER_PERMUTATIONS_MAX_COUNT));
 
         // Load shader name
-        stream.ReadStringAnsi(&initializer.Name, 11);
+        stream.Read(initializer.Name, 11);
         ASSERT(initializer.Name.HasChars());
 
         // Load shader flags
@@ -101,80 +94,100 @@ bool GPUShader::Create(MemoryReadStream& stream)
 
         for (int32 permutationIndex = 0; permutationIndex < permutationsCount; permutationIndex++)
         {
-            // Load cache
-            uint32 cacheSize;
-            stream.ReadUint32(&cacheSize);
-            if (cacheSize > stream.GetLength() - stream.GetPosition())
+            // Load bytecode
+            uint32 bytecodeSize;
+            stream.ReadUint32(&bytecodeSize);
+            if (bytecodeSize > stream.GetLength() - stream.GetPosition())
             {
-                LOG(Warning, "Invalid shader cache size.");
+                LOG(Warning, "Invalid shader bytecode size.");
                 return true;
             }
-            byte* cache = stream.Read<byte>(cacheSize);
+            byte* bytecode = stream.Move<byte>(bytecodeSize);
 
             // Read bindings
             stream.ReadBytes(&initializer.Bindings, sizeof(ShaderBindings));
 
             // Create shader program
-            GPUShaderProgram* shader = CreateGPUShaderProgram(type, initializer, cache, cacheSize, stream);
+            if (type == ShaderStage::Compute && !hasCompute)
+            {
+                LOG(Warning, "Failed to create {} Shader program '{}' ({}).", ::ToString(type), String(initializer.Name), name);
+                continue;
+            }
+            GPUShaderProgram* shader = CreateGPUShaderProgram(type, initializer, Span<byte>(bytecode, bytecodeSize), stream);
             if (shader == nullptr)
             {
-                LOG(Warning, "Failed to create shader program.");
+#if !GPU_ALLOW_TESSELLATION_SHADERS
+                if (type == ShaderStage::Hull || type == ShaderStage::Domain)
+                    continue;
+#endif
+#if !GPU_ALLOW_GEOMETRY_SHADERS
+                if (type == ShaderStage::Geometry)
+                    continue;
+#endif
+                LOG(Error, "Failed to create {} Shader program '{}' ({}).", ::ToString(type), String(initializer.Name), name);
                 return true;
             }
 
-            // Add to collection
-            _shaders.Add(shader, permutationIndex);
+            // Add to the collection
+            const uint32 hash = HashPermutation(shader->GetName(), permutationIndex);
+            ASSERT_LOW_LAYER(!_shaders.ContainsKey(hash));
+            _shaders.Add(hash, shader);
+            _memoryUsage += sizeof(GPUShaderProgram) + bytecodeSize;
         }
     }
 
     // Constant Buffers
     const byte constantBuffersCount = stream.ReadByte();
-    const byte maximumConstantBufferSlot = stream.ReadByte();
-    if (constantBuffersCount > 0)
+    for (int32 i = 0; i < constantBuffersCount; i++)
     {
-        ASSERT(maximumConstantBufferSlot < MAX_CONSTANT_BUFFER_SLOTS);
-
-        for (int32 i = 0; i < constantBuffersCount; i++)
+        // Load info
+        const byte slotIndex = stream.ReadByte();
+        if (slotIndex >= GPU_MAX_CB_BINDED)
         {
-            // Load info
-            const byte slotIndex = stream.ReadByte();
-            uint32 size;
-            stream.ReadUint32(&size);
-
-            // Create CB
-#if GPU_ENABLE_RESOURCE_NAMING
-            String name = ToString() + TEXT(".CB") + i;
-#else
-			String name;
-#endif
-            ASSERT(_constantBuffers[slotIndex] == nullptr);
-            const auto cb = CreateCB(name, size, stream);
-            if (cb == nullptr)
-            {
-                LOG(Warning, "Failed to create shader constant buffer.");
-                return true;
-            }
-            _constantBuffers[slotIndex] = cb;
+            LOG(Warning, "Failed to create shader constant buffer.");
+            return true;
         }
+        uint32 size;
+        stream.ReadUint32(&size);
+
+        // Create CB
+#if GPU_ENABLE_RESOURCE_NAMING
+        String cbName = String::Format(TEXT("{}.CB{}"), ToString(), i);
+#else
+		String cbName;
+#endif
+        ASSERT(_constantBuffers[slotIndex] == nullptr);
+        const auto cb = GPUDevice::Instance->CreateConstantBuffer(size, cbName);
+        if (cb == nullptr)
+        {
+            LOG(Warning, "Failed to create shader constant buffer.");
+            return true;
+        }
+        _constantBuffers[slotIndex] = cb;
+        _memoryUsage += sizeof(GPUConstantBuffer);
     }
 
     // Don't read additional data
 
-    _memoryUsage = 1;
+    PROFILE_MEM_INC(GraphicsShaders, _memoryUsage);
     return false;
+}
+
+bool GPUShader::HasShader(const StringAnsiView& name, int32 permutationIndex) const
+{
+    const uint32 hash = HashPermutation(name, permutationIndex);
+    return _shaders.ContainsKey(hash);
 }
 
 GPUShaderProgram* GPUShader::GetShader(ShaderStage stage, const StringAnsiView& name, int32 permutationIndex) const
 {
-    const auto shader = _shaders.Get(name, permutationIndex);
-
+    GPUShaderProgram* shader = nullptr;
+    const uint32 hash = HashPermutation(name, permutationIndex);
+    _shaders.TryGet(hash, shader);
 #if BUILD_RELEASE
-
 	// Release build is more critical on that
 	ASSERT(shader != nullptr && shader->GetStage() == stage);
-
 #else
-
     if (shader == nullptr)
     {
         LOG(Error, "Missing {0} shader \'{1}\'[{2}]. Object: {3}.", ::ToString(stage), String(name), permutationIndex, ToString());
@@ -183,20 +196,50 @@ GPUShaderProgram* GPUShader::GetShader(ShaderStage stage, const StringAnsiView& 
     {
         LOG(Error, "Invalid shader stage \'{1}\'[{2}]. Expected: {0}. Actual: {4}. Object: {3}.", ::ToString(stage), String(name), permutationIndex, ToString(), ::ToString(shader->GetStage()));
     }
-
 #endif
-
     return shader;
 }
 
-GPUResource::ResourceType GPUShader::GetResourceType() const
+void GPUShader::ReadVertexLayout(MemoryReadStream& stream, GPUVertexLayout*& inputLayout, GPUVertexLayout*& vertexLayout)
 {
-    return ResourceType::Shader;
+    inputLayout = vertexLayout = nullptr;
+
+    // Read input layout (based on shader reflection)
+    GPUVertexLayout::Elements elements;
+    stream.Read(elements);
+    inputLayout = GPUVertexLayout::Get(elements);
+
+    // [Deprecated in v1.10]
+    byte inputLayoutSize;
+    stream.ReadByte(&inputLayoutSize);
+    if (inputLayoutSize == 0)
+        return;
+    void* elementsData = stream.Move(sizeof(VertexElement) * inputLayoutSize);
+    if (inputLayoutSize > GPU_MAX_VS_ELEMENTS)
+    {
+        LOG(Error, "Incorrect input layout size.");
+        return;
+    }
+    elements.Set((VertexElement*)elementsData, inputLayoutSize);
+    vertexLayout = GPUVertexLayout::Get(elements);
+}
+
+GPUResourceType GPUShader::GetResourceType() const
+{
+    return GPUResourceType::Shader;
 }
 
 void GPUShader::OnReleaseGPU()
 {
+    PROFILE_MEM_DEC(GraphicsShaders, _memoryUsage);
+    for (GPUConstantBuffer*& cb : _constantBuffers)
+    {
+        if (cb)
+        {
+            SAFE_DELETE_GPU_RESOURCE(cb);
+            cb = nullptr;
+        }
+    }
     _memoryUsage = 0;
-    _shaders.Clear();
-    Platform::MemoryClear(_constantBuffers, sizeof(_constantBuffers));
+    _shaders.ClearDelete();
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -30,16 +30,20 @@
 #endif
 
 // Enable logging service (saving log to file, can be disabled using -nolog command line)
+#ifndef LOG_ENABLE
 #define LOG_ENABLE 1
+#endif
 
 // Enable crash reporting service (stack trace and crash dump collecting)
 #define CRASH_LOG_ENABLE (!BUILD_RELEASE)
 
 // Enable/disable assertion
-#define ENABLE_ASSERTION 1
+#ifndef ENABLE_ASSERTION
+#define ENABLE_ASSERTION (!BUILD_RELEASE)
+#endif
 
 // Enable/disable assertion for Engine low layers
-#define ENABLE_ASSERTION_LOW_LAYERS ENABLE_ASSERTION && (BUILD_DEBUG)
+#define ENABLE_ASSERTION_LOW_LAYERS ENABLE_ASSERTION && (BUILD_DEBUG || FLAX_TESTS)
 
 // Scripting API defines (see C++ scripting documentation for more info)
 #define API_ENUM(...)
@@ -51,6 +55,7 @@
 #define API_FIELD(...)
 #define API_EVENT(...)
 #define API_PARAM(...)
-#define API_INJECT_CPP_CODE(...)
-#define API_AUTO_SERIALIZATION(...) public: void Serialize(SerializeStream& stream, const void* otherObj) override; void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
+#define API_TYPEDEF(...)
+#define API_INJECT_CODE(...)
+#define API_AUTO_SERIALIZATION(...) public: bool ShouldSerialize(const void* otherObj) const override; void Serialize(SerializeStream& stream, const void* otherObj) override; void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 #define DECLARE_SCRIPTING_TYPE_MINIMAL(type) public: friend class type##Internal; static struct ScriptingTypeInitializer TypeInitializer;

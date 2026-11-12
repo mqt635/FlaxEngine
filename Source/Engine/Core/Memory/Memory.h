@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -41,6 +41,32 @@ namespace AllocatorExt
     /// </summary>
     /// </summary>
     /// <param name="ptr">A pointer to the memory block to reallocate.</param>
+    /// <param name="newSize">The size of the new allocation (in bytes).</param>
+    /// <param name="alignment">The memory alignment (in bytes). Must be an integer power of 2.</param>
+    /// <returns>The pointer to the allocated chunk of the memory. The pointer is a multiple of alignment.</returns>
+    inline void* ReallocAligned(void* ptr, uint64 newSize, uint64 alignment)
+    {
+        if (newSize == 0)
+        {
+            Allocator::Free(ptr);
+            return nullptr;
+        }
+        if (!ptr)
+            return Allocator::Allocate(newSize, alignment);
+        void* result = Allocator::Allocate(newSize, alignment);
+        if (result)
+        {
+            Platform::MemoryCopy(result, ptr, newSize);
+            Allocator::Free(ptr);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Reallocates block of the memory.
+    /// </summary>
+    /// </summary>
+    /// <param name="ptr">A pointer to the memory block to reallocate.</param>
     /// <param name="oldSize">The size of the old allocation (in bytes).</param>
     /// <param name="newSize">The size of the new allocation (in bytes).</param>
     /// <returns>The pointer to the allocated chunk of the memory. The pointer is a multiple of alignment.</returns>
@@ -65,26 +91,21 @@ namespace AllocatorExt
     }
 }
 
-namespace Memory
+class Memory
 {
+public:
     /// <summary>
     /// Constructs the item in the memory.
     /// </summary>
     /// <remarks>The optimized version is noop.</remarks>
     /// <param name="dst">The address of the memory location to construct.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<!TIsTriviallyConstructible<T>::Value>::Type ConstructItem(T* dst)
+    FORCE_INLINE static typename TEnableIf<!TIsTriviallyConstructible<T>::Value>::Type ConstructItem(T* dst)
     {
         new(dst) T();
     }
-
-    /// <summary>
-    /// Constructs the item in the memory.
-    /// </summary>
-    /// <remarks>The optimized version is noop.</remarks>
-    /// <param name="dst">The address of the memory location to construct.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<TIsTriviallyConstructible<T>::Value>::Type ConstructItem(T* dst)
+    FORCE_INLINE static typename TEnableIf<TIsTriviallyConstructible<T>::Value>::Type ConstructItem(T* dst)
     {
         // More undefined behavior! No more clean memory! More performance! Yay!
         //Platform::MemoryClear(dst, sizeof(T));
@@ -97,7 +118,7 @@ namespace Memory
     /// <param name="dst">The address of the first memory location to construct.</param>
     /// <param name="count">The number of element to construct. Can be equal 0.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<!TIsTriviallyConstructible<T>::Value>::Type ConstructItems(T* dst, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsTriviallyConstructible<T>::Value>::Type ConstructItems(T* dst, int32 count)
     {
         while (count--)
         {
@@ -105,15 +126,8 @@ namespace Memory
             ++(T*&)dst;
         }
     }
-
-    /// <summary>
-    /// Constructs the range of items in the memory.
-    /// </summary>
-    /// <remarks>The optimized version is noop.</remarks>
-    /// <param name="dst">The address of the first memory location to construct.</param>
-    /// <param name="count">The number of element to construct. Can be equal 0.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<TIsTriviallyConstructible<T>::Value>::Type ConstructItems(T* dst, int32 count)
+    FORCE_INLINE static typename TEnableIf<TIsTriviallyConstructible<T>::Value>::Type ConstructItems(T* dst, int32 count)
     {
         // More undefined behavior! No more clean memory! More performance! Yay!
         //Platform::MemoryClear(dst, count * sizeof(T));
@@ -127,7 +141,7 @@ namespace Memory
     /// <param name="src">The address of the first memory location to pass to the constructor.</param>
     /// <param name="count">The number of element to construct. Can be equal 0.</param>
     template<typename T, typename U>
-    FORCE_INLINE typename TEnableIf<!TIsBitwiseConstructible<T, U>::Value>::Type ConstructItems(T* dst, const U* src, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsBitwiseConstructible<T, U>::Value>::Type ConstructItems(T* dst, const U* src, int32 count)
     {
         while (count--)
         {
@@ -136,16 +150,8 @@ namespace Memory
             ++src;
         }
     }
-
-    /// <summary>
-    /// Constructs the range of items in the memory from the set of arguments.
-    /// </summary>
-    /// <remarks>The optimized version uses low-level memory copy.</remarks>
-    /// <param name="dst">The address of the first memory location to construct.</param>
-    /// <param name="src">The address of the first memory location to pass to the constructor.</param>
-    /// <param name="count">The number of element to construct. Can be equal 0.</param>
     template<typename T, typename U>
-    FORCE_INLINE typename TEnableIf<TIsBitwiseConstructible<T, U>::Value>::Type ConstructItems(T* dst, const U* src, int32 count)
+    FORCE_INLINE static typename TEnableIf<TIsBitwiseConstructible<T, U>::Value>::Type ConstructItems(T* dst, const U* src, int32 count)
     {
         Platform::MemoryCopy(dst, src, count * sizeof(U));
     }
@@ -156,18 +162,12 @@ namespace Memory
     /// <remarks>The optimized version is noop.</remarks>
     /// <param name="dst">The address of the memory location to destruct.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<!TIsTriviallyDestructible<T>::Value>::Type DestructItem(T* dst)
+    FORCE_INLINE static typename TEnableIf<!TIsTriviallyDestructible<T>::Value>::Type DestructItem(T* dst)
     {
         dst->~T();
     }
-
-    /// <summary>
-    /// Destructs the item in the memory.
-    /// </summary>
-    /// <remarks>The optimized version is noop.</remarks>
-    /// <param name="dst">The address of the memory location to destruct.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<TIsTriviallyDestructible<T>::Value>::Type DestructItem(T* dst)
+    FORCE_INLINE static typename TEnableIf<TIsTriviallyDestructible<T>::Value>::Type DestructItem(T* dst)
     {
     }
 
@@ -178,7 +178,7 @@ namespace Memory
     /// <param name="dst">The address of the first memory location to destruct.</param>
     /// <param name="count">The number of element to destruct. Can be equal 0.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<!TIsTriviallyDestructible<T>::Value>::Type DestructItems(T* dst, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsTriviallyDestructible<T>::Value>::Type DestructItems(T* dst, int32 count)
     {
         while (count--)
         {
@@ -186,15 +186,8 @@ namespace Memory
             ++dst;
         }
     }
-
-    /// <summary>
-    /// Destructs the range of items in the memory.
-    /// </summary>
-    /// <remarks>The optimized version is noop.</remarks>
-    /// <param name="dst">The address of the first memory location to destruct.</param>
-    /// <param name="count">The number of element to destruct. Can be equal 0.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<TIsTriviallyDestructible<T>::Value>::Type DestructItems(T* dst, int32 count)
+    FORCE_INLINE static typename TEnableIf<TIsTriviallyDestructible<T>::Value>::Type DestructItems(T* dst, int32 count)
     {
     }
 
@@ -206,7 +199,7 @@ namespace Memory
     /// <param name="src">The address of the first memory location to assign from.</param>
     /// <param name="count">The number of element to assign. Can be equal 0.</param>
     template<typename T>
-    FORCE_INLINE typename TEnableIf<!TIsTriviallyCopyAssignable<T>::Value>::Type CopyItems(T* dst, const T* src, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsTriviallyCopyAssignable<T>::Value>::Type CopyItems(T* dst, const T* src, int32 count)
     {
         while (count--)
         {
@@ -215,16 +208,8 @@ namespace Memory
             ++src;
         }
     }
-
-    /// <summary>
-    /// Copies the range of items using the assignment operator.
-    /// </summary>
-    /// <remarks>The optimized version is low-level memory copy.</remarks>
-    /// <param name="dst">The address of the first memory location to start assigning to.</param>
-    /// <param name="src">The address of the first memory location to assign from.</param>
-    /// <param name="count">The number of element to assign. Can be equal 0.</param>
-    template<typename T>
-    FORCE_INLINE typename TEnableIf<TIsTriviallyCopyAssignable<T>::Value>::Type CopyItems(T* dst, const T* src, int32 count)
+    template<typename T, typename U>
+    FORCE_INLINE static typename TEnableIf<TIsTriviallyCopyAssignable<T>::Value>::Type CopyItems(T* dst, const T* src, int32 count)
     {
         Platform::MemoryCopy(dst, src, count * sizeof(T));
     }
@@ -237,29 +222,44 @@ namespace Memory
     /// <param name="src">The address of the first memory location to pass to the move constructor.</param>
     /// <param name="count">The number of element to move. Can be equal 0.</param>
     template<typename T, typename U>
-    FORCE_INLINE typename TEnableIf<!TIsBitwiseConstructible<T, U>::Value>::Type MoveItems(T* dst, const U* src, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsBitwiseConstructible<T, U>::Value>::Type MoveItems(T* dst, U* src, int32 count)
     {
         while (count--)
         {
-            new(dst) T((T&&)*src);
+            new(dst) T((U&&)*src);
             ++(T*&)dst;
             ++src;
         }
     }
+    template<typename T, typename U>
+    FORCE_INLINE static typename TEnableIf<TIsBitwiseConstructible<T, U>::Value>::Type MoveItems(T* dst, U* src, int32 count)
+    {
+        Platform::MemoryCopy(dst, src, count * sizeof(U));
+    }
 
     /// <summary>
-    /// Moves the range of items in the memory from the set of arguments.
+    /// Moves the range of items using the assignment operator.
     /// </summary>
     /// <remarks>The optimized version uses low-level memory copy.</remarks>
     /// <param name="dst">The address of the first memory location to move.</param>
     /// <param name="src">The address of the first memory location to pass to the move constructor.</param>
     /// <param name="count">The number of element to move. Can be equal 0.</param>
     template<typename T, typename U>
-    FORCE_INLINE typename TEnableIf<TIsBitwiseConstructible<T, U>::Value>::Type MoveItems(T* dst, const U* src, int32 count)
+    FORCE_INLINE static typename TEnableIf<!TIsBitwiseConstructible<T, U>::Value>::Type MoveAssignItems(T* dst, U* src, int32 count)
+    {
+        while (count--)
+        {
+            *dst = MoveTemp(*src);
+            ++(T*&)dst;
+            ++src;
+        }
+    }
+    template<typename T, typename U>
+    FORCE_INLINE static typename TEnableIf<TIsBitwiseConstructible<T, U>::Value>::Type MoveAssignItems(T* dst, U* src, int32 count)
     {
         Platform::MemoryCopy(dst, src, count * sizeof(U));
     }
-}
+};
 
 /// <summary>
 /// Creates a new object of the given type.

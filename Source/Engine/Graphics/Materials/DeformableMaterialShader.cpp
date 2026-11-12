@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "DeformableMaterialShader.h"
 #include "MaterialShaderFeatures.h"
@@ -7,32 +7,23 @@
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Renderer/DrawCall.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/GPUContext.h"
-#include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Graphics/GPUDevice.h"
-#include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/GPULimits.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/Shaders/GPUShader.h"
+#include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 
 PACK_STRUCT(struct DeformableMaterialShaderData {
-    Matrix ViewProjectionMatrix;
     Matrix WorldMatrix;
     Matrix LocalMatrix;
-    Matrix ViewMatrix;
-    Vector3 ViewPos;
-    float ViewFar;
-    Vector3 ViewDir;
-    float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector3 Dummy0;
+    Float3 Dummy0;
     float WorldDeterminantSign;
     float MeshMinZ;
     float Segment;
     float ChunksPerSegment;
     float PerInstanceRandom;
-    Vector4 TemporalAAJitter;
-    Vector3 GeometrySize;
+    Float3 GeometrySize;
     float MeshMaxZ;
     });
 
@@ -46,11 +37,11 @@ void DeformableMaterialShader::Bind(BindParameters& params)
     // Prepare
     auto context = params.GPUContext;
     auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
+    auto& drawCall = *params.DrawCall;
     Span<byte> cb(_cbData.Get(), _cbData.Count());
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(DeformableMaterialShaderData));
     auto materialData = reinterpret_cast<DeformableMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(DeformableMaterialShaderData), cb.Length() - sizeof(DeformableMaterialShaderData));
+    cb = cb.Slice(sizeof(DeformableMaterialShaderData));
     int32 srv = 1;
 
     // Setup features
@@ -62,30 +53,21 @@ void DeformableMaterialShader::Bind(BindParameters& params)
     bindMeta.Context = context;
     bindMeta.Constants = cb;
     bindMeta.Input = nullptr;
-    bindMeta.Buffers = nullptr;
+    bindMeta.Buffers = params.RenderContext.Buffers;
     bindMeta.CanSampleDepth = false;
     bindMeta.CanSampleGBuffer = false;
     MaterialParams::Bind(params.ParamsLink, bindMeta);
 
     // Setup material constants
     {
-        Matrix::Transpose(view.Frustum.GetMatrix(), materialData->ViewProjectionMatrix);
         Matrix::Transpose(drawCall.World, materialData->WorldMatrix);
         Matrix::Transpose(drawCall.Deformable.LocalMatrix, materialData->LocalMatrix);
-        Matrix::Transpose(view.View, materialData->ViewMatrix);
-        materialData->ViewPos = view.Position;
-        materialData->ViewFar = view.Far;
-        materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = view.ViewInfo;
-        materialData->ScreenSize = view.ScreenSize;
-        materialData->WorldDeterminantSign = drawCall.WorldDeterminantSign;
+        materialData->WorldDeterminantSign = drawCall.WorldDeterminant ? -1.0f : 1.0f;
         materialData->Segment = drawCall.Deformable.Segment;
         materialData->ChunksPerSegment = drawCall.Deformable.ChunksPerSegment;
         materialData->MeshMinZ = drawCall.Deformable.MeshMinZ;
         materialData->MeshMaxZ = drawCall.Deformable.MeshMaxZ;
         materialData->PerInstanceRandom = drawCall.PerInstanceRandom;
-        materialData->TemporalAAJitter = view.TemporalAAJitter;
         materialData->GeometrySize = drawCall.Deformable.GeometrySize;
     }
 
@@ -100,22 +82,19 @@ void DeformableMaterialShader::Bind(BindParameters& params)
     }
 
     // Select pipeline state based on current pass and render mode
-    const bool wireframe = (_info.FeaturesFlags & MaterialFeaturesFlags::Wireframe) != 0 || view.Mode == ViewMode::Wireframe;
     CullMode cullMode = view.Pass == DrawPass::Depth ? CullMode::TwoSided : _info.CullMode;
-    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminantSign < 0)
+    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminant)
     {
         // Invert culling when scale is negative
-        if (cullMode == CullMode::Normal)
-            cullMode = CullMode::Inverted;
-        else
-            cullMode = CullMode::Normal;
+        cullMode = cullMode == CullMode::Normal ? CullMode::Inverted : CullMode::Normal;
     }
     PipelineStateCache* psCache = _cache.GetPS(view.Pass);
     ASSERT(psCache);
-    GPUPipelineState* state = psCache->GetPS(cullMode, wireframe);
+    GPUPipelineState* state = psCache->GetPS(this, cullMode);
 
     // Bind pipeline
     context->SetState(state);
+    context->SetStencilRef(drawCall.StencilValue);
 }
 
 void DeformableMaterialShader::Unload()
@@ -128,11 +107,15 @@ void DeformableMaterialShader::Unload()
 
 bool DeformableMaterialShader::Load()
 {
-    _drawModes = DrawPass::Depth;
+    _drawModes = DrawPass::Depth | DrawPass::QuadOverdraw | DrawPass::Wireframe;
     auto psDesc = GPUPipelineState::Description::Default;
-    psDesc.DepthTestEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthTest) == 0;
-    psDesc.DepthWriteEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthWrite) == 0;
+    psDesc.DepthEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthTest);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.CullMode = _info.CullMode;
+    psDesc.VS = _shader->GetVS("VS_SplineModel");
 
+#if GPU_ALLOW_TESSELLATION_SHADERS
     // Check if use tessellation (both material and runtime supports it)
     const bool useTess = _info.TessellationMode != TessellationMethod::None && GPUDevice::Instance->Limits.HasTessellation;
     if (useTess)
@@ -140,22 +123,48 @@ bool DeformableMaterialShader::Load()
         psDesc.HS = _shader->GetHS("HS");
         psDesc.DS = _shader->GetDS("DS");
     }
+#endif
+
+#if GPU_ENABLE_DEVELOPMENT
+    if (_shader->HasShader("PS_QuadOverdraw"))
+    {
+        // Quad Overdraw
+        _drawModes |= DrawPass::QuadOverdraw;
+        psDesc.PS = _shader->GetPS("PS_QuadOverdraw");
+        _cache.QuadOverdraw.Init(psDesc);
+    }
+
+    // Wireframe
+    psDesc.Wireframe = true;
+    psDesc.DepthWriteEnable = false;
+    psDesc.BlendMode = BlendingMode::AlphaBlend;
+    psDesc.PS = GPUDevice::Instance->QuadShader->GetPS("PS_Wireframe");
+    _cache.Wireframe.Init(psDesc);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.BlendMode = BlendingMode::Opaque;
+#endif
 
     if (_info.BlendMode == MaterialBlendMode::Opaque)
     {
-        _drawModes = DrawPass::GBuffer;
+        _drawModes |= DrawPass::GBuffer | DrawPass::GlobalSurfaceAtlas;
+
+        psDesc.StencilEnable = true;
+        psDesc.StencilReadMask = 0;
+        psDesc.StencilPassOp = StencilOperation::Replace;
 
         // GBuffer Pass
-        psDesc.VS = _shader->GetVS("VS_SplineModel");
         psDesc.PS = _shader->GetPS("PS_GBuffer");
         _cache.Default.Init(psDesc);
+
+        psDesc.StencilEnable = false;
+        psDesc.StencilPassOp = StencilOperation::Keep;
     }
     else
     {
-        _drawModes = DrawPass::Forward;
+        _drawModes |= DrawPass::Forward;
 
         // Forward Pass
-        psDesc.VS = _shader->GetVS("VS_SplineModel");
         psDesc.PS = _shader->GetPS("PS_Forward");
         psDesc.DepthWriteEnable = false;
         psDesc.BlendMode = BlendingMode::AlphaBlend;
@@ -172,14 +181,26 @@ bool DeformableMaterialShader::Load()
             break;
         }
         _cache.Default.Init(psDesc);
+
+        // Check if use transparent distortion pass
+        if (_shader->HasShader("PS_Distortion"))
+        {
+            _drawModes |= DrawPass::Distortion;
+
+            // Accumulate Distortion Pass
+            psDesc.PS = _shader->GetPS("PS_Distortion");
+            psDesc.BlendMode = BlendingMode::Add;
+            psDesc.DepthWriteEnable = false;
+            _cache.Distortion.Init(psDesc);
+        }
     }
 
     // Depth Pass
     psDesc.CullMode = CullMode::TwoSided;
     psDesc.DepthClipEnable = false;
     psDesc.DepthWriteEnable = true;
-    psDesc.DepthTestEnable = true;
-    psDesc.DepthFunc = ComparisonFunc::Less;
+    psDesc.DepthEnable = true;
+    psDesc.DepthFunc = ComparisonFunc::Default;
     psDesc.HS = nullptr;
     psDesc.DS = nullptr;
     _cache.Depth.Init(psDesc);

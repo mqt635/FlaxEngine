@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "SceneObject.h"
+#include "Tags.h"
 #include "Engine/Core/Types/Span.h"
 #include "Engine/Core/Math/Transform.h"
 #include "Engine/Core/Math/BoundingBox.h"
@@ -12,50 +13,50 @@
 
 struct RenderView;
 struct RenderContext;
+struct RenderContextBatch;
 class GPUContext;
 class MemoryWriteStream;
+class PhysicsScene;
 class SceneRendering;
 class SceneRenderTask;
-
-// Maximum tag index is used as an invalid value
-#define ACTOR_TAG_INVALID 255
 
 /// <summary>
 /// Base class for all actor objects on the scene.
 /// </summary>
 API_CLASS(Abstract) class FLAXENGINE_API Actor : public SceneObject
 {
-DECLARE_SCENE_OBJECT(Actor);
+    DECLARE_SCENE_OBJECT(Actor);
     friend Level;
     friend PrefabManager;
     friend Scene;
+    friend SceneRendering;
     friend Prefab;
     friend PrefabInstanceData;
-
+    friend class RenderBuffers;
 protected:
-
-    int8 _isActive : 1;
-    int8 _isActiveInHierarchy : 1;
-    int8 _isPrefabRoot : 1;
-    int8 _isEnabled : 1;
+    uint16 _isActive : 1;
+    uint16 _isActiveInHierarchy : 1;
+    uint16 _isPrefabRoot : 1;
+    uint16 _isEnabled : 1;
+    uint16 _isHierarchyDirty : 1;
+    uint16 _drawNoCulling : 1;
+    uint16 _drawCategory : 4;
     byte _layer;
-    byte _tag;
-    Scene* _scene;
     StaticFlags _staticFlags;
     Transform _localTransform;
     Transform _transform;
     BoundingSphere _sphere;
     BoundingBox _box;
     String _name;
+    Scene* _scene;
+    PhysicsScene* _physicsScene; // TODO: move it into physics-related actors (coliders, rigidbodies, etc.)
 
 private:
-
     // Disable copying
     Actor(Actor const&) = delete;
     Actor& operator=(Actor const&) = delete;
 
 public:
-
     /// <summary>
     /// List with all child actors attached to the actor (readonly). All items are valid (not null).
     /// </summary>
@@ -74,8 +75,12 @@ public:
     API_FIELD(Attributes="HideInEditor, NoSerialize")
     HideFlags HideFlags;
 
-public:
+    /// <summary>
+    /// Actor tags collection.
+    /// </summary>
+    API_FIELD(Attributes="NoAnimate, EditorDisplay(\"General\"), EditorOrder(-68)") Array<Tag> Tags;
 
+public:
     /// <summary>
     /// Gets the object layer (index). Can be used for selective rendering or ignoring raycasts.
     /// </summary>
@@ -94,55 +99,80 @@ public:
     }
 
     /// <summary>
-    /// Gets the actor tag (index). Can be used to identify the objects.
-    /// </summary>
-    FORCE_INLINE int32 GetTagIndex() const
-    {
-        return _tag;
-    }
-
-    /// <summary>
-    /// Determines whether this actor has tag assigned.
-    /// </summary>
-    API_FUNCTION() FORCE_INLINE bool HasTag() const
-    {
-        return _tag != ACTOR_TAG_INVALID;
-    }
-
-    /// <summary>
-    /// Determines whether this actor has given tag assigned.
-    /// </summary>
-    /// <param name="tag">The tag to check.</param>
-    API_FUNCTION() bool HasTag(const StringView& tag) const;
-
-    /// <summary>
-    /// Gets the name of the layer.
-    /// </summary>
-    API_PROPERTY() const String& GetLayerName() const;
-
-    /// <summary>
-    /// Gets the name of the tag.
-    /// </summary>
-    API_PROPERTY(Attributes="NoAnimate, EditorDisplay(\"General\"), EditorOrder(-68), CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTagEditor\")")
-    const String& GetTag() const;
-
-    /// <summary>
     /// Sets the layer.
     /// </summary>
     /// <param name="layerIndex">The index of the layer.</param>
     API_PROPERTY() void SetLayer(int32 layerIndex);
 
     /// <summary>
-    /// Sets the tag.
+    /// Sets the layer recursively for all underlying children.
     /// </summary>
-    /// <param name="tagIndex">The index of the tag.</param>
-    void SetTagIndex(int32 tagIndex);
+    /// <param name="layerIndex">The index of the layer.</param>
+    API_FUNCTION() void SetLayerRecursive(int32 layerIndex);
 
     /// <summary>
-    /// Sets the tag.
+    /// Gets the name of the layer.
     /// </summary>
-    /// <param name="tagName">Name of the tag.</param>
-    API_PROPERTY() void SetTag(const StringView& tagName);
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize, NoAnimate")
+    const String& GetLayerName() const;
+
+    /// <summary>
+    /// Sets the name of the layer.
+    /// </summary>
+    API_PROPERTY() void SetLayerName(const StringView& value);
+
+    /// <summary>
+    /// Sets the name of the layer recursively for actor and for all underlying child actors.
+    /// </summary>
+    API_FUNCTION() void SetLayerNameRecursive(const StringView& value);
+
+    /// <summary>
+    /// Determines whether this actor has any tag assigned.
+    /// </summary>
+    API_FUNCTION() bool HasTag() const;
+
+    /// <summary>
+    /// Determines whether this actor has given tag assigned (exact match).
+    /// </summary>
+    /// <param name="tag">The tag to check.</param>
+    API_FUNCTION() bool HasTag(const Tag& tag) const;
+
+    /// <summary>
+    /// Determines whether this actor has given tag assigned (exact match).
+    /// </summary>
+    /// <param name="tag">The tag to check.</param>
+    API_FUNCTION() bool HasTag(const StringView& tag) const;
+
+    /// <summary>
+    /// Adds a tag to the actor
+    /// </summary>
+    /// <param name="tag">The tag to add.</param>
+    API_FUNCTION() void AddTag(const Tag& tag);
+
+    /// <summary>
+    /// Adds a tag to the actor and for all underlying child actors.
+    /// </summary>
+    /// <param name="tag">The tag to add.</param>
+    API_FUNCTION() void AddTagRecursive(const Tag& tag);
+
+    /// <summary>
+    /// Removes a tag to the actor
+    /// </summary>
+    /// <param name="tag">The tag to remove.</param>
+    API_FUNCTION() void RemoveTag(const Tag& tag);
+
+    /// <summary>
+    /// Gets the name of the tag.
+    /// [Deprecated in v1.5]
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize, NoAnimate")
+    DEPRECATED("Use HasTag instead") const String& GetTag() const;
+
+    /// <summary>
+    /// Sets the name of the tag.
+    /// [Deprecated in v1.5]
+    /// </summary>
+    API_PROPERTY() DEPRECATED("Use AddTag instead") void SetTag(const StringView& value);
 
     /// <summary>
     /// Gets the actor name.
@@ -157,10 +187,15 @@ public:
     /// Sets the actor name.
     /// </summary>
     /// <param name="value">The value to set.</param>
-    API_PROPERTY() void SetName(const StringView& value);
+    API_PROPERTY() void SetName(String&& value);
+
+    /// <summary>
+    /// Sets the actor name.
+    /// </summary>
+    /// <param name="value">The value to set.</param>
+    void SetName(const StringView& value);
 
 public:
-
     /// <summary>
     /// Gets the scene object which contains this actor.
     /// </summary>
@@ -204,9 +239,9 @@ public:
     /// <summary>
     /// Gets the child actor of the given type.
     /// </summary>
-    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
     /// <returns>The child actor or null.</returns>
-    API_FUNCTION() Actor* GetChild(const MClass* type) const;
+    API_FUNCTION() Actor* GetChild(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type) const;
 
     /// <summary>
     /// Gets the child actor of the given type.
@@ -219,11 +254,27 @@ public:
     }
 
     /// <summary>
+    /// Finds the child actor of the given type or creates a new one.
+    /// </summary>
+    /// <returns>The child actor.</returns>
+    template<typename T>
+    T* GetOrAddChild()
+    {
+        T* result = (T*)GetChild(T::GetStaticClass());
+        if (!result)
+        {
+            result = New<T>();
+            result->SetParent(this, false, false);
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Gets the child actors of the given type.
     /// </summary>
-    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
     /// <returns>The child actors.</returns>
-    API_FUNCTION() Array<Actor*> GetChildren(const MClass* type) const;
+    API_FUNCTION() Array<Actor*> GetChildren(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type) const;
 
     /// <summary>
     /// Gets the child actors of the given type.
@@ -241,14 +292,12 @@ public:
     }
 
     /// <summary>
-    /// Gets the child actor by its prefab object identifier.
+    /// Destroys the children. Calls Object.Destroy on every child actor and unlinks them for this actor.
     /// </summary>
-    /// <param name="prefabObjectId">The prefab object identifier.</param>
-    /// <returns>The actor or null.</returns>
-    Actor* GetChildByPrefabObjectId(const Guid& prefabObjectId) const;
+    /// <param name="timeLeft">The time left to destroy object (in seconds).</param>
+    API_FUNCTION(Attributes="NoAnimate") void DestroyChildren(float timeLeft = 0.0f);
 
 public:
-
     /// <summary>
     /// Gets amount of scripts.
     /// </summary>
@@ -268,9 +317,9 @@ public:
     /// <summary>
     /// Gets the script of the given type from this actor.
     /// </summary>
-    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type.</param>
+    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type. Supports interface types.</param>
     /// <returns>The script or null.</returns>
-    API_FUNCTION() Script* GetScript(const MClass* type) const;
+    API_FUNCTION() Script* GetScript(API_PARAM(Attributes="TypeReference(typeof(Script))") const MClass* type) const;
 
     /// <summary>
     /// Gets the script of the given type from this actor.
@@ -285,9 +334,9 @@ public:
     /// <summary>
     /// Gets the scripts of the given type from this actor.
     /// </summary>
-    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type.</param>
+    /// <param name="type">Type of the script to search for. Includes any scripts derived from the type. Supports interface types.</param>
     /// <returns>The scripts.</returns>
-    API_FUNCTION() Array<Script*> GetScripts(const MClass* type) const;
+    API_FUNCTION() Array<Script*> GetScripts(API_PARAM(Attributes="TypeReference(typeof(Script))") const MClass* type) const;
 
     /// <summary>
     /// Gets the scripts of the given type from this actor.
@@ -304,8 +353,19 @@ public:
         return result;
     }
 
-public:
+    /// <summary>
+    /// Creates a new script of a specific type and adds it to the actor.
+    /// </summary>
+    /// <returns>The created script instance, null otherwise.</returns>
+    template<typename T>
+    T* AddScript()
+    {
+        auto script = New<T>();
+        script->SetParent(this);
+        return script;
+    }
 
+public:
     /// <summary>
     /// Gets value indicating if actor is active in the scene.
     /// </summary>
@@ -331,6 +391,15 @@ public:
     }
 
     /// <summary>
+    /// Gets value indicating if actor is in a scene.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize")
+    FORCE_INLINE bool HasScene() const
+    {
+        return _scene != nullptr;
+    }
+
+    /// <summary>
     /// Returns true if object is fully static on the scene, otherwise false.
     /// </summary>
     FORCE_INLINE bool IsStatic() const
@@ -343,11 +412,11 @@ public:
     /// </summary>
     FORCE_INLINE bool IsTransformStatic() const
     {
-        return (_staticFlags & StaticFlags::Transform) != 0;
+        return (_staticFlags & StaticFlags::Transform) != StaticFlags::None;
     }
 
     /// <summary>
-    /// Gets the actor static fags.
+    /// Gets the actor static flags.
     /// </summary>
     API_PROPERTY(Attributes="NoAnimate, EditorDisplay(\"General\"), EditorOrder(-80), CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorStaticFlagsEditor\")")
     FORCE_INLINE StaticFlags GetStaticFlags() const
@@ -366,7 +435,7 @@ public:
     /// </summary>
     FORCE_INLINE bool HasStaticFlag(StaticFlags flag) const
     {
-        return (_staticFlags & flag) == (int)flag;
+        return EnumHasAllFlags(_staticFlags, flag);
     }
 
     /// <summary>
@@ -384,7 +453,7 @@ public:
     /// <param name="flags">The flags to remove.</param>
     FORCE_INLINE void RemoveStaticFlags(StaticFlags flags)
     {
-        SetStaticFlags(static_cast<StaticFlags>(_staticFlags & ~flags));
+        SetStaticFlags(_staticFlags & ~flags);
     }
 
     /// <summary>
@@ -394,11 +463,10 @@ public:
     /// <param name="value">The target value of the flag.</param>
     FORCE_INLINE void SetStaticFlag(StaticFlags flag, bool value)
     {
-        SetStaticFlags(static_cast<StaticFlags>(_staticFlags & ~flag) | (value ? flag : StaticFlags::None));
+        SetStaticFlags((_staticFlags & ~flag) | (value ? flag : StaticFlags::None));
     }
 
 public:
-
     /// <summary>
     /// Gets the actor's world transformation.
     /// </summary>
@@ -448,7 +516,7 @@ public:
     /// Gets actor scale in 3D space.
     /// </summary>
     API_PROPERTY(Attributes="HideInEditor, NoSerialize")
-    FORCE_INLINE Vector3 GetScale() const
+    FORCE_INLINE Float3 GetScale() const
     {
         return _transform.Scale;
     }
@@ -457,7 +525,7 @@ public:
     /// Sets actor scale in 3D space
     /// </summary>
     /// <param name="value">The value to set.</param>
-    API_PROPERTY() void SetScale(const Vector3& value);
+    API_PROPERTY() void SetScale(const Float3& value);
 
     /// <summary>
     /// Gets actor rotation matrix.
@@ -472,7 +540,6 @@ public:
     API_PROPERTY() void SetRotation(const Matrix& value);
 
 public:
-
     /// <summary>
     /// Gets the random per-instance value (normalized to range 0-1).
     /// </summary>
@@ -483,22 +550,37 @@ public:
 
     /// <summary>
     /// Gets actor direction vector (forward vector).
+    /// [Deprecated in v1.13]
     /// </summary>
-    /// <returns>The result value.</returns>
-    API_PROPERTY(Attributes="HideInEditor, NoSerialize")
-    FORCE_INLINE Vector3 GetDirection() const
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") DEPRECATED("Use GetForward instead.")
+    FORCE_INLINE Float3 GetDirection() const
     {
-        return Vector3::Transform(Vector3::Forward, GetOrientation());
+        return GetForward();
+    }
+    
+    /// <summary>
+    /// Gets the actor's forward vector (direction).
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") FORCE_INLINE Float3 GetForward() const
+    {
+        return Float3::Transform(Float3::Forward, GetOrientation());
     }
 
     /// <summary>
     /// Sets actor direction vector (forward)
+    /// [Deprecated in v1.13]
     /// </summary>
     /// <param name="value">The value to set.</param>
-    API_PROPERTY() void SetDirection(const Vector3& value);
+    API_PROPERTY() DEPRECATED("Use SetForward instead.")
+    void SetDirection(const Float3& value);
+
+    /// <summary>
+    /// Rotates the actor to align its forward vector with the passed in value (direction).
+    /// </summary>
+    /// <param name="value">The value to align to.</param>
+    API_PROPERTY() void SetForward(const Float3& value);
 
 public:
-
     /// <summary>
     /// Resets the actor local transform.
     /// </summary>
@@ -522,7 +604,7 @@ public:
     /// <summary>
     /// Gets local position of the actor in parent actor space.
     /// </summary>
-    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Position\"), DefaultValue(typeof(Vector3), \"0,0,0\"), EditorOrder(-30), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+PositionScaleEditor\")")
+    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Position\"), VisibleIf(\"ShowTransform\"), DefaultValue(typeof(Vector3), \"0,0,0\"), EditorOrder(-30), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+PositionEditor\")")
     FORCE_INLINE Vector3 GetLocalPosition() const
     {
         return _localTransform.Translation;
@@ -537,7 +619,8 @@ public:
     /// <summary>
     /// Gets local rotation of the actor in parent actor space.
     /// </summary>
-    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Rotation\"), DefaultValue(typeof(Quaternion), \"0,0,0,1\"), EditorOrder(-20), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+OrientationEditor\")")
+    /// <code>Actor.LocalOrientation *= Quaternion.Euler(0, 10 * Time.DeltaTime, 0)</code>
+    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Rotation\"), VisibleIf(\"ShowTransform\"), DefaultValue(typeof(Quaternion), \"0,0,0,1\"), EditorOrder(-20), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+OrientationEditor\")")
     FORCE_INLINE Quaternion GetLocalOrientation() const
     {
         return _localTransform.Orientation;
@@ -552,8 +635,8 @@ public:
     /// <summary>
     /// Gets local scale vector of the actor in parent actor space.
     /// </summary>
-    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Scale\"), DefaultValue(typeof(Vector3), \"1,1,1\"), Limit(float.MinValue, float.MaxValue, 0.01f), EditorOrder(-10), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+PositionScaleEditor\")")
-    FORCE_INLINE Vector3 GetLocalScale() const
+    API_PROPERTY(Attributes="EditorDisplay(\"Transform\", \"Scale\"), VisibleIf(\"ShowTransform\"), DefaultValue(typeof(Float3), \"1,1,1\"), Limit(float.MinValue, float.MaxValue, 0.01f), EditorOrder(-10), NoSerialize, CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.ActorTransformEditor+ScaleEditor\")")
+    FORCE_INLINE Float3 GetLocalScale() const
     {
         return _localTransform.Scale;
     }
@@ -562,7 +645,7 @@ public:
     /// Sets local scale vector of the actor in parent actor space.
     /// </summary>
     /// <param name="value">The value to set.</param>
-    API_PROPERTY() void SetLocalScale(const Vector3& value);
+    API_PROPERTY() void SetLocalScale(const Float3& value);
 
     /// <summary>
     /// Moves the actor (also can rotate it) in world space.
@@ -590,46 +673,88 @@ public:
     /// Gets the matrix that transforms a point from the local space of the actor to world space.
     /// </summary>
     /// <param name="localToWorld">The world to local matrix.</param>
-    API_FUNCTION() FORCE_INLINE void GetLocalToWorldMatrix(API_PARAM(Out) Matrix& localToWorld) const
-    {
-        _transform.GetWorld(localToWorld);
-    }
+    API_FUNCTION() void GetLocalToWorldMatrix(API_PARAM(Out) Matrix& localToWorld) const;
+
+    /// <summary>
+    /// Gets the matrix that transforms a point from the world space to local space of the actor.
+    /// </summary>
+    /// <param name="worldToLocal">The world to local matrix.</param>
+    void GetWorldToLocalMatrix(Double4x4& worldToLocal) const;
+
+    /// <summary>
+    /// Gets the matrix that transforms a point from the local space of the actor to world space.
+    /// </summary>
+    /// <param name="localToWorld">The world to local matrix.</param>
+    void GetLocalToWorldMatrix(Double4x4& localToWorld) const;
 
 public:
-
+    /// <summary>
+    /// Gets actor bounding sphere that defines 3D space intersecting with the actor (for determination of the visibility for actor).
+    /// [Deprecated in 1.13]
+    /// </summary>
+    API_PROPERTY() DEPRECATED("Use GetBoundingSphere instead.") FORCE_INLINE const BoundingSphere& GetSphere() const
+    {
+        return _sphere;
+    }
+    
     /// <summary>
     /// Gets actor bounding sphere that defines 3D space intersecting with the actor (for determination of the visibility for actor).
     /// </summary>
-    API_PROPERTY() FORCE_INLINE const BoundingSphere& GetSphere() const
+    API_PROPERTY() FORCE_INLINE const BoundingSphere& GetBoundingSphere() const
     {
         return _sphere;
     }
 
     /// <summary>
     /// Gets actor bounding box that defines 3D space intersecting with the actor (for determination of the visibility for actor).
+    /// [Deprecated in 1.13]
     /// </summary>
-    API_PROPERTY() FORCE_INLINE const BoundingBox& GetBox() const
+    API_PROPERTY() DEPRECATED("Use GetBoundingBox instead.") FORCE_INLINE const BoundingBox& GetBox() const
+    {
+        return _box;
+    }
+    
+    /// <summary>
+    /// Gets actor bounding box that defines 3D space intersecting with the actor (for determination of the visibility for actor).
+    /// </summary>
+    API_PROPERTY() FORCE_INLINE const BoundingBox& GetBoundingBox() const
     {
         return _box;
     }
 
     /// <summary>
     /// Gets actor bounding box of the actor including all child actors (children included in recursive way)
+    /// [Deprecated in 1.13]
     /// </summary>
-    API_PROPERTY() BoundingBox GetBoxWithChildren() const;
+    API_PROPERTY() DEPRECATED("Use GetBoundingBoxWithChildren instead.") BoundingBox GetBoxWithChildren() const;
+    
+    /// <summary>
+    /// Gets actor bounding box of the actor including all child actors (children included in recursive way)
+    /// </summary>
+    API_PROPERTY() BoundingBox GetBoundingBoxWithChildren() const;
 
 #if USE_EDITOR
-
+    /// <summary>
+    /// Gets actor bounding box (single actor, no children included) for editor tools.
+    /// [Deprecated in 1.13]
+    /// </summary>
+    API_PROPERTY() DEPRECATED("Use GetEditorBoundingBox instead.") virtual BoundingBox GetEditorBox() const;
+    
     /// <summary>
     /// Gets actor bounding box (single actor, no children included) for editor tools.
     /// </summary>
-    API_PROPERTY() virtual BoundingBox GetEditorBox() const;
+    API_PROPERTY() virtual BoundingBox GetEditorBoundingBox() const;
 
     /// <summary>
     /// Gets actor bounding box of the actor including all child actors for editor tools.
+    /// [Deprecated in 1.13]
     /// </summary>
-    API_PROPERTY() BoundingBox GetEditorBoxChildren() const;
-
+    API_PROPERTY() DEPRECATED("Use GetEditorBoundingBoxWithChildren instead.") BoundingBox GetEditorBoxChildren() const;
+    
+    /// <summary>
+    /// Gets actor bounding box of the actor including all child actors for editor tools.
+    /// </summary>
+    API_PROPERTY() BoundingBox GetEditorBoundingBoxWithChildren() const;
 #endif
 
     /// <summary>
@@ -642,42 +767,31 @@ public:
     /// </summary>
     void UnregisterObjectHierarchy();
 
+    /// <summary>
+    /// Calls Initialize for all objects in the actor hierarchy.
+    /// </summary>
+    void InitializeHierarchy();
+
 public:
-
     /// <summary>
-    /// Draws this actor. Called by Scene Rendering service. This call is more optimized than generic Draw (eg. models are rendered during all passed but other actors are invoked only during GBufferFill pass).
+    /// Draws this actor. Called by Scene Rendering to collect draw calls from objects.
     /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    virtual void Draw(RenderContext& renderContext);
-
-    /// <summary>
-    /// Draws this actor. Called during custom actor rendering or any other generic rendering from code.
-    /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    virtual void DrawGeneric(RenderContext& renderContext);
-
-    /// <summary>
-    /// Draws this actor and all its children (full scene hierarchy part).
-    /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
-    void DrawHierarchy(RenderContext& renderContext);
+    /// <param name="renderContextBatch">The rendering context batch (eg, main view and shadow projections).</param>
+    virtual void Draw(RenderContextBatch& renderContextBatch);
 
 #if USE_EDITOR
-
     /// <summary>
     /// Draws debug shapes for the actor and all child scripts.
     /// </summary>
-    virtual void OnDebugDraw();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnDebugDraw();
 
     /// <summary>
     /// Draws debug shapes for the selected actor and all child scripts.
     /// </summary>
-    virtual void OnDebugDrawSelected();
-
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnDebugDrawSelected();
 #endif
 
 public:
-
     /// <summary>
     /// Changes the script order.
     /// </summary>
@@ -693,19 +807,17 @@ public:
     Script* GetScriptByID(const Guid& id) const;
 
     /// <summary>
-    /// Gets the script by its prefab object identifier.
-    /// </summary>
-    /// <param name="prefabObjectId">The prefab object identifier.</param>
-    /// <returns>The script or null.</returns>
-    Script* GetScriptByPrefabObjectId(const Guid& prefabObjectId) const;
-
-    /// <summary>
     /// Gets a value indicating whether this actor is a prefab instance root object.
     /// </summary>
     API_PROPERTY() bool IsPrefabRoot() const;
 
-public:
+    /// <summary>
+    /// Gets the root of the prefab this actor is attached to.
+    /// </summary>
+    /// <returns>The root prefab object, or null if this actor is not a prefab.</returns>
+    API_FUNCTION() Actor* GetPrefabRoot();
 
+public:
     /// <summary>
     /// Tries to find the actor with the given name in this actor hierarchy (checks this actor and all children hierarchy).
     /// </summary>
@@ -716,26 +828,69 @@ public:
     /// <summary>
     /// Tries to find the actor of the given type in this actor hierarchy (checks this actor and all children hierarchy).
     /// </summary>
-    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
     /// <returns>Actor instance if found, null otherwise.</returns>
-    API_FUNCTION() Actor* FindActor(const MClass* type) const;
+    API_FUNCTION() Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, bool activeOnly = false) const;
+
+    /// <summary>
+    /// Tries to find the actor of the given type and name in this actor hierarchy (checks this actor and all children hierarchy).
+    /// </summary>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="name">The name of the actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    API_FUNCTION() Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, const StringView& name) const;
+
+    /// <summary>
+    /// Tries to find the actor of the given type and tag in this actor hierarchy.
+    /// </summary>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    API_FUNCTION() Actor* FindActor(API_PARAM(Attributes="TypeReference(typeof(Actor))") const MClass* type, const Tag& tag, bool activeOnly = false) const;
 
     /// <summary>
     /// Tries to find the actor of the given type in this actor hierarchy (checks this actor and all children hierarchy).
     /// </summary>
+    /// <param name="activeOnly">Finds only an active actor.</param>
     /// <returns>Actor instance if found, null otherwise.</returns>
     template<typename T>
-    FORCE_INLINE T* FindActor() const
+    FORCE_INLINE T* FindActor(bool activeOnly = false) const
     {
-        return (T*)FindActor(T::GetStaticClass());
+        return (T*)FindActor(T::GetStaticClass(), activeOnly);
+    }
+
+    /// <summary>
+    /// Tries to find the actor of the given type and name in this actor hierarchy (checks this actor and all children hierarchy).
+    /// </summary>
+    /// <param name="name">The name of the actor.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    template<typename T>
+    FORCE_INLINE T* FindActor(const StringView& name, bool activeOnly = false) const
+    {
+        return (T*)FindActor(T::GetStaticClass(), name, activeOnly);
+    }
+
+    /// <summary>
+    /// Tries to find the actor of the given type and tag in this actor hierarchy (checks this actor and all children hierarchy).
+    /// </summary>
+    /// <param name="tag">The tag of the actor to search for.</param>
+    /// <param name="activeOnly">Finds only an active actor.</param>
+    /// <returns>Actor instance if found, null otherwise.</returns>
+    template<typename T>
+    FORCE_INLINE T* FindActor(const Tag& tag, bool activeOnly = false) const
+    {
+        return (T*)FindActor(T::GetStaticClass(), tag, activeOnly);
     }
 
     /// <summary>
     /// Tries to find the script of the given type in this actor hierarchy (checks this actor and all children hierarchy).
     /// </summary>
-    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type.</param>
+    /// <param name="type">Type of the actor to search for. Includes any actors derived from the type. Supports interface types.</param>
     /// <returns>Script instance if found, null otherwise.</returns>
-    API_FUNCTION() Script* FindScript(const MClass* type) const;
+    API_FUNCTION() Script* FindScript(API_PARAM(Attributes="TypeReference(typeof(Script))") const MClass* type) const;
 
     /// <summary>
     /// Tries to find the script of the given type in this actor hierarchy (checks this actor and all children hierarchy).
@@ -762,13 +917,13 @@ public:
     API_FUNCTION() bool HasActorInChildren(Actor* a) const;
 
     /// <summary>
-    /// Determines if there is an intersection between the current object and a Ray.
+    /// Determines if there is an intersection between the current object and a ray.
     /// </summary>
     /// <param name="ray">The ray to test.</param>
     /// <param name="distance">When the method completes, contains the distance of the intersection (if any valid).</param>
     /// <param name="normal">When the method completes, contains the intersection surface normal vector (if any valid).</param>
     /// <returns>True whether the two objects intersected, otherwise false.</returns>
-    API_FUNCTION() virtual bool IntersectsItself(const Ray& ray, API_PARAM(Out) float& distance, API_PARAM(Out) Vector3& normal);
+    API_FUNCTION() virtual bool IntersectsItself(const Ray& ray, API_PARAM(Out) Real& distance, API_PARAM(Out) Vector3& normal);
 
     /// <summary>
     /// Determines if there is an intersection between the current object or any it's child and a ray.
@@ -777,7 +932,7 @@ public:
     /// <param name="distance">When the method completes, contains the distance of the intersection (if any valid).</param>
     /// <param name="normal">When the method completes, contains the intersection surface normal vector (if any valid).</param>
     /// <returns>The target hit actor that is the closest to the ray.</returns>
-    API_FUNCTION() Actor* Intersects(const Ray& ray, API_PARAM(Out) float& distance, API_PARAM(Out) Vector3& normal);
+    API_FUNCTION() Actor* Intersects(const Ray& ray, API_PARAM(Out) Real& distance, API_PARAM(Out) Vector3& normal);
 
     /// <summary>
     /// Rotates actor to orient it towards the specified world position.
@@ -789,28 +944,40 @@ public:
     /// Rotates actor to orient it towards the specified world position with upwards direction.
     /// </summary>
     /// <param name="worldPos">The world position to orient towards.</param>
-    /// <param name="worldUp">The up direction that Constrains y axis orientation to a plane this vector lies on. This rule might be broken if forward and up direction are nearly parallel.</param>
+    /// <param name="worldUp">The up direction that constrains up axis orientation to a plane this vector lies on. This rule might be broken if forward and up direction are nearly parallel.</param>
     API_FUNCTION() void LookAt(const Vector3& worldPos, const Vector3& worldUp);
 
     /// <summary>
     /// Gets rotation of the actor oriented towards the specified world position.
+    /// [Deprecated in v1.13]
     /// </summary>
     /// <param name="worldPos">The world position to orient towards.</param>
-    API_FUNCTION() Quaternion LookingAt(const Vector3& worldPos);
+    API_FUNCTION() DEPRECATED("Use GetLookAtDirection instead.") Quaternion LookingAt(const Vector3& worldPos) const;
+    
+    /// <summary>
+    /// Gets rotation of the actor oriented towards the specified world position.
+    /// </summary>
+    /// <param name="worldPos">The world position to orient towards.</param>
+    API_FUNCTION() Quaternion GetLookAtDirection(const Vector3& worldPos) const;
 
+    /// <summary>
+    /// Gets rotation of the actor oriented towards the specified world position with upwards direction.
+    /// [Deprecated in v1.13]
+    /// </summary>
+    /// <param name="worldPos">The world position to orient towards.</param>
+    /// <param name="worldUp">The up direction that constrains up axis orientation to a plane this vector lies on. This rule might be broken if forward and up direction are nearly parallel.</param>
+    API_FUNCTION() DEPRECATED("Use GetLookAtDirection instead.") Quaternion LookingAt(const Vector3& worldPos, const Vector3& worldUp) const;
+    
     /// <summary>
     /// Gets rotation of the actor oriented towards the specified world position with upwards direction.
     /// </summary>
     /// <param name="worldPos">The world position to orient towards.</param>
-    /// <param name="worldUp">The up direction that Constrains y axis orientation to a plane this vector lies on. This rule might be broken if forward and up direction are nearly parallel.</param>
-    API_FUNCTION() Quaternion LookingAt(const Vector3& worldPos, const Vector3& worldUp);
+    /// <param name="worldUp">The up direction that constrains up axis orientation to a plane this vector lies on. This rule might be broken if forward and up direction are nearly parallel.</param>
+    API_FUNCTION() Quaternion GetLookAtDirection(const Vector3& worldPos, const Vector3& worldUp) const;
 
 public:
-
     /// <summary>
     /// Execute custom action on actors tree.
-    /// Action should returns false to stop calling deeper.
-    /// First action argument is current actor object.
     /// </summary>
     /// <param name="action">Actor to call on every actor in the tree. Returns true if keep calling deeper.</param>
     /// <param name="args">Custom arguments for the function</param>
@@ -820,16 +987,12 @@ public:
         if (action(this, args...))
         {
             for (int32 i = 0; i < Children.Count(); i++)
-            {
-                Children[i]->TreeExecute<Params...>(action, args...);
-            }
+                Children.Get()[i]->TreeExecute<Params...>(action, args...);
         }
     }
 
     /// <summary>
     /// Execute custom action on actor children tree.
-    /// Action should returns false to stop calling deeper.
-    /// First action argument is current actor object.
     /// </summary>
     /// <param name="action">Actor to call on every actor in the tree. Returns true if keep calling deeper.</param>
     /// <param name="args">Custom arguments for the function</param>
@@ -837,13 +1000,10 @@ public:
     void TreeExecuteChildren(Function<bool(Actor*, Params ...)>& action, Params ... args)
     {
         for (int32 i = 0; i < Children.Count(); i++)
-        {
-            Children[i]->TreeExecute<Params...>(action, args...);
-        }
+            Children.Get()[i]->TreeExecute<Params...>(action, args...);
     }
 
 public:
-
     /// <summary>
     /// Performs actors serialization to the raw bytes.
     /// </summary>
@@ -894,64 +1054,64 @@ public:
     /// Serializes the actor object to the Json string. Serialized are only this actor properties but no child actors nor scripts. Serializes references to the other objects in a proper way using IDs.
     /// </summary>
     /// <returns>The Json container with serialized actor data.</returns>
-    API_FUNCTION() String ToJson();
+    API_FUNCTION(Attributes="NoAnimate") String ToJson();
 
     /// <summary>
     /// Deserializes the actor object to the Json string. Deserialized are only this actor properties but no child actors nor scripts. 
     /// </summary>
     /// <param name="json">The serialized actor data (state).</param>
-    API_FUNCTION() void FromJson(const StringAnsiView& json);
+    API_FUNCTION(Attributes="NoAnimate") void FromJson(const StringAnsiView& json);
+
+    /// <summary>
+    /// Clones actor including all scripts and any child actors (whole scene tree). Objects are duplicated via serialization (any transient/non-saved state is ignored).
+    /// </summary>
+    API_FUNCTION(Attributes="NoAnimate") Actor* Clone();
 
 public:
-
     /// <summary>
     /// Called when actor gets added to game systems. Occurs on BeginPlay event or when actor gets activated in hierarchy. Use this event to register object to other game system (eg. audio).
     /// </summary>
-    virtual void OnEnable();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnEnable();
 
     /// <summary>
     /// Called when actor gets removed from game systems. Occurs on EndPlay event or when actor gets inactivated in hierarchy. Use this event to unregister object from other game system (eg. audio).
     /// </summary>
-    virtual void OnDisable();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnDisable();
 
     /// <summary>
     /// Called when actor parent gets changed.
     /// </summary>
-    virtual void OnParentChanged();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnParentChanged();
 
     /// <summary>
     /// Called when actor transform gets changed.
     /// </summary>
-    virtual void OnTransformChanged();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnTransformChanged();
 
     /// <summary>
     /// Called when actor active state gets changed.
     /// </summary>
-    virtual void OnActiveChanged();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnActiveChanged();
 
     /// <summary>
     /// Called when actor active in tree state gets changed.
     /// </summary>
-    virtual void OnActiveInTreeChanged();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnActiveInTreeChanged();
 
     /// <summary>
     /// Called when order in parent children array gets changed.
     /// </summary>
-    virtual void OnOrderInParentChanged();
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnOrderInParentChanged();
+
+    /// <summary>
+    /// Called when actor static flag gets changed.
+    /// </summary>
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnStaticFlagsChanged();
 
     /// <summary>
     /// Called when layer gets changed.
     /// </summary>
-    virtual void OnLayerChanged()
-    {
-    }
-
-    /// <summary>
-    /// Called when tag gets changed.
-    /// </summary>
-    virtual void OnTagChanged()
-    {
-    }
+    API_FUNCTION(Attributes="NoAnimate") virtual void OnLayerChanged();
 
     /// <summary>
     /// Called when adding object to the game.
@@ -973,8 +1133,23 @@ public:
     /// <returns>The scene rendering interface.</returns>
     SceneRendering* GetSceneRendering() const;
 
-private:
+public:
+    /// <summary>
+    /// Set the physics world the controller is part of.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor") void SetPhysicsScene(PhysicsScene* scene);
 
+    /// <summary>
+    /// Get the physics world the controller is part of.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor") PhysicsScene* GetPhysicsScene() const;
+
+protected:
+    virtual void OnPhysicsSceneChanged(PhysicsScene* previous)
+    {
+    }
+
+private:
     void SetSceneInHierarchy(Scene* scene);
     void OnEnableInHierarchy();
     void OnDisableInHierarchy();
@@ -984,8 +1159,7 @@ private:
     static bool IsSubClassOf(const Script* object, const MClass* klass);
 
 public:
-
-    // [PersistentScriptingObject]
+    // [ScriptingObject]
     String ToString() const override;
     void OnDeleteObject() override;
 
@@ -996,8 +1170,7 @@ public:
     void SetOrderInParent(int32 index) override;
     void LinkPrefab(const Guid& prefabId, const Guid& prefabObjectId) override;
     void BreakPrefabLink() override;
-    void PostLoad() override;
-    void PostSpawn() override;
+    void Initialize() override;
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;

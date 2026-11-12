@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,7 +9,7 @@
 /// <summary>
 /// Win32 platform file object implementation
 /// </summary>
-class Win32File : public FileBase
+class FLAXENGINE_API Win32File : public FileBase
 {
 private:
 

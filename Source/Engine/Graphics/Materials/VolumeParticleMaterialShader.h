@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,11 +10,9 @@
 class VolumeParticleMaterialShader : public MaterialShader
 {
 private:
-
     GPUPipelineState* _psVolumetricFog = nullptr;
 
 public:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -25,14 +23,12 @@ public:
     }
 
 public:
-
     // [MaterialShader]
     DrawPass GetDrawModes() const override;
     void Bind(BindParameters& params) override;
     void Unload() override;
 
 protected:
-
     // [MaterialShader]
     bool Load() override;
 };

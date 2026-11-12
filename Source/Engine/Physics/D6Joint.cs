@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.ComponentModel;
 
@@ -6,11 +6,6 @@ namespace FlaxEngine
 {
     partial struct D6JointDrive
     {
-        /// <summary>
-        /// The default <see cref="D6JointDrive"/> structure.
-        /// </summary>
-        public static readonly D6JointDrive Default = new D6JointDrive(0.0f, 0.0f, float.MaxValue, false);
-
         /// <summary>
         /// Initializes a new instance of the <see cref="D6JointDrive"/> struct.
         /// </summary>

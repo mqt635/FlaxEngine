@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -31,22 +31,8 @@ namespace Flax.Build.Projects.VisualStudio
                 {
                 case TargetType.NativeCpp: return VisualStudioProjectGenerator.ProjectTypeGuids.WindowsVisualCpp;
                 case TargetType.DotNet: return VisualStudioProjectGenerator.ProjectTypeGuids.WindowsCSharp;
+                case TargetType.DotNetCore: return VisualStudioProjectGenerator.ProjectTypeGuids.WindowsCSharp;
                 default: throw new ArgumentOutOfRangeException();
-                }
-            }
-        }
-
-        /// <inheritdoc />
-        public override string Path
-        {
-            get => base.Path;
-            set
-            {
-                base.Path = value;
-
-                if (ProjectGuid == Guid.Empty)
-                {
-                    ProjectGuid = VisualStudioProjectGenerator.GetProjectGuid(Path);
                 }
             }
         }

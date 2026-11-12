@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,12 +7,12 @@
 #include "Engine/Core/Collections/Array.h"
 
 /// <summary>
-/// Helper class with Delaunay triangulation algorithm implementation,
+/// Helper class with Delaunay triangulation algorithm implementation (2D space).
 /// </summary>
-class Delaunay2D
+API_CLASS(Internal, Static, Namespace="FlaxEngine.Utilities") class Delaunay2D
 {
+    DECLARE_SCRIPTING_TYPE_MINIMAL(Delaunay2D);
 public:
-
     struct Triangle
     {
         int32 Indices[3];
@@ -32,30 +32,51 @@ public:
         }
     };
 
-    template<typename TVertexArray, typename TTrianglesArray>
-    static void Triangulate(const TVertexArray& vertices, TTrianglesArray& triangles)
+    /// <summary>
+    /// Triangulates input vertices array into the list of triangle vertices.
+    /// </summary>
+    /// <param name="vertices">Input list of vertices.</param>
+    /// <returns>Result list of triangles. Each triangle is made out of sequence of 3 vertices. Empty if no valid triangle built.</returns>
+    API_FUNCTION() static Array<Float2> Triangulate(const Array<Float2>& vertices)
+    {
+        Array<Triangle> triangles;
+        Triangulate(vertices, triangles);
+        Array<Float2> result;
+        result.Resize(triangles.Count() * 3);
+        int32 c = 0;
+        for (const Triangle& t : triangles)
+        {
+            result.Get()[c++] = vertices[t.Indices[0]];
+            result.Get()[c++] = vertices[t.Indices[1]];
+            result.Get()[c++] = vertices[t.Indices[2]];
+        }
+        return result;
+    }
+
+    template<typename TrianglesArray = Triangle>
+    static void Triangulate(const Array<Float2>& vertices, TrianglesArray& triangles)
     {
         // Skip if no change to produce any triangles
-        if (vertices.Count() < 3)
+         if (vertices.Count() < 3)
             return;
 
-        TVertexArray points = vertices;
+        Array<Float2> points = vertices;
         Array<Edge> polygon;
 
         Rectangle rect;
         rect.Location = vertices[0];
-        rect.Size = Vector2::Zero;
+        rect.Size = Float2::Zero;
         for (int32 i = 1; i < vertices.Count(); i++)
         {
             rect = Rectangle::Union(rect, vertices[i]);
         }
 
         const float deltaMax = Math::Max(rect.GetWidth(), rect.GetHeight());
-        const Vector2 center = rect.GetCenter();
+        const Float2 center = rect.GetCenter();
 
-        points.Add(Vector2(center.X - 20 * deltaMax, center.Y - deltaMax));
-        points.Add(Vector2(center.X, center.Y + 20 * deltaMax));
-        points.Add(Vector2(center.X + 20 * deltaMax, center.Y - deltaMax));
+        points.Add(Float2(center.X - 20 * deltaMax, center.Y - deltaMax));
+        points.Add(Float2(center.X, center.Y + 20 * deltaMax));
+        points.Add(Float2(center.X + 20 * deltaMax, center.Y - deltaMax));
 
         triangles.Add(Triangle(vertices.Count() + 0, vertices.Count() + 1, vertices.Count() + 2));
 
@@ -125,7 +146,6 @@ public:
     }
 
 private:
-
     struct Edge
     {
         int32 Indices[2];
@@ -144,40 +164,34 @@ private:
         }
     };
 
-    template<typename TVertexArray>
-    static bool CircumCircleContains(const TVertexArray& vertices, const Triangle& triangle, int vertexIndex)
+    static bool CircumCircleContains(const Array<Float2>& vertices, const Triangle& triangle, int32 vertexIndex)
     {
-        Vector2 p1 = vertices[triangle.Indices[0]];
-        Vector2 p2 = vertices[triangle.Indices[1]];
-        Vector2 p3 = vertices[triangle.Indices[2]];
+        Float2 p1 = vertices[triangle.Indices[0]];
+        Float2 p2 = vertices[triangle.Indices[1]];
+        Float2 p3 = vertices[triangle.Indices[2]];
 
         float ab = p1.X * p1.X + p1.Y * p1.Y;
         float cd = p2.X * p2.X + p2.Y * p2.Y;
         float ef = p3.X * p3.X + p3.Y * p3.Y;
 
-        Vector2 circum(
+        Float2 circum(
             (ab * (p3.Y - p2.Y) + cd * (p1.Y - p3.Y) + ef * (p2.Y - p1.Y)) / (p1.X * (p3.Y - p2.Y) + p2.X * (p1.Y - p3.Y) + p3.X * (p2.Y - p1.Y)),
             (ab * (p3.X - p2.X) + cd * (p1.X - p3.X) + ef * (p2.X - p1.X)) / (p1.Y * (p3.X - p2.X) + p2.Y * (p1.X - p3.X) + p3.Y * (p2.X - p1.X)));
 
-        circum *= 0.5;
-        float r = Vector2::DistanceSquared(p1, circum);
-        float d = Vector2::DistanceSquared(vertices[vertexIndex], circum);
+        circum *= 0.5f;
+        float r = Float2::DistanceSquared(p1, circum);
+        float d = Float2::DistanceSquared(vertices[vertexIndex], circum);
         return d <= r;
     }
 
-    template<typename TVertexArray>
-    static bool EdgeCompare(const TVertexArray& vertices, const Edge& a, const Edge& b)
+    static bool EdgeCompare(const Array<Float2>& vertices, const Edge& a, const Edge& b)
     {
-        if (Vector2::Distance(vertices[a.Indices[0]], vertices[b.Indices[0]]) < ZeroTolerance && Vector2::Distance(vertices[a.Indices[1]], vertices[b.Indices[1]]) < ZeroTolerance)
-        {
+        if (Float2::Distance(vertices[a.Indices[0]], vertices[b.Indices[0]]) < ZeroTolerance && 
+            Float2::Distance(vertices[a.Indices[1]], vertices[b.Indices[1]]) < ZeroTolerance)
             return true;
-        }
-
-        if (Vector2::Distance(vertices[a.Indices[0]], vertices[b.Indices[1]]) < ZeroTolerance && Vector2::Distance(vertices[a.Indices[1]], vertices[b.Indices[0]]) < ZeroTolerance)
-        {
+        if (Float2::Distance(vertices[a.Indices[0]], vertices[b.Indices[1]]) < ZeroTolerance && 
+            Float2::Distance(vertices[a.Indices[1]], vertices[b.Indices[0]]) < ZeroTolerance)
             return true;
-        }
-
         return false;
     }
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -26,10 +26,9 @@ typedef Function<ExportAssetResult(ExportAssetContext&)> ExportAssetFunction;
 /// <summary>
 /// Exporting asset context structure
 /// </summary>
-class ExportAssetContext : public NonCopyable
+class FLAXENGINE_API ExportAssetContext : public NonCopyable
 {
 public:
-
     /// <summary>
     /// The asset reference (prepared by the context to be used by callback).
     /// </summary>
@@ -56,7 +55,6 @@ public:
     void* CustomArg;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ExportAssetContext"/> class.
     /// </summary>
@@ -73,7 +71,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Runs the specified callback.
     /// </summary>

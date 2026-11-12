@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CSGBuilder.h"
 #include "CSGMesh.h"
@@ -46,7 +46,6 @@ using namespace CSGBuilderImpl;
 class CSGBuilderService : public EngineService
 {
 public:
-
     CSGBuilderService()
         : EngineService(TEXT("CSG Builder"), 90)
     {
@@ -274,7 +273,7 @@ bool CSGBuilderImpl::buildInner(Scene* scene, BuildData& data)
 
         // Convert CSG meshes into raw triangles data
         RawData meshData;
-        Array<RawModelVertex> vertexBuffer;
+        Array<MeshVertex> vertexBuffer;
         combinedMesh->Triangulate(meshData, vertexBuffer);
         meshData.RemoveEmptySlots();
         if (meshData.Slots.HasItems())
@@ -335,8 +334,9 @@ bool CSGBuilderImpl::buildInner(Scene* scene, BuildData& data)
                         auto lod = &modelData.LODs[lodIndex];
                         for (int32 meshIndex = 0; meshIndex < lod->Meshes.Count(); meshIndex++)
                         {
-                            const auto v = &lod->Meshes[meshIndex]->Positions;
-                            Vector3::Transform(v->Get(), m2, v->Get(), v->Count());
+                            Array<Float3>& v = lod->Meshes[meshIndex]->Positions;
+                            for (int32 i = 0; i < v.Count(); i++)
+                                Float3::Transform(v[i], m2, v[i]);
                         }
                     }
                 }
@@ -404,14 +404,14 @@ bool CSGBuilderImpl::generateRawDataAsset(Scene* scene, RawData& meshData, Guid&
         {
             auto& surfaces = brush->Value.Surfaces;
 
-            stream.Write(&brush->Key);
+            stream.Write(brush->Key);
             stream.WriteInt32(surfacesDataOffset);
 
             // Calculate offset in data storage to the next brush data
             int32 brushDataSize = 0;
             for (int32 i = 0; i < surfaces.Count(); i++)
             {
-                brushDataSize += sizeof(int32) + sizeof(Triangle) * surfaces[i].Triangles.Count();
+                brushDataSize += sizeof(int32) + sizeof(RawData::SurfaceTriangle) * surfaces[i].Triangles.Count();
             }
             surfacesDataOffset += brushDataSize;
         }
@@ -426,14 +426,14 @@ bool CSGBuilderImpl::generateRawDataAsset(Scene* scene, RawData& meshData, Guid&
                 auto& triangles = surfaces[i].Triangles;
 
                 stream.WriteInt32(triangles.Count());
-                stream.Write(triangles.Get(), triangles.Count());
+                stream.WriteBytes(triangles.Get(), triangles.Count() * sizeof(RawData::SurfaceTriangle));
             }
         }
     }
 
     // Serialize
     BytesContainer bytesContainer;
-    bytesContainer.Link(stream.GetHandle(), stream.GetPosition());
+    bytesContainer.Link(ToSpan(stream));
     return AssetsImportingManager::Create(AssetsImportingManager::CreateRawDataTag, assetPath, assetId, (void*)&bytesContainer);
 }
 

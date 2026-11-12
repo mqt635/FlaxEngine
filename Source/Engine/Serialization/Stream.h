@@ -1,15 +1,31 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
+#include "Engine/Core/Core.h"
 #include "Engine/Core/Types/BaseTypes.h"
 
 #define FILESTREAM_BUFFER_SIZE 4096
 #define STREAM_MAX_STRING_LENGTH (4*1024) // 4 kB
 
-// Forward declarations
 class ReadStream;
 class WriteStream;
+struct Variant;
+struct VariantType;
+class ISerializable;
+class ScriptingObject;
+template<typename T>
+class ScriptingObjectReference;
+template<typename T>
+class ScriptingObjectInterfaceReference;
+template<typename T>
+class SoftObjectReference;
+template<typename T>
+class AssetReference;
+template<typename T>
+class WeakAssetReference;
+template<typename T>
+class SoftAssetReference;
 
 /// <summary>
 /// Base class for all data streams (memory streams, file streams etc.)

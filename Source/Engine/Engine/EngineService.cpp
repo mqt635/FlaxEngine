@@ -1,10 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "EngineService.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Core/Collections/Sorting.h"
-#include <ThirdParty/tracy/Tracy.h>
+#include <ThirdParty/tracy/tracy/Tracy.hpp>
 
 static bool CompareEngineServices(EngineService* const& a, EngineService* const& b)
 {
@@ -26,15 +26,31 @@ static bool CompareEngineServices(EngineService* const& a, EngineService* const&
     { \
         ZoneScoped; \
         auto& services = GetServices(); \
-        for (int32 i = 0; i < services.Count(); i++) \
+        for (int32 i = services.Count() - 1; i >= 0; i--) \
             services[i]->name(); \
     }
 
 DEFINE_ENGINE_SERVICE_EVENT(FixedUpdate);
 DEFINE_ENGINE_SERVICE_EVENT(Update);
 DEFINE_ENGINE_SERVICE_EVENT(LateUpdate);
+DEFINE_ENGINE_SERVICE_EVENT(LateFixedUpdate);
 DEFINE_ENGINE_SERVICE_EVENT(Draw);
 DEFINE_ENGINE_SERVICE_EVENT_INVERTED(BeforeExit);
+
+#if TRACY_ENABLE
+
+StringView FillEventNameBuffer(Char* buffer, StringView name, StringView postfix)
+{
+    int32 size = 0;
+    for (int32 j = 0; j < name.Length(); j++)
+        if (name[j] != ' ')
+            buffer[size++] = name[j];
+    Platform::MemoryCopy(buffer + size, postfix.Get(), (postfix.Length() + 1) * sizeof(Char));
+    size += postfix.Length();
+    return StringView(buffer, size);
+}
+
+#endif
 
 EngineService::EngineServicesArray& EngineService::GetServices()
 {
@@ -71,22 +87,15 @@ void EngineService::OnInit()
 
     // Init services from front to back
     auto& services = GetServices();
-#if TRACY_ENABLE
-    Char nameBuffer[100];
-#endif
     for (int32 i = 0; i < services.Count(); i++)
     {
         const auto service = services[i];
         const StringView name(service->Name);
 #if TRACY_ENABLE
         ZoneScoped;
-        int32 nameBufferLength = 0;
-        for (int32 j = 0; j < name.Length(); j++)
-            if (name[j] != ' ')
-                nameBuffer[nameBufferLength++] = name[j];
-        Platform::MemoryCopy(nameBuffer + nameBufferLength, TEXT("::Init"), 7 * sizeof(Char));
-        nameBufferLength += 7;
-        ZoneName(nameBuffer, nameBufferLength);
+        Char nameBuffer[100];
+        StringView zoneName = FillEventNameBuffer(nameBuffer, name, StringView(TEXT("::Init"), 6));
+        ZoneName(zoneName.Get(), zoneName.Length());
 #endif
         LOG(Info, "Initialize {0}...", name);
         service->IsInitialized = true;
@@ -113,6 +122,13 @@ void EngineService::OnDispose()
         const auto service = services[i];
         if (service->IsInitialized)
         {
+#if TRACY_ENABLE
+            ZoneScoped;
+            Char nameBuffer[100];
+            const StringView name(service->Name);
+            StringView zoneName = FillEventNameBuffer(nameBuffer, name, StringView(TEXT("::Dispose"), 9));
+            ZoneName(zoneName.Get(), zoneName.Length());
+#endif
             service->IsInitialized = false;
             service->Dispose();
         }

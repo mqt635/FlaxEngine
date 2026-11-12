@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,7 +13,6 @@
 class GPUSamplerVulkan : public GPUResourceVulkan<GPUSampler>
 {
 public:
-   
     GPUSamplerVulkan(GPUDeviceVulkan* device)
         : GPUResourceVulkan<GPUSampler>(device, StringView::Empty)
     {
@@ -22,7 +21,6 @@ public:
     VkSampler Sampler = VK_NULL_HANDLE;
 
 protected:
-
     // [GPUSamplerVulkan]
     bool OnInit() override;
     void OnReleaseGPU() override;

@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include <math.h>
-#include "Engine/Core/Types/BaseTypes.h"
+#include "Math.h"
 
 namespace Math
 {
@@ -130,6 +129,11 @@ namespace Math
         return modf(a, b);
     }
 
+    static FORCE_INLINE double Frac(double value)
+    {
+        return value - Floor(value);
+    }
+
     /// <summary>
     /// Returns signed fractional part of a double.
     /// </summary>
@@ -160,38 +164,31 @@ namespace Math
         return TruncToInt(ceil(value));
     }
 
-    // Performs smooth (cubic Hermite) interpolation between 0 and 1
-    // @param amount Value between 0 and 1 indicating interpolation amount
+    // Performs smooth (cubic Hermite) interpolation between 0 and 1.
     static double SmoothStep(double amount)
     {
         return amount <= 0. ? 0. : amount >= 1. ? 1. : amount * amount * (3. - 2. * amount);
     }
 
-    // Performs a smooth(er) interpolation between 0 and 1 with 1st and 2nd order derivatives of zero at endpoints
-    // @param amount Value between 0 and 1 indicating interpolation amount
+    // Performs a smooth(er) interpolation between 0 and 1 with 1st and 2nd order derivatives of zero at endpoints.
     static double SmootherStep(double amount)
     {
         return amount <= 0. ? 0. : amount >= 1. ? 1. : amount * amount * amount * (amount * (amount * 6. - 15.) + 10.);
     }
 
-    // Determines whether the specified value is close to zero (0.0)
-    // @param a The floating value
-    // @returns True if the specified value is close to zero (0.0). otherwise false
+    // Determines whether the specified value is close to zero (0.0).
     inline bool IsZero(double a)
     {
         return Abs(a) < ZeroTolerance;
     }
 
-    // Determines whether the specified value is close to one (1.0f)
-    // @param a The floating value
-    // @returns True if the specified value is close to one (1.0f). otherwise false
+    // Determines whether the specified value is close to one (1.0f).
     inline bool IsOne(double a)
     {
         return IsZero(a - 1.);
     }
 
-    // Returns a value indicating the sign of a number
-    // @returns A number that indicates the sign of value
+    // Returns a value indicating the sign of a number.
     inline double Sign(double v)
     {
         return v > 0. ? 1. : v < 0. ? -1. : 0.;
@@ -227,7 +224,7 @@ namespace Math
     /// <returns>False if a almost equal to b, otherwise true</returns>
     static bool NotNearEqual(double a, double b)
     {
-        return Abs(a - b) >= 2 * 2.2204460492503131e-016;
+        return Abs(a - b) >= ZeroToleranceDouble;
     }
 
     /// <summary>
@@ -238,7 +235,7 @@ namespace Math
     /// <returns>True if a almost equal to b, otherwise false</returns>
     static bool NearEqual(double a, double b)
     {
-        return Abs(a - b) < 2 * 2.2204460492503131e-016;
+        return Abs(a - b) < ZeroToleranceDouble;
     }
 
     /// <summary>
@@ -292,26 +289,6 @@ namespace Math
         else if (delta < -PI)
             delta = delta + TWO_PI;
         return delta;
-    }
-
-    // Given a heading which may be outside the +/- PI range, 'unwind' it back into that range
-    static double UnwindRadians(double a)
-    {
-        while (a > PI)
-            a -= TWO_PI;
-        while (a < -PI)
-            a += TWO_PI;
-        return a;
-    }
-
-    // Utility to ensure angle is between +/- 180 degrees by unwinding
-    static double UnwindDegrees(double a)
-    {
-        while (a > 180.)
-            a -= 360.;
-        while (a < -180.)
-            a += 360.;
-        return a;
     }
 
     /// <summary>

@@ -1,12 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MultiScaler.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
+#include "Engine/Graphics/GPUContext.h"
+#include "Engine/Graphics/GPUPass.h"
 #include "Engine/Content/Content.h"
 
-PACK_STRUCT(struct Data {
-    Vector2 TexelSize;
-    Vector2 Padding;
+GPU_CB_STRUCT(Data {
+    Float2 TexelSize;
+    Float2 Padding;
     });
 
 String MultiScaler::ToString() const
@@ -17,19 +19,17 @@ String MultiScaler::ToString() const
 bool MultiScaler::Init()
 {
     // Create pipeline states
-    _psHalfDepth = GPUDevice::Instance->CreatePipelineState();
     _psBlur5.CreatePipelineStates();
     _psBlur9.CreatePipelineStates();
     _psBlur13.CreatePipelineStates();
+    _psHalfDepth.CreatePipelineStates();
     _psUpscale = GPUDevice::Instance->CreatePipelineState();
 
     // Load asset
-    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/MultiScaler"));
+    _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/MultiScaler"));
     if (_shader == nullptr)
         return true;
-#if COMPILE_WITH_DEV_ENV
-    _shader.Get()->OnReloading.Bind<MultiScaler, &MultiScaler::OnShaderReloading>(this);
-#endif
+    BIND_SHADER_RELOADING(_shader, MultiScaler, OnShaderReloading);
 
     return false;
 }
@@ -39,14 +39,8 @@ bool MultiScaler::setupResources()
     // Check if shader has not been loaded
     if (!_shader->IsLoaded())
         return true;
-    const auto shader = _shader->GetShader();
-
-    // Validate shader constant buffer size
-    if (shader->GetCB(0)->GetSize() != sizeof(Data))
-    {
-        REPORT_INVALID_SHADER_PASS_CB_SIZE(shader, 0, Data);
-        return true;
-    }
+    const auto shader = _shader->GPU;
+    CHECK_INVALID_SHADER_PASS_CB_SIZE(shader, 0, Data);
 
     // Create pipeline states
     GPUPipelineState::Description psDesc = GPUPipelineState::Description::DefaultFullscreenTriangle;
@@ -71,13 +65,21 @@ bool MultiScaler::setupResources()
         if (_psUpscale->Init(psDesc))
             return true;
     }
-    if (!_psHalfDepth->IsValid())
+    if (!_psHalfDepth.IsValid())
     {
-        psDesc.PS = shader->GetPS("PS_HalfDepth");
+        psDesc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::Red;
+        psDesc.PS = shader->GetPS("PS_HalfDepth", 0);
+        if (_psHalfDepth[0]->Init(psDesc))
+            return true;
+        psDesc.PS = shader->GetPS("PS_HalfDepth", 2);
+        if (_psHalfDepth[2]->Init(psDesc))
+            return true;
+        psDesc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::None;
+        psDesc.PS = shader->GetPS("PS_HalfDepth", 1);
         psDesc.DepthWriteEnable = true;
-        psDesc.DepthTestEnable = true;
+        psDesc.DepthEnable = true;
         psDesc.DepthFunc = ComparisonFunc::Always;
-        if (_psHalfDepth->Init(psDesc))
+        if (_psHalfDepth[1]->Init(psDesc))
             return true;
     }
 
@@ -90,15 +92,34 @@ void MultiScaler::Dispose()
     RendererPass::Dispose();
 
     // Cleanup
-    SAFE_DELETE_GPU_RESOURCE(_psHalfDepth);
-    SAFE_DELETE_GPU_RESOURCE(_psUpscale);
+    for (const auto& e : _psBilateralUpscale)
+        e.Value->ReleaseGPU();
+    _psBilateralUpscale.ClearDelete();
     _psBlur5.Delete();
     _psBlur9.Delete();
     _psBlur13.Delete();
+    _psHalfDepth.Delete();
     _shader = nullptr;
 }
 
-void MultiScaler::Filter(const FilterMode mode, GPUContext* context, const int32 width, const int32 height, GPUTextureView* src, GPUTextureView* dst, GPUTextureView* tmp)
+#if COMPILE_WITH_DEV_ENV
+
+void MultiScaler::OnShaderReloading(Asset* obj)
+{
+    for (const auto& e : _psBilateralUpscale)
+        e.Value->ReleaseGPU();
+    _psBilateralUpscale.ClearDelete();
+    _psUpscale->ReleaseGPU();
+    _psBlur5.Release();
+    _psBlur9.Release();
+    _psBlur13.Release();
+    _psHalfDepth.Release();
+    invalidateResources();
+}
+
+#endif
+
+void MultiScaler::Filter(FilterMode mode, GPUContext* context, int32 width, int32 height, GPUTextureView* src, GPUTextureView* dst, GPUTextureView* tmp)
 {
     PROFILE_GPU_CPU("MultiScaler Filter");
 
@@ -136,39 +157,40 @@ void MultiScaler::Filter(const FilterMode mode, GPUContext* context, const int32
     Data data;
     data.TexelSize.X = 1.0f / (float)width;
     data.TexelSize.Y = 1.0f / (float)height;
-    auto cb = _shader->GetShader()->GetCB(0);
+    auto cb = _shader->GPU->GetCB(0);
     context->UpdateCB(cb, &data);
     context->BindCB(0, cb);
+    auto rtAction = GPUDrawPassAction::Store;
 
     // Convolve horizontal
-    context->BindSR(0, src);
-    context->SetRenderTarget(tmp);
-    context->SetState(ps->Get(0));
-    context->DrawFullscreenTriangle();
+    {
+        GPUDrawPass drawPass(context, ToSpan(&tmp, 1), ToSpan(&rtAction, 1));
+        context->BindSR(0, src);
+        context->SetState(ps->Get(0));
+        context->DrawFullscreenTriangle();
+    }
 
     context->ResetRenderTarget();
 
     // Convolve vertical
-    context->BindSR(0, tmp);
-    context->SetRenderTarget(dst);
-    context->SetState(ps->Get(1));
-    context->DrawFullscreenTriangle();
+    {
+        GPUDrawPass drawPass(context, ToSpan(&dst, 1), ToSpan(&rtAction, 1));
+        context->BindSR(0, tmp);
+        context->SetState(ps->Get(1));
+        context->DrawFullscreenTriangle();
+    }
 
     context->ResetRenderTarget();
 }
 
-void MultiScaler::Filter(const FilterMode mode, GPUContext* context, const int32 width, const int32 height, GPUTextureView* srcDst, GPUTextureView* tmp)
+void MultiScaler::Filter(FilterMode mode, GPUContext* context, int32 width, int32 height, GPUTextureView* srcDst, GPUTextureView* tmp)
 {
     PROFILE_GPU_CPU("MultiScaler Filter");
 
     context->SetViewportAndScissors((float)width, (float)height);
 
-    // Check if has missing resources
     if (checkIfSkipPass())
-    {
-        // Skip
         return;
-    }
 
     // Select filter
     GPUPipelineStatePermutationsPs<2>* ps;
@@ -192,23 +214,29 @@ void MultiScaler::Filter(const FilterMode mode, GPUContext* context, const int32
     Data data;
     data.TexelSize.X = 1.0f / (float)width;
     data.TexelSize.Y = 1.0f / (float)height;
-    auto cb = _shader->GetShader()->GetCB(0);
+    auto cb = _shader->GPU->GetCB(0);
     context->UpdateCB(cb, &data);
     context->BindCB(0, cb);
+    auto rtAction = GPUDrawPassAction::Store;
 
     // Convolve horizontal
-    context->BindSR(0, srcDst);
-    context->SetRenderTarget(tmp);
-    context->SetState(ps->Get(0));
-    context->DrawFullscreenTriangle();
+    {
+        GPUDrawPass drawPass(context, ToSpan(&tmp, 1), ToSpan(&rtAction, 1));
+        context->BindSR(0, srcDst);
+        context->SetRenderTarget(tmp);
+        context->SetState(ps->Get(0));
+        context->DrawFullscreenTriangle();
+    }
 
     context->ResetRenderTarget();
 
     // Convolve vertical
-    context->BindSR(0, tmp);
-    context->SetRenderTarget(srcDst);
-    context->SetState(ps->Get(1));
-    context->DrawFullscreenTriangle();
+    {
+        GPUDrawPass drawPass(context, ToSpan(&srcDst, 1), ToSpan(&rtAction, 1));
+        context->BindSR(0, tmp);
+        context->SetState(ps->Get(1));
+        context->DrawFullscreenTriangle();
+    }
 
     context->ResetRenderTarget();
 }
@@ -216,12 +244,13 @@ void MultiScaler::Filter(const FilterMode mode, GPUContext* context, const int32
 void MultiScaler::DownscaleDepth(GPUContext* context, int32 dstWidth, int32 dstHeight, GPUTexture* src, GPUTextureView* dst)
 {
     PROFILE_GPU_CPU("Downscale Depth");
-
-    // Check if has missing resources
+    bool outputDepth = ((GPUTexture*)dst->GetParent())->IsDepthStencil();
     if (checkIfSkipPass())
     {
-        // Clear the output
-        context->ClearDepth(dst);
+        if (outputDepth)
+            context->ClearDepth(dst);
+        else
+            context->Clear(dst, Color::Transparent);
         return;
     }
 
@@ -229,18 +258,72 @@ void MultiScaler::DownscaleDepth(GPUContext* context, int32 dstWidth, int32 dstH
     Data data;
     data.TexelSize.X = 1.0f / (float)src->Width();
     data.TexelSize.Y = 1.0f / (float)src->Height();
-    auto cb = _shader->GetShader()->GetCB(0);
+    auto cb = _shader->GPU->GetCB(0);
     context->UpdateCB(cb, &data);
     context->BindCB(0, cb);
 
     // Draw
     context->SetViewportAndScissors((float)dstWidth, (float)dstHeight);
-    context->SetRenderTarget(dst, (GPUTextureView*)nullptr);
+    if (outputDepth)
+        context->SetRenderTarget(dst, (GPUTextureView*)nullptr);
+    else
+        context->SetRenderTarget(dst);
     context->BindSR(0, src);
-    context->SetState(_psHalfDepth);
+    context->SetState(_psHalfDepth[outputDepth ? 1 : 0]);
     context->DrawFullscreenTriangle();
 
     // Cleanup
+    context->ResetRenderTarget();
+    context->UnBindCB(0);
+}
+
+void MultiScaler::BuildHiZ(GPUContext* context, GPUTexture* srcDepth, GPUTexture* dstHiZ, bool closest)
+{
+    PROFILE_GPU_CPU("Build HiZ");
+
+    int32 dstWidth = dstHiZ->Width();
+    int32 dstHeight = dstHiZ->Height();
+    GPUPipelineState* state = _psHalfDepth[closest ? 2 : 0]; // See PS_HalfDepth permutations
+
+    // Copy mip0
+    if (srcDepth->Size() == dstHiZ->Size() && srcDepth->Format() == dstHiZ->Format())
+    {
+        // Size and format match
+        context->CopySubresource(dstHiZ, 0, srcDepth, 0);
+    }
+    else if (srcDepth->Size() == dstHiZ->Size())
+    {
+        // Size match
+        context->Draw(dstHiZ, srcDepth);
+    }
+    else
+    {
+        // Downscale
+        auto rt = dstHiZ->View();
+        auto rtAction = GPUDrawPassAction::Store;
+        GPUDrawPass drawPass(context, ToSpan(&rt, 1), ToSpan(&rtAction, 1));
+        context->SetViewportAndScissors((float)dstWidth, (float)dstHeight);
+        context->BindSR(0, srcDepth);
+        context->SetState(state);
+        context->DrawFullscreenTriangle();
+    }
+
+    // Build mip chain
+    for (int32 mip = 1; mip < dstHiZ->MipLevels(); mip++)
+    {
+        const int32 mipWidth = Math::Max(dstWidth >> mip, 1);
+        const int32 mipHeight = Math::Max(dstHeight >> mip, 1);
+        context->ResetRenderTarget();
+
+        auto rt = dstHiZ->View(0, mip);
+        auto rtAction = GPUDrawPassAction::Store;
+        GPUDrawPass drawPass(context, ToSpan(&rt, 1), ToSpan(&rtAction, 1));
+        context->SetViewportAndScissors((float)mipWidth, (float)mipHeight);
+        context->BindSR(0, dstHiZ->View(0, mip - 1));
+        context->SetState(state);
+        context->DrawFullscreenTriangle();
+    }
+
     context->ResetRenderTarget();
     context->UnBindCB(0);
 }
@@ -249,8 +332,9 @@ void MultiScaler::Upscale(GPUContext* context, const Viewport& viewport, GPUText
 {
     PROFILE_GPU_CPU("Upscale");
 
+    auto rtAction = GPUDrawPassAction::Store;
+    GPUDrawPass drawPass(context, ToSpan(&dst, 1), ToSpan(&rtAction, 1));
     context->SetViewportAndScissors(viewport);
-    context->SetRenderTarget(dst);
 
     if (checkIfSkipPass())
     {
@@ -261,13 +345,58 @@ void MultiScaler::Upscale(GPUContext* context, const Viewport& viewport, GPUText
         Data data;
         data.TexelSize.X = 1.0f / (float)src->Width();
         data.TexelSize.Y = 1.0f / (float)src->Height();
-        auto cb = _shader->GetShader()->GetCB(0);
+        auto cb = _shader->GPU->GetCB(0);
         context->UpdateCB(cb, &data);
         context->BindCB(0, cb);
         context->BindSR(0, src);
         context->SetState(_psUpscale);
         context->DrawFullscreenTriangle();
         context->UnBindCB(0);
+    }
+
+    context->ResetRenderTarget();
+}
+
+void MultiScaler::BilateralUpscale(GPUContext* context, const Viewport& viewport, GPUTexture* src, GPUTextureView* dst, GPUTexture* depth, GPUTexture* normal, const BlendingMode& blendMode)
+{
+    PROFILE_GPU_CPU("Bilateral Upscale");
+
+    auto rtAction = GPUDrawPassAction::Store;
+    GPUDrawPass drawPass(context, ToSpan(&dst, 1), ToSpan(&rtAction, 1));
+    context->SetViewportAndScissors(viewport);
+
+    if (checkIfSkipPass())
+    {
+        context->Draw(src);
+    }
+    else if (depth && normal)
+    {
+        GPUPipelineState* pso;
+        if (!_psBilateralUpscale.TryGet(blendMode, pso))
+        {
+            pso = GPUDevice::Instance->CreatePipelineState();
+            auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
+            desc.PS = _shader->GPU->GetPS("PS_BilateralUpscale");
+            desc.BlendMode = blendMode;
+            pso->Init(desc);
+            _psBilateralUpscale.Add(blendMode, pso);
+        }
+        Data data;
+        data.TexelSize.X = 1.0f / (float)src->Width();
+        data.TexelSize.Y = 1.0f / (float)src->Height();
+        auto cb = _shader->GPU->GetCB(0);
+        context->UpdateCB(cb, &data);
+        context->BindCB(0, cb);
+        context->BindSR(0, src);
+        context->BindSR(1, depth);
+        context->BindSR(2, normal);
+        context->SetState(pso);
+        context->DrawFullscreenTriangle();
+        context->UnBindCB(0);
+    }
+    else
+    {
+        Upscale(context, viewport, src, dst);
     }
 
     context->ResetRenderTarget();

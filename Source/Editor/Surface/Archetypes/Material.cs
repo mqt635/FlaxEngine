@@ -1,10 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.Content.Settings;
 using FlaxEditor.Scripting;
 using FlaxEditor.Surface.Elements;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
+using FlaxEngine.GUI;
 
 namespace FlaxEditor.Surface.Archetypes
 {
@@ -14,6 +16,29 @@ namespace FlaxEditor.Surface.Archetypes
     [HideInEditor]
     public static class Material
     {
+        /// <summary>
+        /// Blend modes (each enum item value maps to box ID).
+        /// </summary>
+        internal enum BlendMode
+        {
+            Normal,
+            Add,
+            Subtract,
+            Multiply,
+            Screen,
+            Overlay,
+            LinearBurn,
+            LinearLight,
+            Darken,
+            Lighten,
+            Difference,
+            Exclusion,
+            Divide,
+            HardLight,
+            PinLight,
+            HardMix
+        };
+
         /// <summary>
         /// Customized <see cref="SurfaceNode"/> for main material node.
         /// </summary>
@@ -25,79 +50,20 @@ namespace FlaxEditor.Surface.Archetypes
             /// </summary>
             internal enum MaterialNodeBoxes
             {
-                /// <summary>
-                /// The layer input.
-                /// </summary>
                 Layer = 0,
-
-                /// <summary>
-                /// The color input.
-                /// </summary>
                 Color = 1,
-
-                /// <summary>
-                /// The mask input.
-                /// </summary>
                 Mask = 2,
-
-                /// <summary>
-                /// The emissive input.
-                /// </summary>
                 Emissive = 3,
-
-                /// <summary>
-                /// The metalness input.
-                /// </summary>
                 Metalness = 4,
-
-                /// <summary>
-                /// The specular input.
-                /// </summary>
                 Specular = 5,
-
-                /// <summary>
-                /// The roughness input.
-                /// </summary>
                 Roughness = 6,
-
-                /// <summary>
-                /// The ambient occlusion input.
-                /// </summary>
                 AmbientOcclusion = 7,
-
-                /// <summary>
-                /// The normal input.
-                /// </summary>
                 Normal = 8,
-
-                /// <summary>
-                /// The opacity input.
-                /// </summary>
                 Opacity = 9,
-
-                /// <summary>
-                /// The refraction input.
-                /// </summary>
                 Refraction = 10,
-
-                /// <summary>
-                /// The position offset input.
-                /// </summary>
                 PositionOffset = 11,
-
-                /// <summary>
-                /// The tessellation multiplier input.
-                /// </summary>
                 TessellationMultiplier = 12,
-
-                /// <summary>
-                /// The world displacement input.
-                /// </summary>
                 WorldDisplacement = 13,
-
-                /// <summary>
-                /// The subsurface color input.
-                /// </summary>
                 SubsurfaceColor = 14,
             };
 
@@ -124,26 +90,26 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 // Try get parent material window
                 // Maybe too hacky :D
-                if (!(Surface.Owner is MaterialWindow materialWindow) || materialWindow.Item == null)
+                if (!(Surface?.Owner is MaterialWindow materialWindow) || materialWindow.Item == null)
                     return;
 
                 // Layered material
                 if (GetBox(MaterialNodeBoxes.Layer).HasAnyConnection)
                 {
-                    GetBox(MaterialNodeBoxes.Color).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = false;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = false;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = false;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = false;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = false;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = false;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = false;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = false;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = false;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = false;
                     return;
                 }
 
@@ -158,111 +124,111 @@ namespace FlaxEditor.Surface.Archetypes
                 case MaterialDomain.Particle:
                 case MaterialDomain.Deformable:
                 {
-                    bool isNotUnlit = info.ShadingModel != MaterialShadingModel.Unlit;
-                    bool isTransparent = info.BlendMode == MaterialBlendMode.Transparent;
+                    bool isNotUnlit = info.ShadingModel != MaterialShadingModel.Unlit && info.ShadingModel != MaterialShadingModel.CustomLit;
+                    bool isOpaque = info.BlendMode == MaterialBlendMode.Opaque;
                     bool withTess = info.TessellationMode != TessellationMethod.None;
 
-                    GetBox(MaterialNodeBoxes.Color).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = isNotUnlit;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = info.ShadingModel == MaterialShadingModel.Subsurface || info.ShadingModel == MaterialShadingModel.Foliage || info.BlendMode != MaterialBlendMode.Opaque;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = isTransparent;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = true;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = withTess;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = withTess;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = info.ShadingModel == MaterialShadingModel.Subsurface || info.ShadingModel == MaterialShadingModel.Foliage;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = isNotUnlit;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = info.ShadingModel == MaterialShadingModel.Subsurface || info.ShadingModel == MaterialShadingModel.Foliage || !isOpaque;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = !isOpaque;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = true;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = withTess;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = withTess;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = info.ShadingModel == MaterialShadingModel.Subsurface || info.ShadingModel == MaterialShadingModel.Foliage;
                     break;
                 }
                 case MaterialDomain.PostProcess:
                 {
-                    GetBox(MaterialNodeBoxes.Color).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = false;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = false;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = false;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = false;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = false;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = false;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = false;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = false;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = false;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = false;
                     break;
                 }
                 case MaterialDomain.Decal:
                 {
                     var mode = info.DecalBlendingMode;
 
-                    GetBox(MaterialNodeBoxes.Color).Enabled = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Stain;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Emissive;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = mode == MaterialDecalBlendingMode.Translucent;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = mode == MaterialDecalBlendingMode.Translucent;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = mode == MaterialDecalBlendingMode.Translucent;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Normal;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = false;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = false;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = false;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = false;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = false;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Stain;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Emissive;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = mode == MaterialDecalBlendingMode.Translucent;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = mode == MaterialDecalBlendingMode.Translucent;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = mode == MaterialDecalBlendingMode.Translucent;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = mode == MaterialDecalBlendingMode.Translucent || mode == MaterialDecalBlendingMode.Normal;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = false;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = false;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = false;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = false;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = false;
                     break;
                 }
                 case MaterialDomain.GUI:
                 {
-                    GetBox(MaterialNodeBoxes.Color).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = false;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = false;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = false;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = false;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = false;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = false;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = false;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = false;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = false;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = false;
                     break;
                 }
                 case MaterialDomain.VolumeParticle:
                 {
-                    GetBox(MaterialNodeBoxes.Color).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Mask).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Emissive).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Metalness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Specular).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Roughness).Enabled = false;
-                    GetBox(MaterialNodeBoxes.AmbientOcclusion).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Normal).Enabled = false;
-                    GetBox(MaterialNodeBoxes.Opacity).Enabled = true;
-                    GetBox(MaterialNodeBoxes.Refraction).Enabled = false;
-                    GetBox(MaterialNodeBoxes.PositionOffset).Enabled = false;
-                    GetBox(MaterialNodeBoxes.TessellationMultiplier).Enabled = false;
-                    GetBox(MaterialNodeBoxes.WorldDisplacement).Enabled = false;
-                    GetBox(MaterialNodeBoxes.SubsurfaceColor).Enabled = false;
+                    GetBox(MaterialNodeBoxes.Color).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Mask).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Emissive).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Metalness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Specular).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Roughness).IsActive = false;
+                    GetBox(MaterialNodeBoxes.AmbientOcclusion).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Normal).IsActive = false;
+                    GetBox(MaterialNodeBoxes.Opacity).IsActive = true;
+                    GetBox(MaterialNodeBoxes.Refraction).IsActive = false;
+                    GetBox(MaterialNodeBoxes.PositionOffset).IsActive = false;
+                    GetBox(MaterialNodeBoxes.TessellationMultiplier).IsActive = false;
+                    GetBox(MaterialNodeBoxes.WorldDisplacement).IsActive = false;
+                    GetBox(MaterialNodeBoxes.SubsurfaceColor).IsActive = false;
                     break;
                 }
-                    default: throw new ArgumentOutOfRangeException();
+                default: throw new ArgumentOutOfRangeException();
                 }
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 // Fix emissive box (it's a strange error)
-                GetBox(3).CurrentType = new ScriptType(typeof(Vector3));
+                GetBox(3).CurrentType = new ScriptType(typeof(Float3));
 
                 UpdateBoxes();
             }
@@ -296,6 +262,127 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
+#if false // TODO: finish code editor based on RichTextBoxBase with text block parsing for custom styling
+        internal sealed class CustomCodeTextBox : RichTextBoxBase
+        {
+            protected override void OnParseTextBlocks()
+            {
+                base.OnParseTextBlocks();
+
+                // Single block for a whole text
+                // TODO: implement code parsing with HLSL syntax
+                var font = Style.Current.FontMedium;
+                var style = new TextBlockStyle
+                {
+                    Font = new FontReference(font),
+                    Color = Style.Current.Foreground,
+                    BackgroundSelectedBrush = new SolidColorBrush(Style.Current.BackgroundSelected),
+                };
+                _textBlocks.Clear();
+                _textBlocks.Add(new TextBlock
+                {
+                    Range = new TextRange
+                    {
+                        StartIndex = 0,
+                        EndIndex = TextLength,
+                    },
+                    Style = style,
+                    Bounds = new Rectangle(Float2.Zero, font.MeasureText(Text)),
+                });
+            }
+#else
+        internal sealed class CustomCodeTextBox : TextBox
+        {
+#endif
+            public override void Draw()
+            {
+                base.Draw();
+
+                // Draw border
+                if (!IsFocused)
+                    Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), Style.Current.BorderNormal);
+            }
+        }
+
+        internal sealed class CustomCodeNode : ResizableSurfaceNode
+        {
+            private CustomCodeTextBox _textBox;
+
+            public CustomCodeNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
+            : base(id, context, nodeArch, groupArch)
+            {
+                _sizeValueIndex = Archetype.TypeID == 8 ? 1 : 3; // Index of the Size stored in Values array
+                Float2 pos = new Float2(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight), size;
+                if (nodeArch.TypeID == 8)
+                {
+                    pos += new Float2(65, 0);
+                    size = new Float2(160, 185);
+                    _sizeMin = new Float2(240, 185);
+                }
+                else
+                {
+                    pos += new Float2(0, 40 + FlaxEditor.Utilities.Constants.UIMargin * 2f);
+                    size = new Float2(300, 180);
+                }
+                _textBox = new CustomCodeTextBox
+                {
+                    IsMultiline = true,
+                    Location = pos,
+                    Size = size,
+                    Parent = this,
+                    AnchorMax = Float2.One,
+                };
+                _textBox.EditEnd += () => SetValue(0, _textBox.Text);
+            }
+
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
+            {
+                base.OnSurfaceLoaded(action);
+
+                _textBox.Text = (string)Values[0];
+            }
+
+            public override void OnValuesChanged()
+            {
+                base.OnValuesChanged();
+
+                _textBox.Text = (string)Values[0];
+            }
+        }
+
+        internal enum MaterialTemplateInputsMapping
+        {
+            /// <summary>
+            /// Constant buffers.
+            /// </summary>
+            Constants = 1,
+
+            /// <summary>
+            /// Shader resources such as textures and buffers.
+            /// </summary>
+            ShaderResources = 2,
+
+            /// <summary>
+            /// Pre-processor definitions.
+            /// </summary>
+            Defines = 3,
+
+            /// <summary>
+            /// Included files.
+            /// </summary>
+            Includes = 7,
+
+            /// <summary>
+            /// Default location after all shader resources and methods but before actual material code.
+            /// </summary>
+            Utilities = 8,
+
+            /// <summary>
+            /// Shader functions location after all material shaders.
+            /// </summary>
+            Shaders = 9,
+        }
+
         /// <summary>
         /// The nodes for that group.
         /// </summary>
@@ -308,24 +395,24 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Material",
                 Description = "Main material node",
                 Flags = NodeFlags.MaterialGraph | NodeFlags.NoRemove | NodeFlags.NoSpawnViaGUI | NodeFlags.NoSpawnViaPaste | NodeFlags.NoCloseButton,
-                Size = new Vector2(150, 300),
+                Size = new Float2(150, 300),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Input(0, "", true, typeof(void), 0),
-                    NodeElementArchetype.Factory.Input(1, "Color", true, typeof(Vector3), 1),
+                    NodeElementArchetype.Factory.Input(1, "Color", true, typeof(Float3), 1),
                     NodeElementArchetype.Factory.Input(2, "Mask", true, typeof(float), 2),
-                    NodeElementArchetype.Factory.Input(3, "Emissive", true, typeof(Vector3), 3),
+                    NodeElementArchetype.Factory.Input(3, "Emissive", true, typeof(Float3), 3),
                     NodeElementArchetype.Factory.Input(4, "Metalness", true, typeof(float), 4),
                     NodeElementArchetype.Factory.Input(5, "Specular", true, typeof(float), 5),
                     NodeElementArchetype.Factory.Input(6, "Roughness", true, typeof(float), 6),
                     NodeElementArchetype.Factory.Input(7, "Ambient Occlusion", true, typeof(float), 7),
-                    NodeElementArchetype.Factory.Input(8, "Normal", true, typeof(Vector3), 8),
+                    NodeElementArchetype.Factory.Input(8, "Normal", true, typeof(Float3), 8),
                     NodeElementArchetype.Factory.Input(9, "Opacity", true, typeof(float), 9),
                     NodeElementArchetype.Factory.Input(10, "Refraction", true, typeof(float), 10),
-                    NodeElementArchetype.Factory.Input(11, "Position Offset", true, typeof(Vector3), 11),
+                    NodeElementArchetype.Factory.Input(11, "Position Offset", true, typeof(Float3), 11),
                     NodeElementArchetype.Factory.Input(12, "Tessellation Multiplier", true, typeof(float), 12),
-                    NodeElementArchetype.Factory.Input(13, "World Displacement", true, typeof(Vector3), 13),
-                    NodeElementArchetype.Factory.Input(14, "Subsurface Color", true, typeof(Vector3), 14),
+                    NodeElementArchetype.Factory.Input(13, "World Displacement", true, typeof(Float3), 13),
+                    NodeElementArchetype.Factory.Input(14, "Subsurface Color", true, typeof(Float3), 14),
                 }
             },
             new NodeArchetype
@@ -334,10 +421,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "World Position",
                 Description = "Absolute world space position",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 30),
+                Size = new Float2(150, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -346,11 +433,11 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "View",
                 Description = "View properties",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 60),
+                Size = new Float2(150, 60),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Position", typeof(Vector3), 0),
-                    NodeElementArchetype.Factory.Output(1, "Direction", typeof(Vector3), 1),
+                    NodeElementArchetype.Factory.Output(0, "Position", typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(1, "Direction", typeof(Float3), 1),
                     NodeElementArchetype.Factory.Output(2, "Far Plane", typeof(float), 2),
                 }
             },
@@ -360,10 +447,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Normal Vector",
                 Description = "World space normal vector",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 40),
+                Size = new Float2(150, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Normal", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Normal", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -372,10 +459,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Camera Vector",
                 Description = "Calculates camera vector",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 30),
+                Size = new Float2(150, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Vector", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Vector", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -384,11 +471,14 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Screen Position",
                 Description = "Gathers screen position or texcoord",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 40),
+                Size = new Float2(160, 40),
+                DefaultValues = new object[] { false },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Position", typeof(Vector2), 0),
-                    NodeElementArchetype.Factory.Output(1, "Texcoord", typeof(Vector2), 1),
+                    NodeElementArchetype.Factory.Output(0, "Position", typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Output(1, "Texcoord", typeof(Float2), 1),
+                    NodeElementArchetype.Factory.Bool(0, 0, 0),
+                    NodeElementArchetype.Factory.Text(20, 0, "Main View"),
                 }
             },
             new NodeArchetype
@@ -397,41 +487,44 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Screen Size",
                 Description = "Gathers screen size",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 40),
+                Size = new Float2(160, 40),
+                DefaultValues = new object[] { false },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Size", typeof(Vector2), 0),
-                    NodeElementArchetype.Factory.Output(1, "Inv Size", typeof(Vector2), 1),
+                    NodeElementArchetype.Factory.Output(0, "Size", typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Output(1, "Inv Size", typeof(Float2), 1),
+                    NodeElementArchetype.Factory.Bool(0, 0, 0),
+                    NodeElementArchetype.Factory.Text(20, 0, "Main View"),
                 }
             },
             new NodeArchetype
             {
                 TypeID = 8,
+                Create = (id, context, arch, groupArch) => new CustomCodeNode(id, context, arch, groupArch),
                 Title = "Custom Code",
                 Description = "Custom HLSL shader code expression",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(300, 200),
+                Size = new Float2(300, 200),
                 DefaultValues = new object[]
                 {
-                    "// Here you can add HLSL code\nOutput0 = Input0;"
+                    "// You can add HLSL code here\nOutput0 = Input0;",
+                    new Float2(350, 200),
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "Input0", true, typeof(Vector4), 0),
-                    NodeElementArchetype.Factory.Input(1, "Input1", true, typeof(Vector4), 1),
-                    NodeElementArchetype.Factory.Input(2, "Input2", true, typeof(Vector4), 2),
-                    NodeElementArchetype.Factory.Input(3, "Input3", true, typeof(Vector4), 3),
-                    NodeElementArchetype.Factory.Input(4, "Input4", true, typeof(Vector4), 4),
-                    NodeElementArchetype.Factory.Input(5, "Input5", true, typeof(Vector4), 5),
-                    NodeElementArchetype.Factory.Input(6, "Input6", true, typeof(Vector4), 6),
-                    NodeElementArchetype.Factory.Input(7, "Input7", true, typeof(Vector4), 7),
+                    NodeElementArchetype.Factory.Input(0, "Input0", true, typeof(Float4), 0),
+                    NodeElementArchetype.Factory.Input(1, "Input1", true, typeof(Float4), 1),
+                    NodeElementArchetype.Factory.Input(2, "Input2", true, typeof(Float4), 2),
+                    NodeElementArchetype.Factory.Input(3, "Input3", true, typeof(Float4), 3),
+                    NodeElementArchetype.Factory.Input(4, "Input4", true, typeof(Float4), 4),
+                    NodeElementArchetype.Factory.Input(5, "Input5", true, typeof(Float4), 5),
+                    NodeElementArchetype.Factory.Input(6, "Input6", true, typeof(Float4), 6),
+                    NodeElementArchetype.Factory.Input(7, "Input7", true, typeof(Float4), 7),
 
-                    NodeElementArchetype.Factory.Output(0, "Output0", typeof(Vector4), 8),
-                    NodeElementArchetype.Factory.Output(1, "Output1", typeof(Vector4), 9),
-                    NodeElementArchetype.Factory.Output(2, "Output2", typeof(Vector4), 10),
-                    NodeElementArchetype.Factory.Output(3, "Output3", typeof(Vector4), 11),
-
-                    NodeElementArchetype.Factory.TextBox(60, 0, 175, 200, 0),
+                    NodeElementArchetype.Factory.Output(0, "Output0", typeof(Float4), 8),
+                    NodeElementArchetype.Factory.Output(1, "Output1", typeof(Float4), 9),
+                    NodeElementArchetype.Factory.Output(2, "Output2", typeof(Float4), 10),
+                    NodeElementArchetype.Factory.Output(3, "Output3", typeof(Float4), 11),
                 }
             },
             new NodeArchetype
@@ -440,10 +533,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Object Position",
                 Description = "Absolute world space object position",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 30),
+                Size = new Float2(150, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -452,7 +545,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Two Sided Sign",
                 Description = "Scalar value with surface side sign. 1 for normal facing, -1 for inverted",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 30),
+                Size = new Float2(150, 30),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, "", typeof(float), 0),
@@ -464,7 +557,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Camera Depth Fade",
                 Description = "Creates a gradient of 0 near the camera to white at fade length. Useful for preventing particles from camera clipping.",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(200, 60),
+                Size = new Float2(200, 60),
                 DefaultValues = new object[]
                 {
                     200.0f,
@@ -483,10 +576,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Vertex Color",
                 Description = "Per vertex color",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 40),
+                Size = new Float2(150, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Color", typeof(Vector4), 0),
+                    NodeElementArchetype.Factory.Output(0, "Color", typeof(Float4), 0),
                 }
             },
             new NodeArchetype
@@ -494,11 +587,12 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 13,
                 Title = "Pre-skinned Local Position",
                 Description = "Per vertex local position (before skinning)",
+                AlternativeTitles = new[] { "Vertex Position", "Pre skinning Local Vertex Position" },
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(230, 40),
+                Size = new Float2(270, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -506,11 +600,12 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 14,
                 Title = "Pre-skinned Local Normal",
                 Description = "Per vertex local normal (before skinning)",
+                AlternativeTitles = new[] { "Vertex Normal", "Pre skinning Local Normal" },
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(230, 40),
+                Size = new Float2(270, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -519,7 +614,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Depth",
                 Description = "Current pixel/vertex linear distance to the camera",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(100, 30),
+                Size = new Float2(100, 30),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 0),
@@ -531,10 +626,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Tangent Vector",
                 Description = "World space tangent vector",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(160, 40),
+                Size = new Float2(160, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Tangent", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Tangent", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -543,10 +638,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Bitangent Vector",
                 Description = "World space bitangent vector",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(160, 40),
+                Size = new Float2(160, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "Bitangent", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Bitangent", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -555,10 +650,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Camera Position",
                 Description = "World space camera location",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(160, 40),
+                Size = new Float2(160, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -567,7 +662,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Per Instance Random",
                 Description = "Per object instance random value (normalized to range 0-1)",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(200, 40),
+                Size = new Float2(200, 30),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, "", typeof(float), 0),
@@ -579,11 +674,11 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Interpolate VS To PS",
                 Description = "Helper node used to pass data from Vertex Shader to Pixel Shader",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(220, 40),
+                Size = new Float2(220, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "Vertex Shader", true, typeof(Vector4), 0),
-                    NodeElementArchetype.Factory.Output(0, "Pixel Shader", typeof(Vector4), 1),
+                    NodeElementArchetype.Factory.Input(0, "Vertex Shader", true, typeof(Float4), 0),
+                    NodeElementArchetype.Factory.Output(0, "Pixel Shader", typeof(Float4), 1),
                 }
             },
             new NodeArchetype
@@ -592,7 +687,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Terrain Holes Mask",
                 Description = "Scalar terrain visibility mask used mostly for creating holes in terrain",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(200, 30),
+                Size = new Float2(200, 30),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, "", typeof(float), 0),
@@ -604,14 +699,14 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Terrain Layer Weight",
                 Description = "Terrain layer weight mask used for blending terrain layers",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(220, 30),
+                Size = new Float2(200, 30),
                 DefaultValues = new object[]
                 {
                     0,
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.ComboBox(0, 0, 70.0f, 0, FlaxEditor.Tools.Terrain.PaintTerrainGizmoMode.TerrainLayerNames),
+                    NodeElementArchetype.Factory.ComboBox(0, 0, 175.0f, 0, LayersAndTagsSettings.GetCurrentTerrainLayers()),
                     NodeElementArchetype.Factory.Output(0, "", typeof(float), 0),
                 }
             },
@@ -621,7 +716,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Depth Fade",
                 Description = "Creates a gradient of 0 near the scene depth geometry. Useful for preventing particles from clipping with geometry (use it for soft particles).",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(200, 40),
+                Size = new Float2(200, 40),
                 DefaultValues = new object[]
                 {
                     10.0f,
@@ -639,7 +734,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Material Function",
                 Description = "Calls material function",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(220, 120),
+                Size = new Float2(220, 120),
                 DefaultValues = new object[]
                 {
                     Guid.Empty,
@@ -655,10 +750,10 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Object Size",
                 Description = "Absolute world space object size",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 30),
+                Size = new Float2(150, 30),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Output(0, "XYZ", typeof(Float3), 0),
                 }
             },
             new NodeArchetype
@@ -667,28 +762,28 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Blend Normals",
                 Description = "Blend two normal maps to create a single normal map",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(170, 40),
+                Size = new Float2(170, 40),
                 ConnectionsHints = ConnectionsHint.Vector,
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "Base Normal", true, typeof(Vector3), 0),
-                    NodeElementArchetype.Factory.Input(1, "Additional Normal", true, typeof(Vector3), 1),
-                    NodeElementArchetype.Factory.Output(0, "Result", typeof(Vector3), 2)
+                    NodeElementArchetype.Factory.Input(0, "Base Normal", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Input(1, "Additional Normal", true, typeof(Float3), 1),
+                    NodeElementArchetype.Factory.Output(0, "Result", typeof(Float3), 2)
                 }
             },
             new NodeArchetype
             {
                 TypeID = 27,
                 Title = "Rotator",
-                Description = "Rotates UV coordinates according to a scalar angle (0-1)",
+                Description = "Rotates UV coordinates according to a scalar angle (in radians, 0-2PI)",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 55),
+                Size = new Float2(150, 55),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Vector2), 0),
-                    NodeElementArchetype.Factory.Input(1, "Center", true, typeof(Vector2), 1),
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Center", true, typeof(Float2), 1),
                     NodeElementArchetype.Factory.Input(2, "Rotation Angle", true, typeof(float), 2),
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector2), 3),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float2), 3),
                 }
             },
             new NodeArchetype
@@ -697,7 +792,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Sphere Mask",
                 Description = "Creates a sphere mask",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(150, 100),
+                Size = new Float2(150, 100),
                 ConnectionsHints = ConnectionsHint.Vector,
                 IndependentBoxes = new[]
                 {
@@ -712,8 +807,8 @@ namespace FlaxEditor.Surface.Archetypes
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "A", true, null, 0),
-                    NodeElementArchetype.Factory.Input(1, "B", true, null, 1),
+                    NodeElementArchetype.Factory.Input(0, "UV", true, null, 0),
+                    NodeElementArchetype.Factory.Input(1, "Center", true, null, 1),
                     NodeElementArchetype.Factory.Input(2, "Radius", true, typeof(float), 2, 0),
                     NodeElementArchetype.Factory.Input(3, "Hardness", true, typeof(float), 3, 1),
                     NodeElementArchetype.Factory.Input(4, "Invert", true, typeof(bool), 4, 2),
@@ -726,18 +821,18 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "UV Tiling & Offset",
                 Description = "Takes UVs and applies tiling and offset",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(175, 60),
+                Size = new Float2(175, 60),
                 DefaultValues = new object[]
                 {
-                    Vector2.One,
-                    Vector2.Zero
+                    Float2.One,
+                    Float2.Zero
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Vector2), 0),
-                    NodeElementArchetype.Factory.Input(1, "Tiling", true, typeof(Vector2), 1, 0),
-                    NodeElementArchetype.Factory.Input(2, "Offset", true, typeof(Vector2), 2, 1),
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector2), 3),
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Tiling", true, typeof(Float2), 1, 0),
+                    NodeElementArchetype.Factory.Input(2, "Offset", true, typeof(Float2), 2, 1),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float2), 3),
                 }
             },
             new NodeArchetype
@@ -746,7 +841,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "DDX",
                 Description = "Returns the partial derivative of the specified value with respect to the screen-space x-coordinate",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(90, 25),
+                Size = new Float2(90, 25),
                 ConnectionsHints = ConnectionsHint.Numeric,
                 IndependentBoxes = new[] { 0 },
                 DependentBoxes = new[] { 1 },
@@ -762,7 +857,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "DDY",
                 Description = "Returns the partial derivative of the specified value with respect to the screen-space y-coordinate",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(90, 25),
+                Size = new Float2(90, 25),
                 ConnectionsHints = ConnectionsHint.Numeric,
                 IndependentBoxes = new[] { 0 },
                 DependentBoxes = new[] { 1 },
@@ -778,7 +873,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Sign",
                 Description = "Returns -1 if value is less than zero; 0 if value equals zero; and 1 if value is greater than zero",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(90, 25),
+                Size = new Float2(90, 25),
                 ConnectionsHints = ConnectionsHint.Numeric,
                 IndependentBoxes = new[] { 0 },
                 Elements = new[]
@@ -793,7 +888,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Any",
                 Description = "True if any components of value are non-zero; otherwise, false",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(90, 25),
+                Size = new Float2(90, 25),
                 ConnectionsHints = ConnectionsHint.Numeric,
                 IndependentBoxes = new[] { 0 },
                 Elements = new[]
@@ -808,7 +903,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "All",
                 Description = "Determines if all components of the specified value are non-zero",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(90, 25),
+                Size = new Float2(90, 25),
                 ConnectionsHints = ConnectionsHint.Numeric,
                 IndependentBoxes = new[] { 0 },
                 Elements = new[]
@@ -823,7 +918,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Black Body",
                 Description = "Simulates black body radiation via a given temperature in kelvin",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(120, 25),
+                Size = new Float2(120, 25),
                 DefaultValues = new object[]
                 {
                     0.0f,
@@ -831,43 +926,338 @@ namespace FlaxEditor.Surface.Archetypes
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Input(0, "Temp", true, typeof(float), 0, 0),
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector3), 1),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 1),
                 }
             },
             new NodeArchetype
             {
                 TypeID = 36,
-                Title = "HSVToRGB",
+                Title = "HSV To RGB",
                 Description = "Converts a HSV value to linear RGB [X = 0/360, Y = 0/1, Z = 0/1]",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(160, 25),
+                Size = new Float2(160, 25),
                 DefaultValues = new object[]
                 {
-                    new Vector3(240, 1, 1),
+                    new Float3(240, 1, 1),
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "HSV", true, typeof(Vector3), 0, 0),
-                    NodeElementArchetype.Factory.Output(0, "RGB", typeof(Vector3), 1),
+                    NodeElementArchetype.Factory.Input(0, "HSV", true, typeof(Float3), 0, 0),
+                    NodeElementArchetype.Factory.Output(0, "RGB", typeof(Float3), 1),
                 }
             },
             new NodeArchetype
             {
                 TypeID = 37,
-                Title = "RGBToHSV",
+                Title = "RGB To HSV",
                 Description = "Converts a linear RGB value to HSV [X = 0/360, Y = 0/1, Z = 0/1]",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(160, 25),
+                Size = new Float2(160, 25),
                 DefaultValues = new object[]
                 {
-                    new Vector3(0, 1, 0),
+                    new Float3(0, 1, 0),
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "RGB", true, typeof(Vector3), 0, 0),
-                    NodeElementArchetype.Factory.Output(0, "HSV", typeof(Vector3), 1),
+                    NodeElementArchetype.Factory.Input(0, "RGB", true, typeof(Float3), 0, 0),
+                    NodeElementArchetype.Factory.Output(0, "HSV", typeof(Float3), 1),
                 }
-            }
+            },
+            new NodeArchetype
+            {
+                TypeID = 38,
+                Create = (id, context, arch, groupArch) => new CustomCodeNode(id, context, arch, groupArch),
+                Title = "Custom Global Code",
+                Description = "Custom global HLSL shader code expression (placed before material shader code). Can contain includes to shader utilities or declare functions to reuse later.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(300, 240),
+                DefaultValues = new object[]
+                {
+                    "// You can add HLSL code here\nfloat4 GetCustomColor()\n{\n\treturn float4(1, 0, 0, 1);\n}",
+                    true,
+                    (int)MaterialTemplateInputsMapping.Utilities,
+                    new Float2(300, 240),
+                },
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Bool(0, 0, 1),
+                    NodeElementArchetype.Factory.Text(20, 0, "Enabled"),
+                    NodeElementArchetype.Factory.Text(0, 20, "Location"),
+                    NodeElementArchetype.Factory.Enum(50, 20, 120, 2, typeof(MaterialTemplateInputsMapping)),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 39,
+                Title = "View Size",
+                Description = "The size of the view. The draw rectangle size in GUI materials.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 40),
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Output(0, "Size", typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Output(1, "Inv Size", typeof(Float2), 1),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 40,
+                Title = "Rectangle Mask",
+                Description = "Creates a rectangle mask",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 40),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues = new object[]
+                {
+                    new Float2(0.5f, 0.5f),
+                },
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Rectangle", true, typeof(Float2), 1, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 2),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 41,
+                Title = "FWidth",
+                Description = "Creates a partial derivative (fwidth)",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 20),
+                ConnectionsHints = ConnectionsHint.Numeric,
+                IndependentBoxes = new[] { 0 },
+                DependentBoxes = new[] { 1 },
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Input(0, "Value", true, null, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, null, 1),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 42,
+                Title = "AA Step",
+                Description = "Smooth version of step function with less aliasing",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 40),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues = new object[]
+                {
+                    0.5f
+                },
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Input(0, "Value", true, typeof(float), 0),
+                    NodeElementArchetype.Factory.Input(1, "Gradient", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 2),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 43,
+                Title = "Rotate UV",
+                Description = "Rotates 2D vector by given angle around (0,0) origin",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(250, 40),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues =
+                [
+                    0.0f,
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Angle", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float2), 2),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 44,
+                Title = "Cone Gradient",
+                Description = "Creates cone gradient around normalized UVs (range [-1; 1]), angle is in radians (range [0; TwoPi])",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 40),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues =
+                [
+                    0.0f,
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Angle", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 2),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 45,
+                Title = "Cycle Gradient",
+                Description = "Creates 2D sphere mask gradient around normalized UVs (range [-1; 1])",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 20),
+                ConnectionsHints = ConnectionsHint.Vector,
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 1),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 46,
+                Title = "Falloff and Offset",
+                Description = "",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 60),
+                ConnectionsHints = ConnectionsHint.Numeric,
+                DefaultValues =
+                [
+                    0.0f,
+                    0.9f
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "Value", true, typeof(float), 0),
+                    NodeElementArchetype.Factory.Input(1, "Offset", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Input(2, "Falloff", true, typeof(float), 2, 1),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 3),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 47,
+                Title = "Linear Gradient",
+                Description = "x = Gradient along X axis, y = Gradient along Y axis",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 60),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues =
+                [
+                    0.0f,
+                    false
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Angle", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Input(2, "Mirror", true, typeof(bool), 2, 1),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float2), 3),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 48,
+                Title = "Radial Gradient",
+                Description = "",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 40),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues =
+                [
+                    0.0f,
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "Angle", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(float), 2),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 49,
+                Title = "Ring Gradient",
+                Description = "x = InnerMask,y = OuterMask,z = Mask",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 80),
+                ConnectionsHints = ConnectionsHint.Vector,
+                DefaultValues =
+                [
+                    1.0f,
+                    0.8f,
+                    0.05f,
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
+                    NodeElementArchetype.Factory.Input(1, "OuterBounds", true, typeof(float), 1, 0),
+                    NodeElementArchetype.Factory.Input(2, "InnerBounds", true, typeof(float), 2, 1),
+                    NodeElementArchetype.Factory.Input(3, "Falloff", true, typeof(float), 3, 2),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float3), 4),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 50,
+                Title = "Shift HSV",
+                Description = "Modifies the HSV of a color, values are from -1:1, preserves alpha",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(175, 80),
+                DefaultValues =
+                [
+                    0.0f,  // For Hue (index 0)
+                    0.0f,  // For Sat (index 1)
+                    0.0f,  // For Val (index 2)
+                ],
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "RGBA", true, typeof(Float4), 0),          // No default
+                    NodeElementArchetype.Factory.Input(1, "Hue", true, typeof(float), 1, 0),        // Uses DefaultValues[0]
+                    NodeElementArchetype.Factory.Input(2, "Sat", true, typeof(float), 2, 1),        // Uses DefaultValues[1]
+                    NodeElementArchetype.Factory.Input(3, "Val", true, typeof(float), 3, 2),        // Uses DefaultValues[2]
+                    NodeElementArchetype.Factory.Output(0, "RGBA", typeof(Float4), 4),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 51,
+                Title = "Color Blend",
+                Description = "Blends two colors using various blend modes. Passes base alpha through.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(180, 80),
+                DefaultValues = new object[]
+                {
+                    BlendMode.Normal, // Default blend mode
+                    1.0f,            // Default blend amount
+                },
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Input(1, "Base Color", true, typeof(Float4), 0),
+                    NodeElementArchetype.Factory.Input(2, "Blend Color", true, typeof(Float4), 1),
+                    NodeElementArchetype.Factory.Input(3, "Intensity", true, typeof(float), 2, 1),
+                    NodeElementArchetype.Factory.Enum(0, 0, 120, 0, typeof(BlendMode)), // Blend mode selector
+                    NodeElementArchetype.Factory.Output(0, "Result", typeof(Float4), 3),
+                }
+            },
+            new NodeArchetype
+            {
+                TypeID = 52,
+                Title = "Linear to sRGB",
+                Description = "Converts linear color into sRGB.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 20),
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "Linear", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(0, "sRGB", typeof(Float3), 1),
+                ]
+            },
+            new NodeArchetype
+            {
+                TypeID = 53,
+                Title = "sRGB to Linear",
+                Description = "Converts sRGB color into linear.",
+                Flags = NodeFlags.MaterialGraph,
+                Size = new Float2(150, 20),
+                Elements =
+                [
+                    NodeElementArchetype.Factory.Input(0, "sRGB", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Linear", typeof(Float3), 1),
+                ]
+            },
         };
     }
 }

@@ -1,14 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine
 {
     partial struct HingeJointDrive
     {
-        /// <summary>
-        /// The default <see cref="HingeJointDrive"/> structure.
-        /// </summary>
-        public static readonly HingeJointDrive Default = new HingeJointDrive(0.0f, float.MaxValue, 1.0f, false);
-
         /// <summary>
         /// Initializes a new instance of the <see cref="HingeJointDrive"/> struct.
         /// </summary>

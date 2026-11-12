@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2020 Flax Engine. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace Flax.Build
 {
@@ -46,6 +46,26 @@ namespace Flax.Build
         /// Running on Switch.
         /// </summary>
         Switch = 8,
+
+        /// <summary>
+        /// Running on PlayStation 5.
+        /// </summary>
+        PS5 = 9,
+
+        /// <summary>
+        /// Running on Mac.
+        /// </summary>
+        Mac = 10,
+
+        /// <summary>
+        /// Running on iPhone.
+        /// </summary>
+        iOS = 11,
+
+        /// <summary>
+        /// Running on Web.
+        /// </summary>
+        Web = 12,
     }
 
     /// <summary>

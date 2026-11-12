@@ -1,18 +1,16 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CollisionData.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
-#include "Engine/Physics/Physics.h"
-#include "Engine/Physics/Utilities.h"
+#include "Engine/Physics/PhysicsScene.h"
+#include "Engine/Physics/PhysicsBackend.h"
 #include "Engine/Physics/CollisionCooking.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Threading/Threading.h"
-#include <ThirdParty/PhysX/extensions/PxDefaultStreams.h>
-#include <ThirdParty/PhysX/geometry/PxTriangleMesh.h>
-#include <ThirdParty/PhysX/geometry/PxConvexMesh.h>
-#include <ThirdParty/PhysX/PxPhysics.h>
 
 REGISTER_BINARY_ASSET(CollisionData, "FlaxEngine.CollisionData", true);
 
@@ -27,12 +25,18 @@ CollisionData::CollisionData(const SpawnParams& params, const AssetInfo* info)
 
 bool CollisionData::CookCollision(CollisionDataType type, ModelBase* modelObj, int32 modelLodIndex, uint32 materialSlotsMask, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
 {
-    // Validate state
     if (!IsVirtual())
     {
         LOG(Warning, "Only virtual assets can be modified at runtime.");
         return true;
     }
+    if (IsInMainThread() && modelObj && modelObj->IsVirtual())
+    {
+        LOG(Error, "Cannot cook collision data for virtual models on a main thread (virtual models data is stored on GPU only). Use thread pool or async task.");
+        return true;
+    }
+    PROFILE_CPU();
+    PROFILE_MEM(Physics);
 
     // Prepare
     CollisionCooking::Argument arg;
@@ -47,26 +51,22 @@ bool CollisionData::CookCollision(CollisionDataType type, ModelBase* modelObj, i
     SerializedOptions options;
     BytesContainer outputData;
     if (CollisionCooking::CookCollision(arg, options, outputData))
-    {
         return true;
-    }
-
-    // Clear state
-    unload(true);
 
     // Load data
+    unload(true);
     if (load(&options, outputData.Get(), outputData.Length()) != LoadResult::Ok)
-    {
         return true;
-    }
 
     // Mark as loaded (eg. Mesh Colliders using this asset will update shape for physics simulation)
     onLoaded();
     return false;
 }
 
-bool CollisionData::CookCollision(CollisionDataType type, const Span<Vector3>& vertices, const Span<uint32>& triangles, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
+bool CollisionData::CookCollision(CollisionDataType type, const Span<Float3>& vertices, const Span<uint32>& triangles, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Physics);
     CHECK_RETURN(vertices.Length() != 0, true);
     CHECK_RETURN(triangles.Length() != 0 && triangles.Length() % 3 == 0, true);
     ModelData modelData;
@@ -78,8 +78,10 @@ bool CollisionData::CookCollision(CollisionDataType type, const Span<Vector3>& v
     return CookCollision(type, &modelData, convexFlags, convexVertexLimit);
 }
 
-bool CollisionData::CookCollision(CollisionDataType type, const Span<Vector3>& vertices, const Span<int32>& triangles, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
+bool CollisionData::CookCollision(CollisionDataType type, const Span<Float3>& vertices, const Span<int32>& triangles, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Physics);
     CHECK_RETURN(vertices.Length() != 0, true);
     CHECK_RETURN(triangles.Length() != 0 && triangles.Length() % 3 == 0, true);
     ModelData modelData;
@@ -95,12 +97,13 @@ bool CollisionData::CookCollision(CollisionDataType type, const Span<Vector3>& v
 
 bool CollisionData::CookCollision(CollisionDataType type, ModelData* modelData, ConvexMeshGenerationFlags convexFlags, int32 convexVertexLimit)
 {
-    // Validate state
     if (!IsVirtual())
     {
         LOG(Warning, "Only virtual assets can be modified at runtime.");
         return true;
     }
+    PROFILE_CPU();
+    PROFILE_MEM(Physics);
 
     // Prepare
     CollisionCooking::Argument arg;
@@ -113,18 +116,14 @@ bool CollisionData::CookCollision(CollisionDataType type, ModelData* modelData, 
     SerializedOptions options;
     BytesContainer outputData;
     if (CollisionCooking::CookCollision(arg, options, outputData))
-    {
         return true;
-    }
 
     // Clear state
     unload(true);
 
     // Load data
     if (load(&options, outputData.Get(), outputData.Length()) != LoadResult::Ok)
-    {
         return true;
-    }
 
     // Mark as loaded (eg. Mesh Colliders using this asset will update shape for physics simulation)
     onLoaded();
@@ -133,112 +132,78 @@ bool CollisionData::CookCollision(CollisionDataType type, ModelData* modelData, 
 
 #endif
 
-void CollisionData::ExtractGeometry(Array<Vector3>& vertexBuffer, Array<int32>& indexBuffer) const
+bool CollisionData::GetModelTriangle(uint32 faceIndex, MeshBase*& mesh, uint32& meshTriangleIndex) const
 {
+    mesh = nullptr;
+    meshTriangleIndex = MAX_uint32;
+    if (!IsLoaded())
+        return false;
+    PROFILE_CPU();
+    ScopeLock lock(Locker);
+    if (_triangleMesh)
+    {
+        uint32 trianglesCount;
+        const uint32* remap = PhysicsBackend::GetTriangleMeshRemap(_triangleMesh, trianglesCount);
+        if (remap && faceIndex < trianglesCount)
+        {
+            // Get source triangle index from the triangle mesh
+            meshTriangleIndex = remap[faceIndex];
+
+            // Check if model was used when cooking
+            AssetReference<ModelBase> model;
+            model = _options.Model;
+            if (!model)
+                return true;
+
+            // Follow code-path similar to CollisionCooking.cpp to pick a mesh that contains this triangle (collision is cooked from merged all source meshes from the model)
+            if (model->WaitForLoaded())
+                return false;
+            const int32 lodIndex = Math::Clamp(_options.ModelLodIndex, 0, model->GetLODsCount());
+            Array<MeshBase*> meshes;
+            model->GetMeshes(meshes, lodIndex);
+            uint32 triangleCounter = 0;
+            for (int32 meshIndex = 0; meshIndex < meshes.Count(); meshIndex++)
+            {
+                MeshBase* m = meshes[meshIndex];
+                if ((_options.MaterialSlotsMask & (1 << m->GetMaterialSlotIndex())) == 0)
+                    continue;
+                const uint32 count = m->GetTriangleCount();
+                if (meshTriangleIndex - triangleCounter <= count)
+                {
+                    mesh = m;
+                    meshTriangleIndex -= triangleCounter;
+                    return true;
+                }
+                triangleCounter += count;
+            }
+        }
+    }
+
+    return false;
+}
+
+void CollisionData::ExtractGeometry(Array<Float3>& vertexBuffer, Array<int32>& indexBuffer) const
+{
+    PROFILE_CPU();
+    PROFILE_MEM(Physics);
     vertexBuffer.Clear();
     indexBuffer.Clear();
 
     ScopeLock lock(Locker);
-
-    uint32 numVertices = 0;
-    uint32 numIndices = 0;
-
-    // Convex Mesh
     if (_convexMesh)
-    {
-        numVertices = _convexMesh->getNbVertices();
-
-        const uint32 numPolygons = _convexMesh->getNbPolygons();
-        for (uint32 i = 0; i < numPolygons; i++)
-        {
-            PxHullPolygon face;
-            const bool status = _convexMesh->getPolygonData(i, face);
-            ASSERT(status);
-
-            numIndices += (face.mNbVerts - 2) * 3;
-        }
-    }
-        // Triangle Mesh
+        PhysicsBackend::GetConvexMeshTriangles(_convexMesh, vertexBuffer, indexBuffer);
     else if (_triangleMesh)
-    {
-        numVertices = _triangleMesh->getNbVertices();
-        numIndices = _triangleMesh->getNbTriangles() * 3;
-    }
-        // No collision data
-    else
-    {
-        return;
-    }
-
-    // Prepare vertex and index buffers
-    vertexBuffer.Resize(numVertices);
-    indexBuffer.Resize(numIndices);
-    auto outVertices = vertexBuffer.Get();
-    auto outIndices = indexBuffer.Get();
-
-    if (_convexMesh)
-    {
-        const PxVec3* convexVertices = _convexMesh->getVertices();
-        const byte* convexIndices = _convexMesh->getIndexBuffer();
-
-        for (uint32 i = 0; i < numVertices; i++)
-            *outVertices++ = P2C(convexVertices[i]);
-
-        uint32 numPolygons = _convexMesh->getNbPolygons();
-        for (uint32 i = 0; i < numPolygons; i++)
-        {
-            PxHullPolygon face;
-            bool status = _convexMesh->getPolygonData(i, face);
-            ASSERT(status);
-
-            const PxU8* faceIndices = convexIndices + face.mIndexBase;
-            for (uint32 j = 2; j < face.mNbVerts; j++)
-            {
-                *outIndices++ = faceIndices[0];
-                *outIndices++ = faceIndices[j];
-                *outIndices++ = faceIndices[j - 1];
-            }
-        }
-    }
-    else
-    {
-        const PxVec3* vertices = _triangleMesh->getVertices();
-        for (uint32 i = 0; i < numVertices; i++)
-            *outVertices++ = P2C(vertices[i]);
-
-        if (_triangleMesh->getTriangleMeshFlags() & PxTriangleMeshFlag::e16_BIT_INDICES)
-        {
-            const uint16* indices = (const uint16*)_triangleMesh->getTriangles();
-
-            uint32 numTriangles = numIndices / 3;
-            for (uint32 i = 0; i < numTriangles; i++)
-            {
-                outIndices[i * 3 + 0] = (uint32)indices[i * 3 + 0];
-                outIndices[i * 3 + 1] = (uint32)indices[i * 3 + 1];
-                outIndices[i * 3 + 2] = (uint32)indices[i * 3 + 2];
-            }
-        }
-        else
-        {
-            const uint32* indices = (const uint32*)_triangleMesh->getTriangles();
-
-            uint32 numTriangles = numIndices / 3;
-            for (uint32 i = 0; i < numTriangles; i++)
-            {
-                outIndices[i * 3 + 0] = indices[i * 3 + 0];
-                outIndices[i * 3 + 1] = indices[i * 3 + 1];
-                outIndices[i * 3 + 2] = indices[i * 3 + 2];
-            }
-        }
-    }
+        PhysicsBackend::GetTriangleMeshTriangles(_triangleMesh, vertexBuffer, indexBuffer);
 }
 
 #if USE_EDITOR
 
-const Array<Vector3>& CollisionData::GetDebugLines()
+const Array<Float3>& CollisionData::GetDebugLines()
 {
     if (_hasMissingDebugLines && IsLoaded())
     {
+        PROFILE_CPU();
+        PROFILE_MEM(Physics);
         ScopeLock lock(Locker);
         _hasMissingDebugLines = false;
 
@@ -268,7 +233,7 @@ const Array<Vector3>& CollisionData::GetDebugLines()
     return _debugLines;
 }
 
-void CollisionData::GetDebugTriangles(Array<Vector3>*& vertexBuffer, Array<int32>*& indexBuffer)
+void CollisionData::GetDebugTriangles(Array<Float3>*& vertexBuffer, Array<int32>*& indexBuffer)
 {
     GetDebugLines();
     vertexBuffer = &_debugVertexBuffer;
@@ -292,12 +257,17 @@ Asset::LoadResult CollisionData::load()
 
 CollisionData::LoadResult CollisionData::load(const SerializedOptions* options, byte* dataPtr, int32 dataSize)
 {
+    if (WaitForInitPhysics())
+        return LoadResult::CannotLoadData;
+    PROFILE_MEM(Physics);
+
     // Load options
     _options.Type = options->Type;
     _options.Model = options->Model;
     _options.ModelLodIndex = options->ModelLodIndex;
     _options.ConvexFlags = options->ConvexFlags;
     _options.ConvexVertexLimit = options->ConvexVertexLimit < 4 ? 255 : options->ConvexVertexLimit;
+    _options.MaterialSlotsMask = options->MaterialSlotsMask == 0 ? MAX_uint32 : options->MaterialSlotsMask;
 
     // Load data (rest of the chunk is a cooked collision data)
     if (_options.Type == CollisionDataType::None && dataSize > 0)
@@ -310,21 +280,28 @@ CollisionData::LoadResult CollisionData::load(const SerializedOptions* options, 
         if (dataSize <= 0)
             return LoadResult::InvalidData;
 
-        // Create PhysX object
-        PxDefaultMemoryInputData input(dataPtr, dataSize);
+        // Create physics object
         if (_options.Type == CollisionDataType::ConvexMesh)
         {
-            _convexMesh = Physics::GetPhysics()->createConvexMesh(input);
-            _options.Box = P2C(_convexMesh->getLocalBounds());
+            _convexMesh = PhysicsBackend::CreateConvexMesh(dataPtr, dataSize, _options.Box);
+            if (!_convexMesh)
+            {
+                LOG(Error, "Failed to create convex mesh");
+                return LoadResult::Failed;
+            }
         }
         else if (_options.Type == CollisionDataType::TriangleMesh)
         {
-            _triangleMesh = Physics::GetPhysics()->createTriangleMesh(input);
-            _options.Box = P2C(_triangleMesh->getLocalBounds());
+            _triangleMesh = PhysicsBackend::CreateTriangleMesh(dataPtr, dataSize, _options.Box);
+            if (!_triangleMesh)
+            {
+                LOG(Error, "Failed to create triangle mesh");
+                return LoadResult::Failed;
+            }
         }
         else
         {
-            LOG(Warning, "Invalid collision data type.");
+            LOG(Error, "Invalid collision data type.");
             return LoadResult::InvalidData;
         }
     }
@@ -336,12 +313,12 @@ void CollisionData::unload(bool isReloading)
 {
     if (_convexMesh)
     {
-        Physics::RemoveObject(_convexMesh);
+        PhysicsBackend::DestroyObject(_convexMesh);
         _convexMesh = nullptr;
     }
     if (_triangleMesh)
     {
-        Physics::RemoveObject(_triangleMesh);
+        PhysicsBackend::DestroyObject(_triangleMesh);
         _triangleMesh = nullptr;
     }
     _options = CollisionDataOptions();

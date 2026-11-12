@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,11 +13,11 @@ template<typename T>
 class StringBase
 {
 protected:
-
     T* _data = nullptr;
     int32 _length = 0;
 
 public:
+    typedef T CharType;
 
     /// <summary>
     /// Finalizes an instance of the <see cref="StringBase"/> class.
@@ -28,7 +28,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Clears this instance. Frees the memory and sets the string to empty.
     /// </summary>
@@ -40,7 +39,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the character at the specific index.
     /// </summary>
@@ -48,6 +46,7 @@ public:
     /// <returns>The character</returns>
     FORCE_INLINE T& operator[](int32 index)
     {
+        ASSERT(index >= 0 && index < _length);
         return _data[index];
     }
 
@@ -58,11 +57,11 @@ public:
     /// <returns>The character</returns>
     FORCE_INLINE const T& operator[](int32 index) const
     {
+        ASSERT(index >= 0 && index < _length);
         return _data[index];
     }
 
 public:
-
     /// <summary>
     /// Lexicographically tests how this string compares to the other given string.
     /// In case sensitive mode 'A' is less than 'a'.
@@ -78,7 +77,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Returns true if string is empty.
     /// </summary>
@@ -152,7 +150,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Checks whether this string contains the specified substring.
     /// </summary>
@@ -335,6 +332,8 @@ public:
     void ReserveSpace(int32 length)
     {
         ASSERT(length >= 0);
+        if (length == _length)
+            return;
         Platform::Free(_data);
         if (length != 0)
         {
@@ -349,7 +348,6 @@ public:
     }
 
 public:
-
     bool StartsWith(T c, StringSearchCase searchCase = StringSearchCase::CaseSensitive) const
     {
         const int32 length = Length();
@@ -441,14 +439,8 @@ public:
     /// <returns>Number of replacements made (in other words number of occurences of searchText).</returns>
     int32 Replace(const T* searchText, int32 searchTextLength, const T* replacementText, int32 replacementTextLength, StringSearchCase searchCase = StringSearchCase::CaseSensitive)
     {
-        if (!HasChars())
+        if (!HasChars() || searchTextLength == 0)
             return 0;
-
-        if (searchTextLength == 0)
-        {
-            ASSERT(false);  // Empty search text never makes sense, and is always sign of a bug in calling code.
-            return 0;
-        }
 
         int32 replacedCount = 0;
 
@@ -553,14 +545,12 @@ public:
 API_CLASS(InBuild) class FLAXENGINE_API String : public StringBase<Char>
 {
 public:
-
     /// <summary>
     /// Instance of the empty string.
     /// </summary>
-    static String Empty;
+    static const String Empty;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="String"/> class.
     /// </summary>
@@ -648,7 +638,6 @@ public:
     explicit String(const StringAnsiView& str);
 
 public:
-
     /// <summary>
     /// Sets an array of characters to the string.
     /// </summary>
@@ -777,7 +766,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Sets the text value.
     /// </summary>
@@ -850,7 +838,6 @@ public:
     }
 
 public:
-
     // @formatter:off
     FORCE_INLINE friend String operator+(const String& a, const String& b)
     {
@@ -943,7 +930,6 @@ public:
     // @formatter:on
 
 public:
-
     /// <summary>
     /// Checks if string contains only ANSI characters.
     /// </summary>
@@ -951,7 +937,6 @@ public:
     bool IsANSI() const;
 
 public:
-
     using StringBase::StartsWith;
     bool StartsWith(const StringView& prefix, StringSearchCase searchCase = StringSearchCase::CaseSensitive) const;
 
@@ -1062,7 +1047,6 @@ public:
     String TrimTrailing() const;
 
 public:
-
     /// <summary>
     /// Formats the message and gets it as a string.
     /// </summary>
@@ -1079,7 +1063,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Concatenates this path with given path ensuring the '/' character is used between them.
     /// </summary>
@@ -1169,7 +1152,6 @@ public:
     }
 
 public:
-
     String ToString() const
     {
         return *this;
@@ -1178,7 +1160,6 @@ public:
     StringAnsi ToStringAnsi() const;
 
 private:
-
     template<typename T1, typename T2>
     static String ConcatStrings(T1 left, T2 right)
     {
@@ -1258,7 +1239,7 @@ namespace fmt
         template<typename FormatContext>
         auto format(const String& v, FormatContext& ctx) -> decltype(ctx.out())
         {
-            return fmt::internal::copy(v.Get(), v.Get() + v.Length(), ctx.out());
+            return fmt::detail::copy_str<Char>(v.Get(), v.Get() + v.Length(), ctx.out());
         }
     };
 }
@@ -1269,14 +1250,12 @@ namespace fmt
 API_CLASS(InBuild) class FLAXENGINE_API StringAnsi : public StringBase<char>
 {
 public:
-
     /// <summary>
     /// Instance of the empty string.
     /// </summary>
     static StringAnsi Empty;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="StringAnsi"/> class.
     /// </summary>
@@ -1363,7 +1342,6 @@ public:
     explicit StringAnsi(const StringAnsiView& str);
 
 public:
-
     /// <summary>
     /// Sets an array of characters to the string.
     /// </summary>
@@ -1485,7 +1463,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Sets the text value.
     /// </summary>
@@ -1558,7 +1535,6 @@ public:
     }
 
 public:
-
     // @formatter:off
     FORCE_INLINE friend StringAnsi operator+(const StringAnsi& a, const StringAnsi& b)
     {
@@ -1643,7 +1619,6 @@ public:
     // @formatter:on
 
 public:
-
     using StringBase::StartsWith;
     bool StartsWith(const StringAnsiView& prefix, StringSearchCase searchCase = StringSearchCase::CaseSensitive) const;
 
@@ -1729,7 +1704,6 @@ public:
     void Split(char c, Array<StringAnsi, HeapAllocation>& results) const;
 
 public:
-
     /// <summary>
     /// Formats the message and gets it as a string.
     /// </summary>
@@ -1746,7 +1720,6 @@ public:
     }
 
 public:
-
     String ToString() const
     {
         return String(Get(), Length());
@@ -1758,7 +1731,6 @@ public:
     }
 
 private:
-
     template<typename T1, typename T2>
     static StringAnsi ConcatStrings(T1 left, T2 right)
     {
@@ -1838,7 +1810,7 @@ namespace fmt
         template<typename FormatContext>
         auto format(const StringAnsi& v, FormatContext& ctx) -> decltype(ctx.out())
         {
-            return fmt::internal::copy(v.Get(), v.Get() + v.Length(), ctx.out());
+            return fmt::detail::copy_str<char>(v.Get(), v.Get() + v.Length(), ctx.out());
         }
     };
 }

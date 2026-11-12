@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -17,10 +17,16 @@ namespace FlaxEditor.Surface
     public class MaterialSurface : VisjectSurface
     {
         /// <inheritdoc />
-        public MaterialSurface(IVisjectSurfaceOwner owner, Action onSave, FlaxEditor.Undo undo)
+        public MaterialSurface(IVisjectSurfaceOwner owner, Action onSave = null, FlaxEditor.Undo undo = null)
         : base(owner, onSave, undo)
         {
         }
+
+        /// <inheritdoc />
+        public override bool CanLivePreviewValueChanges => false;
+
+        /// <inheritdoc />
+        public override bool UseContextMenuDescriptionPanel => true;
 
         /// <inheritdoc />
         public override string GetTypeName(ScriptType type)
@@ -33,9 +39,9 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
-        public override bool CanUseNodeType(NodeArchetype nodeArchetype)
+        public override bool CanUseNodeType(GroupArchetype groupArchetype, NodeArchetype nodeArchetype)
         {
-            return (nodeArchetype.Flags & NodeFlags.MaterialGraph) != 0 && base.CanUseNodeType(nodeArchetype);
+            return (nodeArchetype.Flags & NodeFlags.MaterialGraph) != 0 && base.CanUseNodeType(groupArchetype, nodeArchetype);
         }
 
         /// <inheritdoc />
@@ -102,7 +108,7 @@ namespace FlaxEditor.Surface
 
                 if (node != null)
                 {
-                    args.SurfaceLocation.X += node.Width + 10;
+                    args.SurfaceLocation.Y += node.Height + 10;
                 }
             }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Reflection;
 using FlaxEngine;
@@ -39,6 +39,7 @@ namespace FlaxEditor
         public SpriteHandle Globe32;
         public SpriteHandle CamSpeed32;
         public SpriteHandle Link32;
+        public SpriteHandle BrokenLink32;
         public SpriteHandle Add32;
         public SpriteHandle Left32;
         public SpriteHandle Right32;
@@ -94,8 +95,14 @@ namespace FlaxEditor
         public SpriteHandle Search64;
         public SpriteHandle Bone64;
         public SpriteHandle Link64;
+        public SpriteHandle BrokenLink64;
         public SpriteHandle Build64;
         public SpriteHandle Add64;
+        public SpriteHandle ShipIt64;
+        public SpriteHandle SplineFree64;
+        public SpriteHandle SplineLinear64;
+        public SpriteHandle SplineAligned64;
+        public SpriteHandle SplineSmoothIn64;
 
         // 96px
         public SpriteHandle Toolbox96;
@@ -135,11 +142,17 @@ namespace FlaxEditor
         public SpriteHandle Scene128;
         public SpriteHandle AndroidIcon128;
         public SpriteHandle PS4Icon128;
+        public SpriteHandle PS5Icon128;
+        public SpriteHandle MacOSIcon128;
+        public SpriteHandle IOSIcon128;
         public SpriteHandle FlaxLogo128;
         public SpriteHandle SwitchIcon128;
         public SpriteHandle SwitchSettings128;
         public SpriteHandle LocalizationSettings128;
         public SpriteHandle Json128;
+        public SpriteHandle AppleSettings128;
+        public SpriteHandle Web128;
+        public SpriteHandle WebSettings128;
 
         internal void LoadIcons()
         {

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,10 +12,46 @@
 #define VISUAL_SCRIPT_GRAPH_MAX_CALL_STACK 250
 #define VISUAL_SCRIPT_DEBUGGING USE_EDITOR
 
-#define VisualScriptGraphNode VisjectGraphNode<>
-
 class VisualScripting;
 class VisualScriptingBinaryModule;
+
+/// <summary>
+/// Visual Script graph node.
+/// </summary>
+class VisualScriptGraphNode : public VisjectGraphNode<>
+{
+public:
+    struct InvokeMethodData
+    {
+        void* Method;
+        BinaryModule* Module;
+        int32 ParamsCount;
+        uint32 OutParamsMask;
+        bool IsStatic;
+    };
+
+    struct GetSetFieldData
+    {
+        void* Field;
+        BinaryModule* Module;
+        bool IsStatic;
+    };
+
+    /// <summary>
+    /// Custom cached data per node type. Compact to use as small amount of memory as possible.
+    /// </summary>
+    struct AdditionalData
+    {
+        union
+        {
+            InvokeMethodData InvokeMethod;
+            GetSetFieldData GetSetField;
+        };
+    };
+
+    // The custom per-node data. Used to cache data for faster usage at runtime.
+    AdditionalData Data;
+};
 
 /// <summary>
 /// The Visual Script graph data.
@@ -33,7 +69,6 @@ class VisualScriptExecutor : public VisjectExecutor
 {
     friend VisualScripting;
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="VisualScriptExecutor"/> class.
     /// </summary>
@@ -58,16 +93,15 @@ private:
 /// <seealso cref="BinaryAsset" />
 API_CLASS(NoSpawn, Sealed) class FLAXENGINE_API VisualScript : public BinaryAsset
 {
-DECLARE_BINARY_ASSET_HEADER(VisualScript, 1);
+    DECLARE_BINARY_ASSET_HEADER(VisualScript, 1);
     friend VisualScripting;
     friend VisualScriptExecutor;
     friend VisualScriptingBinaryModule;
 public:
-
     /// <summary>
     /// Visual Script flag types.
     /// </summary>
-    API_ENUM(Attributes="Flags") enum class Flags
+    API_ENUM(Attributes="Flags") enum class Flags : int32
     {
         /// <summary>
         /// No flags.
@@ -90,7 +124,7 @@ public:
     /// </summary>
     API_STRUCT() struct Metadata
     {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(Metadata);
+        DECLARE_SCRIPTING_TYPE_MINIMAL(Metadata);
 
         /// <summary>
         /// The base class typename.
@@ -147,7 +181,6 @@ public:
     };
 
 private:
-
     Dictionary<Guid, Instance> _instances;
     ScriptingTypeHandle _scriptingTypeHandle;
     ScriptingTypeHandle _scriptingTypeHandleCached;
@@ -157,10 +190,10 @@ private:
     Array<Field, InlinedAllocation<32>> _fields;
 #if USE_EDITOR
     Array<Guid> _oldParamsLayout;
+    Array<Variant> _oldParamsValues;
 #endif
 
 public:
-
     /// <summary>
     /// The Visual Script graph.
     /// </summary>
@@ -172,7 +205,6 @@ public:
     API_FIELD(ReadOnly) Metadata Meta;
 
 public:
-
     /// <summary>
     /// Gets the typename of the Visual Script. Identifies it's scripting type.
     /// </summary>
@@ -221,7 +253,7 @@ public:
     /// <param name="name">The parameter name.</param>
     /// <param name="instance">The object instance.</param>
     /// <param name="value">The property value to set.</param>
-    API_FUNCTION() void SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, const Variant& value) const;
+    API_FUNCTION() void SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, const Variant& value);
 
     /// <summary>
     /// Sets the value of the Visual Script parameter of the given instance.
@@ -229,7 +261,7 @@ public:
     /// <param name="name">The parameter name.</param>
     /// <param name="instance">The object instance.</param>
     /// <param name="value">The property value to set.</param>
-    void SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, Variant&& value) const;
+    void SetScriptInstanceParameterValue(const StringView& name, ScriptingObject* instance, Variant&& value);
 
     /// <summary>
     /// Tries to find the method matching the given properties. Doesn't check base classes but just this script.
@@ -250,7 +282,7 @@ public:
     /// Tries to load surface graph from the asset.
     /// </summary>
     /// <returns>The surface data or empty if failed to load it.</returns>
-    API_FUNCTION() BytesContainer LoadSurface();
+    API_FUNCTION() BytesContainer LoadSurface() const;
 
 #if USE_EDITOR
 
@@ -260,7 +292,7 @@ public:
     /// <param name="data">Stream with graph data.</param>
     /// <param name="meta">Script metadata.</param>
     /// <returns>True if cannot save it, otherwise false.</returns>
-    API_FUNCTION() bool SaveSurface(BytesContainer& data, API_PARAM(Ref) const Metadata& meta);
+    API_FUNCTION() bool SaveSurface(const BytesContainer& data, API_PARAM(Ref) const Metadata& meta) const;
 
     // Returns the amount of methods in the script.
     API_FUNCTION() int32 GetMethodsCount() const
@@ -271,6 +303,9 @@ public:
     // Gets the signature data of the method.
     API_FUNCTION() void GetMethodSignature(int32 index, API_PARAM(Out) String& name, API_PARAM(Out) byte& flags, API_PARAM(Out) String& returnTypeName, API_PARAM(Out) Array<String>& paramNames, API_PARAM(Out) Array<String>& paramTypeNames, API_PARAM(Out) Array<bool>& paramOuts);
 
+    // Invokes the method.
+    API_FUNCTION() Variant InvokeMethod(int32 index, const Variant& instance, Span<Variant> parameters) const;
+
     // Gets the metadata of the script surface.
     API_FUNCTION() Span<byte> GetMetaData(int32 typeID);
 
@@ -280,27 +315,23 @@ public:
 #endif
 
 public:
-
     // [BinaryAsset]
 #if USE_EDITOR
-    void GetReferences(Array<Guid>& output) const override
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override
     {
-        // Base
-        BinaryAsset::GetReferences(output);
-
-        Graph.GetReferences(output);
+        BinaryAsset::GetReferences(assets, files);
+        Graph.GetReferences(assets);
     }
+    bool Save(const StringView& path = StringView::Empty) override;
 #endif
 
 protected:
-
     // [BinaryAsset]
     LoadResult load() override;
     void unload(bool isReloading) override;
     AssetChunksFlag getChunksToPreload() const override;
 
 private:
-
     void CacheScriptingType();
 };
 
@@ -312,25 +343,22 @@ class FLAXENGINE_API VisualScriptingBinaryModule : public BinaryModule
 {
     friend VisualScript;
 private:
-
     StringAnsi _name;
+    Array<char*> _unloadedScriptTypeNames;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="VisualScriptingBinaryModule"/> class.
     /// </summary>
     VisualScriptingBinaryModule();
 
 public:
-
     /// <summary>
     /// The visual script assets loaded into the module with exposes scripting types. Order matches the Types array.
     /// </summary>
     Array<AssetReference<VisualScript>> Scripts;
 
 private:
-
     static ScriptingObject* VisualScriptObjectSpawn(const ScriptingObjectSpawnParams& params);
 #if USE_EDITOR
     void OnScriptsReloading();
@@ -338,7 +366,6 @@ private:
     static void OnEvent(ScriptingObject* object, Span<Variant> parameters, ScriptingTypeHandle eventType, StringView eventName);
 
 public:
-
     // [BinaryModule]
     const StringAnsi& GetName() const override;
     bool IsLoaded() const override;
@@ -363,7 +390,6 @@ public:
 class FLAXENGINE_API VisualScripting
 {
 public:
-
     struct NodeBoxValue
     {
         uint32 NodeId;
@@ -417,7 +443,6 @@ public:
     static Variant Invoke(VisualScript::Method* method, ScriptingObject* instance, Span<Variant> parameters = Span<Variant>());
 
 #if VISUAL_SCRIPT_DEBUGGING
-
     // Custom event that is called every time the Visual Script signal flows over the graph (including the data connections). Can be used to read nad visualize the Visual Script execution logic.
     static Action DebugFlow;
 
@@ -429,8 +454,7 @@ public:
     /// <param name="nodeId">The ID of the node in the script graph to evaluate it's box.</param>
     /// <param name="boxId">The ID of the box in the node to evaluate it's value.</param>
     /// <param name="result">The output value. Valid only if method returned true.</param>
-    /// <returns>True if could fetch teh value, otherwise false.</returns>
+    /// <returns>True if could fetch the value, otherwise false.</returns>
     static bool Evaluate(VisualScript* script, ScriptingObject* instance, uint32 nodeId, uint32 boxId, Variant& result);
-
 #endif
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -15,26 +15,6 @@ namespace FlaxEditor.CustomEditors.Elements
         /// The button.
         /// </summary>
         public readonly Button Button = new Button();
-
-        /// <summary>
-        /// Initializes the element.
-        /// </summary>
-        /// <param name="text">The text.</param>
-        public void Init(string text)
-        {
-            Button.Text = text;
-        }
-
-        /// <summary>
-        /// Initializes the element.
-        /// </summary>
-        /// <param name="text">The text.</param>
-        /// <param name="color">The color.</param>
-        public void Init(string text, Color color)
-        {
-            Button.Text = text;
-            Button.SetColors(color);
-        }
 
         /// <inheritdoc />
         public override Control Control => Button;

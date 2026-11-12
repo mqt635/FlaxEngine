@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX11
 
@@ -87,8 +87,16 @@ bool GPUTextureDX11::OnInit()
         result = device->CreateTexture2D(&textureDesc, nullptr, &texture);
         _resource = texture;
     }
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
-    ASSERT(_resource != nullptr);
+    if (FAILED(result))
+    {
+        LOG(Error, "ID3D11Device::CreateTexture2D failed");
+        LOG_STR(Error, _desc.ToString());
+#if GPU_ENABLE_RESOURCE_NAMING
+        LOG_STR(Error, GetName());
+#endif
+        RenderToolsDX::LogD3DResult(result, __FILE__, __LINE__);
+        return true;
+    }
     DX_SET_DEBUG_NAME(_resource, GetName());
 
     // Update memory usage
@@ -109,37 +117,38 @@ bool GPUTextureDX11::OnInit()
     return false;
 }
 
-void GPUTextureDX11::onResidentMipsChanged()
+void GPUTextureDX11::OnResidentMipsChanged()
 {
-    // We support changing resident mip maps only for regular textures (render targets and depth buffers don't use that feature at all)
-    ASSERT(IsRegularTexture() && _handlesPerSlice.Count() == 1);
-    ASSERT(!IsVolume());
-
-    // Fill description
+    const int32 firstMipIndex = MipLevels() - ResidentMipLevels();
+    const int32 mipLevels = ResidentMipLevels();
     D3D11_SHADER_RESOURCE_VIEW_DESC srDesc;
     srDesc.Format = _dxgiFormatSRV;
     if (IsCubeMap())
     {
         srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-        srDesc.TextureCube.MostDetailedMip = MipLevels() - ResidentMipLevels();
-        srDesc.TextureCube.MipLevels = ResidentMipLevels();
+        srDesc.TextureCube.MostDetailedMip = firstMipIndex;
+        srDesc.TextureCube.MipLevels = mipLevels;
+    }
+    else if (IsVolume())
+    {
+        srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+        srDesc.Texture3D.MostDetailedMip = firstMipIndex;
+        srDesc.Texture3D.MipLevels = mipLevels;
     }
     else
     {
         srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srDesc.Texture2D.MostDetailedMip = MipLevels() - ResidentMipLevels();
-        srDesc.Texture2D.MipLevels = ResidentMipLevels();
+        srDesc.Texture2D.MostDetailedMip = firstMipIndex;
+        srDesc.Texture2D.MipLevels = mipLevels;
     }
-
-    // Create new view
-    ID3D11ShaderResourceView* srView;
-    VALIDATE_DIRECTX_RESULT(_device->GetDevice()->CreateShaderResourceView(_resource, &srDesc, &srView));
-
-    // Change view
-    if (_handlesPerSlice[0].GetParent() == nullptr)
-        _handlesPerSlice[0].Init(this, nullptr, srView, nullptr, nullptr, Format(), MultiSampleLevel());
+    ID3D11ShaderResourceView* srView = nullptr;
+    if (mipLevels != 0)
+        VALIDATE_DIRECTX_CALL(_device->GetDevice()->CreateShaderResourceView(_resource, &srDesc, &srView));
+    GPUTextureViewDX11& view = IsVolume() ? _handleVolume : _handlesPerSlice[0];
+    if (view.GetParent() == nullptr)
+       view.Init(this, nullptr, srView, nullptr, nullptr, Format(), MultiSampleLevel());
     else
-        _handlesPerSlice[0].SetSRV(srView);
+        view.SetSRV(srView);
 }
 
 void GPUTextureDX11::OnReleaseGPU()
@@ -149,11 +158,24 @@ void GPUTextureDX11::OnReleaseGPU()
     _handleArray.Release();
     _handleVolume.Release();
     _handleReadOnlyDepth.Release();
+    _handleStencil.Release();
     DX_SAFE_RELEASE_CHECK(_resource, 0);
 
     // Base
     GPUTexture::OnReleaseGPU();
 }
+
+#if GPU_ENABLE_RESOURCE_NAMING
+
+void GPUTextureDX11::OnRenamed()
+{
+    if (_resource)
+    {
+        DX_SET_DEBUG_NAME(_resource, GetName());
+    }
+}
+
+#endif
 
 #define CLEAR_VIEWS() rtView = nullptr; srView = nullptr; dsView = nullptr; uaView = nullptr
 
@@ -200,7 +222,7 @@ void GPUTextureDX11::initHandles()
             srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
             srDesc.Texture3D.MostDetailedMip = 0;
             srDesc.Texture3D.MipLevels = mipLevels;
-            VALIDATE_DIRECTX_RESULT(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+            VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
         }
         if (useRTV)
         {
@@ -208,7 +230,7 @@ void GPUTextureDX11::initHandles()
             rtDesc.Texture3D.MipSlice = 0;
             rtDesc.Texture3D.FirstWSlice = 0;
             rtDesc.Texture3D.WSize = Depth();
-            VALIDATE_DIRECTX_RESULT(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
+            VALIDATE_DIRECTX_CALL(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
         }
         if (useUAV)
         {
@@ -216,7 +238,7 @@ void GPUTextureDX11::initHandles()
             uaDesc.Texture3D.MipSlice = 0;
             uaDesc.Texture3D.WSize = Depth();
             uaDesc.Texture3D.FirstWSlice = 0;
-            VALIDATE_DIRECTX_RESULT(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
+            VALIDATE_DIRECTX_CALL(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
         }
         _handleVolume.Init(this, rtView, srView, nullptr, uaView, format, msaa);
 
@@ -231,7 +253,7 @@ void GPUTextureDX11::initHandles()
             for (int32 sliceIndex = 0; sliceIndex < Depth(); sliceIndex++)
             {
                 rtDesc.Texture3D.FirstWSlice = sliceIndex;
-                VALIDATE_DIRECTX_RESULT(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
+                VALIDATE_DIRECTX_CALL(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
                 _handlesPerSlice[sliceIndex].Init(this, rtView, nullptr, nullptr, nullptr, format, msaa);
             }
         }
@@ -262,7 +284,7 @@ void GPUTextureDX11::initHandles()
                     dsDesc.Texture2DArray.FirstArraySlice = arrayIndex;
                     dsDesc.Texture2DArray.MipSlice = 0;
                 }
-                VALIDATE_DIRECTX_RESULT(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
+                VALIDATE_DIRECTX_CALL(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
             }
             if (useRTV)
             {
@@ -280,7 +302,7 @@ void GPUTextureDX11::initHandles()
                     rtDesc.Texture2DArray.FirstArraySlice = arrayIndex;
                     rtDesc.Texture2DArray.MipSlice = 0;
                 }
-                VALIDATE_DIRECTX_RESULT(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
+                VALIDATE_DIRECTX_CALL(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
             }
             if (useSRV)
             {
@@ -288,7 +310,6 @@ void GPUTextureDX11::initHandles()
                 // (ViewDimension must be D3D11_SRV_DIMENSION_TEXTURECUBE) [ STATE_CREATION ERROR #126: CREATESHADERRESOURCEVIEW_INVALIDDESC]
                 if (isCubeMap && _device->GetRendererType() != RendererType::DirectX10)
                 {
-                    RendererType aa = _device->GetRendererType();
                     /*if (isCubeMap)
                     {
                         srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
@@ -305,7 +326,7 @@ void GPUTextureDX11::initHandles()
                         srDesc.Texture2DArray.MipLevels = mipLevels;
                         srDesc.Texture2DArray.MostDetailedMip = 0;
                     }
-                    VALIDATE_DIRECTX_RESULT(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+                    VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
                 }
             }
 
@@ -322,7 +343,7 @@ void GPUTextureDX11::initHandles()
                 dsDesc.Texture2DArray.ArraySize = arraySize;
                 dsDesc.Texture2DArray.FirstArraySlice = 0;
                 dsDesc.Texture2DArray.MipSlice = 0;
-                VALIDATE_DIRECTX_RESULT(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
+                VALIDATE_DIRECTX_CALL(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
             }
             if (useRTV)
             {
@@ -330,7 +351,7 @@ void GPUTextureDX11::initHandles()
                 rtDesc.Texture2DArray.ArraySize = arraySize;
                 rtDesc.Texture2DArray.FirstArraySlice = 0;
                 rtDesc.Texture2DArray.MipSlice = 0;
-                VALIDATE_DIRECTX_RESULT(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
+                VALIDATE_DIRECTX_CALL(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
             }
             if (useSRV)
             {
@@ -348,7 +369,7 @@ void GPUTextureDX11::initHandles()
                     srDesc.Texture2DArray.MipLevels = mipLevels;
                     srDesc.Texture2DArray.MostDetailedMip = 0;
                 }
-                VALIDATE_DIRECTX_RESULT(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+                VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
             }
             if (useUAV)
             {
@@ -356,7 +377,7 @@ void GPUTextureDX11::initHandles()
                 uaDesc.Texture2DArray.MipSlice = 0;
                 uaDesc.Texture2DArray.ArraySize = arraySize;
                 uaDesc.Texture2DArray.FirstArraySlice = 0;
-                VALIDATE_DIRECTX_RESULT(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
+                VALIDATE_DIRECTX_CALL(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
             }
             _handleArray.Init(this, rtView, srView, dsView, uaView, format, msaa);
         }
@@ -386,7 +407,7 @@ void GPUTextureDX11::initHandles()
                 dsDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
                 dsDesc.Texture2D.MipSlice = 0;
             }
-            VALIDATE_DIRECTX_RESULT(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
+            VALIDATE_DIRECTX_CALL(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
         }
         if (useRTV)
         {
@@ -406,7 +427,7 @@ void GPUTextureDX11::initHandles()
                 rtDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
                 rtDesc.Texture2D.MipSlice = 0;
             }
-            VALIDATE_DIRECTX_RESULT(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
+            VALIDATE_DIRECTX_CALL(device->CreateRenderTargetView(_resource, &rtDesc, &rtView));
         }
         if (useSRV)
         {
@@ -426,13 +447,13 @@ void GPUTextureDX11::initHandles()
                 srDesc.Texture2D.MostDetailedMip = 0;
                 srDesc.Texture2D.MipLevels = mipLevels;
             }
-            VALIDATE_DIRECTX_RESULT(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+            VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
         }
         if (useUAV)
         {
             uaDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
             uaDesc.Texture2D.MipSlice = 0;
-            VALIDATE_DIRECTX_RESULT(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
+            VALIDATE_DIRECTX_CALL(device->CreateUnorderedAccessView(_resource, &uaDesc, &uaView));
         }
         _handlesPerSlice[0].Init(this, rtView, srView, dsView, uaView, format, msaa);
     }
@@ -495,7 +516,7 @@ void GPUTextureDX11::initHandles()
     }
 
     // Read-only depth-stencil
-    if (_desc.Flags & GPUTextureFlags::ReadOnlyDepthView)
+    if (EnumHasAnyFlags(_desc.Flags, GPUTextureFlags::ReadOnlyDepthView))
     {
         CLEAR_VIEWS();
 
@@ -521,7 +542,7 @@ void GPUTextureDX11::initHandles()
             dsDesc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
             if (PixelFormatExtensions::HasStencil(format))
                 dsDesc.Flags |= D3D11_DSV_READ_ONLY_STENCIL;
-            VALIDATE_DIRECTX_RESULT(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
+            VALIDATE_DIRECTX_CALL(device->CreateDepthStencilView(_resource, &dsDesc, &dsView));
         }
         ASSERT(!useRTV);
         rtView = nullptr;
@@ -543,24 +564,58 @@ void GPUTextureDX11::initHandles()
                 srDesc.Texture2D.MostDetailedMip = 0;
                 srDesc.Texture2D.MipLevels = mipLevels;
             }
-            VALIDATE_DIRECTX_RESULT(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+            VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
         }
         _handleReadOnlyDepth.Init(this, rtView, srView, dsView, nullptr, format, msaa);
     }
+
+    // Stencil view
+    if (useDSV && useSRV && PixelFormatExtensions::HasStencil(format))
+    {
+        PixelFormat stencilFormat;
+        switch (static_cast<PixelFormat>(_dxgiFormatDSV))
+        {
+        case PixelFormat::D24_UNorm_S8_UInt:
+            srDesc.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+            stencilFormat = PixelFormat::X24_Typeless_G8_UInt;
+            break;
+        case PixelFormat::D32_Float_S8X24_UInt:
+            srDesc.Format = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+            stencilFormat = PixelFormat::X32_Typeless_G8X24_UInt;
+            break;
+        }
+        if (isCubeMap)
+        {
+            srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+            srDesc.TextureCube.MostDetailedMip = 0;
+            srDesc.TextureCube.MipLevels = mipLevels;
+        }
+        else if (isMsaa)
+        {
+            srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        }
+        else
+        {
+            srDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srDesc.Texture2D.MostDetailedMip = 0;
+            srDesc.Texture2D.MipLevels = mipLevels;
+        }
+        VALIDATE_DIRECTX_CALL(device->CreateShaderResourceView(_resource, &srDesc, &srView));
+        _handleStencil.Init(this, nullptr, srView, nullptr, nullptr, stencilFormat, msaa);
+    }
 }
 
-bool GPUTextureDX11::GetData(int32 arrayOrDepthSliceIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch)
+bool GPUTextureDX11::GetData(int32 arrayIndex, int32 mipMapIndex, TextureMipData& data, uint32 mipRowPitch)
 {
     if (!IsStaging())
     {
         LOG(Warning, "Texture::GetData is valid only for staging resources.");
         return true;
     }
-
     GPUDeviceLock lock(_device);
 
     // Map the staging resource mip map for reading
-    const uint32 subresource = RenderToolsDX::CalcSubresourceIndex(mipMapIndex, arrayOrDepthSliceIndex, MipLevels());
+    const uint32 subresource = RenderToolsDX::CalcSubresourceIndex(mipMapIndex, arrayIndex, MipLevels());
     D3D11_MAPPED_SUBRESOURCE mapped;
     const HRESULT mapResult = _device->GetIM()->Map(_resource, subresource, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(mapResult))
@@ -569,31 +624,7 @@ bool GPUTextureDX11::GetData(int32 arrayOrDepthSliceIndex, int32 mipMapIndex, Te
         return true;
     }
 
-    // Check if target row pitch is the same
-    if (mipRowPitch == mapped.RowPitch || mipRowPitch == 0)
-    {
-        // Init mip info
-        data.Lines = mapped.DepthPitch / mapped.RowPitch;
-        data.DepthPitch = mapped.DepthPitch;
-        data.RowPitch = mapped.RowPitch;
-
-        // Copy data
-        data.Data.Copy((byte*)mapped.pData, mapped.DepthPitch);
-    }
-    else
-    {
-        // Init mip info
-        data.Lines = mapped.DepthPitch / mapped.RowPitch;
-        data.DepthPitch = mipRowPitch * data.Lines;
-        data.RowPitch = mipRowPitch;
-
-        // Copy data
-        data.Data.Allocate(data.DepthPitch);
-        for (uint32 i = 0; i < data.Lines; i++)
-        {
-            Platform::MemoryCopy(data.Data.Get() + data.RowPitch * i, ((byte*)mapped.pData) + mapped.RowPitch * i, data.RowPitch);
-        }
-    }
+    data.Copy(mapped.pData, mapped.RowPitch, mapped.DepthPitch, Depth(), mipRowPitch);
 
     // Unmap texture
     _device->GetIM()->Unmap(_resource, subresource);

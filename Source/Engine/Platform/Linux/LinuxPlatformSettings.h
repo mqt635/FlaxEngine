@@ -1,18 +1,21 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #if PLATFORM_LINUX || USE_EDITOR
 
 #include "Engine/Core/Config/PlatformSettingsBase.h"
+#include "Engine/Scripting/SoftObjectReference.h"
+
+class Texture;
 
 /// <summary>
 /// Linux platform settings.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LinuxPlatformSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API LinuxPlatformSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LinuxPlatformSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LinuxPlatformSettings);
+    API_AUTO_SERIALIZATION();
 
     /// <summary>
     /// The default game window mode.
@@ -40,8 +43,10 @@ public:
 
     /// <summary>
     /// Enables game running when application window loses focus.
+    /// [Deprecated in v1.12]
     /// </summary>
     API_FIELD(Attributes="EditorOrder(1010), DefaultValue(false), EditorDisplay(\"Other\", \"Run In Background\")")
+    DEPRECATED("Use UnfocusedPause from TimeSettings.")
     bool RunInBackground = false;
 
     /// <summary>
@@ -51,10 +56,10 @@ public:
     bool ForceSingleInstance = false;
 
     /// <summary>
-    /// Custom icon texture (asset id) to use for the application (overrides the default one).
+    /// Custom icon texture to use for the application (overrides the default one).
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(1030), CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.AssetRefEditor\"), AssetReference(typeof(Texture)), EditorDisplay(\"Other\")")
-    Guid OverrideIcon;
+    API_FIELD(Attributes="EditorOrder(1030), EditorDisplay(\"Other\")")
+    SoftObjectReference<Texture> OverrideIcon;
 
     /// <summary>
     /// Enables support for Vulkan. Disabling it reduces compiled shaders count.
@@ -62,25 +67,10 @@ public:
     API_FIELD(Attributes="EditorOrder(2000), DefaultValue(true), EditorDisplay(\"Graphics\")")
     bool SupportVulkan = true;
 
-public:
-
     /// <summary>
     /// Gets the instance of the settings asset (default value if missing). Object returned by this method is always loaded with valid data to use.
     /// </summary>
     static LinuxPlatformSettings* Get();
-
-    // [SettingsBase]
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override
-    {
-        DESERIALIZE(WindowMode);
-        DESERIALIZE(ScreenWidth);
-        DESERIALIZE(ScreenHeight);
-        DESERIALIZE(RunInBackground);
-        DESERIALIZE(ResizableWindow);
-        DESERIALIZE(ForceSingleInstance);
-        DESERIALIZE(OverrideIcon);
-        DESERIALIZE(SupportVulkan);
-    }
 };
 
 #if PLATFORM_LINUX

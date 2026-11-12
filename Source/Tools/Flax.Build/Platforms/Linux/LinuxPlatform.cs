@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -37,32 +37,37 @@ namespace Flax.Build.Platforms
         public LinuxPlatform()
         {
             // Try to use system compiler
-            if (Environment.OSVersion.Platform == PlatformID.Unix)
+            if (BuildTargetPlatform == TargetPlatform.Linux)
             {
                 // Pick the newest compiler (overriden by specified in command line)
-                if (Which(Compiler) != null)
+                if (Which(Configuration.Compiler) != null)
                     Compiler = Configuration.Compiler;
-                else if (Which("clang++-10") != null)
-                    Compiler = "clang++-10";
-                else if (Which("clang++-9") != null)
-                    Compiler = "clang++-9";
-                else if (Which("clang++-8") != null)
-                    Compiler = "clang++-8";
-                else if (Which("clang++-7") != null)
-                    Compiler = "clang++-7";
-                else if (Which("clang++-6") != null)
-                    Compiler = "clang++-6";
-                else if (Which("clang++") != null)
-                    Compiler = "clang++";
+                else
+                {
+                    for (int ver = 17; ver >= 6; ver--)
+                    {
+                        var compiler = "clang++-" + ver;
+                        if (Which(compiler) != null)
+                        {
+                            Compiler = compiler;
+                            break;
+                        }
+                    }
+                    if (Compiler == null)
+                    {
+                        if (Which("clang++") != null)
+                            Compiler = "clang++";
+                    }
+                }
             }
             if (Compiler != null)
             {
                 // System compiler
-                ToolchainRoot = string.Empty;
+                ToolchainRoot = "/";
                 Log.Verbose($"Using native Linux toolchain (compiler {Compiler})");
                 HasRequiredSDKsInstalled = true;
             }
-            else
+            else if (BuildTargetPlatform != TargetPlatform.Mac)
             {
                 // Check if Linux toolchain is installed
                 string toolchainName = "v13_clang-7.0.1-centos7";
@@ -71,9 +76,11 @@ namespace Flax.Build.Platforms
                 {
                     if (string.IsNullOrEmpty(toolchainsRoot))
                     {
-                        Log.Warning("Missing Linux Toolchain. Cannot build for Linux platform.");
+                        if (BuildTargetPlatform == TargetPlatform.Linux)
+                            Log.Warning("Missing Linux Toolchain. Cannot build for Linux platform.");
+                        else
+                            Log.Verbose("Missing Linux Toolchain. Cannot build for Linux platform.");
                     }
-
                     return;
                 }
 
@@ -97,6 +104,7 @@ namespace Flax.Build.Platforms
             {
             case TargetPlatform.Linux: return HasRequiredSDKsInstalled;
             case TargetPlatform.Android: return AndroidSdk.Instance.IsValid && AndroidNdk.Instance.IsValid;
+            case TargetPlatform.Web: return EmscriptenSdk.Instance.IsValid;
             default: return false;
             }
         }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,6 +17,7 @@ class ParticleEmitter;
 class Particles;
 class GPUBuffer;
 class DynamicIndexBuffer;
+class DynamicVertexBuffer;
 
 /// <summary>
 /// The particle attribute that defines a single particle layout component.
@@ -26,9 +27,9 @@ struct ParticleAttribute
     enum class ValueTypes
     {
         Float,
-        Vector2,
-        Vector3,
-        Vector4,
+        Float2,
+        Float3,
+        Float4,
         Int,
         Uint,
     };
@@ -51,25 +52,7 @@ struct ParticleAttribute
     /// <summary>
     /// Gets the size of the attribute (in bytes).
     /// </summary>
-    /// <returns>The size (in bytes).</returns>
-    int32 GetSize() const
-    {
-        switch (ValueType)
-        {
-        case ValueTypes::Vector2:
-            return 8;
-        case ValueTypes::Vector3:
-            return 12;
-        case ValueTypes::Vector4:
-            return 16;
-        case ValueTypes::Float:
-        case ValueTypes::Int:
-        case ValueTypes::Uint:
-            return 4;
-        default:
-            return 0;
-        }
-    }
+    int32 GetSize() const;
 };
 
 /// <summary>
@@ -78,7 +61,6 @@ struct ParticleAttribute
 class ParticleLayout
 {
 public:
-
     /// <summary>
     /// The total particle data stride size (in bytes). Defines the required memory amount for a single particle.
     /// </summary>
@@ -90,45 +72,22 @@ public:
     Array<ParticleAttribute, FixedAllocation<PARTICLE_ATTRIBUTES_MAX_COUNT>> Attributes;
 
 public:
-
     /// <summary>
     /// Clears the layout data.
     /// </summary>
-    void Clear()
-    {
-        Size = 0;
-        Attributes.Clear();
-    }
+    void Clear();
 
     /// <summary>
     /// Updates the attributes layout (calculates offset) and updates the total size of the layout.
     /// </summary>
-    void UpdateLayout()
-    {
-        Size = 0;
-        for (int32 i = 0; i < Attributes.Count(); i++)
-        {
-            Attributes[i].Offset = Size;
-            Size += Attributes[i].GetSize();
-        }
-    }
+    void UpdateLayout();
 
     /// <summary>
     /// Finds the attribute by the name.
     /// </summary>
     /// <param name="name">The name.</param>
     /// <returns>The attribute index or -1 if cannot find it.</returns>
-    int32 FindAttribute(const StringView& name) const
-    {
-        for (int32 i = 0; i < Attributes.Count(); i++)
-        {
-            if (name == Attributes[i].Name)
-            {
-                return i;
-            }
-        }
-        return -1;
-    }
+    int32 FindAttribute(const StringView& name) const;
 
     /// <summary>
     /// Finds the attribute by the name and type.
@@ -136,17 +95,7 @@ public:
     /// <param name="name">The name.</param>
     /// <param name="valueType">The type.</param>
     /// <returns>The attribute index or -1 if cannot find it.</returns>
-    int32 FindAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType) const
-    {
-        for (int32 i = 0; i < Attributes.Count(); i++)
-        {
-            if (Attributes[i].ValueType == valueType && name == Attributes[i].Name)
-            {
-                return i;
-            }
-        }
-        return -1;
-    }
+    int32 FindAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType) const;
 
     /// <summary>
     /// Finds the attribute offset by the name.
@@ -154,17 +103,7 @@ public:
     /// <param name="name">The name.</param>
     /// <param name="fallbackValue">The fallback value to return if attribute is missing.</param>
     /// <returns>The attribute offset or fallback value if cannot find it.</returns>
-    int32 FindAttributeOffset(const StringView& name, int32 fallbackValue = 0) const
-    {
-        for (int32 i = 0; i < Attributes.Count(); i++)
-        {
-            if (name == Attributes[i].Name)
-            {
-                return Attributes[i].Offset;
-            }
-        }
-        return fallbackValue;
-    }
+    int32 FindAttributeOffset(const StringView& name, int32 fallbackValue = 0) const;
 
     /// <summary>
     /// Finds the attribute offset by the name.
@@ -173,17 +112,7 @@ public:
     /// <param name="valueType">The type.</param>
     /// <param name="fallbackValue">The fallback value to return if attribute is missing.</param>
     /// <returns>The attribute offset or fallback value if cannot find it.</returns>
-    int32 FindAttributeOffset(const StringView& name, ParticleAttribute::ValueTypes valueType, int32 fallbackValue = 0) const
-    {
-        for (int32 i = 0; i < Attributes.Count(); i++)
-        {
-            if (Attributes[i].ValueType == valueType && name == Attributes[i].Name)
-            {
-                return Attributes[i].Offset;
-            }
-        }
-        return fallbackValue;
-    }
+    int32 FindAttributeOffset(const StringView& name, ParticleAttribute::ValueTypes valueType, int32 fallbackValue = 0) const;
 
     /// <summary>
     /// Gets the attribute offset by the attribute index.
@@ -202,13 +131,7 @@ public:
     /// <param name="name">The name.</param>
     /// <param name="valueType">The value type.</param>
     /// <returns>The attribute index or -1 if cannot find it.</returns>
-    int32 AddAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType)
-    {
-        auto& a = Attributes.AddOne();
-        a.Name = String(*name, name.Length());
-        a.ValueType = valueType;
-        return Attributes.Count() - 1;
-    }
+    int32 AddAttribute(const StringView& name, ParticleAttribute::ValueTypes valueType);
 };
 
 /// <summary>
@@ -217,7 +140,6 @@ public:
 class FLAXENGINE_API ParticleBuffer
 {
 public:
-
     /// <summary>
     /// The emitter graph version (cached on Init). Used to discard pooled buffers that has been created for older emitter graph.
     /// </summary>
@@ -282,14 +204,9 @@ public:
         GPUBuffer* BufferSecondary = nullptr;
 
         /// <summary>
-        /// The indirect draw command arguments buffer used by the GPU particles to invoke drawing on a GPU based on the particles amount (instances count).
-        /// </summary>
-        GPUBuffer* IndirectDrawArgsBuffer = nullptr;
-
-        /// <summary>
         /// The GPU particles sorting buffer. Contains structure of particle index and the sorting key for every particle. Used to sort particles.
         /// </summary>
-        GPUBuffer* SortingKeysBuffer = nullptr;
+        GPUBuffer* SortingKeys = nullptr;
 
         /// <summary>
         /// The particles indices buffer (GPU side).
@@ -305,9 +222,9 @@ public:
         DynamicIndexBuffer* RibbonIndexBufferDynamic = nullptr;
 
         /// <summary>
-        /// The ribbon particles rendering segment distances buffer. Stored one per ribbon module.
+        /// The ribbon particles rendering vertex buffer (dynamic GPU access).
         /// </summary>
-        GPUBuffer* RibbonSegmentDistances[PARTICLE_EMITTER_MAX_RIBBONS] = {};
+        DynamicVertexBuffer* RibbonVertexBufferDynamic = nullptr;
 
         /// <summary>
         /// The flag used to indicate that GPU buffers data should be cleared before next simulation.
@@ -331,7 +248,6 @@ public:
     } GPU;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ParticleBuffer"/> class.
     /// </summary>
@@ -384,12 +300,10 @@ public:
 struct ParticleBufferCPUDataAccessorBase
 {
 protected:
-
     ParticleBuffer* _buffer;
     int32 _offset;
 
 public:
-
     ParticleBufferCPUDataAccessorBase()
         : _buffer(nullptr)
         , _offset(-1)
@@ -403,7 +317,6 @@ public:
     }
 
 public:
-
     FORCE_INLINE bool IsValid() const
     {
         return _buffer != nullptr && _offset != -1;
@@ -414,7 +327,6 @@ template<typename T>
 struct ParticleBufferCPUDataAccessor : ParticleBufferCPUDataAccessorBase
 {
 public:
-
     ParticleBufferCPUDataAccessor<T>()
     {
     }
@@ -425,25 +337,21 @@ public:
     }
 
 public:
-
     FORCE_INLINE T operator[](int32 index) const
     {
         return Get(index);
     }
 
-    T Get(int32 index) const
+    FORCE_INLINE T Get(int32 index) const
     {
-        ASSERT(IsValid());
-        ASSERT(index >= 0 && index < _buffer->CPU.Count);
+        ASSERT(IsValid() && index >= 0 && index < _buffer->CPU.Count);
         return *(T*)(_buffer->CPU.Buffer.Get() + _offset + index * _buffer->Stride);
     }
 
     FORCE_INLINE T Get(int32 index, const T& defaultValue) const
     {
         if (IsValid())
-        {
             return Get(index);
-        }
         return defaultValue;
     }
 };

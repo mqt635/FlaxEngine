@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@
 class GPUAdapterVulkan : public GPUAdapter
 {
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUAdapterVulkan"/> class.
     /// </summary>
@@ -37,14 +36,7 @@ public:
         return *this;
     }
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="GPUAdapterVulkan"/> class.
-    /// </summary>
-    /// <param name="gpu">The GPU device handle.</param>
-    GPUAdapterVulkan(VkPhysicalDevice gpu);
-
 public:
-
     /// <summary>
     /// The GPU device handle.
     /// </summary>
@@ -61,21 +53,43 @@ public:
     String Description;
 
 public:
-
     // [GPUAdapter]
     bool IsValid() const override
     {
         return Gpu != VK_NULL_HANDLE;
     }
-
+    void* GetNativePtr() const override
+    {
+        return (void*)Gpu;
+    }
     uint32 GetVendorId() const override
     {
         return GpuProps.vendorID;
     }
-
     String GetDescription() const override
     {
         return Description;
+    }
+    Version GetDriverVersion() const override
+    {
+        Version version(VK_VERSION_MAJOR(GpuProps.driverVersion), VK_VERSION_MINOR(GpuProps.driverVersion), VK_VERSION_PATCH(GpuProps.driverVersion));
+        if (IsNVIDIA())
+        {
+            union NvidiaDriverVersion
+            {
+                struct
+                {
+                    uint32 Tertiary : 6;
+                    uint32 Secondary : 8;
+                    uint32 Minor : 8;
+                    uint32 Major : 10;
+                };
+                uint32 Packed;
+            } NvidiaVersion;
+            NvidiaVersion.Packed = GpuProps.driverVersion;
+            version = Version(NvidiaVersion.Major, NvidiaVersion.Minor);
+        }
+        return version;
     }
 };
 

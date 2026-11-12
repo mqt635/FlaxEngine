@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,7 +12,6 @@ template<typename T>
 class SkeletonUpdater
 {
 public:
-
     typedef Array<T> Items;
 
     /// <summary>
@@ -21,8 +20,7 @@ public:
     struct Node
     {
         /// <summary>
-        /// The parent node index.
-        /// The parent bone index. The root node uses value -1.
+        /// The parent node index. The root node uses value -1.
         /// </summary>
         int32 ParentIndex;
 
@@ -43,14 +41,12 @@ public:
     };
 
 public:
-
     /// <summary>
     /// The cached node transformations.
     /// </summary>
     Array<Node> NodeTransformations;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="SkeletonUpdater" /> class.
     /// </summary>
@@ -133,7 +129,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets the default root node.
     /// </summary>
@@ -149,7 +144,6 @@ public:
     }
 
 private:
-
     void UpdateNode(Node& node)
     {
         // Compute local matrix

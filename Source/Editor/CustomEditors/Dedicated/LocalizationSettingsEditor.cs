@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -75,13 +75,14 @@ namespace FlaxEditor.CustomEditors.Dedicated
                         _theMostTranslatedCulture = culture;
                         _theMostTranslatedCultureCount = count;
                     }
-                    prop.Label(string.Format("Progress: {0}% ({1}/{2})", (int)(((float)validCount / allKeys.Count * 100.0f)), validCount, allKeys.Count));
+                    prop.Label(string.Format("Progress: {0}% ({1}/{2})", allKeys.Count > 0 ? (int)(((float)validCount / allKeys.Count * 100.0f)) : 0, validCount, allKeys.Count));
                     prop.Label("Tables:");
+                    var projectFolder = Globals.ProjectFolder;
                     foreach (var table in e)
                     {
                         var namePath = table.Path;
-                        if (namePath.StartsWith(Globals.ProjectFolder))
-                            namePath = namePath.Substring(Globals.ProjectFolder.Length + 1);
+                        if (namePath.StartsWith(projectFolder))
+                            namePath = namePath.Substring(projectFolder.Length + 1);
                         var tableLabel = prop.ClickableLabel(namePath).CustomControl;
                         tableLabel.TextColorHighlighted = Color.Wheat;
                         tableLabel.DoubleClick += delegate { Editor.Instance.Windows.ContentWin.Select(table); };
@@ -91,12 +92,14 @@ namespace FlaxEditor.CustomEditors.Dedicated
 
                 // Update add button
                 var update = group.Button("Update").Button;
+                group.Space(0);
                 update.TooltipText = "Refreshes the dashboard statistics";
                 update.Height = 16.0f;
                 update.Clicked += RebuildLayout;
 
                 // New locale add button
                 var addLocale = group.Button("Add Locale...").Button;
+                group.Space(0);
                 addLocale.TooltipText = "Shows a locale picker and creates new localization for it with not translated string tables";
                 addLocale.Height = 16.0f;
                 addLocale.ButtonClicked += delegate(Button button)
@@ -111,7 +114,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                         }
                         Profiler.BeginEvent("LocalizationSettingsEditor.AddLocale");
                         Editor.Log($"Adding culture '{displayName}' to localization settings");
-                        var newTables = settings.LocalizedStringTables.ToList();
+                        var newTables = settings.LocalizedStringTables?.ToList() ?? new List<LocalizedStringTable>();
                         if (_theMostTranslatedCulture != null)
                         {
                             // Duplicate localization for culture with the highest amount of keys
@@ -136,7 +139,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                                 table.Entries = entries;
                                 if (!table.Save(path))
                                 {
-                                    Object.Destroy(table);
+                                    Object.DestroyNow(table);
                                     newTables.Add(FlaxEngine.Content.LoadAsync<LocalizedStringTable>(path));
                                 }
                             }
@@ -144,12 +147,15 @@ namespace FlaxEditor.CustomEditors.Dedicated
                         else
                         {
                             // No localization so initialize with empty table
-                            var path = Path.Combine(Path.Combine(Path.GetDirectoryName(GameSettings.Load().Localization.Path), "Localization", culture.Name + ".json"));
+                            var folder = Path.Combine(Path.GetDirectoryName(GameSettings.Load().Localization.Path), "Localization");
+                            if (!Directory.Exists(folder))
+                                Directory.CreateDirectory(folder);
+                            var path = Path.Combine(Path.Combine(folder, culture.Name + ".json"));
                             var table = FlaxEngine.Content.CreateVirtualAsset<LocalizedStringTable>();
                             table.Locale = culture.Name;
                             if (!table.Save(path))
                             {
-                                Object.Destroy(table);
+                                Object.DestroyNow(table);
                                 newTables.Add(FlaxEngine.Content.LoadAsync<LocalizedStringTable>(path));
                             }
                         }
@@ -158,70 +164,19 @@ namespace FlaxEditor.CustomEditors.Dedicated
                         RebuildLayout();
                         Profiler.EndEvent();
                     });
-                    menu.Show(button, new Vector2(0, button.Height));
+                    menu.Show(button, new Float2(0, button.Height));
                 };
 
                 // Export button
                 var exportLocalization = group.Button("Export...").Button;
+                group.Space(0);
                 exportLocalization.TooltipText = "Exports the localization strings into .pot file for translation";
                 exportLocalization.Height = 16.0f;
-                exportLocalization.Clicked += delegate
-                {
-                    if (FileSystem.ShowSaveFileDialog(null, null, "*.pot", false, "Export localization for translation to .pot file", out var filenames))
-                        return;
-                    Profiler.BeginEvent("LocalizationSettingsEditor.Export");
-                    if (!filenames[0].EndsWith(".pot"))
-                        filenames[0] += ".pot";
-                    var nplurals = 1;
-                    foreach (var e in tableEntries)
-                    {
-                        foreach (var value in e.Value.Values)
-                        {
-                            if (value != null && value.Length > nplurals)
-                                nplurals = value.Length;
-                        }
-                    }
-                    using (var writer = new StreamWriter(filenames[0], false, Encoding.UTF8))
-                    {
-                        writer.WriteLine("msgid \"\"");
-                        writer.WriteLine("msgstr \"\"");
-                        writer.WriteLine("\"Language: English\\n\"");
-                        writer.WriteLine("\"MIME-Version: 1.0\\n\"");
-                        writer.WriteLine("\"Content-Type: text/plain; charset=UTF-8\\n\"");
-                        writer.WriteLine("\"Content-Transfer-Encoding: 8bit\\n\"");
-                        writer.WriteLine($"\"Plural-Forms: nplurals={nplurals}; plural=(n != 1);\\n\"");
-                        writer.WriteLine("\"X-Generator: FlaxEngine\\n\"");
-                        var written = new HashSet<string>();
-                        foreach (var e in tableEntries)
-                        {
-                            foreach (var pair in e.Value)
-                            {
-                                if (written.Contains(pair.Key))
-                                    continue;
-                                written.Add(pair.Key);
-
-                                writer.WriteLine("");
-                                writer.WriteLine($"msgid \"{pair.Key}\"");
-                                if (pair.Value == null || pair.Value.Length < 2)
-                                {
-                                    writer.WriteLine("msgstr \"\"");
-                                }
-                                else
-                                {
-                                    writer.WriteLine("msgid_plural \"\"");
-                                    for (int i = 0; i < pair.Value.Length; i++)
-                                        writer.WriteLine($"msgstr[{i}] \"\"");
-                                }
-                            }
-                            if (written.Count == allKeys.Count)
-                                break;
-                        }
-                    }
-                    Profiler.EndEvent();
-                };
+                exportLocalization.Clicked += () => Export(tableEntries, allKeys);
 
                 // Find localized strings in code button
                 var findStringsCode = group.Button("Find localized strings in code").Button;
+                group.Space(0);
                 findStringsCode.TooltipText = "Searches for localized string usage in inside a project source files";
                 findStringsCode.Height = 16.0f;
                 findStringsCode.Clicked += delegate
@@ -235,12 +190,12 @@ namespace FlaxEditor.CustomEditors.Dedicated
                     foreach (var file in files)
                         FindNewKeysCSharp(file, newKeys, allKeys);
 
-                    // C++
-                    files = Directory.GetFiles(Globals.ProjectSourceFolder, "*.cpp", SearchOption.AllDirectories);
+                    // C/C++
+                    files = Directory.GetFiles(Globals.ProjectSourceFolder, "*.cpp", SearchOption.AllDirectories).Concat(Directory.GetFiles(Globals.ProjectSourceFolder, "*.c", SearchOption.AllDirectories)).ToArray();
                     filesCount += files.Length;
                     foreach (var file in files)
                         FindNewKeysCpp(file, newKeys, allKeys);
-                    files = Directory.GetFiles(Globals.ProjectSourceFolder, "*.h", SearchOption.AllDirectories);
+                    files = Directory.GetFiles(Globals.ProjectSourceFolder, "*.h", SearchOption.AllDirectories).Concat(Directory.GetFiles(Globals.ProjectSourceFolder, "*.hpp", SearchOption.AllDirectories)).ToArray();
                     filesCount += files.Length;
                     foreach (var file in files)
                         FindNewKeysCpp(file, newKeys, allKeys);
@@ -281,6 +236,62 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 base.Initialize(group);
             }
 
+            Profiler.EndEvent();
+        }
+
+        internal static void Export(Dictionary<LocalizedStringTable, Dictionary<string, string[]>> tableEntries, HashSet<string> allKeys = null)
+        {
+            if (FileSystem.ShowSaveFileDialog(null, null, "*.pot", false, "Export localization for translation to .pot file", out var filenames))
+                return;
+            Profiler.BeginEvent("LocalizationSettingsEditor.Export");
+            var filename = filenames[0];
+            if (!filename.EndsWith(".pot"))
+                filename += ".pot";
+            var nplurals = 1;
+            foreach (var e in tableEntries)
+            {
+                foreach (var value in e.Value.Values)
+                {
+                    if (value != null && value.Length > nplurals)
+                        nplurals = value.Length;
+                }
+            }
+            using (var writer = new StreamWriter(filename, false, Encoding.UTF8))
+            {
+                writer.WriteLine("msgid \"\"");
+                writer.WriteLine("msgstr \"\"");
+                writer.WriteLine("\"Language: English\\n\"");
+                writer.WriteLine("\"MIME-Version: 1.0\\n\"");
+                writer.WriteLine("\"Content-Type: text/plain; charset=UTF-8\\n\"");
+                writer.WriteLine("\"Content-Transfer-Encoding: 8bit\\n\"");
+                writer.WriteLine($"\"Plural-Forms: nplurals={nplurals}; plural=(n != 1);\\n\"");
+                writer.WriteLine("\"X-Generator: FlaxEngine\\n\"");
+                var written = new HashSet<string>();
+                foreach (var e in tableEntries)
+                {
+                    foreach (var pair in e.Value)
+                    {
+                        if (written.Contains(pair.Key))
+                            continue;
+                        written.Add(pair.Key);
+
+                        writer.WriteLine("");
+                        writer.WriteLine($"msgid \"{pair.Key}\"");
+                        if (pair.Value == null || pair.Value.Length < 2)
+                        {
+                            writer.WriteLine("msgstr \"\"");
+                        }
+                        else
+                        {
+                            writer.WriteLine("msgid_plural \"\"");
+                            for (int i = 0; i < pair.Value.Length; i++)
+                                writer.WriteLine($"msgstr[{i}] \"\"");
+                        }
+                    }
+                    if (allKeys != null && written.Count == allKeys.Count)
+                        break;
+                }
+            }
             Profiler.EndEvent();
         }
 

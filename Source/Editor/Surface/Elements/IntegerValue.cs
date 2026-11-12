@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEditor.GUI.Input;
 using FlaxEngine;
@@ -32,6 +32,7 @@ namespace FlaxEditor.Surface.Elements
         public IntegerValue(SurfaceNode parentNode, NodeElementArchetype archetype)
         : base(Get(parentNode, archetype), archetype.Position.X, archetype.Position.Y, 50, (int)archetype.ValueMin, (int)archetype.ValueMax, 0.05f)
         {
+            Height = Constants.BoxRowHeight;
             ParentNode = parentNode;
             Archetype = archetype;
 
@@ -50,7 +51,7 @@ namespace FlaxEditor.Surface.Elements
 
             // Draw border
             if (!IsFocused)
-                Render2D.DrawRectangle(new Rectangle(Vector2.Zero, Size), Style.Current.BorderNormal);
+                Render2D.DrawRectangle(new Rectangle(Float2.Zero, Size), Style.Current.BorderNormal);
         }
 
         /// <inheritdoc />
@@ -65,33 +66,34 @@ namespace FlaxEditor.Surface.Elements
         /// </summary>
         /// <param name="parentNode">The parent node.</param>
         /// <param name="arch">The node element archetype.</param>
+        /// <param name="customValue">The custom value override (optional).</param>
         /// <returns>The result value.</returns>
-        public static int Get(SurfaceNode parentNode, NodeElementArchetype arch)
+        public static int Get(SurfaceNode parentNode, NodeElementArchetype arch, object customValue = null)
         {
-            if (arch.ValueIndex < 0)
+            if (arch.ValueIndex < 0 && customValue == null)
                 return 0;
 
             int result;
-            var value = parentNode.Values[arch.ValueIndex];
+            var value = customValue ?? parentNode.Values[arch.ValueIndex];
 
             // Note: this value box may edit on component of the vector like Vector3.Y, BoxID from Archetype tells which component pick
 
-            if (value is int valueInt)
-                result = valueInt;
-            else if (value is uint valueUint)
-                result = (int)valueUint;
-            else if (value is long valueLong)
-                result = (int)valueLong;
-            else if (value is ulong valueUlong)
-                result = (int)valueUlong;
-            else if (value is float valueFloat)
-                result = (int)valueFloat;
-            else if (value is Vector2 valueVec2)
-                result = (int)(arch.BoxID == 0 ? valueVec2.X : valueVec2.Y);
-            else if (value is Vector3 valueVec3)
-                result = (int)(arch.BoxID == 0 ? valueVec3.X : arch.BoxID == 1 ? valueVec3.Y : valueVec3.Z);
-            else if (value is Vector4 valueVec4)
-                result = (int)(arch.BoxID == 0 ? valueVec4.X : arch.BoxID == 1 ? valueVec4.Y : arch.BoxID == 2 ? valueVec4.Z : valueVec4.W);
+            if (value is int asInt)
+                result = asInt;
+            else if (value is uint asUint)
+                result = (int)asUint;
+            else if (value is long asLong)
+                result = (int)asLong;
+            else if (value is ulong asUlong)
+                result = (int)asUlong;
+            else if (value is float asFloat)
+                result = (int)asFloat;
+            else if (value is Vector2 asVector2)
+                result = (int)(arch.BoxID == 0 ? asVector2.X : asVector2.Y);
+            else if (value is Vector3 asVector3)
+                result = (int)(arch.BoxID == 0 ? asVector3.X : arch.BoxID == 1 ? asVector3.Y : asVector3.Z);
+            else if (value is Vector4 asVector4)
+                result = (int)(arch.BoxID == 0 ? asVector4.X : arch.BoxID == 1 ? asVector4.Y : arch.BoxID == 2 ? asVector4.Z : asVector4.W);
             else
                 result = 0;
 
@@ -122,35 +124,35 @@ namespace FlaxEditor.Surface.Elements
                 value = (ulong)toSet;
             else if (value is float)
                 value = toSetF;
-            else if (value is Vector2 valueVec2)
+            else if (value is Vector2 asVector2)
             {
                 if (arch.BoxID == 0)
-                    valueVec2.X = toSetF;
+                    asVector2.X = toSetF;
                 else
-                    valueVec2.Y = toSetF;
-                value = valueVec2;
+                    asVector2.Y = toSetF;
+                value = asVector2;
             }
-            else if (value is Vector3 valueVec3)
+            else if (value is Vector3 asVector3)
             {
                 if (arch.BoxID == 0)
-                    valueVec3.X = toSetF;
+                    asVector3.X = toSetF;
                 else if (arch.BoxID == 1)
-                    valueVec3.Y = toSetF;
+                    asVector3.Y = toSetF;
                 else
-                    valueVec3.Z = toSetF;
-                value = valueVec3;
+                    asVector3.Z = toSetF;
+                value = asVector3;
             }
-            else if (value is Vector4 valueVec4)
+            else if (value is Vector4 asVector4)
             {
                 if (arch.BoxID == 0)
-                    valueVec4.X = toSetF;
+                    asVector4.X = toSetF;
                 else if (arch.BoxID == 1)
-                    valueVec4.Y = toSetF;
+                    asVector4.Y = toSetF;
                 else if (arch.BoxID == 2)
-                    valueVec4.Z = toSetF;
+                    asVector4.Z = toSetF;
                 else
-                    valueVec4.W = toSetF;
-                value = valueVec4;
+                    asVector4.W = toSetF;
+                value = asVector4;
             }
             else
                 value = 0;

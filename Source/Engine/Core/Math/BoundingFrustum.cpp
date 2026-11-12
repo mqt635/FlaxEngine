@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BoundingFrustum.h"
 #include "BoundingBox.h"
@@ -59,30 +59,53 @@ void BoundingFrustum::SetMatrix(const Matrix& matrix)
     _pFar.Normal.Z = matrix.M34 - matrix.M33;
     _pFar.D = matrix.M44 - matrix.M43;
     _pFar.Normalize();
+
+#if REVERSE_Z
+    // Swap far and near planes if reverse z
+    Swap(_pFar, _pNear);
+#endif
 }
 
 Plane BoundingFrustum::GetPlane(int32 index) const
 {
     switch (index)
     {
-    case 0:
-        return _pLeft;
-    case 1:
-        return _pRight;
-    case 2:
-        return _pTop;
-    case 3:
-        return _pBottom;
-    case 4:
-        return _pNear;
-    case 5:
-        return _pFar;
-    default:
-        return Plane();
+    case 0: return _pLeft;
+    case 1: return _pRight;
+    case 2: return _pTop;
+    case 3: return _pBottom;
+    case 4: return _pNear;
+    case 5: return _pFar;
+    default: return Plane();
     }
 }
 
-void BoundingFrustum::GetCorners(Vector3 corners[8]) const
+static Vector3 Get3PlanesInterPoint(const Plane& p1, const Plane& p2, const Plane& p3)
+{
+    const Vector3 n2Xn3 = Vector3::Cross(p2.Normal, p3.Normal);
+    const Vector3 n3Xn1 = Vector3::Cross(p3.Normal, p1.Normal);
+    const Vector3 n1Xn2 = Vector3::Cross(p1.Normal, p2.Normal);
+    const Real div1 = Vector3::Dot(p1.Normal, n2Xn3);
+    const Real div2 = Vector3::Dot(p2.Normal, n3Xn1);
+    const Real div3 = Vector3::Dot(p3.Normal, n1Xn2);
+    if (Math::IsZero(div1 * div2 * div3))
+        return Vector3::Zero;
+    return n2Xn3 * (-p1.D / div1) - n3Xn1 * (p2.D / div2) - n1Xn2 * (p3.D / div3);
+}
+
+void BoundingFrustum::GetCorners(Float3 corners[8]) const
+{
+    corners[0] = Get3PlanesInterPoint(_pNear, _pBottom, _pRight);
+    corners[1] = Get3PlanesInterPoint(_pNear, _pTop, _pRight);
+    corners[2] = Get3PlanesInterPoint(_pNear, _pTop, _pLeft);
+    corners[3] = Get3PlanesInterPoint(_pNear, _pBottom, _pLeft);
+    corners[4] = Get3PlanesInterPoint(_pFar, _pBottom, _pRight);
+    corners[5] = Get3PlanesInterPoint(_pFar, _pTop, _pRight);
+    corners[6] = Get3PlanesInterPoint(_pFar, _pTop, _pLeft);
+    corners[7] = Get3PlanesInterPoint(_pFar, _pBottom, _pLeft);
+}
+
+void BoundingFrustum::GetCorners(Double3 corners[8]) const
 {
     corners[0] = Get3PlanesInterPoint(_pNear, _pBottom, _pRight);
     corners[1] = Get3PlanesInterPoint(_pNear, _pTop, _pRight);
@@ -110,43 +133,22 @@ void BoundingFrustum::GetSphere(BoundingSphere& result) const
 
 float BoundingFrustum::GetWidthAtDepth(float depth) const
 {
-    const float hAngle = PI / 2.0f - Math::Acos(Vector3::Dot(_pNear.Normal, _pLeft.Normal));
+    const float hAngle = PI / 2.0f - Math::Acos((float)Vector3::Dot(_pNear.Normal, _pLeft.Normal));
     return Math::Tan(hAngle) * depth * 2.0f;
 }
 
 float BoundingFrustum::GetHeightAtDepth(float depth) const
 {
-    const float vAngle = PI / 2.0f - Math::Acos(Vector3::Dot(_pNear.Normal, _pTop.Normal));
+    const float vAngle = PI / 2.0f - Math::Acos((float)Vector3::Dot(_pNear.Normal, _pTop.Normal));
     return Math::Tan(vAngle) * depth * 2.0f;
 }
 
 ContainmentType BoundingFrustum::Contains(const Vector3& point) const
 {
     PlaneIntersectionType result = PlaneIntersectionType::Front;
-    PlaneIntersectionType planeResult = PlaneIntersectionType::Front;
-    for (int i = 0; i < 6; i++)
+    for (int32 i = 0; i < 6; i++)
     {
-        switch (i)
-        {
-        case 0:
-            planeResult = _pNear.Intersects(point);
-            break;
-        case 1:
-            planeResult = _pFar.Intersects(point);
-            break;
-        case 2:
-            planeResult = _pLeft.Intersects(point);
-            break;
-        case 3:
-            planeResult = _pRight.Intersects(point);
-            break;
-        case 4:
-            planeResult = _pTop.Intersects(point);
-            break;
-        case 5:
-            planeResult = _pBottom.Intersects(point);
-            break;
-        }
+        const PlaneIntersectionType planeResult = _planes[i].Intersects(point);
         switch (planeResult)
         {
         case PlaneIntersectionType::Back:
@@ -168,30 +170,9 @@ ContainmentType BoundingFrustum::Contains(const Vector3& point) const
 ContainmentType BoundingFrustum::Contains(const BoundingSphere& sphere) const
 {
     auto result = PlaneIntersectionType::Front;
-    auto planeResult = PlaneIntersectionType::Front;
-    for (int i = 0; i < 6; i++)
+    for (int32 i = 0; i < 6; i++)
     {
-        switch (i)
-        {
-        case 0:
-            planeResult = _pNear.Intersects(sphere);
-            break;
-        case 1:
-            planeResult = _pFar.Intersects(sphere);
-            break;
-        case 2:
-            planeResult = _pLeft.Intersects(sphere);
-            break;
-        case 3:
-            planeResult = _pRight.Intersects(sphere);
-            break;
-        case 4:
-            planeResult = _pTop.Intersects(sphere);
-            break;
-        case 5:
-            planeResult = _pBottom.Intersects(sphere);
-            break;
-        }
+        const PlaneIntersectionType planeResult = _planes[i].Intersects(sphere);
         switch (planeResult)
         {
         case PlaneIntersectionType::Back:
@@ -208,4 +189,15 @@ ContainmentType BoundingFrustum::Contains(const BoundingSphere& sphere) const
     default:
         return ContainmentType::Contains;
     }
+}
+
+bool BoundingFrustum::Intersects(const BoundingSphere& sphere) const
+{
+    for (int32 i = 0; i < 6; i++)
+    {
+        const Real distance = Vector3::Dot(_planes[i].Normal, sphere.Center) + _planes[i].D;
+        if (distance < -sphere.Radius)
+            return false;
+    }
+    return true;
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -32,6 +32,7 @@ public:
     }
 
 public:
+    using JsonWriter::Key;
 
     // [JsonWriter]
     void Key(const char* str, int32 length) override

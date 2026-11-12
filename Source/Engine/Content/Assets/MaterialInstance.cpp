@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MaterialInstance.h"
 #include "Engine/Core/Log.h"
@@ -8,6 +8,9 @@
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Threading/Threading.h"
+#if USE_EDITOR
+#include "Engine/Serialization/MemoryWriteStream.h"
+#endif
 
 REGISTER_BINARY_ASSET_WITH_UPGRADER(MaterialInstance, "FlaxEngine.MaterialInstance", MaterialInstanceUpgrader, true);
 
@@ -22,7 +25,7 @@ void MaterialInstance::OnBaseSet()
     ASSERT(_baseMaterial->IsLoaded());
 
     _baseMaterial->AddReference();
-    _baseMaterial->OnUnloaded.Bind<MaterialInstance, &MaterialInstance::OnBaseUnloaded>(this);
+    _baseMaterial->Unloaded.Bind<MaterialInstance, &MaterialInstance::OnBaseUnloaded>(this);
     _baseMaterial->ParamsChanged.Bind<MaterialInstance, &MaterialInstance::OnBaseParamsChanged>(this);
 
     // Sync parameters with the base parameters to ensure all data is valid for rendering (constants offset and resource register)
@@ -60,7 +63,7 @@ void MaterialInstance::OnBaseSet()
 void MaterialInstance::OnBaseUnset()
 {
     _baseMaterial->RemoveReference();
-    _baseMaterial->OnUnloaded.Unbind<MaterialInstance, &MaterialInstance::OnBaseUnloaded>(this);
+    _baseMaterial->Unloaded.Unbind<MaterialInstance, &MaterialInstance::OnBaseUnloaded>(this);
     _baseMaterial->ParamsChanged.Unbind<MaterialInstance, &MaterialInstance::OnBaseParamsChanged>(this);
 }
 
@@ -87,9 +90,11 @@ void MaterialInstance::OnBaseParamsChanged()
     // Get the newest parameters
     baseParams->Clone(Params);
 
+#if 0
     // Override all public parameters by default
     for (auto& param : Params)
         param.SetIsOverride(param.IsPublic());
+#endif
 
     // Copy previous parameters values
     for (int32 i = 0; i < oldParams.Count(); i++)
@@ -123,13 +128,11 @@ bool MaterialInstance::IsMaterialInstance() const
 
 #if USE_EDITOR
 
-void MaterialInstance::GetReferences(Array<Guid>& output) const
+void MaterialInstance::GetReferences(Array<Guid>& assets, Array<String>& files) const
 {
-    // Base
-    MaterialBase::GetReferences(output);
-
+    MaterialBase::GetReferences(assets, files);
     if (_baseMaterial)
-        output.Add(_baseMaterial->GetID());
+        assets.Add(_baseMaterial->GetID());
 }
 
 #endif
@@ -141,6 +144,11 @@ const MaterialInfo& MaterialInstance::GetInfo() const
 
     static MaterialInfo EmptyInfo;
     return EmptyInfo;
+}
+
+GPUShader* MaterialInstance::GetShader() const
+{
+    return _baseMaterial ? _baseMaterial->GetShader() : nullptr;
 }
 
 bool MaterialInstance::IsReady() const
@@ -160,9 +168,9 @@ bool MaterialInstance::CanUseLightmap() const
     return _baseMaterial && _baseMaterial->CanUseLightmap();
 }
 
-bool MaterialInstance::CanUseInstancing(InstancingHandler& handler) const
+bool MaterialInstance::CanUseInstancing(const RenderContext& renderContext, InstancingHandler& handler) const
 {
-    return _baseMaterial && _baseMaterial->CanUseInstancing(handler);
+    return _baseMaterial && _baseMaterial->CanUseInstancing(renderContext, handler);
 }
 
 void MaterialInstance::Bind(BindParameters& params)
@@ -200,8 +208,6 @@ void MaterialInstance::Bind(BindParameters& params)
 
 Asset::LoadResult MaterialInstance::load()
 {
-    ASSERT(_baseMaterial == nullptr);
-
     // Get main chunk
     auto chunk0 = GetChunk(0);
     if (chunk0 == nullptr || chunk0->IsMissing())
@@ -210,11 +216,19 @@ Asset::LoadResult MaterialInstance::load()
 
     // Load base material
     Guid baseMaterialId;
-    headerStream.Read(&baseMaterialId);
+    headerStream.Read(baseMaterialId);
     auto baseMaterial = Content::LoadAsync<MaterialBase>(baseMaterialId);
+    if (baseMaterial)
+        baseMaterial->AddReference();
 
     // Load parameters
-    Params.Load(&headerStream);
+    if (Params.Load(&headerStream))
+    {
+        if (baseMaterial)
+            baseMaterial->RemoveReference();
+        LOG(Warning, "Cannot load material parameters.");
+        return LoadResult::CannotLoadData;
+    }
 
     if (baseMaterial && !baseMaterial->WaitForLoaded())
     {
@@ -224,10 +238,13 @@ Asset::LoadResult MaterialInstance::load()
     else
     {
         // Clear parameters if has no material loaded
+        _baseMaterial = nullptr;
         Params.Dispose();
         ParamsChanged();
     }
 
+    if (baseMaterial)
+        baseMaterial->RemoveReference();
     return LoadResult::Ok;
 }
 
@@ -259,6 +276,20 @@ void MaterialInstance::SetBaseMaterial(MaterialBase* baseMaterial)
     if (baseMaterial == _baseMaterial)
         return;
 
+#if !BUILD_RELEASE
+    // Prevent recursion
+    auto mi = Cast<MaterialInstance>(baseMaterial);
+    while (mi)
+    {
+        if (mi == this)
+        {
+            LOG(Error, "Cannot set base material of {0} to {1} because it's recursive.", ToString(), baseMaterial->ToString());
+            return;
+        }
+        mi = Cast<MaterialInstance>(mi->GetBaseMaterial());
+    }
+#endif
+
     // Release previous parameters
     Params.Dispose();
 
@@ -275,35 +306,44 @@ void MaterialInstance::SetBaseMaterial(MaterialBase* baseMaterial)
     }
 }
 
+void MaterialInstance::ResetParameters()
+{
+    for (auto& param : Params)
+    {
+        param.SetIsOverride(false);
+    }
+}
+
 #if USE_EDITOR
 
 bool MaterialInstance::Save(const StringView& path)
 {
-    // Validate state
-    if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave(path))
         return true;
-    }
-    if (IsVirtual() && path.IsEmpty())
-    {
-        LOG(Error, "To save virtual asset asset you need to specify the target asset path location.");
-        return true;
-    }
-
     ScopeLock lock(Locker);
 
     // Save instance data
     MemoryWriteStream stream(512);
     {
         // Save base material ID
-        const auto baseMaterialId = _baseMaterial ? _baseMaterial->GetID() : Guid::Empty;
-        stream.Write(&baseMaterialId);
+        const Guid baseMaterialId = _baseMaterial ? _baseMaterial->GetID() : Guid::Empty;
+        stream.Write(baseMaterialId);
 
         // Save parameters
         Params.Save(&stream);
     }
-    SetChunk(0, ToSpan(stream.GetHandle(), stream.GetPosition()));
+    // Virtual assets don't own a storage container, so SetChunk/GetOrCreateChunk are a no-op for them.
+    // Wire a temporary chunk into the header for the duration of the save (mirrors ModelBase::Save).
+    FlaxChunk tmpChunk;
+    if (IsVirtual())
+    {
+        tmpChunk.Data.Copy(ToSpan(stream));
+        _header.Chunks[0] = &tmpChunk;
+    }
+    else
+    {
+        SetChunk(0, ToSpan(stream));
+    }
 
     // Setup asset data
     AssetInitData data;
@@ -311,6 +351,11 @@ bool MaterialInstance::Save(const StringView& path)
 
     // Save data
     const bool saveResult = path.HasChars() ? SaveAsset(path, data) : SaveAsset(data, true);
+    if (IsVirtual())
+    {
+        // Release the temporary chunk reference (points to stack memory)
+        _header.Chunks[0] = nullptr;
+    }
     if (saveResult)
     {
         LOG(Error, "Cannot save \'{0}\'", ToString());

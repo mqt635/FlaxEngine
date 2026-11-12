@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ShaderProcessing.h"
 
@@ -26,7 +26,8 @@ VertexShaderMeta::InputType ShaderProcessing::ParseInputType(const Token& token)
         _PARSE_ENTRY(BITANGENT),
         _PARSE_ENTRY(ATTRIBUTE),
         _PARSE_ENTRY(BLENDINDICES),
-        _PARSE_ENTRY(BLENDWEIGHT),
+        _PARSE_ENTRY(BLENDWEIGHTS),
+        _PARSE_ENTRY(BLENDWEIGHT), // [Deprecated in v1.10]
     };
 #undef _PARSE_ENTRY
 
@@ -145,8 +146,8 @@ ShaderFlags ShaderProcessing::ParseShaderFlags(const Token& token)
         _PARSE_ENTRY(Hidden),
         _PARSE_ENTRY(NoFastMath),
         _PARSE_ENTRY(VertexToGeometryShader),
+        _PARSE_ENTRY(DevelopmentOnly),
     };
-    static_assert(ARRAY_COUNT(data) == 4, "Invalid amount of Shader Flag data entries.");
 #undef _PARSE_ENTRY
 
     for (int32 i = 0; i < ARRAY_COUNT(data); i++)

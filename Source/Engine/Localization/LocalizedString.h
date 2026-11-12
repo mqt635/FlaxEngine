@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 /// </summary>
 API_CLASS(Sealed) class FLAXENGINE_API LocalizedString
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(LocalizedString);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(LocalizedString);
 public:
     /// <summary>
     /// The localized string identifier. Used to lookup text value for a current language (via <see cref="Localization::GetString"/>).
@@ -34,9 +34,9 @@ public:
     LocalizedString& operator=(const StringView& value);
     LocalizedString& operator=(String&& value) noexcept;
 
-    friend bool operator==(const LocalizedString& a, const LocalizedString& b)
+    bool operator==(const LocalizedString& other) const
     {
-        return a.Id == b.Id && a.Value == b.Value;
+        return Id == other.Id && Value == other.Value;
     }
 
     friend bool operator!=(const LocalizedString& a, const LocalizedString& b)
@@ -71,49 +71,8 @@ namespace Serialization
         return !otherObj || v != *(LocalizedString*)otherObj;
     }
 
-    inline void Serialize(ISerializable::SerializeStream& stream, const LocalizedString& v, const void* otherObj)
-    {
-        if (v.Id.IsEmpty())
-        {
-            stream.String(v.Value);
-        }
-        else
-        {
-            stream.StartObject();
-            stream.JKEY("Id");
-            stream.String(v.Id);
-            if (v.Value.HasChars())
-            {
-                stream.JKEY("Value");
-                stream.String(v.Value);
-            }
-            stream.EndObject();
-        }
-    }
-
-    inline void Deserialize(ISerializable::DeserializeStream& stream, LocalizedString& v, ISerializeModifier* modifier)
-    {
-        if (stream.IsString())
-        {
-            v.Id = String::Empty;
-            v.Value = stream.GetText();
-        }
-        else if (stream.IsObject())
-        {
-            auto e = SERIALIZE_FIND_MEMBER(stream, "Id");
-            if (e != stream.MemberEnd())
-                v.Id.SetUTF8(e->value.GetString(), e->value.GetStringLength());
-            e = SERIALIZE_FIND_MEMBER(stream, "Value");
-            if (e != stream.MemberEnd())
-                v.Value.SetUTF8(e->value.GetString(), e->value.GetStringLength());
-            else if (v.Id.HasChars())
-                v.Value.Clear();
-        }
-        else
-        {
-            v = LocalizedString();
-        }
-    }
+    FLAXENGINE_API void Serialize(ISerializable::SerializeStream& stream, const LocalizedString& v, const void* otherObj);
+    FLAXENGINE_API void Deserialize(ISerializable::DeserializeStream& stream, LocalizedString& v, ISerializeModifier* modifier);
 }
 
 DEFINE_DEFAULT_FORMATTING_VIA_TO_STRING(LocalizedString);

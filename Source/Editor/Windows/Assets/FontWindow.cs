@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.ComponentModel;
 using FlaxEditor.Content;
@@ -21,6 +21,14 @@ namespace FlaxEditor.Windows.Assets
         /// </summary>
         private sealed class PropertiesProxy
         {
+            [DefaultValue(FontRasterMode.Bitmap)]
+            [EditorOrder(5), EditorDisplay("Properties"), Tooltip("The rasterization mode used when generating font atlases.")]
+            public FontRasterMode RasterMode;
+
+            [DefaultValue(32.0f), VisibleIf(nameof(IsMSDF))]
+            [EditorOrder(6), Limit(4, 512), EditorDisplay("Properties"), Tooltip("The font size used when generating MSDF font atlases.")]
+            public float MSDFSize;
+
             [DefaultValue(FontHinting.Default)]
             [EditorOrder(10), EditorDisplay("Properties"), Tooltip("The font hinting used when rendering characters.")]
             public FontHinting Hinting;
@@ -37,11 +45,15 @@ namespace FlaxEditor.Windows.Assets
             [EditorOrder(40), EditorDisplay("Properties"), Tooltip("Enables slant effect, emulating italic style.")]
             public bool Italic;
 
+            private bool IsMSDF => RasterMode == FontRasterMode.MSDF;
+
             public void Get(out FontOptions options)
             {
                 options = new FontOptions
                 {
-                    Hinting = Hinting
+                    Hinting = Hinting,
+                    RasterMode = RasterMode,
+                    MSDFSize = MSDFSize,
                 };
                 if (AntiAliasing)
                     options.Flags |= FontFlags.AntiAliasing;
@@ -57,6 +69,8 @@ namespace FlaxEditor.Windows.Assets
                 AntiAliasing = (options.Flags & FontFlags.AntiAliasing) == FontFlags.AntiAliasing;
                 Bold = (options.Flags & FontFlags.Bold) == FontFlags.Bold;
                 Italic = (options.Flags & FontFlags.Italic) == FontFlags.Italic;
+                RasterMode = options.RasterMode;
+                MSDFSize = options.MSDFSize;
             }
         }
 
@@ -128,7 +142,6 @@ namespace FlaxEditor.Windows.Assets
             if (assetOptions != options)
             {
                 Asset.Options = options;
-                Asset.Invalidate();
             }
         }
 
@@ -144,7 +157,7 @@ namespace FlaxEditor.Windows.Assets
         protected override void OnAssetLinked()
         {
             Asset.WaitForLoaded();
-            _textPreview.Font = new FontReference(Asset.CreateFont(30));
+            _textPreview.Font = new FontReference(Asset, 30);
             _inputText.Text = string.Format("This is a sample text using font {0}.", Asset.FamilyName);
             var options = Asset.Options;
             _proxy.Set(ref options);

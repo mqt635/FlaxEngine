@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -27,15 +27,16 @@ namespace FlaxEditor.CustomEditors.Editors
         public override void Initialize(LayoutElementsContainer layout)
         {
             _label = layout.ClickableLabel(GetName(Culture)).CustomControl;
-            _label.RightClick += ShowPicker;
+            _label.RightClick += () => CreatePicker(Culture, OnValueChanged).Show(_label, new Float2(0, _label.Height));
             var button = new Button
             {
                 Width = 16.0f,
                 Text = "...",
+                TooltipText = "Edit locale...",
                 Parent = _label,
             };
             button.SetAnchorPreset(AnchorPresets.MiddleRight, false, true);
-            button.Clicked += ShowPicker;
+            button.ButtonClicked += b => CreatePicker(Culture, OnValueChanged).Show(b, new Float2(0, b.Height));
         }
 
         /// <inheritdoc />
@@ -66,11 +67,16 @@ namespace FlaxEditor.CustomEditors.Editors
             }
             set
             {
-                if (Values[0] is CultureInfo)
+                if (Values[0] is CultureInfo || Values.Type == typeof(CultureInfo))
                     SetValue(value);
-                else if (Values[0] is string)
+                else if (Values[0] is string || Values.Type == typeof(string))
                     SetValue(value.Name);
             }
+        }
+
+        private void OnValueChanged(CultureInfo value)
+        {
+            Culture = value;
         }
 
         private class CultureInfoComparer : IComparer<CultureInfo>
@@ -79,36 +85,6 @@ namespace FlaxEditor.CustomEditors.Editors
             {
                 return string.Compare(a.Name, b.Name, StringComparison.Ordinal);
             }
-        }
-
-        private static void UpdateFilter(TreeNode node, string filterText)
-        {
-            // Update children
-            bool isAnyChildVisible = false;
-            for (int i = 0; i < node.Children.Count; i++)
-            {
-                if (node.Children[i] is TreeNode child)
-                {
-                    UpdateFilter(child, filterText);
-                    isAnyChildVisible |= child.Visible;
-                }
-            }
-
-            // Update itself
-            bool noFilter = string.IsNullOrWhiteSpace(filterText);
-            bool isThisVisible = noFilter || QueryFilterHelper.Match(filterText, node.Text);
-            bool isExpanded = isAnyChildVisible;
-            if (isExpanded)
-                node.Expand(true);
-            else
-                node.Collapse(true);
-            node.Visible = isThisVisible | isAnyChildVisible;
-        }
-
-        private void ShowPicker()
-        {
-            var menu = CreatePicker(Culture, value => { Culture = value; });
-            menu.Show(_label, new Vector2(0, _label.Height));
         }
 
         internal static ContextMenuBase CreatePicker(CultureInfo value, Action<CultureInfo> changed)
@@ -146,10 +122,9 @@ namespace FlaxEditor.CustomEditors.Editors
             {
                 if (tree.IsLayoutLocked)
                     return;
-                root.LockChildrenRecursive();
-                var query = searchBox.Text;
-                UpdateFilter(root, query);
-                root.UnlockChildrenRecursive();
+                tree.LockChildrenRecursive();
+                Utilities.Utils.UpdateSearchPopupFilter(root, searchBox.Text);
+                tree.UnlockChildrenRecursive();
                 menu.PerformLayout();
             };
             root.ExpandAll(true);

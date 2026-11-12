@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -21,6 +21,7 @@ namespace Flax.Build.Graph
 
         private readonly List<BuildResultCache> _prevBuildCache = new List<BuildResultCache>();
         private readonly List<string> _prevBuildCacheFiles = new List<string>();
+        private readonly Dictionary<string, int> _prevBuildCacheFileIndices = new Dictionary<string, int>();
 
         /// <summary>
         /// The workspace folder of the task graph.
@@ -82,16 +83,38 @@ namespace Flax.Build.Graph
             if (Platform.BuildPlatform.Target == TargetPlatform.Windows)
             {
                 task.CommandPath = "xcopy";
-                task.CommandArguments = string.Format("/y \"{0}\" \"{1}\"", srcFile, outputPath);
+                task.CommandArguments = string.Format("/y \"{0}\" \"{1}\"", srcFile.Replace('/', '\\'), outputPath.Replace('/', '\\'));
             }
             else
             {
                 task.CommandPath = "cp";
-                task.CommandArguments = string.Format("\'{0}\' \'{1}\'", srcFile, outputPath);
+                task.CommandArguments = string.Format("\"{0}\" \"{1}\"", srcFile, outputPath);
             }
 
             Tasks.Add(task);
             return task;
+        }
+
+        /// <summary>
+        /// Checks if that copy task is already added in a graph. Use it for logic that might copy the same file multiple times.
+        /// </summary>
+        /// <param name="dstFile">The destination file path.</param>
+        /// <param name="srcFile">The source file path.</param>
+        /// <returns>True if has copy task already scheduled in a task graph, otherwise false..</returns>
+        public bool HasCopyTask(string dstFile, string srcFile)
+        {
+            for (int i = Tasks.Count - 1; i >= 0; i--)
+            {
+                var t = Tasks[i];
+                if (t.Cost == 1 &&
+                    t.PrerequisiteFiles.Count == 1 && t.PrerequisiteFiles[0] == srcFile &&
+                    t.ProducedFiles.Count == 1 && t.ProducedFiles[0] == dstFile)
+                {
+                    // Already scheduled for copy
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
@@ -111,7 +134,7 @@ namespace Flax.Build.Graph
         }
 
         /// <summary>
-        /// Performs tasks list sorting based on task dependencies and cost heuristics to to improve parallelism of the graph execution.
+        /// Performs tasks list sorting based on task dependencies and cost heuristics to improve parallelism of the graph execution.
         /// </summary>
         public void SortTasks()
         {
@@ -126,12 +149,7 @@ namespace Flax.Build.Graph
                     {
                         if (FileToProducingTaskMap.TryGetValue(prerequisiteFile, out var prerequisiteTask))
                         {
-                            HashSet<Task> dependentTasks;
-                            if (taskToDependentActionsMap.ContainsKey(prerequisiteTask))
-                            {
-                                dependentTasks = taskToDependentActionsMap[prerequisiteTask];
-                            }
-                            else
+                            if (!taskToDependentActionsMap.TryGetValue(prerequisiteTask, out var dependentTasks))
                             {
                                 dependentTasks = new HashSet<Task>();
                                 taskToDependentActionsMap[prerequisiteTask] = dependentTasks;
@@ -275,9 +293,10 @@ namespace Flax.Build.Graph
                 var lastWrite = new DateTime(reader.ReadInt64());
 
                 var isValid = true;
-                if (File.Exists(file))
+                var cacheFile = true;
+                if (FileCache.Exists(file))
                 {
-                    if (File.GetLastWriteTime(file) > lastWrite)
+                    if (FileCache.GetLastWriteTime(file) > lastWrite)
                     {
                         isValid = false;
                     }
@@ -286,10 +305,16 @@ namespace Flax.Build.Graph
                 {
                     isValid = false;
                 }
+                else
+                    cacheFile = false;
 
                 filesDates[i] = lastWrite;
                 filesValid[i] = isValid;
                 _prevBuildCacheFiles.Add(file);
+                _prevBuildCacheFileIndices.Add(file, i);
+
+                if (!isValid || !cacheFile)
+                    FileCache.FileRemoveFromCache(file);
             }
 
             int taskCount = reader.ReadInt32();
@@ -446,14 +471,20 @@ namespace Flax.Build.Graph
                 fileIndices.Clear();
                 foreach (var file in files)
                 {
-                    int fileIndex = _prevBuildCacheFiles.IndexOf(file);
-                    if (fileIndex == -1)
+                    if (!_prevBuildCacheFileIndices.TryGetValue(file, out int fileIndex))
                     {
                         fileIndex = _prevBuildCacheFiles.Count;
                         _prevBuildCacheFiles.Add(file);
+                        _prevBuildCacheFileIndices.Add(file, fileIndex);
                     }
 
                     fileIndices.Add(fileIndex);
+                }
+
+                if (!task.HasValidCachedResults)
+                {
+                    foreach (var file in task.ProducedFiles)
+                        FileCache.FileRemoveFromCache(file);
                 }
 
                 _prevBuildCache.Add(new BuildResultCache
@@ -479,8 +510,8 @@ namespace Flax.Build.Graph
 
                     // Last File Write
                     DateTime lastWrite;
-                    if (File.Exists(file))
-                        lastWrite = File.GetLastWriteTime(file);
+                    if (FileCache.Exists(file))
+                        lastWrite = FileCache.GetLastWriteTime(file);
                     else
                         lastWrite = DateTime.MinValue;
                     writer.Write(lastWrite.Ticks);

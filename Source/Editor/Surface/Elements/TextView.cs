@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -25,7 +25,7 @@ namespace FlaxEditor.Surface.Elements
 
             var style = Style.Current;
             var color = Enabled ? style.Foreground : style.ForegroundDisabled;
-            Render2D.DrawText(style.FontSmall, Archetype.Text, new Rectangle(Vector2.Zero, Size), color, TextAlignment.Near, TextAlignment.Center);
+            Render2D.DrawText(style.FontSmall, Archetype.Text, new Rectangle(Float2.Zero, Size), color, TextAlignment.Near, TextAlignment.Center);
         }
     }
 }

@@ -1,6 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.Content;
+using FlaxEditor.GUI.Drag;
 using FlaxEditor.GUI.Timeline.Tracks;
 using FlaxEditor.Viewport.Previews;
 using FlaxEngine;
@@ -24,6 +26,7 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         private AnimationPreview _preview;
+        internal Guid _id;
 
         /// <summary>
         /// Gets or sets the animated preview used for the animation playback.
@@ -52,7 +55,7 @@ namespace FlaxEditor.GUI.Timeline
         /// </summary>
         /// <param name="undo">The undo/redo to use for the history actions recording. Optional, can be null to disable undo support.</param>
         public AnimationTimeline(FlaxEditor.Undo undo)
-        : base(PlaybackButtons.Play | PlaybackButtons.Stop, undo, false, false)
+        : base(PlaybackButtons.Play | PlaybackButtons.Stop, undo, false, true)
         {
             PlaybackState = PlaybackStates.Seeking;
             ShowPreviewValues = false;
@@ -61,6 +64,8 @@ namespace FlaxEditor.GUI.Timeline
             // Setup track types
             TrackArchetypes.Add(AnimationChannelTrack.GetArchetype());
             TrackArchetypes.Add(AnimationChannelDataTrack.GetArchetype());
+            TrackArchetypes.Add(AnimationEventTrack.GetArchetype());
+            TrackArchetypes.Add(NestedAnimationTrack.GetArchetype());
         }
 
         /// <summary>
@@ -125,9 +130,9 @@ namespace FlaxEditor.GUI.Timeline
         public override void OnPlay()
         {
             var time = CurrentTime;
-            _preview.Play();
             if (_preview != null)
             {
+                _preview.Play();
                 Editor.Internal_SetAnimationTime(Object.GetUnmanagedPtr(_preview.PreviewActor), time);
             }
 
@@ -155,7 +160,7 @@ namespace FlaxEditor.GUI.Timeline
         {
             if (_preview != null)
             {
-                frame = Mathf.Clamp(frame, 0, DurationFrames - 1);
+                frame = Mathf.Clamp(frame, 0, DurationFrames);
                 var time = frame / FramesPerSecond;
                 Editor.Internal_SetAnimationTime(Object.GetUnmanagedPtr(_preview.PreviewActor), time);
                 if (!_preview.PlayAnimation)
@@ -167,6 +172,49 @@ namespace FlaxEditor.GUI.Timeline
             }
 
             base.OnSeek(frame);
+        }
+
+        /// <inheritdoc />
+        protected override void SetupDragDrop()
+        {
+            base.SetupDragDrop();
+
+            DragHandlers.Add(new DragHandler(new DragAssets(IsValidAsset), OnDragAsset));
+        }
+
+        private static bool IsValidAsset(AssetItem assetItem)
+        {
+            if (assetItem is BinaryAssetItem binaryAssetItem)
+            {
+                if (typeof(Animation).IsAssignableFrom(binaryAssetItem.Type))
+                {
+                    var sceneAnimation = FlaxEngine.Content.LoadAsync<Animation>(binaryAssetItem.ID);
+                    if (sceneAnimation)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static void OnDragAsset(Timeline timeline, DragHelper drag)
+        {
+            foreach (var assetItem in ((DragAssets)drag).Objects)
+            {
+                if (assetItem is BinaryAssetItem binaryAssetItem)
+                {
+                    if (typeof(Animation).IsAssignableFrom(binaryAssetItem.Type))
+                    {
+                        var animation = FlaxEngine.Content.LoadAsync<Animation>(binaryAssetItem.ID);
+                        if (!animation || animation.WaitForLoaded())
+                            continue;
+                        var track = (NestedAnimationTrack)timeline.NewTrack(NestedAnimationTrack.GetArchetype());
+                        track.Asset = animation;
+                        track.TrackMedia.DurationFrames = (int)(animation.Length * timeline.FramesPerSecond);
+                        track.Rename(assetItem.ShortName);
+                        timeline.AddTrack(track);
+                    }
+                }
+            }
         }
     }
 }

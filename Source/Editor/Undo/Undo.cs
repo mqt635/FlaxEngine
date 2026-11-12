@@ -1,11 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using FlaxEditor.History;
 using FlaxEditor.Utilities;
-using FlaxEngine.Collections;
 
 namespace FlaxEditor
 {
@@ -38,9 +36,6 @@ namespace FlaxEditor
         /// <summary>
         /// Gets the undo operations stack.
         /// </summary>
-        /// <value>
-        /// The undo operations stack.
-        /// </value>
         public HistoryStack UndoOperationsStack { get; }
 
         /// <summary>
@@ -61,41 +56,26 @@ namespace FlaxEditor
         /// <summary>
         /// Gets or sets a value indicating whether this <see cref="Undo"/> is enabled.
         /// </summary>
-        /// <value>
-        ///   <c>true</c> if enabled; otherwise, <c>false</c>.
-        /// </value>
         public virtual bool Enabled { get; set; } = true;
 
         /// <summary>
         /// Gets a value indicating whether can do undo on last performed action.
         /// </summary>
-        /// <value>
-        ///   <c>true</c> if can perform undo; otherwise, <c>false</c>.
-        /// </value>
         public bool CanUndo => UndoOperationsStack.HistoryCount > 0;
 
         /// <summary>
         /// Gets a value indicating whether can do redo on last undone action.
         /// </summary>
-        /// <value>
-        ///   <c>true</c> if can perform redo; otherwise, <c>false</c>.
-        /// </value>
         public bool CanRedo => UndoOperationsStack.ReverseCount > 0;
 
         /// <summary>
         /// Gets the first name of the undo action.
         /// </summary>
-        /// <value>
-        /// The first name of the undo action.
-        /// </value>
         public string FirstUndoName => UndoOperationsStack.PeekHistory().ActionString;
 
         /// <summary>
         /// Gets the first name of the redo action.
         /// </summary>
-        /// <value>
-        /// The first name of the redo action.
-        /// </value>
         public string FirstRedoName => UndoOperationsStack.PeekReverse().ActionString;
 
         /// <summary>
@@ -153,6 +133,7 @@ namespace FlaxEditor
                 return;
 
             _snapshots.Add(snapshotInstance, new UndoInternal(snapshotInstance, actionString));
+
         }
 
         /// <summary>
@@ -167,9 +148,7 @@ namespace FlaxEditor
                 return;
 
             if (snapshotInstance == null)
-            {
                 snapshotInstance = _snapshots.Last().Key;
-            }
             var action = _snapshots[snapshotInstance].End(snapshotInstance);
             _snapshots.Remove(snapshotInstance);
 
@@ -264,9 +243,7 @@ namespace FlaxEditor
                 return;
 
             if (snapshotInstance == null)
-            {
                 snapshotInstance = (object[])_snapshots.Last().Key;
-            }
             var action = _snapshots[snapshotInstance].End(snapshotInstance);
             _snapshots.Remove(snapshotInstance);
 
@@ -340,12 +317,10 @@ namespace FlaxEditor
         {
             if (action == null)
                 throw new ArgumentNullException();
-
             if (!Enabled)
                 return;
 
             UndoOperationsStack.Push(action);
-
             OnAction(action);
         }
 

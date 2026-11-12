@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "StreamingHandlers.h"
 #include "Streaming.h"
@@ -11,7 +11,7 @@
 #include "Engine/Audio/Audio.h"
 #include "Engine/Audio/AudioSource.h"
 
-float TexturesStreamingHandler::CalculateTargetQuality(StreamableResource* resource, DateTime now, double currentTime)
+float TexturesStreamingHandler::CalculateTargetQuality(StreamableResource* resource, double currentTime)
 {
     ASSERT(resource);
     auto& texture = *(StreamingTexture*)resource;
@@ -59,7 +59,7 @@ int32 TexturesStreamingHandler::CalculateResidency(StreamableResource* resource,
 
     if (mipLevels > 0 && mipLevels < texture._minMipCountBlockCompressed && texture._isBlockCompressed)
     {
-        // Block compressed textures require minimum size of 4
+        // Block compressed textures require minimum size of block size (eg. 4 for BC formats)
         mipLevels = texture._minMipCountBlockCompressed;
     }
 
@@ -93,7 +93,7 @@ int32 TexturesStreamingHandler::CalculateRequestedResidency(StreamableResource* 
     return residency;
 }
 
-float ModelsStreamingHandler::CalculateTargetQuality(StreamableResource* resource, DateTime now, double currentTime)
+float ModelsStreamingHandler::CalculateTargetQuality(StreamableResource* resource, double currentTime)
 {
     // TODO: calculate a proper quality levels for models based on render time and streaming enable/disable options
     return 1.0f;
@@ -104,22 +104,20 @@ int32 ModelsStreamingHandler::CalculateResidency(StreamableResource* resource, f
     if (quality < ZeroTolerance)
         return 0;
     ASSERT(resource);
-    auto& model = *(Model*)resource;
-
+    const auto& model = *(Model*)resource;
     const int32 lodCount = model.GetLODsCount();
-    int32 lods = Math::CeilToInt(quality * (float)lodCount);
-    ASSERT(model.IsValidLODIndex(lods - 1));
+    const int32 lods = Math::CeilToInt(quality * (float)lodCount);
     return lods;
 }
 
 int32 ModelsStreamingHandler::CalculateRequestedResidency(StreamableResource* resource, int32 targetResidency)
 {
     ASSERT(resource);
-    auto& model = *(Model*)resource;
+    const auto& model = *(Model*)resource;
 
     // Always load only single LOD at once
     int32 residency = targetResidency;
-    int32 currentResidency = model.GetCurrentResidency();
+    const int32 currentResidency = model.GetCurrentResidency();
     if (currentResidency < targetResidency)
     {
         // Up
@@ -134,7 +132,7 @@ int32 ModelsStreamingHandler::CalculateRequestedResidency(StreamableResource* re
     return residency;
 }
 
-float SkinnedModelsStreamingHandler::CalculateTargetQuality(StreamableResource* resource, DateTime now, double currentTime)
+float SkinnedModelsStreamingHandler::CalculateTargetQuality(StreamableResource* resource, double currentTime)
 {
     // TODO: calculate a proper quality levels for models based on render time and streaming enable/disable options
     return 1.0f;
@@ -145,22 +143,20 @@ int32 SkinnedModelsStreamingHandler::CalculateResidency(StreamableResource* reso
     if (quality < ZeroTolerance)
         return 0;
     ASSERT(resource);
-    auto& model = *(SkinnedModel*)resource;
-
+    const auto& model = *(SkinnedModel*)resource;
     const int32 lodCount = model.GetLODsCount();
-    int32 lods = Math::CeilToInt(quality * (float)lodCount);
-    ASSERT(model.IsValidLODIndex(lods - 1));
+    const int32 lods = Math::CeilToInt(quality * (float)lodCount);
     return lods;
 }
 
 int32 SkinnedModelsStreamingHandler::CalculateRequestedResidency(StreamableResource* resource, int32 targetResidency)
 {
     ASSERT(resource);
-    auto& model = *(SkinnedModel*)resource;
+    const auto& model = *(SkinnedModel*)resource;
 
     // Always load only single LOD at once
     int32 residency = targetResidency;
-    int32 currentResidency = model.GetCurrentResidency();
+    const int32 currentResidency = model.GetCurrentResidency();
     if (currentResidency < targetResidency)
     {
         // Up
@@ -175,7 +171,7 @@ int32 SkinnedModelsStreamingHandler::CalculateRequestedResidency(StreamableResou
     return residency;
 }
 
-float AudioStreamingHandler::CalculateTargetQuality(StreamableResource* resource, DateTime now, double currentTime)
+float AudioStreamingHandler::CalculateTargetQuality(StreamableResource* resource, double currentTime)
 {
     // Audio clips don't use quality but only residency
     return 1.0f;
@@ -186,7 +182,7 @@ int32 AudioStreamingHandler::CalculateResidency(StreamableResource* resource, fl
     ASSERT(resource);
     auto clip = static_cast<AudioClip*>(resource);
     const int32 chunksCount = clip->Buffers.Count();
-    bool chunksMask[ASSET_FILE_DATA_CHUNKS];
+    bool chunksMask[ASSET_FILE_DATA_CHUNKS]; // TODO: use single int as bit mask
     Platform::MemoryClear(chunksMask, sizeof(chunksMask));
 
     // Find audio chunks required for streaming
@@ -196,14 +192,14 @@ int32 AudioStreamingHandler::CalculateResidency(StreamableResource* resource, fl
         // TODO: collect refs to audio clip from sources and use faster iteration (but do it thread-safe)
 
         const auto src = Audio::Sources[sourceIndex];
-        if (src->Clip == clip && src->GetState() == AudioSource::States::Playing)
+        if (src->Clip == clip && src->GetState() != AudioSource::States::Stopped)
         {
             // Stream the current and the next chunk if could be used in a while
             const int32 chunk = src->_streamingFirstChunk;
             ASSERT(Math::IsInRange(chunk, 0, chunksCount));
             chunksMask[chunk] = true;
-
-            const float StreamingDstSec = 2.0f;
+            
+            const float StreamingDstSec = 2.0f; // TODO: make it configurable via StreamingSettings
             if (chunk + 1 < chunksCount && src->GetTime() + StreamingDstSec >= clip->GetBufferStartTime(src->_streamingFirstChunk))
             {
                 chunksMask[chunk + 1] = true;

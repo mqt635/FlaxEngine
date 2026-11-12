@@ -1,14 +1,76 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using FlaxEditor.SceneGraph;
 using FlaxEditor.Scripting;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
+using FlaxEditor.CustomEditors.GUI;
 
 namespace FlaxEditor.CustomEditors
 {
+    /// <summary>
+    /// The per-feature flags for custom editors system.
+    /// </summary>
+    [HideInEditor, Flags]
+    public enum FeatureFlags
+    {
+        /// <summary>
+        /// Nothing.
+        /// </summary>
+        None = 0,
+
+        /// <summary>
+        /// Enables caching the expanded groups in this presenter. Used to preserve the expanded groups using project cache.
+        /// </summary>
+        CacheExpandedGroups = 1 << 0,
+
+        /// <summary>
+        /// Enables using prefab-related features of the properties editor (eg. revert to prefab option).
+        /// </summary>
+        UsePrefab = 1 << 1,
+
+        /// <summary>
+        /// Enables using default-value-related features of the properties editor (eg. revert to default option).
+        /// </summary>
+        UseDefault = 1 << 2,
+    }
+
+    /// <summary>
+    /// The interface for Editor context that owns the presenter. Can be <see cref="FlaxEditor.Windows.PropertiesWindow"/> or <see cref="FlaxEditor.Windows.Assets.PrefabWindow"/> or other window/panel - custom editor scan use it for more specific features.
+    /// </summary>
+    public interface IPresenterOwner
+    {
+        /// <summary>
+        /// Gets the viewport linked with properties presenter (optional, null if unused).
+        /// </summary>
+        public Viewport.EditorViewport PresenterViewport { get; }
+
+        /// <summary>
+        /// Selects the scene objects.
+        /// </summary>
+        /// <param name="nodes">The nodes to select</param>
+        public void Select(List<SceneGraph.SceneGraphNode> nodes);
+
+        /// <summary>
+        /// Gets the current selection.
+        /// </summary>
+        public List<SceneGraphNode> Selection { get; }
+
+        /// <summary>
+        /// Indication of if the properties window is locked on specific objects.
+        /// </summary>
+        public bool LockSelection { get; set; }
+
+        /// <summary>
+        /// Gets the scene editing context.
+        /// </summary>
+        public ISceneEditingContext SceneContext { get; }
+    }
+
     /// <summary>
     /// Main class for Custom Editors used to present selected objects properties and allow to modify them.
     /// </summary>
@@ -34,14 +96,27 @@ namespace FlaxEditor.CustomEditors
                 _presenter = presenter;
                 AnchorPreset = AnchorPresets.StretchAll;
                 Offsets = Margin.Zero;
+                Pivot = Float2.Zero;
                 IsScrollable = true;
+                Spacing = Utilities.Constants.UIMargin;
+                Margin = new Margin(Utilities.Constants.UIMargin);
             }
 
             /// <inheritdoc />
             public override void Update(float deltaTime)
             {
-                // Update editors
-                _presenter.Update();
+                try
+                {
+                    // Update editors
+                    _presenter.Update();
+                }
+                catch (Exception ex)
+                {
+                    FlaxEditor.Editor.LogWarning(ex);
+
+                    // Refresh layout on errors to reduce log spam
+                    _presenter.BuildLayout();
+                }
 
                 base.Update(deltaTime);
             }
@@ -61,7 +136,6 @@ namespace FlaxEditor.CustomEditors
         /// <seealso cref="FlaxEditor.CustomEditors.SyncPointEditor" />
         protected class RootEditor : SyncPointEditor
         {
-            private readonly string _noSelectionText;
             private CustomEditor _overrideEditor;
 
             /// <summary>
@@ -77,10 +151,17 @@ namespace FlaxEditor.CustomEditors
                 get => _overrideEditor;
                 set
                 {
+                    if (_overrideEditor == value)
+                        return;
                     _overrideEditor = value;
                     RebuildLayout();
                 }
             }
+
+            /// <summary>
+            /// The text to show when no object is selected.
+            /// </summary>
+            public string NoSelectionText;
 
             /// <summary>
             /// Initializes a new instance of the <see cref="RootEditor"/> class.
@@ -88,7 +169,7 @@ namespace FlaxEditor.CustomEditors
             /// <param name="noSelectionText">The text to show when no item is selected.</param>
             public RootEditor(string noSelectionText)
             {
-                _noSelectionText = noSelectionText ?? "No selection";
+                NoSelectionText = noSelectionText ?? "No selection";
             }
 
             /// <summary>
@@ -116,7 +197,7 @@ namespace FlaxEditor.CustomEditors
                     }
                     else
                     {
-                        var type = new ScriptType(typeof(object));
+                        var type = ScriptType.Object;
                         if (selection.HasDifferentTypes == false)
                             type = TypeUtils.GetObjectType(selection[0]);
                         Editor = CustomEditorsUtil.CreateEditor(type, false);
@@ -127,13 +208,21 @@ namespace FlaxEditor.CustomEditors
                 }
                 else
                 {
-                    var label = layout.Label(_noSelectionText, TextAlignment.Center);
+                    var label = layout.Label(NoSelectionText, TextAlignment.Center);
                     label.Label.Height = 20.0f;
                 }
 
                 base.Initialize(layout);
 
                 Presenter.AfterLayout?.Invoke(layout);
+            }
+
+            /// <inheritdoc />
+            protected override void Deinitialize()
+            {
+                Editor = null;
+
+                base.Deinitialize();
             }
 
             /// <inheritdoc />
@@ -156,9 +245,14 @@ namespace FlaxEditor.CustomEditors
         protected readonly RootEditor Editor;
 
         /// <summary>
-        /// The selected objects list (read-only).
+        /// The current selection.
         /// </summary>
         public readonly ValueContainer Selection = new ValueContainer(ScriptMemberInfo.Null);
+
+        /// <summary>
+        /// The current properties search query.
+        /// </summary>
+        public string SearchText = string.Empty;
 
         /// <summary>
         /// The undo object used by this editor.
@@ -205,9 +299,9 @@ namespace FlaxEditor.CustomEditors
         public bool BuildOnUpdate => _buildOnUpdate;
 
         /// <summary>
-        /// True if cache the expanded groups in this presenter, otherwise will disable this feature. Used to preserve the expanded groups using project cache.
+        /// The features to use for properties editor.
         /// </summary>
-        public bool CacheExpandedGroups;
+        public FeatureFlags Features = FeatureFlags.UsePrefab | FeatureFlags.UseDefault;
 
         /// <summary>
         /// Occurs when before creating layout for the selected objects editor UI. Can be used to inject custom UI to the layout.
@@ -219,16 +313,55 @@ namespace FlaxEditor.CustomEditors
         /// </summary>
         public event Action<LayoutElementsContainer> AfterLayout;
 
+        /// <summary>
+        /// The Editor context that owns this presenter. Can be <see cref="FlaxEditor.Windows.PropertiesWindow"/> or <see cref="FlaxEditor.Windows.Assets.PrefabWindow"/> or other window/panel - custom editor scan use it for more specific features.
+        /// </summary>
+        public IPresenterOwner Owner;
+
+        /// <summary>
+        /// Gets or sets the text to show when no object is selected.
+        /// </summary>
+        public string NoSelectionText
+        {
+            get => Editor.NoSelectionText;
+            set
+            {
+                Editor.NoSelectionText = value;
+                if (SelectionCount == 0)
+                    BuildLayoutOnUpdate();
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the value indicating whether properties are read-only.
+        /// </summary>
+        public bool ReadOnly
+        {
+            get => _readOnly;
+            set
+            {
+                if (_readOnly != value)
+                {
+                    _readOnly = value;
+                    UpdateReadOnly();
+                }
+            }
+        }
+
         private bool _buildOnUpdate;
+        private bool _initialized;
+        private bool _readOnly;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CustomEditorPresenter"/> class.
         /// </summary>
         /// <param name="undo">The undo. It's optional.</param>
         /// <param name="noSelectionText">The custom text to display when no object is selected. Default is No selection.</param>
-        public CustomEditorPresenter(Undo undo, string noSelectionText = null)
+        /// <param name="owner">The owner of the presenter.</param>
+        public CustomEditorPresenter(Undo undo = null, string noSelectionText = null, IPresenterOwner owner = null)
         {
             Undo = undo;
+            Owner = owner;
             Panel = new PresenterPanel(this);
             Editor = new RootEditor(noSelectionText);
             Editor.Initialize(this, this, null);
@@ -303,6 +436,8 @@ namespace FlaxEditor.CustomEditors
             Panel.DisposeChildren();
 
             ClearLayout();
+            _buildOnUpdate = false;
+            _initialized = true;
             Editor.Setup(this);
 
             Panel.IsLayoutLocked = false;
@@ -311,6 +446,8 @@ namespace FlaxEditor.CustomEditors
             // Restore scroll value
             if (parentScrollV > -1)
                 panel.VScrollBar.Value = parentScrollV;
+            if (_readOnly)
+                UpdateReadOnly();
         }
 
         /// <summary>
@@ -319,6 +456,16 @@ namespace FlaxEditor.CustomEditors
         public void BuildLayoutOnUpdate()
         {
             _buildOnUpdate = true;
+        }
+
+        private void UpdateReadOnly()
+        {
+            // Only scrollbars are enabled
+            foreach (var child in Panel.Children)
+            {
+                if (!(child is ScrollBar))
+                    child.Enabled = !_readOnly;
+            }
         }
 
         private void ExpandGroups(LayoutElementsContainer c, bool open)
@@ -367,7 +514,11 @@ namespace FlaxEditor.CustomEditors
         /// </summary>
         protected virtual void OnSelectionChanged()
         {
-            BuildLayout();
+            // Defer building the layout after we have initialized to improve initial loading times
+            if (!_initialized)
+                _buildOnUpdate = true;
+            else
+                BuildLayout();
             SelectionChanged?.Invoke();
         }
 
@@ -378,11 +529,260 @@ namespace FlaxEditor.CustomEditors
         {
             if (_buildOnUpdate)
             {
-                _buildOnUpdate = false;
                 BuildLayout();
             }
 
             Editor?.RefreshInternal();
+        }
+
+        /// <summary>
+        /// Applies search filter query to the presenter layout controls.
+        /// </summary>
+        public void ApplySearchFilter(string query)
+        {
+            SearchText = query;
+            if (Root == null)
+                return;
+
+            var isQueryEmpty = string.IsNullOrEmpty(query);
+            var groupMatchCache = new Dictionary<DropPanel, bool>();
+            UpdateFilter(Root, query, isQueryEmpty, groupMatchCache);
+            UpdatePropertiesListsVisibility(Panel, query);
+            UpdateGroupsVisibility(Panel, query);
+            Panel.PerformLayout();
+        }
+
+        /// <summary>
+        /// Updates the visibility of properties lists and drop panels based on the current search query.
+        /// </summary>
+        public void UpdateGroupsAndListsVisibility()
+        {
+            if (string.IsNullOrEmpty(SearchText))
+            {
+                RestoreVisibilities(Panel);
+            }
+            else
+            {
+                UpdatePropertiesListsVisibility(Panel, SearchText);
+                UpdateGroupsVisibility(Panel, SearchText);
+            }
+            Panel.PerformLayout();
+        }
+
+        private void RestoreVisibilities(Control control)
+        {
+            if (control is DropPanel dropPanel)
+            {
+                dropPanel.SearchText = string.Empty;
+                dropPanel.Visible = true;
+            }
+            else if (control is PropertiesList list)
+            {
+                list.Visible = true;
+            }
+
+            if (control is ContainerControl container)
+            {
+                for (int i = 0; i < container.ChildrenCount; i++)
+                {
+                    RestoreVisibilities(container.GetChild(i));
+                }
+            }
+        }
+
+        private void UpdatePropertiesListsVisibility(Control control, string query)
+        {
+            if (control is PropertiesList list)
+            {
+                if (string.IsNullOrEmpty(query))
+                {
+                    list.Visible = true;
+                }
+                else
+                {
+                    bool anyVisible = false;
+                    foreach (var label in list.Element.Labels)
+                    {
+                        if (label.Visible)
+                        {
+                            anyVisible = true;
+                            break;
+                        }
+                    }
+                    list.Visible = anyVisible;
+                }
+            }
+
+            if (control is ContainerControl container)
+            {
+                for (int i = 0; i < container.ChildrenCount; i++)
+                {
+                    UpdatePropertiesListsVisibility(container.GetChild(i), query);
+                }
+            }
+        }
+
+        private void UpdateGroupsVisibility(Control control, string query)
+        {
+            if (control is DropPanel dropPanel)
+            {
+                dropPanel.SearchText = query;
+                for (int i = 0; i < dropPanel.ChildrenCount; i++)
+                {
+                    UpdateGroupsVisibility(dropPanel.GetChild(i), query);
+                }
+
+                if (string.IsNullOrEmpty(query))
+                {
+                    dropPanel.Visible = true;
+                }
+                else
+                {
+                    dropPanel.Visible = HasVisibleDescendants(dropPanel);
+                }
+            }
+            else if (control is ContainerControl container)
+            {
+                for (int i = 0; i < container.ChildrenCount; i++)
+                {
+                    UpdateGroupsVisibility(container.GetChild(i), query);
+                }
+            }
+        }
+
+        private bool HasVisibleDescendants(ContainerControl container)
+        {
+            for (int i = 0; i < container.ChildrenCount; i++)
+            {
+                var child = container.GetChild(i);
+                if (child is PropertyNameLabel label && label.Visible)
+                {
+                    return true;
+                }
+                if (child is DropPanel dropPanel && dropPanel.Visible)
+                {
+                    return true;
+                }
+                if (child is ContainerControl subContainer && subContainer.Visible && HasVisibleDescendants(subContainer))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private bool IsInMatchingGroup(Control control, string query, Dictionary<DropPanel, bool> groupMatchCache)
+        {
+            if (string.IsNullOrEmpty(query))
+                return false;
+
+            var p = control.Parent;
+            while (p != null)
+            {
+                if (p is DropPanel dropPanel)
+                {
+                    if (!groupMatchCache.TryGetValue(dropPanel, out bool matches))
+                    {
+                        var headerText = dropPanel.HeaderText;
+                        matches = headerText != null && headerText.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+                        groupMatchCache[dropPanel] = matches;
+                    }
+                    if (matches)
+                        return true;
+                }
+                p = p.Parent;
+            }
+            return false;
+        }
+
+        private bool UpdateFilter(CustomEditor editor, string query, bool forceVisible, Dictionary<DropPanel, bool> groupMatchCache)
+        {
+            bool isVisible = false;
+
+            bool labelMatches = false;
+            if (editor.LinkedLabel != null)
+            {
+                editor.LinkedLabel.SearchText = query;
+                if (forceVisible)
+                {
+                    labelMatches = true;
+                }
+                else if (!string.IsNullOrEmpty(query))
+                {
+                    var labelText = editor.LinkedLabel.Text.ToString();
+                    if (labelText.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        labelMatches = true;
+                    }
+                    else if (IsInMatchingGroup(editor.LinkedLabel, query, groupMatchCache))
+                    {
+                        labelMatches = true;
+                    }
+                }
+            }
+
+            bool isThisEditorVisible = forceVisible || labelMatches;
+
+            bool anyChildVisible = false;
+            bool forceChildrenVisible = isThisEditorVisible;
+
+            foreach (var child in editor.ChildrenEditors)
+            {
+                if (UpdateFilter(child, query, forceChildrenVisible, groupMatchCache))
+                {
+                    anyChildVisible = true;
+                }
+            }
+
+            isVisible = isThisEditorVisible || anyChildVisible;
+
+            if (editor.LinkedLabel != null)
+            {
+                SetLabelAndControlsVisible(editor.LinkedLabel, isVisible);
+            }
+
+            if (editor.Style == DisplayStyle.Group && editor.Layout != null && editor.Layout.Control != null)
+            {
+                editor.Layout.Control.Visible = isVisible;
+            }
+
+            return isVisible;
+        }
+
+        private void SetLabelAndControlsVisible(PropertyNameLabel label, bool visible)
+        {
+            label.Visible = visible;
+            var container = label.FirstChildControlContainer ?? label.Parent as PropertiesList;
+            if (container != null)
+            {
+                int startIndex = label.FirstChildControlIndex;
+                if (startIndex >= 0)
+                {
+                    int endIndex = container.Children.Count;
+                    var labels = container.Element.Labels;
+                    int labelIndex = labels.IndexOf(label);
+                    if (labelIndex >= 0 && labelIndex < labels.Count - 1)
+                    {
+                        for (int i = labelIndex + 1; i < labels.Count; i++)
+                        {
+                            var nextContainer = labels[i].FirstChildControlContainer ?? labels[i].Parent as PropertiesList;
+                            if (nextContainer == container)
+                            {
+                                endIndex = labels[i].FirstChildControlIndex - 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    for (int i = startIndex; i < endIndex; i++)
+                    {
+                        if (i < container.Children.Count)
+                        {
+                            container.Children[i].Visible = visible;
+                        }
+                    }
+                }
+            }
         }
 
         /// <inheritdoc />

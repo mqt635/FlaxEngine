@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -60,13 +60,14 @@ namespace FlaxEditor.Modules
         /// To create prefab manually (from code) use <see cref="PrefabManager.CreatePrefab"/> method.
         /// </remarks>
         /// <param name="selection">The scene selection to use.</param>
-        public void CreatePrefab(List<SceneGraphNode> selection)
+        /// <param name="prefabWindow">The prefab window that creates it.</param>
+        public void CreatePrefab(List<SceneGraphNode> selection, Windows.Assets.PrefabWindow prefabWindow = null)
         {
             if (selection == null)
                 selection = Editor.SceneEditing.Selection;
             if (selection.Count == 1 && selection[0] is ActorNode actorNode && actorNode.CanCreatePrefab)
             {
-                CreatePrefab(actorNode.Actor);
+                CreatePrefab(actorNode.Actor, true, prefabWindow);
             }
         }
 
@@ -79,6 +80,17 @@ namespace FlaxEditor.Modules
         /// <param name="actor">The root prefab actor.</param>
         public void CreatePrefab(Actor actor)
         {
+            CreatePrefab(actor, true);
+        }
+
+        /// <summary>
+        /// Starts the creating prefab for the given actor by showing the new item creation dialog in <see cref="ContentWindow"/>.
+        /// </summary>
+        /// <param name="actor">The root prefab actor.</param>
+        /// <param name="rename">Allow renaming or not</param>
+        /// <param name="prefabWindow">The prefab window that creates it.</param>
+        public void CreatePrefab(Actor actor, bool rename, Windows.Assets.PrefabWindow prefabWindow = null)
+        {
             // Skip in invalid states
             if (!Editor.StateMachine.CurrentState.CanEditContent)
                 return;
@@ -90,45 +102,74 @@ namespace FlaxEditor.Modules
             PrefabCreating?.Invoke(actor);
 
             var proxy = Editor.ContentDatabase.GetProxy<Prefab>();
-            Editor.Windows.ContentWin.NewItem(proxy, actor, OnPrefabCreated);
+            Editor.Windows.ContentWin.NewItem(proxy, actor, contentItem => OnPrefabCreated(contentItem, actor, prefabWindow), actor.Name, rename);
         }
 
-        private void OnPrefabCreated(ContentItem contentItem)
+        /// <summary>
+        /// Opens a prefab editor window.
+        /// </summary>
+        public void OpenPrefab(ActorNode actorNode)
+        {
+            if (actorNode != null)
+                OpenPrefab(actorNode.Actor.PrefabID);
+        }
+
+        /// <summary>
+        /// Opens a prefab editor window.
+        /// </summary>
+        public void OpenPrefab(Guid prefabID = default)
+        {
+            if (prefabID == Guid.Empty)
+            {
+                var selection = Editor.SceneEditing.Selection.Where(x => x is ActorNode actorNode && actorNode.HasPrefabLink).ToList().BuildNodesParents();
+                if (selection.Count == 0 || !((ActorNode)selection[0]).Actor.HasPrefabLink)
+                    return;
+                prefabID = ((ActorNode)selection[0]).Actor.PrefabID;
+            }
+
+            var item = Editor.ContentDatabase.Find(prefabID);
+            Editor.ContentEditing.Open(item);
+        }
+
+        private void OnPrefabCreated(ContentItem contentItem, Actor actor, Windows.Assets.PrefabWindow prefabWindow)
         {
             if (contentItem is PrefabItem prefabItem)
             {
                 PrefabCreated?.Invoke(prefabItem);
             }
 
-            // Skip in invalid states
-            if (!Editor.StateMachine.CurrentState.CanEditScene)
-                return;
-
-            // Record undo for prefab creating (backend links the target instance with the prefab)
-            if (Editor.Undo.Enabled)
+            Undo undo = null;
+            if (prefabWindow != null)
             {
-                var selection = Editor.SceneEditing.Selection.Where(x => x is ActorNode).ToList().BuildNodesParents();
-                if (selection.Count == 0)
+                prefabWindow.MarkAsEdited();
+                undo = prefabWindow.Undo;
+            }
+            else
+            {
+                // Skip in invalid states
+                if (!Editor.StateMachine.CurrentState.CanEditScene)
                     return;
-
-                if (selection.Count == 1)
-                {
-                    var action = BreakPrefabLinkAction.Linked(((ActorNode)selection[0]).Actor);
-                    Undo.AddAction(action);
-                }
-                else
-                {
-                    var actions = new IUndoAction[selection.Count];
-                    for (int i = 0; i < selection.Count; i++)
-                    {
-                        var action = BreakPrefabLinkAction.Linked(((ActorNode)selection[i]).Actor);
-                        actions[i] = action;
-                    }
-                    Undo.AddAction(new MultiUndoAction(actions));
-                }
+                undo = Editor.Undo;
+                Editor.Scene.MarkSceneEdited(actor.Scene);
             }
 
-            Editor.Instance.Windows.PropertiesWin.Presenter.BuildLayout();
+            // Record undo for prefab creating (backend links the target instance with the prefab)
+            if (undo.Enabled)
+            {
+                if (!actor)
+                    return;
+                var actorsList = new List<Actor>();
+                Utilities.Utils.GetActorsTree(actorsList, actor);
+
+                var actions = new IUndoAction[actorsList.Count];
+                for (int i = 0; i < actorsList.Count; i++)
+                    actions[i] = BreakPrefabLinkAction.Linked(actorsList[i]);
+                undo.AddAction(new MultiUndoAction(actions));
+            }
+
+            Editor.Windows.PropertiesWin.Presenter.BuildLayout();
+            if (prefabWindow != null)
+                prefabWindow.Presenter.BuildLayout();
         }
 
         /// <summary>
@@ -187,6 +228,7 @@ namespace FlaxEditor.Modules
 
             var prefabId = ((ActorNode)selection[0]).Actor.PrefabID;
             var prefab = FlaxEngine.Content.LoadAsync<Prefab>(prefabId);
+            Editor.Windows.ContentWin.ClearItemsSearch();
             Editor.Windows.ContentWin.Select(prefab);
         }
 
@@ -210,9 +252,32 @@ namespace FlaxEditor.Modules
                 throw new ArgumentException("Missing prefab to apply.");
             PrefabApplying?.Invoke(prefab, instance);
 
+            // When applying changes to prefab from actor in level ignore it's root transformation (see ActorEditor.ProcessDiff)
+            Actor prefabRoot = null;
+            var originalTransform = instance.LocalTransform;
+            var originalName = instance.Name;
+            if (instance.HasScene)
+            {
+                prefabRoot = instance.GetPrefabRoot();
+                if (prefabRoot != null && prefabRoot.IsPrefabRoot && instance.HasScene)
+                {
+                    var defaultInstance = prefab.GetDefaultInstance();
+                    originalTransform = prefabRoot.LocalTransform;
+                    originalName = prefabRoot.Name;
+                    prefabRoot.LocalTransform = defaultInstance.Transform;
+                    prefabRoot.Name = defaultInstance.Name;
+                }
+            }
+
             // Call backend
-            if (PrefabManager.Internal_ApplyAll(FlaxEngine.Object.GetUnmanagedPtr(instance)))
-                throw new FlaxException("Failed to apply the prefab. See log to learn more.");
+            var failed = PrefabManager.Internal_ApplyAll(FlaxEngine.Object.GetUnmanagedPtr(instance));
+            if (prefabRoot != null)
+            {
+                prefabRoot.LocalTransform = originalTransform;
+                prefabRoot.Name = originalName;
+            }
+            if (failed)
+                throw new Exception("Failed to apply the prefab. See log to learn more.");
 
             PrefabApplied?.Invoke(prefab, instance);
         }

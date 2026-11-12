@@ -1,17 +1,52 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUResource.h"
+#include "Engine/Core/Collections/Dictionary.h"
 #include "../GPUDeviceDX.h"
 #include "../IncludeDirectXHeaders.h"
 
 #if GRAPHICS_API_DIRECTX11
 
 class Engine;
+enum class StencilOperation : byte;
 class GPUContextDX11;
 class GPUSwapChainDX11;
+
+/// <summary>
+/// GPU query ID packed into 64-bits.
+/// </summary>
+struct GPUQueryDX11
+{
+    union
+    {
+        struct
+        {
+            uint16 Type;
+            uint16 Index;
+            uint32 Padding;
+        };
+        uint64 Raw;
+    };
+};
+
+/// <summary>
+/// GPU query data (reusable via pooling).
+/// </summary>
+struct GPUQueryDataDX11
+{
+    ID3D11Query* Query = nullptr;
+    ID3D11Query* TimerBeginQuery = nullptr;
+    ID3D11Query* DisjointQuery = nullptr;
+    uint64 Result = 0;
+    uint16 TTL = 0;
+    enum States : uint16 { Ready, Begin, End, Finished } State = Ready;
+    GPUQueryType Type = GPUQueryType::MAX;
+
+    void Release();
+};
 
 /// <summary>
 /// Implementation of Graphics Device for DirectX 11 backend.
@@ -20,32 +55,62 @@ class GPUDeviceDX11 : public GPUDeviceDX
 {
     friend GPUContextDX11;
     friend GPUSwapChainDX11;
-
 private:
 
+    struct DepthStencilMode
+    {
+        int8 DepthEnable : 1;
+        int8 DepthWriteEnable : 1;
+        int8 DepthClipEnable : 1;
+        int8 StencilEnable : 1;
+        uint8 StencilReadMask;
+        uint8 StencilWriteMask;
+        ComparisonFunc DepthFunc;
+        ComparisonFunc StencilFunc;
+        StencilOperation StencilFailOp;
+        StencilOperation StencilDepthFailOp;
+        StencilOperation StencilPassOp;
+
+        bool operator==(const DepthStencilMode& other) const
+        {
+            return Platform::MemoryCompare(this, &other, sizeof(DepthStencilMode)) == 0;
+        }
+
+        friend uint32 GetHash(const DepthStencilMode& key)
+        {
+            uint32 hash = 0;
+            for (int32 i = 0; i < sizeof(DepthStencilMode) / 4; i++)
+                CombineHash(hash, ((uint32*)&key)[i]);
+            return hash;
+        }
+    };
+
     // Private Stuff
-    ID3D11Device* _device;
-    ID3D11DeviceContext* _imContext;
+    ID3D11Device* _device = nullptr;
+    ID3D11DeviceContext* _imContext = nullptr;
     IDXGIFactory* _factoryDXGI;
 
-    GPUContextDX11* _mainContext;
+    GPUContextDX11* _mainContext = nullptr;
+    bool _allowTearing = false;
+    GPUBuffer* _dummyVB = nullptr;
+    Array<GPUQueryDataDX11> _queries;
+    Array<uint16> _readyQueries[3]; // Timer and Occlusion and BinaryOcclusion
 
     // Static Samplers
-    ID3D11SamplerState* _samplerLinearClamp;
-    ID3D11SamplerState* _samplerPointClamp;
-    ID3D11SamplerState* _samplerLinearWrap;
-    ID3D11SamplerState* _samplerPointWrap;
-    ID3D11SamplerState* _samplerShadow;
-    ID3D11SamplerState* _samplerShadowPCF;
+    ID3D11SamplerState* _samplerLinearClamp = nullptr;
+    ID3D11SamplerState* _samplerPointClamp = nullptr;
+    ID3D11SamplerState* _samplerLinearWrap = nullptr;
+    ID3D11SamplerState* _samplerPointWrap = nullptr;
+    ID3D11SamplerState* _samplerShadow = nullptr;
+    ID3D11SamplerState* _samplerShadowLinear = nullptr;
 
     // Shared data for pipeline states
-    CriticalSection BlendStatesWriteLocker;
+    CriticalSection StatesWriteLocker;
     Dictionary<BlendingMode, ID3D11BlendState*> BlendStates;
+    Dictionary<DepthStencilMode, ID3D11DepthStencilState*> DepthStencilStates;
     ID3D11RasterizerState* RasterizerStates[3 * 2 * 2]; // Index =  CullMode[0-2] + Wireframe[0?3] + DepthClipEnable[0?6]
-    ID3D11DepthStencilState* DepthStencilStates[9 * 2 * 2]; // Index = ComparisonFunc[0-8] + DepthTestEnable[0?9] + DepthWriteEnable[0?18]
 
 public:
-
     static GPUDevice* Create();
     GPUDeviceDX11(IDXGIFactory* dxgiFactory, GPUAdapterDX* adapter);
     ~GPUDeviceDX11();
@@ -75,12 +140,11 @@ public:
         return _mainContext;
     }
 
-public:
-
+    ID3D11DepthStencilState* GetDepthStencilState(const void* descriptionPtr);
     ID3D11BlendState* GetBlendState(const BlendingMode& blending);
+    GPUBuffer* GetDummyVB();
 
 public:
-
     // [GPUDeviceDX]
     GPUContext* GetMainContext() override
     {
@@ -94,13 +158,16 @@ public:
     void Dispose() override;
     void WaitForGPU() override;
     void DrawEnd() override;
+    bool GetQueryResult(uint64 queryID, uint64& result, bool wait = false) override;
     GPUTexture* CreateTexture(const StringView& name) override;
     GPUShader* CreateShader(const StringView& name) override;
     GPUPipelineState* CreatePipelineState() override;
     GPUTimerQuery* CreateTimerQuery() override;
     GPUBuffer* CreateBuffer(const StringView& name) override;
     GPUSampler* CreateSampler() override;
+    GPUVertexLayout* CreateVertexLayout(const VertexElements& elements, bool explicitOffsets) override;
     GPUSwapChain* CreateSwapChain(Window* window) override;
+    GPUConstantBuffer* CreateConstantBuffer(uint32 size, const StringView& name) override;
 };
 
 /// <summary>
@@ -130,7 +197,7 @@ public:
     /// <param name="device">The graphics device.</param>
     /// <param name="name">The resource name.</param>
     GPUResourceDX11(GPUDeviceDX11* device, const StringView& name) noexcept
-        : GPUResourceBase(device, name)
+        : GPUResourceBase<GPUDeviceDX11, BaseType>(device, name)
     {
     }
 };

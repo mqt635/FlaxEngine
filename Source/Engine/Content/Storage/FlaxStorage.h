@@ -1,11 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Object.h"
 #include "Engine/Core/Delegate.h"
 #include "Engine/Core/Types/String.h"
-#include "Engine/Core/Types/DateTime.h"
+#include "Engine/Core/Collections/Array.h"
 #include "Engine/Platform/CriticalSection.h"
 #include "Engine/Serialization/FileReadStream.h"
 #include "Engine/Threading/ThreadLocal.h"
@@ -26,7 +26,6 @@ class FLAXENGINE_API FlaxStorage : public Object
     friend class BinaryAsset;
 
 public:
-
     /// <summary>
     /// Magic code stored in file header to identify contents.
     /// </summary>
@@ -87,47 +86,51 @@ public:
     };
 
 protected:
-
     // State
-    uint32 _refCount;
-    DateTime _lastRefLostTime;
-    int64 _chunksLock;
+    intptr _refCount = 0;
+    intptr _chunksLock = 0;
+    intptr _files = 0;
+    intptr _isUnloadingData = 0;
+    double _lastRefLostTime;
     CriticalSection _loadLocker;
 
     // Storage
-    ThreadLocalObject<FileReadStream> _file;
+    ThreadLocal<FileReadStream*> _file;
     Array<FlaxChunk*> _chunks;
 
     // Metadata
-    uint32 _version;
+    uint32 _version = 0;
     String _path;
 
 protected:
-
     explicit FlaxStorage(const StringView& path);
 
 private:
-
     // Used by FlaxStorageReference:
-    void AddRef();
-    void RemoveRef();
+    void AddRef()
+    {
+        Platform::InterlockedIncrement(&_refCount);
+    }
+    void RemoveRef()
+    {
+        Platform::InterlockedDecrement(&_refCount);
+        if (Platform::AtomicRead(&_refCount) == 0)
+        {
+            _lastRefLostTime = Platform::GetTimeSeconds();
+        }
+    }
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="FlaxStorage"/> class.
     /// </summary>
     virtual ~FlaxStorage();
 
 public:
-
     /// <summary>
     /// Locks the storage chunks data to prevent disposing them. Also ensures that file handles won't be closed while chunks are locked.
     /// </summary>
-    FORCE_INLINE void LockChunks()
-    {
-        Platform::InterlockedIncrement(&_chunksLock);
-    }
+    void LockChunks();
 
     /// <summary>
     /// Unlocks the storage chunks data.
@@ -143,10 +146,8 @@ public:
     struct LockData
     {
         friend FlaxStorage;
-        static LockData Invalid;
 
     private:
-
         FlaxStorage* _storage;
 
         LockData(FlaxStorage* storage)
@@ -157,6 +158,10 @@ public:
         }
 
     public:
+        LockData()
+            : _storage(nullptr)
+        {
+        }
 
         LockData(const LockData& other)
             : _storage(other._storage)
@@ -164,7 +169,7 @@ public:
             if (_storage)
                 _storage->LockChunks();
         }
-        
+
         LockData(LockData&& other) noexcept
             : _storage(other._storage)
         {
@@ -207,7 +212,6 @@ public:
             other._storage = nullptr;
             return *this;
         }
-
     };
 
     /// <summary>
@@ -227,14 +231,10 @@ public:
     LockData LockSafe();
 
 public:
-
     /// <summary>
     /// Gets the references count.
     /// </summary>
-    FORCE_INLINE uint32 GetRefCount() const
-    {
-        return _refCount;
-    }
+    uint32 GetRefCount() const;
 
     /// <summary>
     /// Checks if storage container should be disposed (it's not used anymore).
@@ -276,9 +276,9 @@ public:
     virtual bool IsPackage() const = 0;
 
     /// <summary>
-    /// Checks whenever storage container allows the data modifications.
+    /// Checks whenever storage container doesn't allow modifications.
     /// </summary>
-    virtual bool AllowDataModifications() const = 0;
+    virtual bool IsReadOnly() const = 0;
 
     /// <summary>
     /// Determines whether the specified asset exists in this container.
@@ -315,8 +315,17 @@ public:
     /// Gets the asset entry at given index.
     /// </summary>
     /// <param name="index">The asset index.</param>
-    /// <param name="output">The output.</param>
-    virtual void GetEntry(int32 index, Entry& output) const = 0;
+    /// <param name="value">The result.</param>
+    virtual void GetEntry(int32 index, Entry& value) const = 0;
+
+#if USE_EDITOR
+    /// <summary>
+    /// Sets the asset entry at given index.
+    /// </summary>
+    /// <param name="index">The asset index.</param>
+    /// <param name="value">The input value.</param>
+    virtual void SetEntry(int32 index, const Entry& value) = 0;
+#endif
 
     /// <summary>
     /// Gets all the entries in the storage.
@@ -334,7 +343,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Loads package from the file.
     /// </summary>
@@ -408,7 +416,7 @@ public:
     /// <summary>
     /// Closes the file handles (it can be modified from the outside).
     /// </summary>
-    void CloseFileHandles();
+    bool CloseFileHandles();
 
     /// <summary>
 	/// Releases storage resources and closes handle to the file.
@@ -416,82 +424,76 @@ public:
     virtual void Dispose();
 
 public:
-
     /// <summary>
     /// Ticks this instance.
     /// </summary>
-    void Tick();
+    void Tick(double time);
 
 #if USE_EDITOR
     void OnRename(const StringView& newPath);
 #endif
 
 public:
-
 #if USE_EDITOR
-
     /// <summary>
     /// Saves the specified asset data to the storage container.
     /// </summary>
     /// <param name="data">The data to save.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <returns>True if cannot save, otherwise false</returns>
-    bool Save(AssetInitData& data, bool silentMode = false);
+    bool Save(const AssetInitData& data, bool silentMode = false);
 
     /// <summary>
     /// Creates new FlaxFile using specified asset data.
     /// </summary>
     /// <param name="path">The file path.</param>
-    /// <param name="data">The data to write.</param>
+    /// <param name="asset">The asset data to write.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <param name="customData">Custom options.</param>
     /// <returns>True if cannot create package, otherwise false</returns>
-    FORCE_INLINE static bool Create(const StringView& path, AssetInitData& data, bool silentMode = false, const CustomData* customData = nullptr)
+    FORCE_INLINE static bool Create(const StringView& path, const AssetInitData& asset, bool silentMode = false, const CustomData* customData = nullptr)
     {
-        return Create(path, &data, 1, silentMode, customData);
+        return Create(path, ToSpan(&asset, 1), silentMode, customData);
     }
 
     /// <summary>
     /// Creates new FlaxFile using specified assets data.
     /// </summary>
     /// <param name="path">The file path.</param>
-    /// <param name="data">The data to write.</param>
+    /// <param name="assets">The assets data to write.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <param name="customData">Custom options.</param>
     /// <returns>True if cannot create package, otherwise false</returns>
-    FORCE_INLINE static bool Create(const StringView& path, const Array<AssetInitData>& data, bool silentMode = false, const CustomData* customData = nullptr)
+    FORCE_INLINE static bool Create(const StringView& path, const Array<AssetInitData>& assets, bool silentMode = false, const CustomData* customData = nullptr)
     {
-        return Create(path, data.Get(), data.Count(), silentMode, customData);
+        return Create(path, ToSpan(assets), silentMode, customData);
     }
 
     /// <summary>
     /// Creates new FlaxFile using specified assets data.
     /// </summary>
     /// <param name="path">The file path.</param>
-    /// <param name="data">The data to write.</param>
-    /// <param name="dataCount">The data size.</param>
+    /// <param name="assets">The assets data to write.</param>
     /// <param name="silentMode">In silent mode don't reload opened storage container that is using target file.</param>
     /// <param name="customData">Custom options.</param>
     /// <returns>True if cannot create package, otherwise false</returns>
-    static bool Create(const StringView& path, const AssetInitData* data, int32 dataCount, bool silentMode = false, const CustomData* customData = nullptr);
+    static bool Create(const StringView& path, Span<AssetInitData> assets, bool silentMode = false, const CustomData* customData = nullptr);
 
     /// <summary>
     /// Creates new FlaxFile using specified assets data.
     /// </summary>
     /// <param name="stream">The output stream.</param>
-    /// <param name="data">The data to write.</param>
-    /// <param name="dataCount">The data size.</param>
+    /// <param name="assets">The assets data to write.</param>
     /// <param name="customData">Custom options.</param>
     /// <returns>True if cannot create package, otherwise false</returns>
-    static bool Create(WriteStream* stream, const AssetInitData* data, int32 dataCount, const CustomData* customData = nullptr);
-
+    static bool Create(WriteStream* stream, Span<AssetInitData> assets, const CustomData* customData = nullptr);
 #endif
 
 protected:
-
     bool LoadAssetHeader(const Entry& e, AssetInitData& data);
     void AddChunk(FlaxChunk* chunk);
     virtual void AddEntry(Entry& e) = 0;
     FileReadStream* OpenFile();
     virtual bool GetEntry(const Guid& id, Entry& e) = 0;
+    bool ReloadSilent();
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
@@ -23,8 +23,26 @@ namespace FlaxEngine.GUI
         public Rectangle Bounds;
 
         /// <summary>
+        /// Custom ascender value for the line layout (block size above the baseline). Set to 0 to use ascender from the font.
+        /// </summary>
+        public float Ascender;
+
+        /// <summary>
         /// The custom tag.
         /// </summary>
         public object Tag;
+
+        internal float GetAscender()
+        {
+            float ascender = Ascender;
+            if (Mathf.IsZero(ascender))
+            {
+                // Use ascender from the font
+                var textBlockFont = Style.Font.GetFont();
+                if (textBlockFont)
+                    ascender = textBlockFont.Ascender;
+            }
+            return ascender;
+        }
     }
 }

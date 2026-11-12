@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -13,6 +13,8 @@ namespace FlaxEditor.GUI.Tabs
     [HideInEditor]
     public class Tab : ContainerControl
     {
+        internal Tabs _selectedInTabs;
+
         /// <summary>
         /// Gets or sets the text.
         /// </summary>
@@ -76,6 +78,38 @@ namespace FlaxEditor.GUI.Tabs
         public virtual void OnDeselected()
         {
             Deselected?.Invoke(this);
+        }
+
+        /// <summary>
+        /// Factory method for tabs header control (UI for the tabs strip to represent this tab).
+        /// </summary>
+        /// <returns>The tab header control.</returns>
+        public virtual Tabs.TabHeader CreateHeader()
+        {
+            return new Tabs.TabHeader((Tabs)Parent, this);
+        }
+
+        /// <inheritdoc />
+        protected override bool ShowTooltip => false; // Tabs.TabHeader handles tooltip showing for tab
+
+        /// <inheritdoc />
+        protected override void OnParentChangedInternal()
+        {
+            if (_selectedInTabs != null)
+                _selectedInTabs.SelectedTab = null;
+
+            base.OnParentChangedInternal();
+        }
+
+        /// <inheritdoc />
+        public override void OnDestroy()
+        {
+            if (IsDisposing)
+                return;
+            if (_selectedInTabs != null)
+                _selectedInTabs.SelectedTab = null;
+
+            base.OnDestroy();
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -10,6 +10,7 @@ using FlaxEditor.GUI.Timeline.Tracks;
 using FlaxEditor.Utilities;
 using FlaxEditor.Viewport.Previews;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.GUI.Timeline
 {
@@ -200,10 +201,9 @@ namespace FlaxEditor.GUI.Timeline
                     var idx = stream.ReadInt32();
                     var id = stream.ReadGuid();
                     object value = null;
-                    if (version == 2)
-                        stream.ReadCommonValue(ref value);
-                    else
-                        value = stream.ReadVariant();
+                    if (version <= 2)
+                        throw new Exception("Not supported asset version. Open and re-save asset with Flax 1.11.");
+                    value = stream.ReadVariant();
 
                     Emitters[idx].ParametersOverrides.Add(id, value);
                 }

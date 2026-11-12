@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -21,6 +21,7 @@ namespace FlaxEditor.CustomEditors.Editors
     public sealed class LocalizedStringEditor : GenericEditor
     {
         private TextBoxElement _idElement, _valueElement;
+        private Button _viewStringButton;
 
         /// <inheritdoc />
         public override DisplayStyle Style => DisplayStyle.Inline;
@@ -33,10 +34,10 @@ namespace FlaxEditor.CustomEditors.Editors
             if (layout.Children.Count == 0)
                 return;
             var propList = layout.Children[layout.Children.Count - 1] as PropertiesListElement;
-            if (propList == null || propList.Children.Count != 2)
+            if (propList == null || propList.Children.Count < 2)
                 return;
-            var idElement = propList.Children[0] as TextBoxElement;
-            var valueElement = propList.Children[1] as TextBoxElement;
+            var idElement = propList.Children[propList.Children.Count - 2] as TextBoxElement;
+            var valueElement = propList.Children[propList.Children.Count - 1] as TextBoxElement;
             if (idElement == null || valueElement == null)
                 return;
             _idElement = idElement;
@@ -70,6 +71,21 @@ namespace FlaxEditor.CustomEditors.Editors
             };
             addString.SetAnchorPreset(AnchorPresets.MiddleRight, false, true);
             addString.ButtonClicked += OnAddStringClicked;
+
+            var viewString = new Button
+            {
+                Visible = false,
+                Width = 16.0f,
+                BackgroundColor = Color.White,
+                BackgroundColorHighlighted = Color.Gray,
+                BackgroundBrush = new SpriteBrush(Editor.Instance.Icons.Search12),
+                TooltipText = "Find localized text in Localized String Table asset for the current locale...",
+                Parent = valueElement.TextBox,
+            };
+            viewString.SetAnchorPreset(AnchorPresets.MiddleRight, false, true);
+            viewString.LocalX -= 16.0f;
+            viewString.ButtonClicked += OnViewStringClicked;
+            _viewStringButton = viewString;
         }
 
         /// <inheritdoc />
@@ -80,6 +96,7 @@ namespace FlaxEditor.CustomEditors.Editors
             if (_valueElement != null)
             {
                 _valueElement.TextBox.WatermarkText = Localization.GetString(_idElement.Text);
+                _viewStringButton.Visible = !string.IsNullOrEmpty(_valueElement.TextBox.WatermarkText);
             }
         }
 
@@ -92,14 +109,21 @@ namespace FlaxEditor.CustomEditors.Editors
             _valueElement = null;
         }
 
-        private void OnSelectStringClicked(Button button)
+        private bool GetSettings(out LocalizationSettings settings)
         {
-            var settings = GameSettings.Load<LocalizationSettings>();
+            settings = GameSettings.Load<LocalizationSettings>();
             if (settings?.LocalizedStringTables == null || settings.LocalizedStringTables.Length == 0)
             {
                 MessageBox.Show("No valid localization settings setup.");
-                return;
+                return true;
             }
+            return false;
+        }
+
+        private void OnSelectStringClicked(Button button)
+        {
+            if (GetSettings(out var settings))
+                return;
             Profiler.BeginEvent("LocalizedStringEditor.OnSelectStringClicked");
             var allKeys = new HashSet<string>();
             for (int i = 0; i < settings.LocalizedStringTables.Length; i++)
@@ -136,6 +160,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 {
                     menu.Hide();
                     _idElement.TextBox.SetTextAsUser(after[0].Text);
+                    _valueElement.TextBox.SetTextAsUser(string.Empty);
                 }
             };
             searchBox.TextChanged += delegate
@@ -152,18 +177,14 @@ namespace FlaxEditor.CustomEditors.Editors
                 tree.UnlockChildrenRecursive();
                 menu.PerformLayout();
             };
-            menu.Show(button, new Vector2(0, button.Height));
+            menu.Show(button, new Float2(0, button.Height));
             Profiler.EndEvent();
         }
 
         private void OnAddStringClicked(Button button)
         {
-            var settings = GameSettings.Load<LocalizationSettings>();
-            if (settings?.LocalizedStringTables == null || settings.LocalizedStringTables.Length == 0)
-            {
-                MessageBox.Show("No valid localization settings setup.");
+            if (GetSettings(out var settings))
                 return;
-            }
             Profiler.BeginEvent("LocalizedStringEditor.OnAddStringClicked");
             var allKeys = new HashSet<string>();
             for (int i = 0; i < settings.LocalizedStringTables.Length; i++)
@@ -176,7 +197,6 @@ namespace FlaxEditor.CustomEditors.Editors
                         allKeys.Add(e.Key);
                 }
             }
-            _valueElement.TextBox.SetTextAsUser(null);
             string newKey = null;
             if (string.IsNullOrEmpty(_idElement.Text))
             {
@@ -216,19 +236,46 @@ namespace FlaxEditor.CustomEditors.Editors
             var newValue = _valueElement.Text;
             Editor.Log(newKey + (newValue != null ? " = " + newValue : string.Empty));
             var locales = settings.LocalizedStringTables.GroupBy(x => x.Locale);
+            var defaultLocale = settings.LocalizedStringTables[0].Locale;
             foreach (var locale in locales)
             {
                 var table = locale.First();
                 var entries = table.Entries;
-                if (table.Locale == "en")
+                if (table.Locale == defaultLocale)
                     entries[newKey] = new[] { newValue };
                 else
                     entries[newKey] = new[] { string.Empty };
                 table.Entries = entries;
                 table.Save();
             }
+            _valueElement.TextBox.SetTextAsUser(null);
             _idElement.TextBox.SetTextAsUser(newKey);
             Profiler.EndEvent();
+        }
+
+        private void OnViewStringClicked(Button button)
+        {
+            if (GetSettings(out var settings))
+                return;
+            var id = _idElement.TextBox.Text;
+            var value = _valueElement.TextBox.WatermarkText;
+            for (int i = 0; i < settings.LocalizedStringTables.Length; i++)
+            {
+                var table = settings.LocalizedStringTables[i];
+                if (table && !table.WaitForLoaded())
+                {
+                    var entries = table.Entries;
+                    if (entries.TryGetValue(id, out var messages))
+                    {
+                        if (messages.Length != 0 && messages[0] == value)
+                        {
+                            Editor.Instance.ContentEditing.Open(table);
+                            return;
+                        }
+                    }
+                }
+            }
+            MessageBox.Show("Unable to find localized string table.");
         }
     }
 }

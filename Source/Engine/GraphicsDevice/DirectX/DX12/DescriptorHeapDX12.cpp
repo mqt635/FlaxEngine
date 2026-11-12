@@ -1,22 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
 #include "DescriptorHeapDX12.h"
 #include "GPUDeviceDX12.h"
 #include "Engine/GraphicsDevice/DirectX/RenderToolsDX.h"
-
-D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeapWithSlotsDX12::Slot::CPU() const
-{
-    ASSERT_LOW_LAYER(Heap);
-    return Heap->CPU(Index);
-}
-
-D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeapWithSlotsDX12::Slot::GPU() const
-{
-    ASSERT_LOW_LAYER(Heap);
-    return Heap->GPU(Index);
-}
 
 void DescriptorHeapWithSlotsDX12::Slot::CreateSRV(GPUDeviceDX12* device, ID3D12Resource* resource, D3D12_SHADER_RESOURCE_VIEW_DESC* desc)
 {
@@ -73,7 +61,7 @@ bool DescriptorHeapWithSlotsDX12::Create(D3D12_DESCRIPTOR_HEAP_TYPE type, uint32
 
     // Create heap
     const HRESULT result = _device->GetDevice()->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&_heap));
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
 
     // Setup
     _type = type;
@@ -124,13 +112,13 @@ void DescriptorHeapWithSlotsDX12::ReleaseSlot(uint32 index)
 {
     uint32& value = _usage[index / 32];
     const uint32 mask = 1 << (index & 31);
-    ASSERT_LOW_LAYER((value & mask) == mask);
+    //ASSERT_LOW_LAYER((value & mask) == mask);
     value &= ~mask;
 }
 
-GPUResource::ResourceType DescriptorHeapWithSlotsDX12::GetResourceType() const
+GPUResourceType DescriptorHeapWithSlotsDX12::GetResourceType() const
 {
-    return ResourceType::Descriptor;
+    return GPUResourceType::Descriptor;
 }
 
 DescriptorHeapPoolDX12::DescriptorHeapPoolDX12(GPUDeviceDX12* device, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32 descriptorsCountPerHeap, bool shaderVisible)
@@ -196,7 +184,7 @@ bool DescriptorHeapRingBufferDX12::Init()
     desc.Flags = _shaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     desc.NodeMask = 0;
     const HRESULT result = _device->GetDevice()->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&_heap));
-    LOG_DIRECTX_RESULT_WITH_RETURN(result);
+    LOG_DIRECTX_RESULT_WITH_RETURN(result, true);
 
     // Setup
     _firstFree = 0;

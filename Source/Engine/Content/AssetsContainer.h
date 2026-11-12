@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,14 +12,13 @@
 class AssetsContainer : public Array<AssetReference<Asset>>
 {
 public:
-
     /// <summary>
     /// Loads an asset.
     /// </summary>
     /// <param name="id">The asset id.</param>
     /// <returns>Loaded asset of null.</returns>
     template<typename T>
-    T* LoadAsync(const Guid& id)
+    T* Load(const Guid& id)
     {
         for (auto& e : *this)
         {
@@ -27,8 +26,10 @@ public:
                 return (T*)e.Get();
         }
         auto asset = (T*)::LoadAsset(id, T::TypeInitializer);
-        if (asset)
+        if (asset && !asset->WaitForLoaded())
             Add(asset);
+        else
+            asset = nullptr;
         return asset;
     }
 

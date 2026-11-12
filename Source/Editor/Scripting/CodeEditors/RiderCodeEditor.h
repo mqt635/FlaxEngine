@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,6 +13,8 @@ private:
 
     String _execPath;
     String _solutionPath;
+
+    String GetSolutionPath() const;
 
 public:
 
@@ -35,6 +37,7 @@ public:
     // [CodeEditor]
     CodeEditorTypes GetType() const override;
     String GetName() const override;
+    String GetGenerateProjectCustomArgs() const override;
     void OpenFile(const String& path, int32 line) override;
     void OpenSolution() override;
     void OnFileAdded(const String& path) override;

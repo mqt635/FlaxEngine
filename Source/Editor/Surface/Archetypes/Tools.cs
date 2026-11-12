@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -10,6 +10,7 @@ using FlaxEditor.Scripting;
 using FlaxEditor.Surface.Elements;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Surface.Archetypes
 {
@@ -32,7 +33,7 @@ namespace FlaxEditor.Surface.Archetypes
                     base.Draw();
 
                     var style = Style.Current;
-                    var bounds = new Rectangle(Vector2.Zero, Size);
+                    var bounds = new Rectangle(Float2.Zero, Size);
                     var count = (int)Node.Values[0];
                     if (count == 0)
                     {
@@ -51,7 +52,7 @@ namespace FlaxEditor.Surface.Archetypes
 
                         if (prevTime > 0.0f)
                         {
-                            Render2D.FillRectangle(new Rectangle(Vector2.Zero, prevTime * width, height), prevColor);
+                            Render2D.FillRectangle(new Rectangle(Float2.Zero, prevTime * width, height), prevColor);
                         }
 
                         for (int i = 1; i < count; i++)
@@ -86,10 +87,16 @@ namespace FlaxEditor.Surface.Archetypes
             private class GradientStop : Control
             {
                 private bool _isMoving;
-                private Vector2 _startMovePos;
+                private float _movedToTime = float.MaxValue;
+                private Float2 _startMovePos;
 
                 public ColorGradientNode Node;
                 public Color Color;
+
+                public void UpdateLocation(float time)
+                {
+                    Location = Node._gradient.BottomLeft + new Float2(time * Node._gradient.Width - Width * 0.5f, 0.0f);
+                }
 
                 /// <inheritdoc />
                 public override void Draw()
@@ -98,7 +105,7 @@ namespace FlaxEditor.Surface.Archetypes
 
                     var isSelected = Node._selected == this;
                     var arrowRect = new Rectangle(0, 0, 16.0f, 16.0f);
-                    var arrowTransform = Matrix3x3.Translation2D(new Vector2(-16.0f, -8.0f)) * Matrix3x3.RotationZ(-Mathf.PiOverTwo) * Matrix3x3.Translation2D(new Vector2(8.0f, 0));
+                    var arrowTransform = Matrix3x3.Translation2D(new Float2(-16.0f, -8.0f)) * Matrix3x3.RotationZ(-Mathf.PiOverTwo) * Matrix3x3.Translation2D(new Float2(8.0f, 0));
                     var color = Color;
                     if (IsMouseOver)
                         color *= 1.3f;
@@ -112,11 +119,12 @@ namespace FlaxEditor.Surface.Archetypes
                 }
 
                 /// <inheritdoc />
-                public override bool OnMouseDown(Vector2 location, MouseButton button)
+                public override bool OnMouseDown(Float2 location, MouseButton button)
                 {
                     if (button == MouseButton.Left)
                     {
                         Node.Select(this);
+                        _movedToTime = float.MaxValue;
                         _isMoving = true;
                         _startMovePos = location;
                         StartMouseCapture();
@@ -127,11 +135,17 @@ namespace FlaxEditor.Surface.Archetypes
                 }
 
                 /// <inheritdoc />
-                public override bool OnMouseUp(Vector2 location, MouseButton button)
+                public override bool OnMouseUp(Float2 location, MouseButton button)
                 {
                     if (button == MouseButton.Left && _isMoving)
                     {
                         _isMoving = false;
+                        if (_movedToTime < float.MaxValue)
+                        {
+                            int index = Node._stops.IndexOf(this);
+                            Node.SetStopTime(index, _movedToTime);
+                            _movedToTime = float.MaxValue;
+                        }
                         EndMouseCapture();
                     }
 
@@ -139,28 +153,29 @@ namespace FlaxEditor.Surface.Archetypes
                 }
 
                 /// <inheritdoc />
-                public override bool OnShowTooltip(out string text, out Vector2 location, out Rectangle area)
+                public override bool OnShowTooltip(out string text, out Float2 location, out Rectangle area)
                 {
                     // Don't show tooltip is user is moving the stop
                     return base.OnShowTooltip(out text, out location, out area) && !_isMoving;
                 }
 
                 /// <inheritdoc />
-                public override bool OnTestTooltipOverControl(ref Vector2 location)
+                public override bool OnTestTooltipOverControl(ref Float2 location)
                 {
                     // Don't show tooltip is user is moving the stop
                     return base.OnTestTooltipOverControl(ref location) && !_isMoving;
                 }
 
                 /// <inheritdoc />
-                public override void OnMouseMove(Vector2 location)
+                public override void OnMouseMove(Float2 location)
                 {
-                    if (_isMoving && Vector2.DistanceSquared(ref location, ref _startMovePos) > 25.0f)
+                    if (_isMoving && Float2.DistanceSquared(ref location, ref _startMovePos) > 25.0f)
                     {
-                        _startMovePos = Vector2.Minimum;
-                        var index = Node._stops.IndexOf(this);
-                        var time = (PointToParent(location).X - Node._gradient.BottomLeft.X) / Node._gradient.Width;
-                        Node.SetStopTime(index, time);
+                        _startMovePos = Float2.Minimum;
+                        int index = Node._stops.IndexOf(this);
+                        _movedToTime = (PointToParent(location).X - Node._gradient.BottomLeft.X) / Node._gradient.Width;
+                        _movedToTime = Node.ClampStopTime(index, _movedToTime);
+                        UpdateLocation(_movedToTime);
                     }
 
                     base.OnMouseMove(location);
@@ -170,6 +185,7 @@ namespace FlaxEditor.Surface.Archetypes
                 public override void OnEndMouseCapture()
                 {
                     _isMoving = false;
+                    _movedToTime = float.MaxValue;
 
                     base.OnEndMouseCapture();
                 }
@@ -183,7 +199,7 @@ namespace FlaxEditor.Surface.Archetypes
             private Label _labelValue;
             private FloatValueBox _timeValue;
             private ColorValueBox _colorValue;
-            private const int MaxStops = 8;
+            private const int MaxStops = 12;
 
             /// <inheritdoc />
             public ColorGradientNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
@@ -192,9 +208,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
             {
-                base.OnSurfaceLoaded();
+                base.OnSurfaceLoaded(action);
 
                 var upperLeft = GetBox(0).BottomLeft;
                 var upperRight = GetBox(1).BottomRight;
@@ -203,7 +219,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _gradient = new Gradient
                 {
                     Node = this,
-                    Bounds = new Rectangle(upperLeft + new Vector2(gradientMargin, 10.0f), upperRight.X - upperLeft.X - gradientMargin * 2.0f, 40.0f),
+                    Bounds = new Rectangle(upperLeft + new Float2(gradientMargin, 10.0f), upperRight.X - upperLeft.X - gradientMargin * 2.0f, 40.0f),
                     Parent = this,
                 };
 
@@ -222,6 +238,7 @@ namespace FlaxEditor.Surface.Archetypes
                     Parent = this
                 };
                 _timeValue.ValueChanged += OnTimeValueChanged;
+                _timeValue.SlidingEnd += OnTimeValueChanged;
 
                 _colorValue = new ColorValueBox(Color.Black, _timeValue.Right + 4.0f, controlsLevel)
                 {
@@ -300,8 +317,16 @@ namespace FlaxEditor.Surface.Archetypes
 
             private void OnTimeValueChanged()
             {
+                var time = _timeValue.Value;
                 var index = _stops.IndexOf(_selected);
-                SetStopTime(index, _timeValue.Value);
+                if (_timeValue.IsSliding)
+                {
+                    // Preview-only while sliding
+                    time = ClampStopTime(index, time);
+                    _selected.UpdateLocation(time);
+                    return;
+                }
+                SetStopTime(index, time);
             }
 
             private void OnColorValueChanged()
@@ -345,7 +370,7 @@ namespace FlaxEditor.Surface.Archetypes
                 UpdateStops();
             }
 
-            private void SetStopTime(int index, float time)
+            private float ClampStopTime(int index, float time)
             {
                 time = Mathf.Saturate(time);
                 if (index != 0)
@@ -356,6 +381,12 @@ namespace FlaxEditor.Surface.Archetypes
                 {
                     time = Mathf.Min(time, (float)Values[1 + index * 2 + 2]);
                 }
+                return time;
+            }
+
+            private void SetStopTime(int index, float time)
+            {
+                time = ClampStopTime(index, time);
                 SetValue(1 + index * 2, time);
             }
 
@@ -383,7 +414,7 @@ namespace FlaxEditor.Surface.Archetypes
                     {
                         AutoFocus = false,
                         Node = this,
-                        Size = new Vector2(16.0f, 16.0f),
+                        Size = new Float2(16.0f, 16.0f),
                         Parent = this,
                     };
                     _stops.Add(stop);
@@ -394,7 +425,7 @@ namespace FlaxEditor.Surface.Archetypes
                 {
                     var stop = _stops[i];
                     var time = (float)Values[i * 2 + 1];
-                    stop.Location = _gradient.BottomLeft + new Vector2(time * _gradient.Width - stop.Width * 0.5f, 0.0f);
+                    stop.UpdateLocation(time);
                     stop.Color = (Color)Values[i * 2 + 2];
                     stop.TooltipText = stop.Color + " at " + time;
                 }
@@ -422,7 +453,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        private class CurveNode<T> : SurfaceNode where T : struct
+        private class CurveNode<T> : ResizableSurfaceNode where T : struct
         {
             private BezierCurveEditor<T> _curve;
             private bool _isSavingCurve;
@@ -436,7 +467,7 @@ namespace FlaxEditor.Surface.Archetypes
                     Create = (id, context, arch, groupArch) => new CurveNode<T>(id, context, arch, groupArch),
                     Description = "An animation spline represented by a set of keyframes, each representing an endpoint of a Bezier curve.",
                     Flags = NodeFlags.AllGraphs,
-                    Size = new Vector2(400, 180.0f),
+                    Size = new Float2(400, 180.0f),
                     DefaultValues = new object[]
                     {
                         // Keyframes count
@@ -454,12 +485,14 @@ namespace FlaxEditor.Surface.Archetypes
                         zero, // Tangent In
                         zero, // Tangent Out
 
-                        // Empty keys zero-6
+                        // Empty keys 0-6
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
                         0.0f, zero, zero, zero,
+
+                        new Float2(400, 180),
                     },
                     Elements = new[]
                     {
@@ -473,28 +506,49 @@ namespace FlaxEditor.Surface.Archetypes
             public CurveNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
+                _sizeValueIndex = 29; // Index of the Size stored in Values array
             }
-
+                
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                var upperLeft = GetBox(0).BottomLeft;
-                var upperRight = GetBox(1).BottomRight;
-                float curveMargin = 20.0f;
-
+                // Create curve editor
+                var upperLeft = GetBox(0).BottomRight;
+                var upperRight = GetBox(1).BottomLeft;
                 _curve = new BezierCurveEditor<T>
                 {
                     MaxKeyframes = 7,
-                    Bounds = new Rectangle(upperLeft + new Vector2(curveMargin, 10.0f), upperRight.X - upperLeft.X - curveMargin * 2.0f, 140.0f),
-                    Parent = this
+                    Bounds = new Rectangle(upperLeft + new Float2(0f, 10.0f), upperRight.X - upperLeft.X - 8.0f, 135.0f),
+                    Parent = this,
+                    AnchorMax = Float2.One,
                 };
                 _curve.Edited += OnCurveEdited;
                 _curve.UnlockChildrenRecursive();
                 _curve.PerformLayout();
 
+                // Sync keyframes
                 UpdateCurveKeyframes();
+            }
+
+            /// <inheritdoc />
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
+            {
+                base.OnSurfaceLoaded(action);
+
+                // Ensure the whole curve is shown
+                _curve.ShowWholeCurve();
+            }
+
+            public override void OnValuesChanged()
+            {
+                base.OnValuesChanged();
+
+                if (!_isSavingCurve)
+                {
+                    UpdateCurveKeyframes();
+                }
             }
 
             private void OnCurveEdited()
@@ -520,17 +574,6 @@ namespace FlaxEditor.Surface.Archetypes
                 SetValues(values);
 
                 _isSavingCurve = false;
-            }
-
-            /// <inheritdoc />
-            public override void OnValuesChanged()
-            {
-                base.OnValuesChanged();
-
-                if (!_isSavingCurve)
-                {
-                    UpdateCurveKeyframes();
-                }
             }
 
             private void UpdateCurveKeyframes()
@@ -608,10 +651,16 @@ namespace FlaxEditor.Surface.Archetypes
                     foreach (var e in values)
                     {
                         _combobox.AddItem(e.Key);
-                        tooltips[i++] = "Type: " + CustomEditorsUtil.GetTypeNameUI(e.Value.GetType()) + ", default value: " + e.Value;
+                        var value = e.Value;
+                        if (value == null)
+                        {
+                            tooltips[i++] = "null";
+                            continue;
+                        }
+                        tooltips[i++] = "Type: " + CustomEditorsUtil.GetTypeNameUI(value.GetType()) + ", default value: " + value;
                         if (toSelect == e.Key)
                         {
-                            type = e.Value.GetType();
+                            type = value.GetType();
                         }
                     }
                     _combobox.Tooltips = tooltips;
@@ -656,9 +705,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 UpdateCombo();
             }
@@ -681,14 +730,14 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                var surface = (VisualScriptSurface)Context.Surface;
-                var type = TypeUtils.GetType(surface.Script.ScriptTypeName);
-                var box = (OutputBox)GetBox(0);
-                box.CurrentType = type ? type : new ScriptType(typeof(VisualScript));
+                var type = ScriptType.Null;
+                if (Context.Surface is VisualScriptSurface visjectSurface)
+                    type = TypeUtils.GetType(visjectSurface.Script.ScriptTypeName);
+                GetBox(0).CurrentType = type ? type : new ScriptType(typeof(VisualScript));
             }
         }
 
@@ -709,9 +758,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 UpdateOutputBox();
             }
@@ -762,9 +811,9 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
                 UpdateOutputBox();
             }
@@ -786,7 +835,7 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        private class AsNode : SurfaceNode
+        internal class AsNode : SurfaceNode
         {
             private TypePickerControl _picker;
 
@@ -796,8 +845,8 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 _picker = new TypePickerControl
                 {
-                    Type = new ScriptType(typeof(FlaxEngine.Object)),
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Type = ScriptType.FlaxObject,
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -821,11 +870,12 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                _picker.ValueTypeName = (string)Values[0];
+                if (Surface != null)
+                    _picker.ValueTypeName = (string)Values[0];
                 UpdateOutputBox();
             }
 
@@ -833,7 +883,16 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 var type = TypeUtils.GetType((string)Values[0]);
                 var box = (OutputBox)GetBox(0);
-                box.CurrentType = type ? type : new ScriptType(typeof(FlaxEngine.Object));
+                box.CurrentType = type ? type : ScriptType.FlaxObject;
+            }
+
+            /// <summary>
+            /// Sets the type of the picker and the type of the output box
+            /// </summary>
+            /// <param name="type">Target Type</param>
+            public void SetPickerValue(ScriptType type)
+            {
+                _picker.Value = type;
             }
 
             /// <inheritdoc />
@@ -855,8 +914,8 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 _picker = new TypePickerControl
                 {
-                    Type = new ScriptType(typeof(object)),
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 140, 16),
+                    Type = ScriptType.Object,
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 140, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -879,11 +938,12 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                _picker.ValueTypeName = (string)Values[0];
+                if (Surface != null)
+                    _picker.ValueTypeName = (string)Values[0];
             }
 
             /// <inheritdoc />
@@ -905,8 +965,8 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 _picker = new TypePickerControl
                 {
-                    Type = new ScriptType(typeof(FlaxEngine.Object)),
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Type = ScriptType.FlaxObject,
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -929,11 +989,12 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                _picker.ValueTypeName = (string)Values[0];
+                if (Surface != null)
+                    _picker.ValueTypeName = (string)Values[0];
             }
 
             /// <inheritdoc />
@@ -956,7 +1017,7 @@ namespace FlaxEditor.Surface.Archetypes
                 _picker = new TypePickerControl
                 {
                     Type = type,
-                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderSize, 160, 16),
+                    Bounds = new Rectangle(FlaxEditor.Surface.Constants.NodeMarginX + 20, FlaxEditor.Surface.Constants.NodeMarginY + FlaxEditor.Surface.Constants.NodeHeaderHeight, 160, 16),
                     Parent = this,
                 };
                 _picker.ValueChanged += () => SetValue(0, _picker.ValueTypeName);
@@ -980,11 +1041,12 @@ namespace FlaxEditor.Surface.Archetypes
             }
 
             /// <inheritdoc />
-            public override void OnLoaded()
+            public override void OnLoaded(SurfaceNodeActions action)
             {
-                base.OnLoaded();
+                base.OnLoaded(action);
 
-                _picker.ValueTypeName = (string)Values[0];
+                if (Surface != null)
+                    _picker.ValueTypeName = (string)Values[0];
                 UpdateOutputBox();
             }
 
@@ -992,6 +1054,15 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 var type = TypeUtils.GetType((string)Values[0]);
                 GetBox(4).CurrentType = type ? type : _picker.Type;
+            }
+
+            /// <summary>
+            /// Sets the type of the picker and the type of the output box
+            /// </summary>
+            /// <param name="type">Target Type</param>
+            public void SetPickerValue(ScriptType type)
+            {
+                _picker.Value = type;
             }
 
             /// <inheritdoc />
@@ -1003,32 +1074,69 @@ namespace FlaxEditor.Surface.Archetypes
             }
         }
 
-        private class RerouteNode : SurfaceNode
+        internal class RerouteNode : SurfaceNode, IConnectionInstigator
         {
-            public static readonly Vector2 DefaultSize = new Vector2(16);
+            internal static readonly Float2 DefaultSize = new Float2(FlaxEditor.Surface.Constants.BoxRowHeight);
+            
+            internal bool DrawDisabled => _input.AllConnectionsDisabled || _output.AllConnectionsDisabled;
+            internal override bool DrawBasicShadow => false;
 
-            /// <inheritdoc />
-            protected override bool ShowTooltip => false;
+            private Rectangle _localBounds;
+            private InputBox _input;
+            private OutputBox _output;
+            private bool _isMouseDown, _isConnecting, _isMouseInConnectingBounds;
+            private const float ConnectingBounds = -12.0f;
 
             /// <inheritdoc />
             public RerouteNode(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch)
             : base(id, context, nodeArch, groupArch)
             {
                 Size = DefaultSize;
+                _localBounds = new Rectangle(Float2.Zero, DefaultSize);
                 Title = string.Empty;
                 BackgroundColor = Color.Transparent;
             }
 
             /// <inheritdoc />
-            public override void OnSurfaceLoaded()
+            protected override bool ShowTooltip => !string.IsNullOrEmpty(TooltipText) && _localBounds.Contains(ref _mousePosition) && !Surface.IsLeftMouseButtonDown && !Surface.IsRightMouseButtonDown && !Surface.IsPrimaryMenuOpened;
+
+            /// <inheritdoc />
+            public override bool OnTestTooltipOverControl(ref Float2 location)
             {
-                base.OnSurfaceLoaded();
+                return _localBounds.Contains(ref location) && ShowTooltip;
+            }
 
-                var inputBox = GetBox(0);
-                var outputBox = GetBox(1);
-                inputBox.Location = Vector2.Zero;
-                outputBox.Location = Vector2.Zero;
+            /// <inheritdoc />
+            public override bool OnShowTooltip(out string text, out Float2 location, out Rectangle area)
+            {
+                var result = base.OnShowTooltip(out text, out _, out area);
 
+                // Change the position
+                location = new Float2(Width * 0.5f, Height);
+
+                return result;
+            }
+
+            /// <inheritdoc />
+            public override void OnSurfaceLoaded(SurfaceNodeActions action)
+            {
+                base.OnSurfaceLoaded(action);
+
+                _input = (InputBox)GetBox(0);
+                _output = (OutputBox)GetBox(1);
+
+                _input.Location = Float2.Zero;
+                _output.Location = Float2.Zero;
+                _input.Visible = false;
+                _output.Visible = false;
+
+                _input.CurrentTypeChanged += OnInputBoxTypeChanged;
+
+                UpdateBoxes();
+            }
+
+            private void OnInputBoxTypeChanged(Box inputBox)
+            {
                 UpdateBoxes();
             }
 
@@ -1042,15 +1150,27 @@ namespace FlaxEditor.Surface.Archetypes
 
             private void UpdateBoxes()
             {
-                var inputBox = GetBox(0);
-                var outputBox = GetBox(1);
+                if (Surface == null)
+                    return;
 
-                inputBox.Visible = !inputBox.HasAnyConnection;
-                outputBox.Visible = !outputBox.HasAnyConnection;
+                var type = _input.CurrentType;
+                if (_input.TooltipText != null)
+                {
+                    TooltipText = _input.TooltipText;
+                }
+                else
+                {
+                    type = _input.HasAnyConnection ? _input.CurrentType : _output.CurrentType;
+                    TooltipText = Surface.GetTypeName(type);
+                }
+
+                var isImpulse = type.IsVoid;
+                _input.IsSingle = !isImpulse;
+                _output.IsSingle = isImpulse;
             }
 
             /// <inheritdoc />
-            public override bool CanSelect(ref Vector2 location)
+            public override bool CanSelect(ref Float2 location)
             {
                 return new Rectangle(Location, DefaultSize).Contains(ref location);
             }
@@ -1063,41 +1183,198 @@ namespace FlaxEditor.Surface.Archetypes
                 _footerRect = Rectangle.Empty;
             }
 
+            /// <inheritdoc />
+            public override void Resize(float width, float height)
+            {
+                // Do nothing so the input and output boxes do not change position
+            }
+
+            /// <inheritdoc />
             public override void Draw()
             {
+                // Update active state of input
+                _input.IsActive = !_output.AllConnectionsDisabled;
+
                 var style = Surface.Style;
-                var inputBox = GetBox(0);
-                var outputBox = GetBox(1);
                 var connectionColor = style.Colors.Default;
+                var type = ScriptType.Null;
                 float barHorizontalOffset = -2;
                 float barHeight = 3;
 
-                if (inputBox.HasAnyConnection)
+                if (_input.HasAnyConnection)
                 {
-                    var hints = inputBox.Connections[0].ParentNode.Archetype.ConnectionsHints;
-                    Surface.Style.GetConnectionColor(inputBox.Connections[0].CurrentType, hints, out connectionColor);
+                    type = _input.Connections[0].CurrentType;
+                    var hints = _input.Connections[0].ParentNode.Archetype.ConnectionsHints;
+                    Surface.Style.GetConnectionColor(type, hints, out connectionColor);
                 }
 
-                if (!inputBox.HasAnyConnection)
-                {
+                // Draw the box as disabled if needed
+                if (DrawDisabled)
+                    connectionColor = connectionColor * 0.6f;
+
+                if (!_input.HasAnyConnection)
                     Render2D.FillRectangle(new Rectangle(-barHorizontalOffset - barHeight * 2, (DefaultSize.Y - barHeight) / 2, barHeight * 2, barHeight), connectionColor);
-                }
-
-                if (!outputBox.HasAnyConnection)
-                {
+                if (!_output.HasAnyConnection)
                     Render2D.FillRectangle(new Rectangle(DefaultSize.X + barHorizontalOffset, (DefaultSize.Y - barHeight) / 2, barHeight * 2, barHeight), connectionColor);
-                }
 
-                if (inputBox.HasAnyConnection && outputBox.HasAnyConnection)
-                {
-                    var hints = inputBox.Connections[0].ParentNode.Archetype.ConnectionsHints;
-                    Surface.Style.GetConnectionColor(inputBox.Connections[0].CurrentType, hints, out connectionColor);
-                    SpriteHandle icon = style.Icons.BoxClose;
-                    Render2D.DrawSprite(icon, new Rectangle(Vector2.Zero, DefaultSize), connectionColor);
-                }
+                SpriteHandle icon;
+                if (_input.HasAnyConnection && _output.HasAnyConnection)
+                    icon = type.IsVoid ? style.Icons.ArrowClose : style.Icons.BoxClose;
+                else
+                    icon = type.IsVoid ? style.Icons.ArrowOpen : style.Icons.BoxOpen;
+
+                // Shadow
+                var shadowRect = _localBounds.MakeOffsetted(ShadowOffset);
+                Render2D.DrawSprite(icon, shadowRect, Color.Black.AlphaMultiplied(0.125f));
+
+                Render2D.DrawSprite(icon, _localBounds, connectionColor);
 
                 base.Draw();
             }
+
+            /// <inheritdoc />
+            public override bool OnMouseDown(Float2 location, MouseButton button)
+            {
+                if (base.OnMouseDown(location, button))
+                    return true;
+
+                if (button == MouseButton.Left)
+                {
+                    _isMouseDown = true;
+                    _isConnecting = _isMouseInConnectingBounds;
+                    if (_isConnecting)
+                    {
+                        Focus();
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            /// <inheritdoc />
+            public override void OnMouseLeave()
+            {
+                if (_isMouseDown)
+                {
+                    _isMouseDown = false;
+                    if (Surface.CanEdit && _isConnecting)
+                        Surface.ConnectingStart(this);
+                }
+
+                _isMouseInConnectingBounds = false;
+                Cursor = CursorType.Default;
+
+                base.OnMouseLeave();
+            }
+
+            /// <inheritdoc />
+            public override void OnMouseMove(Float2 location)
+            {
+                _isMouseInConnectingBounds = IsMouseOver && _localBounds.MakeExpanded(ConnectingBounds).Contains(ref location); // Inner area for connecting, outer area for moving
+                if (!_isMouseInConnectingBounds && !_isMouseDown)
+                    Cursor = CursorType.SizeAll;
+                else
+                    Cursor = CursorType.Default;
+
+                Surface.ConnectingOver(this);
+                base.OnMouseMove(location);
+            }
+
+            /// <inheritdoc />
+            public override bool OnMouseUp(Float2 location, MouseButton button)
+            {
+                if (base.OnMouseUp(location, button))
+                    return true;
+
+                if (button == MouseButton.Left)
+                {
+                    _isMouseDown = false;
+                    if (Surface.IsConnecting)
+                        Surface.ConnectingEnd(this);
+                    return true;
+                }
+
+                return false;
+            }
+
+            /// <inheritdoc />
+            public Float2 ConnectionOrigin
+            {
+                get
+                {
+                    var center = _localBounds.Center;
+                    return PointToParent(ref center);
+                }
+            }
+
+            /// <inheritdoc />
+            public bool AreConnected(IConnectionInstigator other)
+            {
+                return _input.AreConnected(other) || _output.AreConnected(other);
+            }
+
+            /// <inheritdoc />
+            public bool CanConnectWith(IConnectionInstigator other)
+            {
+                if (other is InputBox otherInput)
+                {
+                    return _output.CanConnectWith(otherInput);
+                }
+                if (other is OutputBox otherOutput)
+                {
+                    return _input.CanConnectWith(otherOutput);
+                }
+                if (other is RerouteNode otherReroute)
+                {
+                    if (_output.CurrentType.IsVoid)
+                        return otherReroute._input.CanConnectWith(_output);
+                    return otherReroute._output.CanConnectWith(_input);
+                }
+                return false;
+            }
+
+            /// <inheritdoc />
+            public void DrawConnectingLine(ref Float2 startPos, ref Float2 endPos, ref Color color)
+            {
+                OutputBox.DrawConnection(Surface.Style, ref startPos, ref endPos, ref color, OutputBox.ConnectingConnectionThickness);
+            }
+
+            /// <inheritdoc />
+            public void Connect(IConnectionInstigator other)
+            {
+                if (other is InputBox otherInput)
+                {
+                    _output.Connect(otherInput);
+                }
+                if (other is OutputBox otherOutput)
+                {
+                    _input.Connect(otherOutput);
+                }
+                if (other is RerouteNode otherReroute)
+                {
+                    if (_output.CurrentType.IsVoid)
+                        otherReroute._input.Connect(_output);
+                    else
+                        otherReroute._output.Connect(_input);
+                }
+            }
+        }
+
+        private static NodeArchetype Noise(ushort id, string name, Type resultType, Type pointType, string desc)
+        {
+            return new NodeArchetype
+            {
+                TypeID = id,
+                Title = name,
+                Description = desc,
+                Flags = NodeFlags.MaterialGraph | NodeFlags.ParticleEmitterGraph | NodeFlags.AnimGraph,
+                Size = new Float2(150, 20),
+                Elements = new[]
+                {
+                    NodeElementArchetype.Factory.Input(0, "Point", true, pointType, 0),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, resultType, 1),
+                }
+            };
         }
 
         /// <summary>
@@ -1112,12 +1389,12 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Fresnel",
                 Description = "Calculates a falloff based on the dot product of the surface normal and the direction to the camera",
                 Flags = NodeFlags.MaterialGraph | NodeFlags.NoSpawnViaGUI | NodeFlags.NoSpawnViaPaste,
-                Size = new Vector2(140, 60),
+                Size = new Float2(140, 60),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Input(0, "Exponent", true, typeof(float), 0),
                     NodeElementArchetype.Factory.Input(1, "Base Reflect Fraction", true, typeof(float), 1),
-                    NodeElementArchetype.Factory.Input(2, "Normal", true, typeof(Vector3), 2),
+                    NodeElementArchetype.Factory.Input(2, "Normal", true, typeof(Float3), 2),
                     NodeElementArchetype.Factory.Output(0, "", typeof(float), 3)
                 }
             },
@@ -1127,16 +1404,16 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Desaturation",
                 Description = "Desaturates input, or converts the colors of its input into shades of gray, based a certain percentage",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(140, 130),
+                Size = new Float2(140, 130),
                 DefaultValues = new object[]
                 {
-                    new Vector3(0.3f, 0.59f, 0.11f)
+                    new Float3(0.3f, 0.59f, 0.11f)
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "Input", true, typeof(Vector3), 0),
+                    NodeElementArchetype.Factory.Input(0, "Input", true, typeof(Float3), 0),
                     NodeElementArchetype.Factory.Input(1, "Scale", true, typeof(float), 1),
-                    NodeElementArchetype.Factory.Output(0, "Result", typeof(Vector3), 2),
+                    NodeElementArchetype.Factory.Output(0, "Result", typeof(Float3), 2),
                     NodeElementArchetype.Factory.Text(0, Surface.Constants.LayoutOffsetY * 2 + 5, "Luminance Factors"),
                     NodeElementArchetype.Factory.Vector_X(0, Surface.Constants.LayoutOffsetY * 3 + 5, 0),
                     NodeElementArchetype.Factory.Vector_Y(0, Surface.Constants.LayoutOffsetY * 4 + 5, 0),
@@ -1149,10 +1426,11 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Time",
                 Description = "Game time constant",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(110, 20),
+                Size = new Float2(110, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Output(0, "", typeof(float), 0),
+                    NodeElementArchetype.Factory.Output(0, "Time", typeof(float), 0),
+                    NodeElementArchetype.Factory.Output(1, "Scaled Time", typeof(float), 1),
                 }
             },
             new NodeArchetype
@@ -1161,7 +1439,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Fresnel",
                 Description = "Calculates a falloff based on the dot product of the surface normal and the direction to the camera",
                 Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(200, 60),
+                Size = new Float2(200, 60),
                 DefaultValues = new object[]
                 {
                     5.0f,
@@ -1181,7 +1459,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Time",
                 Description = "Game time constant",
                 Flags = NodeFlags.AnimGraph,
-                Size = new Vector2(140, 40),
+                Size = new Float2(140, 40),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, "Animation Time", typeof(float), 0),
@@ -1193,20 +1471,20 @@ namespace FlaxEditor.Surface.Archetypes
                 TypeID = 6,
                 Title = "Panner",
                 Description = "Animates UVs over time",
-                Flags = NodeFlags.MaterialGraph,
-                Size = new Vector2(170, 80),
+                Flags = NodeFlags.MaterialGraph | NodeFlags.FixedSize,
+                Size = new Float2(170, 96),
                 DefaultValues = new object[]
                 {
                     false
                 },
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Vector2), 0),
+                    NodeElementArchetype.Factory.Input(0, "UV", true, typeof(Float2), 0),
                     NodeElementArchetype.Factory.Input(1, "Time", true, typeof(float), 1),
-                    NodeElementArchetype.Factory.Input(2, "Speed", true, typeof(Vector2), 2),
-                    NodeElementArchetype.Factory.Text(18, Surface.Constants.LayoutOffsetY * 3 + 5, "Fractional Part"),
+                    NodeElementArchetype.Factory.Input(2, "Speed", true, typeof(Float2), 2),
+                    NodeElementArchetype.Factory.Text(20, Surface.Constants.LayoutOffsetY * 3 + 5, "Fractional Part"),
                     NodeElementArchetype.Factory.Bool(0, Surface.Constants.LayoutOffsetY * 3 + 5, 0),
-                    NodeElementArchetype.Factory.Output(0, "", typeof(Vector2), 3)
+                    NodeElementArchetype.Factory.Output(0, "", typeof(Float2), 3)
                 }
             },
             new NodeArchetype
@@ -1215,7 +1493,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Linearize Depth",
                 Description = "Scene depth buffer texture lookup node",
                 Flags = NodeFlags.MaterialGraph | NodeFlags.ParticleEmitterGraph,
-                Size = new Vector2(240, 40),
+                Size = new Float2(240, 40),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Input(0, "Hardware Depth", true, typeof(float), 0),
@@ -1228,7 +1506,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Time",
                 Description = "Simulation time and update delta time access",
                 Flags = NodeFlags.ParticleEmitterGraph,
-                Size = new Vector2(140, 40),
+                Size = new Float2(140, 40),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, "Simulation Time", typeof(float), 0),
@@ -1241,11 +1519,11 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Transform Position To Screen UV",
                 Description = "Transforms world-space position into screen space coordinates (normalized)",
                 Flags = NodeFlags.ParticleEmitterGraph,
-                Size = new Vector2(300, 40),
+                Size = new Float2(300, 40),
                 Elements = new[]
                 {
-                    NodeElementArchetype.Factory.Input(0, "World Space", true, typeof(Vector3), 0),
-                    NodeElementArchetype.Factory.Output(0, "Screen Space UV", typeof(Vector2), 1),
+                    NodeElementArchetype.Factory.Input(0, "World Space", true, typeof(Float3), 0),
+                    NodeElementArchetype.Factory.Output(0, "Screen Space UV", typeof(Float2), 1),
                 }
             },
             new NodeArchetype
@@ -1254,22 +1532,26 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Color Gradient",
                 Create = (id, context, arch, groupArch) => new ColorGradientNode(id, context, arch, groupArch),
                 Description = "Linear color gradient sampler",
-                Flags = NodeFlags.AllGraphs,
-                Size = new Vector2(400, 150.0f),
+                Flags = NodeFlags.AllGraphs | NodeFlags.FixedSize,
+                Size = new Float2(400, 150.0f),
                 DefaultValues = new object[]
                 {
                     // Stops count
                     2,
 
                     // Stop 0
-                    0.1f,
-                    Color.CornflowerBlue,
+                    0.05f,
+                    Color.Black,
 
                     // Stop 1
-                    0.9f,
-                    Color.GreenYellow,
+                    0.95f,
+                    Color.White,
 
-                    // Empty stops 2-7
+                    // Empty stops 2-11
+                    0.0f, Color.Black,
+                    0.0f, Color.Black,
+                    0.0f, Color.Black,
+                    0.0f, Color.Black,
                     0.0f, Color.Black,
                     0.0f, Color.Black,
                     0.0f, Color.Black,
@@ -1280,14 +1562,14 @@ namespace FlaxEditor.Surface.Archetypes
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Input(0, "Time", true, typeof(float), 0),
-                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Vector4), 1),
+                    NodeElementArchetype.Factory.Output(0, string.Empty, typeof(Float4), 1),
                 }
             },
             new NodeArchetype
             {
                 TypeID = 11,
                 Title = "Comment",
-                AlternativeTitles = new[] { "//" },
+                AlternativeTitles = new[] { "//", "Group" },
                 TryParseText = (string filterText, out object[] data) =>
                 {
                     data = null;
@@ -1295,9 +1577,10 @@ namespace FlaxEditor.Surface.Archetypes
                     {
                         data = new object[]
                         {
-                            filterText.Substring(2),
-                            new Color(1.0f, 1.0f, 1.0f, 0.2f),
-                            new Vector2(400.0f, 400.0f),
+                            filterText.Substring(2), // Title
+                            new Color(1.0f, 1.0f, 1.0f, 0.2f), // Color
+                            new Float2(400.0f, 400.0f), // Size
+                            -1, // Order
                         };
                         return true;
                     }
@@ -1308,18 +1591,19 @@ namespace FlaxEditor.Surface.Archetypes
                 },
                 Create = (id, context, arch, groupArch) => new SurfaceComment(id, context, arch, groupArch),
                 Flags = NodeFlags.AllGraphs,
-                Size = new Vector2(400.0f, 400.0f),
+                Size = new Float2(400.0f, 400.0f),
                 DefaultValues = new object[]
                 {
                     "Comment", // Title
                     new Color(1.0f, 1.0f, 1.0f, 0.2f), // Color
-                    new Vector2(400.0f, 400.0f), // Size
+                    new Float2(400.0f, 400.0f), // Size
+                    -1, // Order
                 },
             },
             CurveNode<float>.GetArchetype(12, "Curve", typeof(float), 0.0f, 1.0f),
-            CurveNode<Vector2>.GetArchetype(13, "Curve Vector2", typeof(Vector2), Vector2.Zero, Vector2.One),
-            CurveNode<Vector3>.GetArchetype(14, "Curve Vector3", typeof(Vector3), Vector3.Zero, Vector3.One),
-            CurveNode<Vector4>.GetArchetype(15, "Curve Vector4", typeof(Vector4), Vector4.Zero, Vector4.One),
+            CurveNode<Float2>.GetArchetype(13, "Curve Float2", typeof(Float2), Float2.Zero, Float2.One),
+            CurveNode<Float3>.GetArchetype(14, "Curve Float3", typeof(Float3), Float3.Zero, Float3.One),
+            CurveNode<Float4>.GetArchetype(15, "Curve Float4", typeof(Float4), Float4.Zero, Float4.One),
             new NodeArchetype
             {
                 TypeID = 16,
@@ -1327,11 +1611,11 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Get Gameplay Global",
                 Description = "Gets the Gameplay Global variable value",
                 Flags = NodeFlags.AllGraphs,
-                Size = new Vector2(220, 90),
+                Size = new Float2(220, 90),
                 DefaultValues = new object[]
                 {
                     Guid.Empty,
-                    string.Empty
+                    string.Empty,
                 },
                 Elements = new[]
                 {
@@ -1346,9 +1630,9 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Platform Switch",
                 Description = "Gets the input value based on the runtime-platform type",
                 Flags = NodeFlags.AllGraphs,
-                Size = new Vector2(220, 180),
+                Size = new Float2(220, 260),
                 ConnectionsHints = ConnectionsHint.Value,
-                IndependentBoxes = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+                IndependentBoxes = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 },
                 DependentBoxes = new[] { 0 },
                 Elements = new[]
                 {
@@ -1362,6 +1646,10 @@ namespace FlaxEditor.Surface.Archetypes
                     NodeElementArchetype.Factory.Input(6, "Xbox Scarlett", true, null, 7),
                     NodeElementArchetype.Factory.Input(7, "Android", true, null, 8),
                     NodeElementArchetype.Factory.Input(8, "Switch", true, null, 9),
+                    NodeElementArchetype.Factory.Input(9, "PlayStation 5", true, null, 10),
+                    NodeElementArchetype.Factory.Input(10, "Mac", true, null, 11),
+                    NodeElementArchetype.Factory.Input(11, "iOS", true, null, 12),
+                    NodeElementArchetype.Factory.Input(12, "Web", true, null, 13),
                 }
             },
             new NodeArchetype
@@ -1371,7 +1659,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new AssetReferenceNode(id, context, arch, groupArch),
                 Description = "References an asset.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(200, 70),
+                Size = new Float2(200, 70),
                 DefaultValues = new object[]
                 {
                     Guid.Empty,
@@ -1389,7 +1677,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new ThisNode(id, context, arch, groupArch),
                 Description = "Gets the reference to this script object instance (self).",
                 Flags = NodeFlags.VisualScriptGraph,
-                Size = new Vector2(140, 20),
+                Size = new Float2(140, 20),
                 AlternativeTitles = new[]
                 {
                     "self",
@@ -1406,7 +1694,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Description = "Converts the value into a human-readable string representation.",
                 ConnectionsHints = ConnectionsHint.Anything,
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(140, 20),
+                Size = new Float2(140, 20),
                 AlternativeTitles = new[]
                 {
                     "tostring",
@@ -1424,7 +1712,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new ActorReferenceNode(id, context, arch, groupArch),
                 Description = "References an actor.",
                 Flags = NodeFlags.VisualScriptGraph,
-                Size = new Vector2(200, 20),
+                Size = new Float2(200, 20),
                 DefaultValues = new object[]
                 {
                     Guid.Empty,
@@ -1439,10 +1727,11 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 22,
                 Title = "As",
+                AlternativeTitles = new[] { "Cast" },
                 Create = (id, context, arch, groupArch) => new AsNode(id, context, arch, groupArch),
                 Description = "Casts the object to a different type. Returns null if cast fails.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(200, 20),
+                Size = new Float2(200, 20),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Typename
@@ -1460,7 +1749,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new TypeReferenceNode(id, context, arch, groupArch),
                 Description = "Scripting type picker.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(200, 40),
+                Size = new Float2(200, 40),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Typename
@@ -1478,7 +1767,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new IsNode(id, context, arch, groupArch),
                 Description = "Checks if the object is of the given type. Return true if so, false otherwise.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(200, 20),
+                Size = new Float2(200, 20),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Typename
@@ -1496,7 +1785,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Create = (id, context, arch, groupArch) => new CastNode(id, context, arch, groupArch, new ScriptType(typeof(FlaxEngine.Object))),
                 Description = "Tries to cast the object to a given type. Returns null if fails.",
                 Flags = NodeFlags.VisualScriptGraph,
-                Size = new Vector2(200, 60),
+                Size = new Float2(200, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Typename
@@ -1514,10 +1803,10 @@ namespace FlaxEditor.Surface.Archetypes
             {
                 TypeID = 26,
                 Title = "Cast Value",
-                Create = (id, context, arch, groupArch) => new CastNode(id, context, arch, groupArch, new ScriptType(typeof(object))),
+                Create = (id, context, arch, groupArch) => new CastNode(id, context, arch, groupArch, ScriptType.Object),
                 Description = "Tries to cast the object to a given type. Returns null if fails.",
                 Flags = NodeFlags.VisualScriptGraph,
-                Size = new Vector2(200, 60),
+                Size = new Float2(200, 60),
                 DefaultValues = new object[]
                 {
                     string.Empty, // Typename
@@ -1537,7 +1826,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Is Null",
                 Description = "Checks if the object is null. Return false if it's valid.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(150, 20),
+                Size = new Float2(150, 20),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, string.Empty, typeof(bool), 0),
@@ -1550,7 +1839,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Is Valid",
                 Description = "Checks if the object is valid. Return false if it's null.",
                 Flags = NodeFlags.VisualScriptGraph | NodeFlags.AnimGraph,
-                Size = new Vector2(150, 20),
+                Size = new Float2(150, 20),
                 Elements = new[]
                 {
                     NodeElementArchetype.Factory.Output(0, string.Empty, typeof(bool), 0),
@@ -1563,7 +1852,7 @@ namespace FlaxEditor.Surface.Archetypes
                 Title = "Reroute",
                 Create = (id, context, arch, groupArch) => new RerouteNode(id, context, arch, groupArch),
                 Description = "Reroute a connection.",
-                Flags = NodeFlags.NoCloseButton | NodeFlags.NoSpawnViaGUI | NodeFlags.AllGraphs,
+                Flags = NodeFlags.NoCloseButton | NodeFlags.NoSpawnViaGUI | NodeFlags.AllGraphs | NodeFlags.FixedSize,
                 Size = RerouteNode.DefaultSize,
                 ConnectionsHints = ConnectionsHint.All,
                 IndependentBoxes = new int[] { 0 },
@@ -1574,6 +1863,11 @@ namespace FlaxEditor.Surface.Archetypes
                     NodeElementArchetype.Factory.Output(0, string.Empty, null, 1, true),
                 }
             },
+            Noise(30, "Perlin Noise", typeof(float), typeof(Float2), "Classic Perlin noise (normalized to 0-1)."),
+            Noise(31, "Simplex Noise", typeof(float), typeof(Float2), "Simplex noise (normalized to 0-1)."),
+            Noise(32, "Worley Noise", typeof(Float2), typeof(Float2), "Worley noise (cellar noise with standard 3x3 search window for F1 and F2 values)."),
+            Noise(33, "Voronoi Noise", typeof(Float3), typeof(Float2), "Voronoi noise (X=minDistToCell, Y=randomColor, Z=minEdgeDistance)."),
+            Noise(34, "Custom Noise", typeof(float), typeof(Float3), "Custom noise function (3D -> 1D)."),
         };
     }
 }

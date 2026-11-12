@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Threading;
 using FlaxEngine;
@@ -22,7 +22,7 @@ namespace FlaxEditor.GUI.Dialogs
         /// <summary>
         /// The parent window.
         /// </summary>
-        protected Window _window;
+        protected volatile Window _window;
 
         /// <summary>
         /// The dialog result.
@@ -32,12 +32,17 @@ namespace FlaxEditor.GUI.Dialogs
         /// <summary>
         /// The dialog size.
         /// </summary>
-        protected Vector2 _dialogSize = new Vector2(300, 100);
+        protected Float2 _dialogSize = new Float2(300, 100);
 
         /// <summary>
         /// Gets the dialog result.
         /// </summary>
         public DialogResult Result => _result;
+
+        /// <summary>
+        /// Returns the size of the dialog.
+        /// </summary>
+        public Float2 DialogSize => _dialogSize;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Dialog"/> class.
@@ -221,6 +226,14 @@ namespace FlaxEditor.GUI.Dialogs
         }
 
         /// <summary>
+        /// Called to cancel action and close the dialog.
+        /// </summary>
+        public virtual void OnCancel()
+        {
+            Close(DialogResult.Cancel);
+        }
+
+        /// <summary>
         /// Closes dialog with the specified result.
         /// </summary>
         /// <param name="result">The result.</param>
@@ -243,6 +256,7 @@ namespace FlaxEditor.GUI.Dialogs
         /// </summary>
         protected virtual void OnShow()
         {
+            Focus();
         }
 
         /// <summary>
@@ -253,6 +267,42 @@ namespace FlaxEditor.GUI.Dialogs
         protected virtual bool CanCloseWindow(ClosingReason reason)
         {
             return true;
+        }
+
+        /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            base.OnSubmit();
+
+            Close(DialogResult.OK);
+        }
+
+        /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            if (base.OnKeyDown(key))
+                return true;
+
+            switch (key)
+            {
+            case KeyboardKeys.Return:
+                if (Root?.FocusedControl != null)
+                    Root.SubmitFocused();
+                else
+                    OnSubmit();
+                return true;
+            case KeyboardKeys.Escape:
+                OnCancel();
+                return true;
+            case KeyboardKeys.Tab:
+                if (Root != null)
+                {
+                    bool shiftDown = Root.GetKey(KeyboardKeys.Shift);
+                    Root.Navigate(shiftDown ? NavDirection.Previous : NavDirection.Next);
+                }
+                return true;
+            }
+            return false;
         }
     }
 }

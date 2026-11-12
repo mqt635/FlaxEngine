@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using FlaxEngine;
 
 namespace FlaxEditor
@@ -15,12 +16,12 @@ namespace FlaxEditor
         private readonly List<IntPtr> _actors;
         private readonly List<HighlightData> _highlights;
         private MaterialBase _highlightMaterial;
-        private readonly List<Vector3> _highlightTriangles = new List<Vector3>(64);
-        private Vector3[] _highlightTrianglesSet;
+        private readonly List<Float3> _highlightTriangles = new List<Float3>(64);
+        private Float3[] _highlightTrianglesSet;
         private int[] _highlightIndicesSet;
         private Model _highlightTrianglesModel;
 
-        internal IntPtr[] ActorsPtrs => Utils.ExtractArrayFromList(_actors);
+        internal Span<IntPtr> ActorsPtrs => CollectionsMarshal.AsSpan(_actors);
 
         internal int ActorsCount => _actors.Count;
 
@@ -49,11 +50,10 @@ namespace FlaxEditor
         /// Highlights the model.
         /// </summary>
         /// <param name="model">The model.</param>
-        public void HighlightModel(StaticModel model)
+        public void HighlightModel(ModelInstanceActor model)
         {
-            if (model.Model == null)
+            if (!model)
                 return;
-
             var entries = model.Entries;
             for (var i = 0; i < entries.Length; i++)
                 HighlightModel(model, i);
@@ -64,7 +64,7 @@ namespace FlaxEditor
         /// </summary>
         /// <param name="model">The model.</param>
         /// <param name="entryIndex">Index of the entry to highlight.</param>
-        public void HighlightModel(StaticModel model, int entryIndex)
+        public void HighlightModel(ModelInstanceActor model, int entryIndex)
         {
             _highlights.Add(new HighlightData
             {
@@ -79,10 +79,25 @@ namespace FlaxEditor
         /// <param name="surface">The surface.</param>
         public void HighlightBrushSurface(BrushSurface surface)
         {
+            if (surface.Brush == null)
+                return;
             surface.Brush.GetVertices(surface.Index, out var vertices);
             if (vertices.Length > 0)
             {
-                _highlightTriangles.AddRange(vertices);
+                for (int i = 0; i < vertices.Length; i++)
+                    _highlightTriangles.Add(vertices[i]);
+            }
+        }
+
+        /// <summary>
+        /// Draws the collected actors via <see cref="DebugDraw"/>.
+        /// </summary>
+        /// <param name="drawScenes">True if draw all loaded scenes too, otherwise will draw only provided actors.</param>
+        public unsafe void DrawActors(bool drawScenes = false)
+        {
+            fixed (IntPtr* actors = ActorsPtrs)
+            {
+                DebugDraw.DrawActors(new IntPtr(actors), _actors.Count, drawScenes);
             }
         }
 
@@ -95,7 +110,7 @@ namespace FlaxEditor
             if (_highlightMaterial == null
                 || (_highlights.Count == 0 && _highlightTriangles.Count == 0)
                 || renderContext.View.Pass == DrawPass.Depth
-            )
+               )
                 return;
             Profiler.BeginEvent("ViewportDebugDrawData.OnDraw");
 
@@ -109,10 +124,11 @@ namespace FlaxEditor
                     if (model == null)
                         continue;
                     staticModel.Transform.GetWorld(out world);
-                    var bounds = BoundingSphere.FromBox(staticModel.Box);
+                    var bounds = BoundingSphere.FromBox(staticModel.BoundingBox);
 
                     // Pick a proper LOD
-                    int lodIndex = RenderTools.ComputeModelLOD(model, ref bounds.Center, bounds.Radius, ref renderContext);
+                    Float3 center = bounds.Center - renderContext.View.Origin;
+                    int lodIndex = RenderTools.ComputeModelLOD(model, ref center, (float)bounds.Radius, ref renderContext);
                     var lods = model.LODs;
                     if (lods == null || lods.Length < lodIndex || lodIndex < 0)
                         continue;
@@ -124,6 +140,32 @@ namespace FlaxEditor
                         if (lod.Meshes[meshIndex].MaterialSlotIndex == highlight.EntryIndex)
                         {
                             lod.Meshes[meshIndex].Draw(ref renderContext, _highlightMaterial, ref world);
+                        }
+                    }
+                }
+                else if (highlight.Target is AnimatedModel animatedModel)
+                {
+                    var model = animatedModel.SkinnedModel;
+                    if (model == null)
+                        continue;
+                    animatedModel.Transform.GetWorld(out world);
+                    var bounds = BoundingSphere.FromBox(animatedModel.BoundingBox);
+                    var bones = animatedModel.SkinnedMeshBones;
+
+                    // Pick a proper LOD
+                    Float3 center = bounds.Center - renderContext.View.Origin;
+                    int lodIndex = RenderTools.ComputeModelLOD(model, ref center, (float)bounds.Radius, ref renderContext);
+                    var lods = model.LODs;
+                    if (lods == null || lods.Length < lodIndex || lodIndex < 0)
+                        continue;
+                    var lod = lods[lodIndex];
+
+                    // Draw meshes
+                    for (int meshIndex = 0; meshIndex < lod.Meshes.Length; meshIndex++)
+                    {
+                        if (lod.Meshes[meshIndex].MaterialSlotIndex == highlight.EntryIndex)
+                        {
+                            lod.Meshes[meshIndex].Draw(ref renderContext, bones, _highlightMaterial, ref world);
                         }
                     }
                 }

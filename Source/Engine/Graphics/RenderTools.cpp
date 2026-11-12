@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "RenderTools.h"
 #include "PixelFormatExtensions.h"
@@ -6,9 +6,11 @@
 #include "PixelFormat.h"
 #include "RenderView.h"
 #include "GPUDevice.h"
-#include "RenderTask.h"
+#include "RenderContext.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Assets/SkinnedModel.h"
+#include "Engine/Core/Math/Packed.h"
+#include "Engine/Core/Math/OrientedBoundingBox.h"
 #include "Engine/Engine/Time.h"
 
 const Char* ToString(RendererType value)
@@ -52,6 +54,12 @@ const Char* ToString(RendererType value)
     case RendererType::PS4:
         result = TEXT("PS4");
         break;
+    case RendererType::PS5:
+        result = TEXT("PS5");
+        break;
+    case RendererType::WebGPU:
+        result = TEXT("WebGPU");
+        break;
     default:
         result = TEXT("?");
     }
@@ -86,6 +94,12 @@ const Char* ToString(ShaderProfile value)
         break;
     case ShaderProfile::PS4:
         result = TEXT("PS4");
+        break;
+    case ShaderProfile::PS5:
+        result = TEXT("PS5");
+        break;
+    case ShaderProfile::WebGPU:
+        result = TEXT("WebGPU");
         break;
     default:
         result = TEXT("?");
@@ -174,121 +188,81 @@ uint32 GetHash(const BlendingMode& key)
     return hash;
 }
 
+// @formatter:off
+
 BlendingMode BlendingMode::Opaque =
 {
-    false,
-    // AlphaToCoverageEnable
-    false,
-    // BlendEnable
-    Blend::One,
-    // SrcBlend
-    Blend::Zero,
-    // DestBlend
-    Operation::Add,
-    // BlendOp
-    Blend::One,
-    // SrcBlendAlpha
-    Blend::Zero,
-    // DestBlendAlpha
-    Operation::Add,
-    // BlendOpAlpha
-    ColorWrite::All,
-    // RenderTargetWriteMask
+    false, // AlphaToCoverageEnable
+    false, // BlendEnable
+    Blend::One, // SrcBlend
+    Blend::Zero, // DestBlend
+    Operation::Add, // BlendOp
+    Blend::One, // SrcBlendAlpha
+    Blend::Zero, // DestBlendAlpha
+    Operation::Add, // BlendOpAlpha
+    ColorWrite::All, // RenderTargetWriteMask
 };
 
 BlendingMode BlendingMode::Additive =
 {
-    false,
-    // AlphaToCoverageEnable
-    true,
-    // BlendEnable
-    Blend::SrcAlpha,
-    // SrcBlend
-    Blend::One,
-    // DestBlend
-    Operation::Add,
-    // BlendOp
-    Blend::SrcAlpha,
-    // SrcBlendAlpha
-    Blend::One,
-    // DestBlendAlpha
-    Operation::Add,
-    // BlendOpAlpha
-    ColorWrite::All,
-    // RenderTargetWriteMask
+    false, // AlphaToCoverageEnable
+    true, // BlendEnable
+    Blend::SrcAlpha, // SrcBlend
+    Blend::One, // DestBlend
+    Operation::Add, // BlendOp
+    Blend::SrcAlpha, // SrcBlendAlpha
+    Blend::One, // DestBlendAlpha
+    Operation::Add, // BlendOpAlpha
+    ColorWrite::All, // RenderTargetWriteMask
 };
 
 BlendingMode BlendingMode::AlphaBlend =
 {
-    false,
-    // AlphaToCoverageEnable
-    true,
-    // BlendEnable
-    Blend::SrcAlpha,
-    // SrcBlend
-    Blend::InvSrcAlpha,
-    // DestBlend
-    Operation::Add,
-    // BlendOp
-    Blend::One,
-    // SrcBlendAlpha
-    Blend::InvSrcAlpha,
-    // DestBlendAlpha
-    Operation::Add,
-    // BlendOpAlpha
-    ColorWrite::All,
-    // RenderTargetWriteMask
+    false, // AlphaToCoverageEnable
+    true, // BlendEnable
+    Blend::SrcAlpha, // SrcBlend
+    Blend::InvSrcAlpha, // DestBlend
+    Operation::Add, // BlendOp
+    Blend::One, // SrcBlendAlpha
+    Blend::InvSrcAlpha, // DestBlendAlpha
+    Operation::Add, // BlendOpAlpha
+    ColorWrite::All, // RenderTargetWriteMask
 };
 
 BlendingMode BlendingMode::Add =
 {
-    false,
-    // AlphaToCoverageEnable
-    true,
-    // BlendEnable
-    Blend::One,
-    // SrcBlend
-    Blend::One,
-    // DestBlend
-    Operation::Add,
-    // BlendOp
-    Blend::One,
-    // SrcBlendAlpha
-    Blend::One,
-    // DestBlendAlpha
-    Operation::Add,
-    // BlendOpAlpha
-    ColorWrite::All,
-    // RenderTargetWriteMask
+    false, // AlphaToCoverageEnable
+    true, // BlendEnable
+    Blend::One, // SrcBlend
+    Blend::One, // DestBlend
+    Operation::Add, // BlendOp
+    Blend::One, // SrcBlendAlpha
+    Blend::One, // DestBlendAlpha
+    Operation::Add, // BlendOpAlpha
+    ColorWrite::All, // RenderTargetWriteMask
 };
 
 BlendingMode BlendingMode::Multiply =
 {
-    false,
-    // AlphaToCoverageEnable
-    true,
-    // BlendEnable
-    Blend::Zero,
-    // SrcBlend
-    Blend::SrcColor,
-    // DestBlend
-    Operation::Add,
-    // BlendOp
-    Blend::Zero,
-    // SrcBlendAlpha
-    Blend::SrcAlpha,
-    // DestBlendAlpha
-    Operation::Add,
-    // BlendOpAlpha
-    ColorWrite::All,
-    // RenderTargetWriteMask
+    false, // AlphaToCoverageEnable
+    true, // BlendEnable
+    Blend::Zero, // SrcBlend
+    Blend::SrcColor, // DestBlend
+    Operation::Add, // BlendOp
+    Blend::Zero, // SrcBlendAlpha
+    Blend::SrcAlpha, // DestBlendAlpha
+    Operation::Add, // BlendOpAlpha
+    ColorWrite::All, // RenderTargetWriteMask
 };
+
+// @formatter:on
 
 FeatureLevel RenderTools::GetFeatureLevel(ShaderProfile profile)
 {
     switch (profile)
     {
     case ShaderProfile::DirectX_SM6:
+    case ShaderProfile::PS5:
         return FeatureLevel::SM6;
     case ShaderProfile::DirectX_SM5:
     case ShaderProfile::Vulkan_SM5:
@@ -299,9 +273,30 @@ FeatureLevel RenderTools::GetFeatureLevel(ShaderProfile profile)
     case ShaderProfile::GLSL_440:
     case ShaderProfile::GLSL_410:
     case ShaderProfile::Unknown:
-        return FeatureLevel::ES2;
+    case ShaderProfile::WebGPU:
+        return FeatureLevel::ES3_1;
     default:
         return FeatureLevel::ES2;
+    }
+}
+
+ShaderProfileFeatures RenderTools::GetShaderProfileFeatures(ShaderProfile profile)
+{
+    switch (profile)
+    {
+    case ShaderProfile::DirectX_SM6:
+    case ShaderProfile::DirectX_SM5:
+    case ShaderProfile::Vulkan_SM5:
+        return ShaderProfileFeatures::ComputeShaders | ShaderProfileFeatures::GeometryShaders | ShaderProfileFeatures::TessellationShaders;
+    case ShaderProfile::PS4:
+    case ShaderProfile::PS5:
+        return ShaderProfileFeatures::ComputeShaders | ShaderProfileFeatures::GeometryShaders;
+    case ShaderProfile::DirectX_SM4:
+        return ShaderProfileFeatures::GeometryShaders;
+    case ShaderProfile::WebGPU:
+        return ShaderProfileFeatures::ComputeShaders;
+    default:
+        return ShaderProfileFeatures::None;
     }
 }
 
@@ -313,6 +308,7 @@ bool RenderTools::CanSupportTessellation(ShaderProfile profile)
     case ShaderProfile::DirectX_SM6:
     case ShaderProfile::DirectX_SM5:
     case ShaderProfile::PS4:
+    case ShaderProfile::PS5:
         return true;
     default:
         return false;
@@ -329,15 +325,13 @@ void RenderTools::ComputePitch(PixelFormat format, int32 width, int32 height, ui
     case PixelFormat::BC4_Typeless:
     case PixelFormat::BC4_UNorm:
     case PixelFormat::BC4_SNorm:
-        ASSERT(PixelFormatExtensions::IsCompressed(format));
-        {
-            uint32 nbw = Math::Max<uint32>(1, (width + 3) / 4);
-            uint32 nbh = Math::Max<uint32>(1, (height + 3) / 4);
-            rowPitch = nbw * 8;
-            slicePitch = rowPitch * nbh;
-        }
-        break;
-
+    {
+        const uint32 nbw = Math::Max<uint32>(1, (width + 3) / 4);
+        const uint32 nbh = Math::Max<uint32>(1, (height + 3) / 4);
+        rowPitch = nbw * 8;
+        slicePitch = rowPitch * nbh;
+    }
+    break;
     case PixelFormat::BC2_Typeless:
     case PixelFormat::BC2_UNorm:
     case PixelFormat::BC2_UNorm_sRGB:
@@ -353,32 +347,43 @@ void RenderTools::ComputePitch(PixelFormat format, int32 width, int32 height, ui
     case PixelFormat::BC7_Typeless:
     case PixelFormat::BC7_UNorm:
     case PixelFormat::BC7_UNorm_sRGB:
-        ASSERT(PixelFormatExtensions::IsCompressed(format));
-        {
-            uint32 nbw = Math::Max<uint32>(1, (width + 3) / 4);
-            uint32 nbh = Math::Max<uint32>(1, (height + 3) / 4);
-            rowPitch = nbw * 16;
-            slicePitch = rowPitch * nbh;
-        }
-        break;
-
+    {
+        const uint32 nbw = Math::Max<uint32>(1, (width + 3) / 4);
+        const uint32 nbh = Math::Max<uint32>(1, (height + 3) / 4);
+        rowPitch = nbw * 16;
+        slicePitch = rowPitch * nbh;
+    }
+    break;
+    case PixelFormat::ASTC_4x4_UNorm:
+    case PixelFormat::ASTC_4x4_UNorm_sRGB:
+    case PixelFormat::ASTC_6x6_UNorm:
+    case PixelFormat::ASTC_6x6_UNorm_sRGB:
+    case PixelFormat::ASTC_8x8_UNorm:
+    case PixelFormat::ASTC_8x8_UNorm_sRGB:
+    case PixelFormat::ASTC_10x10_UNorm:
+    case PixelFormat::ASTC_10x10_UNorm_sRGB:
+    {
+        const int32 blockSize = PixelFormatExtensions::ComputeBlockSize(format);
+        const uint32 nbw = Math::Max<uint32>(1, Math::DivideAndRoundUp(width, blockSize));
+        const uint32 nbh = Math::Max<uint32>(1, Math::DivideAndRoundUp(height, blockSize));
+        rowPitch = nbw * 16; // All ASTC blocks use 128 bits
+        slicePitch = rowPitch * nbh;
+    }
+    break;
     case PixelFormat::R8G8_B8G8_UNorm:
     case PixelFormat::G8R8_G8B8_UNorm:
-        ASSERT(PixelFormatExtensions::IsPacked(format));
+    case PixelFormat::YUY2:
         rowPitch = ((width + 1) >> 1) * 4;
         slicePitch = rowPitch * height;
         break;
-
+    case PixelFormat::NV12:
+        rowPitch = width;
+        slicePitch = width * height * 3 / 2;
+        break;
     default:
-        ASSERT(PixelFormatExtensions::IsValid(format));
-        ASSERT(!PixelFormatExtensions::IsCompressed(format) && !PixelFormatExtensions::IsPacked(format) && !PixelFormatExtensions::IsPlanar(format));
-        {
-            uint32 bpp = PixelFormatExtensions::SizeInBits(format);
-
-            // Default byte alignment
-            rowPitch = (width * bpp + 7) / 8;
-            slicePitch = rowPitch * height;
-        }
+        // Default byte alignment
+        rowPitch = (width * PixelFormatExtensions::SizeInBits(format) + 7) / 8;
+        slicePitch = rowPitch * height;
         break;
     }
 }
@@ -424,14 +429,41 @@ uint64 RenderTools::CalculateTextureMemoryUsage(PixelFormat format, int32 width,
     return CalculateTextureMemoryUsage(format, width, height, mipLevels) * depth;
 }
 
-float RenderTools::ComputeBoundsScreenRadiusSquared(const Vector3& origin, float radius, const Vector3& viewOrigin, const Matrix& projectionMatrix)
+float RenderTools::ComputeBoundsScreenRadiusSquared(const Float3& origin, float radius, const Float3& viewOrigin, const Matrix& projectionMatrix)
 {
     const float screenMultiple = 0.5f * Math::Max(projectionMatrix.Values[0][0], projectionMatrix.Values[1][1]);
-    const float distSqr = Vector3::DistanceSquared(origin, viewOrigin);
+    const float distSqr = Float3::DistanceSquared(origin, viewOrigin) * projectionMatrix.Values[2][3];
     return Math::Square(screenMultiple * radius) / Math::Max(1.0f, distSqr);
 }
 
-int32 RenderTools::ComputeModelLOD(const Model* model, const Vector3& origin, float radius, const RenderContext& renderContext)
+int32 RenderTools::ComputeModelLOD(const Model* model, const Float3& origin, float radius, const RenderContext& renderContext)
+{
+    const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
+    const float screenRadiusSquared = ComputeBoundsScreenRadiusSquared(origin, radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
+
+    // Check if model is being culled
+    if (Math::Square(model->MinScreenSize * 0.5f) > screenRadiusSquared)
+        return -1;
+
+    // Skip if no need to calculate LOD
+    int32 lodCount = model->LODs.Count();
+    if (lodCount <= 1)
+        return 0;
+
+    // Iterate backwards and return the first matching LOD
+    const auto* lodData = model->LODs.Get();
+    for (int32 lodIndex = lodCount - 1; lodIndex >= 0; lodIndex--)
+    {
+        if (Math::Square(lodData[lodIndex].ScreenSize * 0.5f) >= screenRadiusSquared)
+        {
+            return lodIndex;
+        }
+    }
+
+    return 0;
+}
+
+int32 RenderTools::ComputeModelLOD(const SkinnedModel* model, const Float3& origin, float radius, const RenderContext& renderContext)
 {
     const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
     const float screenRadiusSquared = ComputeBoundsScreenRadiusSquared(origin, radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
@@ -456,56 +488,375 @@ int32 RenderTools::ComputeModelLOD(const Model* model, const Vector3& origin, fl
     return 0;
 }
 
-int32 RenderTools::ComputeSkinnedModelLOD(const SkinnedModel* model, const Vector3& origin, float radius, const RenderContext& renderContext)
+int32 RenderTools::ComputeSkinnedModelLOD(const SkinnedModel* model, const Float3& origin, float radius, const RenderContext& renderContext)
 {
-    const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
-    const float screenRadiusSquared = ComputeBoundsScreenRadiusSquared(origin, radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
-
-    // Check if model is being culled
-    if (Math::Square(model->MinScreenSize * 0.5f) > screenRadiusSquared)
-        return -1;
-
-    // Skip if no need to calculate LOD
-    if (model->LODs.Count() <= 1)
-        return 0;
-
-    // Iterate backwards and return the first matching LOD
-    for (int32 lodIndex = model->LODs.Count() - 1; lodIndex >= 0; lodIndex--)
-    {
-        if (Math::Square(model->LODs[lodIndex].ScreenSize * 0.5f) >= screenRadiusSquared)
-        {
-            return lodIndex;
-        }
-    }
-
-    return 0;
+    return ComputeModelLOD(model, origin, radius, renderContext);
 }
 
-int32 MipLevelsCount(int32 width, bool useMipLevels)
+void RenderTools::ComputeCascadeUpdateFrequency(int32 cascadeIndex, int32 cascadeCount, int32& updateFrequency, int32& updatePhrase, int32 updateMaxCountPerFrame)
 {
-    if (!useMipLevels)
-        return 1;
+    switch (updateMaxCountPerFrame)
+    {
+    case 1: // 1 cascade update per frame
+        switch (cascadeIndex)
+        {
+        case 0: // Cascade 0
+            updateFrequency = 2;
+            updatePhrase = 0;
+            break;
+        case 1: // Cascade 1
+            updateFrequency = 4;
+            updatePhrase = 1;
+            break;
+        case 2: // Cascade 2
+            updateFrequency = 8;
+            updatePhrase = 3;
+            break;
+        default:
+            if (cascadeCount > 4)
+            {
+                if (cascadeIndex == 3)
+                {
+                    // Cascade 3
+                    updateFrequency = 16;
+                    updatePhrase = 7;
+                }
+                else
+                {
+                    // Other
+                    updateFrequency = 16;
+                    updatePhrase = 15;
+                }
+            }
+            else
+            {
+                // Cascade 3
+                updateFrequency = 8;
+                updatePhrase = 7;
+            }
+        }
+        break;
+    case 2: // 2 cascades update per frame
+        switch (cascadeIndex)
+        {
+        case 0: // Cascade 0
+            updateFrequency = 1;
+            updatePhrase = 0;
+            break;
+        case 1: // Cascade 1
+            updateFrequency = 2;
+            updatePhrase = 0;
+            break;
+        case 2: // Cascade 2
+            updateFrequency = 4;
+            updatePhrase = 1;
+            break;
+        default:
+            if (cascadeCount > 4)
+            {
+                if (cascadeIndex == 3)
+                {
+                    // Cascade 3
+                    updateFrequency = 8;
+                    updatePhrase = 3;
+                }
+                else
+                {
+                    // Other
+                    updateFrequency = 8;
+                    updatePhrase = 7;
+                }
+            }
+            else
+            {
+                // Cascade 3
+                updateFrequency = 4;
+                updatePhrase = 3;
+            }
+        }
+        break;
+    default: // Every frame
+        updateFrequency = 1;
+        updatePhrase = 1;
+        break;
+    }
+}
 
+bool RenderTools::ShouldUpdateCascade(int32 frameIndex, int32 cascadeIndex, int32 cascadeCount, int32 updateMaxCountPerFrame, bool updateForce)
+{
+    int32 updateFrequency, updatePhrase;
+    ComputeCascadeUpdateFrequency(cascadeIndex, cascadeCount, updateFrequency, updatePhrase, updateMaxCountPerFrame);
+    return (frameIndex % updateFrequency == updatePhrase) || updateForce;
+}
+
+float RenderTools::ComputeTemporalTime()
+{
+    const float time = Time::Draw.UnscaledTime.GetTotalSeconds();
+    const float scale = 10;
+    const float integral = roundf(time / scale) * scale;
+    return time - integral;
+}
+
+void RenderTools::CalculateTangentFrame(FloatR10G10B10A2& resultNormal, FloatR10G10B10A2& resultTangent, const Float3& normal)
+{
+    // [Deprecated in v1.10]
+    Float3 n;
+    Float4 t;
+    CalculateTangentFrame(n, t, normal);
+    resultNormal = FloatR10G10B10A2(n, 0);
+    resultTangent = FloatR10G10B10A2(t);
+}
+
+void RenderTools::CalculateTangentFrame(FloatR10G10B10A2& resultNormal, FloatR10G10B10A2& resultTangent, const Float3& normal, const Float3& tangent)
+{
+    // [Deprecated in v1.10]
+    Float3 n;
+    Float4 t;
+    CalculateTangentFrame(n, t, normal, tangent);
+    resultNormal = FloatR10G10B10A2(n, 0);
+    resultTangent = FloatR10G10B10A2(t);
+}
+
+void RenderTools::CalculateTangentFrame(Float3& resultNormal, Float4& resultTangent, const Float3& normal)
+{
+    // Calculate tangent
+    const Float3 c1 = Float3::Cross(normal, Float3::UnitZ);
+    const Float3 c2 = Float3::Cross(normal, Float3::UnitY);
+    const Float3 tangent = c1.LengthSquared() > c2.LengthSquared() ? c1 : c2;
+
+    // Calculate bitangent sign
+    const Float3 bitangent = Float3::Normalize(Float3::Cross(normal, tangent));
+    const byte sign = static_cast<byte>(Float3::Dot(Float3::Cross(bitangent, normal), tangent) < 0.0f ? 1 : 0);
+
+    // Set tangent frame
+    resultNormal = normal * 0.5f + 0.5f;
+    resultTangent = Float4(tangent * 0.5f + 0.5f, sign);
+}
+
+void RenderTools::CalculateTangentFrame(Float3& resultNormal, Float4& resultTangent, const Float3& normal, const Float3& tangent)
+{
+    // Calculate bitangent sign
+    const Float3 bitangent = Float3::Normalize(Float3::Cross(normal, tangent));
+    const byte sign = static_cast<byte>(Float3::Dot(Float3::Cross(bitangent, normal), tangent) < 0.0f ? 1 : 0);
+
+    // Set tangent frame
+    resultNormal = normal * 0.5f + 0.5f;
+    resultTangent = Float4(tangent * 0.5f + 0.5f, sign);
+}
+
+void RenderTools::ComputeSphereModelDrawMatrix(const RenderView& view, const Float3& position, float radius, Matrix& resultWorld, bool& resultIsViewInside)
+{
+    // Construct world matrix
+    constexpr float sphereModelScale = 0.0205f; // Manually tweaked for 'Engine/Models/Sphere' with some slack
+    const float scaling = radius * sphereModelScale;
+    resultWorld = Matrix::Identity;
+    resultWorld.M11 = scaling;
+    resultWorld.M22 = scaling;
+    resultWorld.M33 = scaling;
+    resultWorld.M41 = position.X;
+    resultWorld.M42 = position.Y;
+    resultWorld.M43 = position.Z;
+
+    // Check if view is inside the sphere
+    resultIsViewInside = Float3::DistanceSquared(view.Position, position) < Math::Square(radius * 1.1f); // Manually tweaked bias
+}
+
+void RenderTools::ComputeBoxModelDrawMatrix(const RenderView& view, const OrientedBoundingBox& box, Matrix& resultWorld, bool& resultIsViewInside)
+{
+    // Construct world matrix
+    Matrix::Transformation(box.Transformation.Scale * box.Extents * 2.0f, box.Transformation.Orientation, box.Transformation.Translation, resultWorld);
+
+    // Check if view is inside the sphere
+    resultIsViewInside = box.Contains(view.Position) == ContainmentType::Contains;
+}
+
+float RenderTools::TemporalHalton(int32 index, int32 base)
+{
+    float result = 0.0f;
+    const float invBase = 1.0f / (float)base;
+    float fraction = invBase;
+    while (index > 0)
+    {
+        result += float(index % base) * fraction;
+        index /= base;
+        fraction *= invBase;
+    }
+    return result;
+}
+
+Float2 RenderTools::GetDepthBounds(const RenderView& view, const Float3& nearPoint, const Float3& farPoint)
+{
+#if REVERSE_Z
+    Float3 viewNearPoint = Float3::Transform(nearPoint, view.View);
+    Float3 viewFarPoint = Float3::Transform(farPoint, view.View);
+
+    viewNearPoint.Z = Math::Max(viewNearPoint.Z, view.Near);
+    viewFarPoint.Z = Math::Min(viewFarPoint.Z, view.Far);
+
+    Float4 clipNearPoint = Matrix::TransformPosition(view.Projection, Float4(0, 0, viewNearPoint.Z, 1));
+    Float4 clipFarPoint = Matrix::TransformPosition(view.Projection, Float4(0, 0, viewFarPoint.Z, 1));
+    clipNearPoint /= clipNearPoint.W;
+    clipFarPoint /= clipFarPoint.W;
+
+    // Clamp within valid depth range
+    clipNearPoint.Z = Math::Saturate(clipNearPoint.Z);
+    clipFarPoint.Z = Math::Saturate(clipFarPoint.Z);
+
+    return Float2(clipNearPoint.Z, clipFarPoint.Z);
+#else
+    // Point closest the view
+    const Float4 nearPointClip = Matrix::TransformPosition(view.ViewProjection(), Float4(nearPoint, 1.0));
+    float nearDepth = nearPointClip.Z / nearPointClip.W;
+    if (nearDepth >= 1.0f)
+        nearDepth = 0.0f; // Near point is behind the view
+
+    // Point furthest away the view
+    const Float4 farPointClip = Matrix::TransformPosition(view.ViewProjection(), Float4(farPoint, 1.0f));
+    float farDepth = farPointClip.Z / farPointClip.W;
+    if (farDepth >= 1.0f)
+        farDepth = 1.0f; // Far point is behind the view
+
+    // Clamp within valid depth range
+    nearDepth = Math::Clamp(nearDepth, 0.0f, 1.0f);
+    farDepth = Math::Clamp(farDepth, nearDepth, 1.0f);
+
+    return Float2(nearDepth, farDepth);
+#endif
+}
+
+Float2 RenderTools::GetDepthBounds(const RenderView& view, const BoundingSphere& bounds)
+{
+    const Float3 nearPoint = bounds.Center - bounds.Radius * view.Direction;
+    const Float3 farPoint = bounds.Center + bounds.Radius * view.Direction;
+    return GetDepthBounds(view, nearPoint, farPoint);
+}
+
+Float2 RenderTools::GetDepthBounds(const RenderView& view, const Span<Float3>& points)
+{
+#if REVERSE_Z
+    // Find min and max view depth range for list of points
+    float nearDepth = view.Far, farDepth = view.Near;
+    for (int32 i = 0; i < points.Length(); i++)
+    {
+        const Float3 viewPoint = Float3::Transform(points[i], view.View);
+        nearDepth = Math::Min(nearDepth, viewPoint.Z);
+        farDepth = Math::Max(farDepth, viewPoint.Z);
+    }
+
+    // Project end points to clip space
+    Float4 clipNearPoint = Matrix::TransformPosition(view.Projection, Float4(0, 0, nearDepth, 1));
+    Float4 clipFarPoint = Matrix::TransformPosition(view.Projection, Float4(0, 0, farDepth, 1));
+    clipNearPoint /= clipNearPoint.W;
+    clipFarPoint /= clipFarPoint.W;
+
+    return Float2(clipNearPoint.Z, clipFarPoint.Z);
+#else
+    // Find min and max depth range for list of points
+    float nearDepth = 1.0f, farDepth = 0.0f;
+    for (int32 i = 0; i < points.Length(); i++)
+    {
+        const Float4 pointClip = Matrix::TransformPosition(view.ViewProjection(), Float4(points[i], 1.0));
+        float depth = pointClip.Z / pointClip.W;
+        if (depth >= 1.0f)
+            depth = 0.0f; // Point is behind the view
+        nearDepth = Math::Min(nearDepth, depth);
+        farDepth = Math::Max(farDepth, depth);
+    }
+
+    // Clamp within valid depth range
+    nearDepth = Math::Clamp(nearDepth, 0.0f, 1.0f);
+    farDepth = Math::Clamp(farDepth, nearDepth, 1.0f);
+
+    return Float2(nearDepth, farDepth);
+#endif
+}
+
+Float2 RenderTools::GetDepthBounds(const RenderView& view, const BoundingBox& bounds)
+{
+    Float3 corners[8];
+    bounds.GetCorners(corners);
+    return GetDepthBounds(view, Span<Float3>(corners, 8));
+}
+
+Float2 RenderTools::GetDepthBounds(const RenderView& view, const OrientedBoundingBox& bounds)
+{
+    Float3 corners[8];
+    bounds.GetCorners(corners);
+    return GetDepthBounds(view, Span<Float3>(corners, 8));
+}
+
+float RenderTools::GetDepthBounds(const RenderView& view, const Float3& point, bool near)
+{
+#if REVERSE_Z
+    Float3 viewPoint = Float3::Transform(point, view.View);
+    viewPoint.Z = Math::Clamp(viewPoint.Z, view.Near, view.Far);
+
+    Float4 clipPoint = Matrix::TransformPosition(view.Projection, Float4(0, 0, viewPoint.Z, 1));
+    clipPoint /= clipPoint.W;
+
+    return clipPoint.Z;
+#else
+    const Float4 pointClip = Matrix::TransformPosition(view.ViewProjection(), Float4(point, 1.0));
+    float depth = pointClip.Z / pointClip.W;
+    if (depth >= 1.0f)
+        depth = near ? 0.0f : 1.0f; // Point is behind the view
+    return Math::Clamp(depth, 0.0f, 1.0f);
+#endif
+}
+
+float RenderTools::GetDepthBounds(const RenderView& view, float viewDistance, bool near)
+{
+    Float3 point = view.Position + view.Direction * (viewDistance * 2.0f);
+    return GetDepthBounds(view, point, near);
+}
+
+Float3 RenderTools::GetColorQuantizationError(PixelFormat format)
+{
+    Float3 mantissaBits;
+    switch (format)
+    {
+    case PixelFormat::R11G11B10_Float:
+        mantissaBits = Float3(6, 6, 5);
+        break;
+    case PixelFormat::R10G10B10A2_UNorm:
+        mantissaBits = Float3(10, 10, 10);
+        break;
+    case PixelFormat::R16G16B16A16_Float:
+        mantissaBits = Float3(16, 16, 16);
+        break;
+    case PixelFormat::R32G32B32A32_Float:
+        mantissaBits = Float3(23, 23, 23);
+        break;
+    case PixelFormat::R9G9B9E5_SharedExp:
+        mantissaBits = Float3(5, 6, 5);
+        break;
+    case PixelFormat::R8G8B8A8_UNorm:
+    case PixelFormat::B8G8R8A8_UNorm:
+        mantissaBits = Float3(8, 8, 8);
+        break;
+    default:
+        return Float3::Zero;
+    }
+    return {
+        Math::Pow(0.5f, mantissaBits.X),
+        Math::Pow(0.5f, mantissaBits.Y),
+        Math::Pow(0.5f, mantissaBits.Z)
+    };
+}
+
+int32 MipLevelsCount(int32 width)
+{
     int32 result = 1;
     while (width > 1)
     {
         width >>= 1;
         result++;
     }
-
     return result;
 }
 
-int32 MipLevelsCount(int32 width, int32 height, bool useMipLevels)
+int32 MipLevelsCount(int32 width, int32 height)
 {
-    // Check if use mip maps
-    if (!useMipLevels)
-    {
-        // No mipmaps chain, only single mip map
-        return 1;
-    }
-
-    // Count mip maps
     int32 result = 1;
     while (width > 1 || height > 1)
     {
@@ -518,11 +869,8 @@ int32 MipLevelsCount(int32 width, int32 height, bool useMipLevels)
     return result;
 }
 
-int32 MipLevelsCount(int32 width, int32 height, int32 depth, bool useMipLevels)
+int32 MipLevelsCount(int32 width, int32 height, int32 depth)
 {
-    if (!useMipLevels)
-        return 1;
-
     int32 result = 1;
     while (width > 1 || height > 1 || depth > 1)
     {
@@ -534,39 +882,5 @@ int32 MipLevelsCount(int32 width, int32 height, int32 depth, bool useMipLevels)
             depth >>= 1;
         result++;
     }
-
     return result;
-}
-
-float ViewToCenterLessRadius(const RenderView& view, const Vector3& center, float radius)
-{
-    // Calculate distance from view to sphere center
-    float viewToCenter = Vector3::Distance(view.Position, center);
-
-    // Check if need to fix the radius
-    //if (radius + viewToCenter > view.Far)
-    {
-        // Clamp radius
-        //radius = view.Far - viewToCenter;
-    }
-
-    // Calculate result
-    return viewToCenter - radius;
-}
-
-void MeshBase::SetMaterialSlotIndex(int32 value)
-{
-    if (value < 0 || value >= _model->MaterialSlots.Count())
-    {
-        LOG(Warning, "Cannot set mesh material slot to {0} while model has {1} slots.", value, _model->MaterialSlots.Count());
-        return;
-    }
-
-    _materialSlotIndex = value;
-}
-
-void MeshBase::SetBounds(const BoundingBox& box)
-{
-    _box = box;
-    BoundingSphere::FromBox(box, _sphere);
 }

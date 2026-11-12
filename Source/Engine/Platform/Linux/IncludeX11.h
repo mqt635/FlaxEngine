@@ -1,6 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
+
+#if PLATFORM_LINUX
 
 // Hide warning from old headers
 #define register
@@ -19,6 +21,7 @@ namespace X11
 #include <X11/Xresource.h>
 #include <X11/extensions/Xinerama.h>
 #include <X11/Xcursor/Xcursor.h>
+#include <X11/extensions/Xfixes.h>
 }
 
 // Helper macros
@@ -38,3 +41,5 @@ namespace X11
 #undef Status
 #undef True
 #undef False
+
+#endif

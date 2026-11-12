@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -8,6 +8,7 @@
 #include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/Async/Tasks/GPUUploadBufferTask.h"
+#include <ThirdParty/D3D12MemoryAllocator/D3D12MemAlloc.h>
 
 void GPUBufferViewDX12::SetSRV(D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc)
 {
@@ -38,7 +39,7 @@ void* GPUBufferDX12::Map(GPUResourceMapMode mode)
 {
     D3D12_RANGE readRange;
     D3D12_RANGE* readRangePtr;
-    switch (mode)
+    switch (mode & GPUResourceMapMode::ReadWrite)
     {
     case GPUResourceMapMode::Read:
         readRangePtr = nullptr;
@@ -77,9 +78,10 @@ void GPUBufferDX12::Unmap()
         writtenRangePtr = nullptr;
         break;
     default:
-    CRASH;
+        return;
     }
     _resource->Unmap(0, writtenRangePtr);
+    _lastMapMode = (GPUResourceMapMode)255;
 }
 
 GPUResource* GPUBufferDX12::AsGPUResource() const
@@ -110,32 +112,37 @@ bool GPUBufferDX12::OnInit()
     if (useUAV)
         resourceDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 #if PLATFORM_XBOX_SCARLETT || PLATFORM_XBOX_ONE
-    if (_desc.Flags & GPUBufferFlags::Argument)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Argument))
         resourceDesc.Flags |= D3D12XBOX_RESOURCE_FLAG_ALLOW_INDIRECT_BUFFER;
 #endif
 
-    // Create allocation description
-    D3D12_HEAP_PROPERTIES heapProperties;
+    // Create resource
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
     switch (_desc.Usage)
     {
     case GPUResourceUsage::StagingUpload:
-        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    case GPUResourceUsage::Staging:
+        allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
         break;
     case GPUResourceUsage::StagingReadback:
-        heapProperties.Type = D3D12_HEAP_TYPE_READBACK;
+        allocationDesc.HeapType = D3D12_HEAP_TYPE_READBACK;
         break;
     default:
-        heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     }
-    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    heapProperties.CreationNodeMask = 1;
-    heapProperties.VisibleNodeMask = 1;
-
-    // Create resource
     ID3D12Resource* resource;
-    D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COPY_DEST;
-    VALIDATE_DIRECTX_RESULT(_device->GetDevice()->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc, initialState, nullptr, IID_PPV_ARGS(&resource)));
+    D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON;
+    HRESULT result = _device->Allocator->CreateResource(&allocationDesc, &resourceDesc, initialState, nullptr, &_allocation, IID_PPV_ARGS(&resource));
+    if (FAILED(result))
+    {
+        LOG(Error, "CreatePlacedResource failed");
+        LOG_STR(Error, _desc.ToString());
+#if GPU_ENABLE_RESOURCE_NAMING
+        LOG_STR(Error, GetName());
+#endif
+        RenderToolsDX::LogD3DResult(result, __FILE__, __LINE__);
+        return true;
+    }
 
     // Set state
     initResource(resource, initialState, 1);
@@ -151,12 +158,12 @@ bool GPUBufferDX12::OnInit()
         // But if we are doing it during update or from the other thread we have to register resource data upload job.
         // In both cases options.InitData data have to exist for a few next frames.
 
-        if (_desc.Usage == GPUResourceUsage::StagingUpload)
+        if (_desc.Usage == GPUResourceUsage::StagingUpload || _desc.Usage == GPUResourceUsage::Staging)
         {
             // Modify staging resource data now
             SetData(_desc.InitData, _desc.Size);
         }
-        else if (_device->IsRendering() && IsInMainThread())
+        else if (_device->IsRendering() && IsInRenderThread())
         {
             // Upload resource data now
             _device->GetMainContext()->UpdateBuffer(this, _desc.InitData, _desc.Size);
@@ -171,10 +178,10 @@ bool GPUBufferDX12::OnInit()
     }
 
     // Check if need to use a counter
-    if (_desc.Flags & GPUBufferFlags::Counter || _desc.Flags & GPUBufferFlags::Append)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Counter) || EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Append))
     {
 #if GPU_ENABLE_RESOURCE_NAMING
-        String name = GetName() + TEXT(".Counter");
+        String name = String(GetName()) + TEXT(".Counter");
         _counter = ::New<GPUBufferDX12>(_device, name);
 #else
         _counter = ::New<GPUBufferDX12>(_device, String::Empty);
@@ -187,11 +194,11 @@ bool GPUBufferDX12::OnInit()
     }
 
     // Create views
-    _view.Init(_device, this);
+    _view.Init(_device, this, this);
     if (useSRV)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
-        if (_desc.Flags & GPUBufferFlags::RawBuffer)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::RawBuffer))
             srvDesc.Format = RenderToolsDX::ToDxgiFormat(_desc.Format);
         else
             srvDesc.Format = RenderToolsDX::ToDxgiFormat(PixelFormatExtensions::FindShaderResourceFormat(_desc.Format, false));
@@ -200,7 +207,7 @@ bool GPUBufferDX12::OnInit()
         srvDesc.Buffer.FirstElement = 0;
         srvDesc.Buffer.NumElements = numElements;
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        if (_desc.Flags & GPUBufferFlags::Structured)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Structured))
         {
             srvDesc.Buffer.StructureByteStride = _desc.Stride;
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
@@ -209,7 +216,7 @@ bool GPUBufferDX12::OnInit()
         {
             srvDesc.Buffer.StructureByteStride = 0;
         }
-        if (_desc.Flags & GPUBufferFlags::RawBuffer)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::RawBuffer))
             srvDesc.Buffer.Flags |= D3D12_BUFFER_SRV_FLAG_RAW;
         _view.SetSRV(srvDesc);
     }
@@ -222,11 +229,11 @@ bool GPUBufferDX12::OnInit()
         uavDesc.Buffer.CounterOffsetInBytes = 0;
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
         uavDesc.Buffer.NumElements = numElements;
-        if (_desc.Flags & GPUBufferFlags::Structured)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Structured))
             uavDesc.Buffer.StructureByteStride = _desc.Stride;
-        if (_desc.Flags & GPUBufferFlags::RawBuffer)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::RawBuffer))
             uavDesc.Buffer.Flags |= D3D12_BUFFER_UAV_FLAG_RAW;
-        if (_desc.Flags & GPUBufferFlags::Structured)
+        if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Structured))
             uavDesc.Format = DXGI_FORMAT_UNKNOWN;
         else
             uavDesc.Format = RenderToolsDX::ToDxgiFormat(PixelFormatExtensions::FindUnorderedAccessFormat(_desc.Format));

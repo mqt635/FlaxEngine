@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if USE_VISUAL_STUDIO_DTE
 
@@ -157,6 +157,23 @@ namespace VisualStudio
 		return _wcsicmp(path1, path2) == 0;
     }
 
+	bool AreSolutionPathsEqual(const wchar_t* path1, const wchar_t* path2)
+	{
+		// Compare exact paths first (fast path)
+		if (AreFilePathsEqual(path1, path2))
+			return true;
+		// Strip .sln/.slnx extension and compare stems (handles .sln vs .slnx mismatch)
+		auto stripSolExt = [](const wchar_t* p, size_t& len) {
+			if (len >= 5 && _wcsicmp(p + len - 5, L".slnx") == 0) len -= 5;
+			else if (len >= 4 && _wcsicmp(p + len - 4, L".sln") == 0) len -= 4;
+		};
+		size_t len1 = wcslen(path1);
+		size_t len2 = wcslen(path2);
+		stripSolExt(path1, len1);
+		stripSolExt(path2, len2);
+		return len1 == len2 && _wcsnicmp(path1, path2, len1) == 0;
+	}
+
 	class ConnectionInternal
 	{
 	public:
@@ -183,12 +200,6 @@ namespace VisualStudio
 		}
 	};
 
-	// Scans the running processes to find a running Visual Studio instance with the specified version and open solution.
-	//
-	// @param[in]	clsID			Class ID of the specific Visual Studio version we are looking for.
-	// @param[in]	solutionPath	Path to the solution the instance needs to have open.
-	// @return						DTE object that may be used to interact with the Visual Studio instance, or null if
-	//								not found.
 	static Result FindRunningInstance(ConnectionHandle connection)
 	{
 		HRESULT result;
@@ -232,7 +243,7 @@ namespace VisualStudio
 				if (FAILED(solution->get_FullName(&fullName.Str)))
 					continue;
 
-				if (AreFilePathsEqual(connection->SolutionPath, fullName))
+				if (AreSolutionPathsEqual(connection->SolutionPath, fullName))
 				{
 					// Found
 					connection->DTE = dte;
@@ -286,81 +297,17 @@ namespace VisualStudio
 		return "Visual Studio open timout";
 	}
 
-	static ComPtr<EnvDTE::ProjectItem> FindItem(const ComPtr<EnvDTE::ProjectItems>& projectItems, BSTR filePath)
-	{
-		long count;
-		projectItems->get_Count(&count);
-		if (count == 0)
-			return nullptr;
-
-		for (long i = 1; i <= count; i++) // They are counting from [1..Count]
-		{
-			ComPtr<EnvDTE::ProjectItem> projectItem;
-		    projectItems->Item(_variant_t(i), &projectItem);
-            if (!projectItem)
-                continue;
-
-			short fileCount = 0;
-			projectItem->get_FileCount(&fileCount);
-			for (short fileIndex = 1; fileIndex <= fileCount; fileIndex++)
-			{
-				_bstr_t filename;
-				projectItem->get_FileNames(fileIndex, filename.GetAddress());
-
-				if (filename.GetBSTR() != nullptr && AreFilePathsEqual(filePath, filename))
-				{
-					return projectItem;
-				}
-			}
-
-			ComPtr<EnvDTE::ProjectItems> childProjectItems;
-			projectItem->get_ProjectItems(&childProjectItems);
-			if (childProjectItems)
-			{
-			    ComPtr<EnvDTE::ProjectItem> result = FindItem(childProjectItems, filePath);
-			    if (result)
-				    return result;
-			}
-		}
-
-		return nullptr;
-	}
-
-	static ComPtr<EnvDTE::ProjectItem> FindItem(const ComPtr<EnvDTE::_Solution>& solution, BSTR filePath)
-	{
+    static ComPtr<EnvDTE::ProjectItem> FindItem(const ComPtr<EnvDTE::_Solution>& solution, BSTR filePath)
+    {
         HRESULT result;
 
-		ComPtr<EnvDTE::Projects> projects;
-		result = solution->get_Projects(&projects);
+        ComPtr<EnvDTE::ProjectItem> projectItem;
+        result = solution->FindProjectItem(filePath, &projectItem);
         if (FAILED(result))
             return nullptr;
 
-		long projectsCount = 0;
-		result = projects->get_Count(&projectsCount);
-        if (FAILED(result))
-            return nullptr;
-
-		for (long projectIndex = 1; projectIndex <= projectsCount; projectIndex++) // They are counting from [1..Count]
-		{
-			ComPtr<EnvDTE::Project> project;
-			result = projects->Item(_variant_t(projectIndex), &project);
-			if (FAILED(result) || !project)
-				continue;
-
-			ComPtr<EnvDTE::ProjectItems> projectItems;
-			result = project->get_ProjectItems(&projectItems);
-			if (FAILED(result) || !projectItems)
-				continue;
-
-			auto projectItem = FindItem(projectItems, filePath);
-			if (projectItem)
-			{
-                return projectItem;
-			}
-		}
-
-		return nullptr;
-	}
+        return projectItem;
+    }
 
 	// Opens a file on a specific line in a running Visual Studio instance.
 	//

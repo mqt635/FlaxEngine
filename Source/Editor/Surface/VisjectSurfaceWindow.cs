@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -11,12 +11,12 @@ using FlaxEditor.CustomEditors.GUI;
 using FlaxEditor.GUI;
 using FlaxEditor.GUI.Drag;
 using FlaxEditor.GUI.Tabs;
-using FlaxEditor.History;
 using FlaxEditor.Scripting;
 using FlaxEditor.Viewport.Previews;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Surface
 {
@@ -24,7 +24,7 @@ namespace FlaxEditor.Surface
     /// The base interface for editor windows that use <see cref="FlaxEditor.Surface.VisjectSurface"/> for content editing. 
     /// </summary>
     /// <seealso cref="FlaxEditor.Surface.IVisjectSurfaceOwner" />
-    interface IVisjectSurfaceWindow : IVisjectSurfaceOwner
+    public interface IVisjectSurfaceWindow : IVisjectSurfaceOwner
     {
         /// <summary>
         /// Gets the asset edited by the window.
@@ -40,6 +40,17 @@ namespace FlaxEditor.Surface
         /// The new parameter types enum type to use. Null to disable adding new parameters.
         /// </summary>
         IEnumerable<ScriptType> NewParameterTypes { get; }
+
+        /// <summary>
+        /// Index of the parameter to start renaming once the properties panel is next rebuilt, or -1 if none.
+        /// Used to auto-start renaming of a freshly added parameter.
+        /// </summary>
+        int ParamToRename { get; set; }
+
+        /// <summary>
+        /// Event called when surface gets loaded (eg. after opening the window).
+        /// </summary>
+        event Action SurfaceLoaded;
 
         /// <summary>
         /// Called when parameter rename undo action is performed.
@@ -235,6 +246,7 @@ namespace FlaxEditor.Surface
         {
             var param = Window.VisjectSurface.Parameters[Index];
             param.Meta.SetAttributes(value);
+            Window.VisjectSurface.OnParamEdited(param);
             Window.VisjectSurface.MarkAsEdited();
             Window.OnParamEditAttributesUndo();
         }
@@ -251,6 +263,11 @@ namespace FlaxEditor.Surface
         /// The window reference.
         /// </summary>
         public IVisjectSurfaceWindow Window;
+
+        /// <summary>
+        /// The identifier of the parameter. Empty to auto generate it.
+        /// </summary>
+        public Guid Id = Guid.NewGuid();
 
         /// <summary>
         /// True if adding, false if removing parameter.
@@ -271,6 +288,11 @@ namespace FlaxEditor.Surface
         /// The type of the parameter.
         /// </summary>
         public ScriptType Type;
+
+        /// <summary>
+        /// The value to initialize the parameter with. Can be null to use default one for the parameter type.
+        /// </summary>
+        public object InitValue;
 
         /// <inheritdoc />
         public string ActionString => IsAdd ? "Add parameter" : "Remove parameter";
@@ -298,7 +320,14 @@ namespace FlaxEditor.Surface
             var type = Type;
             if (IsAdd && type.Type == typeof(NormalMap))
                 type = new ScriptType(typeof(Texture));
-            var param = SurfaceParameter.Create(type, Name);
+            var param = new SurfaceParameter
+            {
+                ID = Id,
+                IsPublic = true,
+                Name = Name,
+                Type = type,
+                Value = InitValue ?? TypeUtils.GetDefaultValue(type),
+            };
             if (IsAdd && Type.Type == typeof(NormalMap))
                 param.Value = FlaxEngine.Content.LoadAsyncInternal<Texture>("Engine/Textures/NormalTexture");
             Window.VisjectSurface.Parameters.Insert(Index, param);
@@ -326,6 +355,213 @@ namespace FlaxEditor.Surface
         }
     }
 
+    sealed class ReorderParamAction : IUndoAction
+    {
+        /// <summary>
+        /// The window reference.
+        /// </summary>
+        public IVisjectSurfaceWindow Window;
+
+        /// <summary>
+        /// The parameters editor for this action.
+        /// </summary>
+        public ParametersEditor Editor;
+
+        /// <summary>
+        /// The old index the parameter was at.
+        /// </summary>
+        public int OldIndex;
+
+        /// <summary>
+        /// The new index the parameter will be at.
+        /// </summary>
+        public int NewIndex;
+
+        /// <inheritdoc />
+        public string ActionString => "Reorder Parameter";
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            Window = null;
+            Editor = null;
+        }
+
+        public void Swap(int oldIdx, int newIdx)
+        {
+            if (oldIdx == newIdx)
+                return; // ?
+
+            var parameters = Window.VisjectSurface.Parameters;
+            if (newIdx > oldIdx)
+            {
+                for (int i = oldIdx; i < newIdx; i++)
+                {
+                    SurfaceParameter old = parameters[i + 1];
+                    parameters[i + 1] = parameters[i];
+                    parameters[i] = old;
+                }
+            }
+            else
+            {
+                for (int i = oldIdx; i > newIdx; i--)
+                {
+                    SurfaceParameter old = parameters[i - 1];
+                    parameters[i - 1] = parameters[i];
+                    parameters[i] = old;
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public void Do()
+        {
+            Swap(OldIndex, NewIndex);
+            Window.VisjectSurface.OnParamReordered();
+        }
+
+        /// <inheritdoc />
+        public void Undo()
+        {
+            Swap(NewIndex, OldIndex);
+            Window.VisjectSurface.OnParamReordered();
+        }
+    }
+
+    /// <summary>
+    /// Custom draggable property name label that handles reordering visject parameters.
+    /// </summary>
+    /// <seealso cref="FlaxEditor.CustomEditors.GUI.DraggablePropertyNameLabel" />
+    [HideInEditor]
+    public class ParameterPropertyNameLabel : DraggablePropertyNameLabel
+    {
+        private ParametersEditor _editor;
+        private IVisjectSurfaceWindow _window;
+        private Rectangle _arrangeButtonRect;
+        private bool _arrangeButtonInUse;
+
+        /// <inheritdoc />
+        public ParameterPropertyNameLabel(string name, ParametersEditor editor)
+        : base(name)
+        {
+            _editor = editor;
+            _window = _editor.Values[0] as IVisjectSurfaceWindow;
+            _arrangeButtonRect = new Rectangle(2, 3, 12, 12);
+
+            // Extend margin of the label to support a dragging handle
+            Margin m = Margin;
+            m.Left += 16;
+            Margin = m;
+        }
+
+        private bool ArrangeAreaCheck(out int index, out Rectangle rect)
+        {
+            var child = _editor.ChildrenEditors[0];
+            var container = child.Layout.ContainerControl;
+            var mousePosition = container.PointFromScreen(Input.MouseScreenPosition);
+            var barSidesExtend = 20.0f;
+            var barHeight = 5.0f;
+            var barCheckAreaHeight = 40.0f;
+            var pos = mousePosition.Y + barCheckAreaHeight * 0.5f;
+
+            for (int i = 0; i < container.Children.Count / 2; i++)
+            {
+                var containerChild = container.Children[i * 2]; // times 2 to skip the value editor
+                if (Mathf.IsInRange(pos, containerChild.Top, containerChild.Top + barCheckAreaHeight) || (i == 0 && pos < containerChild.Top))
+                {
+                    index = i;
+                    var p1 = containerChild.UpperLeft;
+                    rect = new Rectangle(PointFromParent(p1) - new Float2(barSidesExtend * 0.5f, barHeight * 0.5f), Width + barSidesExtend, barHeight);
+                    return true;
+                }
+            }
+
+            var p2 = container.Children[((container.Children.Count / 2) - 1) * 2].BottomLeft;
+            if (pos > p2.Y)
+            {
+                index = (container.Children.Count / 2) - 1;
+                rect = new Rectangle(PointFromParent(p2) - new Float2(barSidesExtend * 0.5f, barHeight * 0.5f), Width + barSidesExtend, barHeight);
+                return true;
+            }
+
+            index = -1;
+            rect = Rectangle.Empty;
+            return false;
+        }
+
+        /// <inheritdoc />
+        public override void Draw()
+        {
+            base.Draw();
+
+            var style = Style.Current;
+            var mousePosition = PointFromScreen(Input.MouseScreenPosition);
+            var dragBarColor = _arrangeButtonRect.Contains(mousePosition) ? style.Foreground : style.ForegroundGrey;
+            Render2D.DrawSprite(Editor.Instance.Icons.DragBar12, _arrangeButtonRect, _arrangeButtonInUse ? Color.Orange : dragBarColor);
+            if (_arrangeButtonInUse && ArrangeAreaCheck(out _, out var arrangeTargetRect))
+            {
+                Render2D.FillRectangle(arrangeTargetRect, style.Selection);
+            }
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseDown(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left && _arrangeButtonRect.Contains(ref location))
+            {
+                _arrangeButtonInUse = true;
+                Focus();
+                StartMouseCapture();
+                return true;
+            }
+
+            return base.OnMouseDown(location, button);
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left && _arrangeButtonInUse)
+            {
+                _arrangeButtonInUse = false;
+                EndMouseCapture();
+                ArrangeAreaCheck(out var index, out _);
+                var action = new ReorderParamAction
+                {
+                    OldIndex = (int)Tag,
+                    NewIndex = index,
+                    Window = _window,
+                    Editor = _editor
+                };
+                action.Do();
+                _window.Undo.AddAction(action);
+            }
+
+            return base.OnMouseUp(location, button);
+        }
+
+        /// <inheritdoc />
+        public override void OnLostFocus()
+        {
+            if (_arrangeButtonInUse)
+            {
+                _arrangeButtonInUse = false;
+                EndMouseCapture();
+            }
+
+            base.OnLostFocus();
+        }
+
+        /// <inheritdoc />
+        protected override void OnSizeChanged()
+        {
+            base.OnSizeChanged();
+
+            // Center the drag button vertically
+            _arrangeButtonRect = new Rectangle(2, Mathf.Ceil((Height - 12) * 0.5f) + 1, 12, 12);
+        }
+    }
+
     /// <summary>
     /// Custom editor for editing Visject Surface parameters collection.
     /// </summary>
@@ -336,6 +572,11 @@ namespace FlaxEditor.Surface
         {
             //new LimitAttribute(float.MinValue, float.MaxValue, 0.1f),
         };
+
+        /// <summary>
+        /// True if show only public properties, otherwise will display all properties.
+        /// </summary>
+        protected bool ShowOnlyPublic = true;
 
         /// <inheritdoc />
         public override DisplayStyle Style => DisplayStyle.InlineIntoParent;
@@ -350,23 +591,15 @@ namespace FlaxEditor.Surface
                 layout.Label("No parameters");
                 return;
             }
-            if (asset.LastLoadFailed)
-            {
-                layout.Label("Failed to load asset");
+            if (Utilities.Utils.OnAssetProperties(layout, asset))
                 return;
-            }
-            if (!asset.IsLoaded)
-            {
-                layout.Label("Loading...");
-                return;
-            }
             var parameters = window.VisjectSurface.Parameters;
-            GroupElement lastGroup = null;
-
+            ParameterPropertyNameLabel labelToRename = null;
+            CustomEditors.Editors.GenericEditor.OnGroupsBegin();
             for (int i = 0; i < parameters.Count; i++)
             {
                 var p = parameters[i];
-                if (!p.IsPublic)
+                if (!p.IsPublic && ShowOnlyPublic)
                     continue;
 
                 var pIndex = i;
@@ -374,25 +607,13 @@ namespace FlaxEditor.Surface
                 var attributes = p.Meta.GetAttributes();
                 if (attributes == null || attributes.Length == 0)
                     attributes = DefaultAttributes;
-                var itemLayout = layout;
                 var name = p.Name;
 
                 // Editor Display
                 var editorDisplay = (EditorDisplayAttribute)attributes.FirstOrDefault(x => x is EditorDisplayAttribute);
-                if (editorDisplay?.Group != null)
-                {
-                    if (lastGroup == null || lastGroup.Panel.HeaderText != editorDisplay.Group)
-                    {
-                        lastGroup = layout.Group(editorDisplay.Group);
-                        lastGroup.Panel.Open(false);
-                    }
-                    itemLayout = lastGroup;
-                }
-                else
-                {
-                    lastGroup = null;
-                    itemLayout = layout;
-                }
+                var itemLayout = CustomEditors.Editors.GenericEditor.OnGroup(layout, editorDisplay);
+                if (itemLayout is GroupElement groupElement)
+                    groupElement.Panel.Open(false);
                 if (editorDisplay?.Name != null)
                     name = editorDisplay.Name;
 
@@ -404,7 +625,7 @@ namespace FlaxEditor.Surface
                 // Header
                 var header = (HeaderAttribute)attributes.FirstOrDefault(x => x is HeaderAttribute);
                 if (header != null)
-                    itemLayout.Header(header.Text);
+                    itemLayout.Header(header);
 
                 var propertyValue = new CustomValueContainer
                 (
@@ -415,17 +636,25 @@ namespace FlaxEditor.Surface
                  attributes
                 );
 
-                var propertyLabel = new DraggablePropertyNameLabel(name)
+                var propertyLabel = new ParameterPropertyNameLabel(name, this)
                 {
                     Tag = pIndex,
-                    Drag = OnDragParameter
+                    Drag = OnDragParameter,
                 };
+                if (!p.IsPublic)
+                    propertyLabel.TextColor = propertyLabel.TextColor.RGBMultiplied(0.7f);
+                var tooltipText = "Type: " + window.VisjectSurface.GetTypeName(p.Type);
                 var tooltip = (TooltipAttribute)attributes.FirstOrDefault(x => x is TooltipAttribute);
+                if (tooltip != null)
+                    tooltipText += '\n' + tooltip.Text;
                 propertyLabel.MouseLeftDoubleClick += (label, location) => StartParameterRenaming(pIndex, label);
                 propertyLabel.SetupContextMenu += OnPropertyLabelSetupContextMenu;
-                var property = itemLayout.AddPropertyItem(propertyLabel, tooltip?.Text);
-                property.Object(propertyValue);
+                if (pIndex == window.ParamToRename)
+                    labelToRename = propertyLabel;
+                var property = itemLayout.AddPropertyItem(propertyLabel, tooltipText);
+                property.Property("Value", propertyValue);
             }
+            CustomEditors.Editors.GenericEditor.OnGroupsEnd();
 
             // Parameters creating
             var newParameterTypes = window.NewParameterTypes;
@@ -435,6 +664,22 @@ namespace FlaxEditor.Surface
                 var newParam = layout.Button("Add parameter...");
                 newParam.Button.ButtonClicked += OnAddParameterButtonClicked;
                 layout.Space(10);
+            }
+
+            // Defer renaming a newly added param once its label is built and laid out
+            // Adding a param can rebuild the panel more than once (disposing earlier labels) 
+            // Because of this every rebuild recaptures the current label, only the surviving one actually calls StartParameterRenaming
+            if (labelToRename != null)
+            {
+                var index = window.ParamToRename;
+                var label = labelToRename;
+                FlaxEngine.Scripting.InvokeOnUpdate(() =>
+                {
+                    if (label.IsDisposing)
+                        return; // A latter rebuild replaced this label, its own callback will handle it
+                    window.ParamToRename = -1;
+                    StartParameterRenaming(index, label);
+                });
             }
         }
 
@@ -453,7 +698,7 @@ namespace FlaxEditor.Surface
                 cm.AddItem(item);
             }
             cm.ItemClicked += OnAddParameterItemClicked;
-            cm.SortChildren();
+            cm.SortItems();
             cm.Show(button.Parent, button.BottomLeft);
         }
 
@@ -468,12 +713,13 @@ namespace FlaxEditor.Surface
             {
                 Window = window,
                 IsAdd = true,
-                Name = StringUtils.IncrementNameNumber("New parameter", x => OnParameterRenameValidate(null, x)),
+                Name = Utilities.Utils.IncrementNameNumber("New parameter", x => OnParameterRenameValidate(null, x)),
                 Type = type,
                 Index = window.VisjectSurface.Parameters.Count,
             };
             window.VisjectSurface.Undo.AddAction(action);
             action.Do();
+            window.ParamToRename = action.Index;
         }
 
         private DragData OnDragParameter(DraggablePropertyNameLabel label)
@@ -487,9 +733,28 @@ namespace FlaxEditor.Surface
         {
             var index = (int)label.Tag;
             menu.AddSeparator();
+            menu.AddButton("Copy name", () => Clipboard.Text = ((IVisjectSurfaceWindow)Values[0]).VisjectSurface.Parameters[index].Name);
+            // TODO: move 'Copy all names' to context menu of the Properties category (as it's not item-specific)
+            menu.AddButton("Copy all names", CopyAllParameterNamesAsConstantCSharpCode);
+            menu.AddSeparator();
             menu.AddButton("Rename", () => StartParameterRenaming(index, label));
             menu.AddButton("Edit attributes...", () => EditAttributesParameter(index, label));
             menu.AddButton("Delete", () => DeleteParameter(index));
+            OnParamContextMenu(index, menu);
+        }
+
+        private void CopyAllParameterNamesAsConstantCSharpCode()
+        {
+            string allParamNames = "";
+            foreach (var param in ((IVisjectSurfaceWindow)Values[0]).VisjectSurface.Parameters)
+            {
+                string cleanParamName = param.Name.Replace(" ", "");
+                // Filter out headers and other non-parameter entries that can be present in the parameters list
+                if (string.IsNullOrEmpty(cleanParamName))
+                    continue;
+                allParamNames += $"private const string {cleanParamName}ParameterName = \"{param.Name}\";\n";
+            }
+            Clipboard.Text = allParamNames;
         }
 
         private void StartParameterRenaming(int index, Control label)
@@ -540,12 +805,21 @@ namespace FlaxEditor.Surface
                 window.VisjectSurface.Undo.AddAction(action);
                 action.Do();
             };
-            editor.Show(label, label.Center);
+            editor.Show(label, label.Size * 0.5f);
         }
 
         private void DeleteParameter(int index)
         {
             var window = (IVisjectSurfaceWindow)Values[0];
+            SurfaceParameter param = window.VisjectSurface.Parameters[index];
+
+            if (Editor.Instance.Options.Options.Interface.WarnOnDeletingUsedVisjectParameter && window.VisjectSurface.IsParamUsed(param))
+            {
+                string msg = $"Delete parameter {param.Name}?\nParameter is being used in a graph.\n\nYou can disable this warning in the editor settings.";
+                if (MessageBox.Show(msg, "Delete parameter", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                    return;
+            }
+
             var action = new AddRemoveParamAction
             {
                 Window = window,
@@ -554,6 +828,24 @@ namespace FlaxEditor.Surface
             };
             window.VisjectSurface.Undo.AddAction(action);
             action.Do();
+        }
+
+        /// <summary>
+        /// Called to display additional context options for a parameter.
+        /// </summary>
+        /// <param name="index">The zero-based parameter index.</param>
+        /// <param name="menu">The context menu.</param>
+        protected virtual void OnParamContextMenu(int index, FlaxEditor.GUI.ContextMenu.ContextMenu menu)
+        {
+            menu.AddSeparator();
+            menu.AddButton("Find references...", () => OnFindReferences(index));
+        }
+
+        private void OnFindReferences(int index)
+        {
+            var window = (IVisjectSurfaceWindow)Values[0];
+            var param = window.VisjectSurface.Parameters[index];
+            Editor.Instance.ContentFinding.ShowSearch(window.VisjectSurface, '\"' + FlaxEngine.Json.JsonSerializer.GetStringID(param.ID) + '\"');
         }
     }
 
@@ -643,9 +935,21 @@ namespace FlaxEditor.Surface
         /// </summary>
         protected Tabs _tabs;
 
-        private readonly ToolStripButton _saveButton;
-        private readonly ToolStripButton _undoButton;
-        private readonly ToolStripButton _redoButton;
+        /// <summary>
+        /// Save button on a toolstrip.
+        /// </summary>
+        protected ToolStripButton _saveButton;
+
+        /// <summary>
+        /// Undo button on a toolstrip.
+        /// </summary>
+        protected ToolStripButton _undoButton;
+
+        /// <summary>
+        /// Redo button on a toolstrip.
+        /// </summary>
+        protected ToolStripButton _redoButton;
+
         private bool _showWholeGraphOnLoad = true;
 
         /// <summary>
@@ -733,7 +1037,7 @@ namespace FlaxEditor.Surface
                 {
                     AnchorPreset = AnchorPresets.StretchAll,
                     Offsets = Margin.Zero,
-                    TabsSize = new Vector2(60, 20),
+                    TabsSize = new Float2(60, Tabs.MinSize),
                     TabsTextHorizontalAlignment = TextAlignment.Center,
                     UseScroll = true,
                     Parent = _split2.Panel2
@@ -748,18 +1052,6 @@ namespace FlaxEditor.Surface
                 _propertiesEditor.Panel.Parent = _split2.Panel2;
             }
             _propertiesEditor.Modified += OnPropertyEdited;
-
-            // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Save64, Save).LinkTooltip("Save");
-            _toolstrip.AddSeparator();
-            _undoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo (Ctrl+Z)");
-            _redoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo (Ctrl+Y)");
-            _toolstrip.AddSeparator();
-            _toolstrip.AddButton(editor.Icons.CenterView64, ShowWholeGraph).LinkTooltip("Show whole graph");
-
-            // Setup input actions
-            InputActions.Add(options => options.Undo, _undo.PerformUndo);
-            InputActions.Add(options => options.Redo, _undo.PerformRedo);
         }
 
         private void OnUndoRedo(IUndoAction action)
@@ -866,10 +1158,16 @@ namespace FlaxEditor.Surface
         }
 
         /// <inheritdoc />
+        public Asset SurfaceAsset => Asset;
+
+        /// <inheritdoc />
         public abstract string SurfaceName { get; }
 
         /// <inheritdoc />
         public abstract byte[] SurfaceData { get; set; }
+
+        /// <inheritdoc />
+        public VisjectSurfaceContext ParentContext => null;
 
         /// <inheritdoc />
         public void OnContextCreated(VisjectSurfaceContext context)
@@ -956,6 +1254,7 @@ namespace FlaxEditor.Surface
                     _showWholeGraphOnLoad = false;
                     _surface.ShowWholeGraph();
                 }
+                SurfaceLoaded?.Invoke();
             }
             else if (_refreshPropertiesOnLoad && _asset.IsLoaded)
             {
@@ -971,18 +1270,15 @@ namespace FlaxEditor.Surface
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split1", _split1.SplitterValue.ToString());
-            writer.WriteAttributeString("Split2", _split2.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split1", _split1);
+            LayoutSerializeSplitter(writer, "Split2", _split2);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split1"), out float value1))
-                _split1.SplitterValue = value1;
-
-            if (float.TryParse(node.GetAttribute("Split2"), out value1))
-                _split2.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split1", _split1);
+            LayoutDeserializeSplitter(node, "Split2", _split2);
         }
 
         /// <inheritdoc />
@@ -1006,6 +1302,12 @@ namespace FlaxEditor.Surface
         public abstract IEnumerable<ScriptType> NewParameterTypes { get; }
 
         /// <inheritdoc />
+        public int ParamToRename { get; set; } = -1;
+
+        /// <inheritdoc />
+        public event Action SurfaceLoaded;
+
+        /// <inheritdoc />
         public virtual void OnParamRenameUndo()
         {
         }
@@ -1026,7 +1328,6 @@ namespace FlaxEditor.Surface
         public virtual void OnParamRemoveUndo()
         {
             _refreshPropertiesOnLoad = true;
-            //_propertiesEditor.BuildLayoutOnUpdate();
             _propertiesEditor.BuildLayout();
         }
 

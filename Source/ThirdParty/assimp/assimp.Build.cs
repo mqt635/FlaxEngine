@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -7,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://www.assimp.org/
 /// </summary>
-public class assimp : DepsModule
+public class assimp : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -16,9 +16,6 @@ public class assimp : DepsModule
 
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "LICENSE";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -35,8 +32,8 @@ public class assimp : DepsModule
             options.DelayLoadLibraries.Add("assimp-vc140-md.dll");
             break;
         case TargetPlatform.Linux:
+        case TargetPlatform.Mac:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libassimp.a"));
-            options.OutputFiles.Add(Path.Combine(depsRoot, "libIrrXML.a"));
             break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }

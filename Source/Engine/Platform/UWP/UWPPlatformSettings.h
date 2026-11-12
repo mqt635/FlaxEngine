@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,10 +9,10 @@
 /// <summary>
 /// Universal Windows Platform settings.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API UWPPlatformSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API UWPPlatformSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(UWPPlatformSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(UWPPlatformSettings);
+    API_AUTO_SERIALIZATION();
 
     /// <summary>
     /// The preferred launch windowing mode.
@@ -66,8 +66,6 @@ public:
         All = Landscape | LandscapeFlipped | Portrait | PortraitFlipped
     };
 
-public:
-
     /// <summary>
     /// The preferred launch windowing mode. Always fullscreen on Xbox.
     /// </summary>
@@ -98,22 +96,10 @@ public:
     API_FIELD(Attributes="EditorOrder(2010), DefaultValue(false), EditorDisplay(\"Graphics\", \"Support DirectX 10\")")
     bool SupportDX10 = false;
 
-public:
-
     /// <summary>
     /// Gets the instance of the settings asset (default value if missing). Object returned by this method is always loaded with valid data to use.
     /// </summary>
     static UWPPlatformSettings* Get();
-
-    // [SettingsBase]
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) final override
-    {
-        DESERIALIZE(PreferredLaunchWindowingMode);
-        DESERIALIZE(AutoRotationPreferences);
-        DESERIALIZE(CertificateLocation);
-        DESERIALIZE(SupportDX11);
-        DESERIALIZE(SupportDX10);
-    }
 };
 
 #if PLATFORM_UWP

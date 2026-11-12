@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -20,18 +20,15 @@ class GPUDeviceNull : public GPUDevice
     friend GPUSwapChainNull;
 
 private:
-
     GPUContextNull* _mainContext;
     GPUAdapterNull* _adapter;
 
 public:
-
     static GPUDevice* Create();
     GPUDeviceNull();
     ~GPUDeviceNull();
 
 public:
-
     // [GPUDevice]
     GPUContext* GetMainContext() override;
     GPUAdapter* GetAdapter() const override;
@@ -41,13 +38,16 @@ public:
     void Draw() override;
     void Dispose() override;
     void WaitForGPU() override;
+    bool GetQueryResult(uint64 queryID, uint64& result, bool wait = false) override;
     GPUTexture* CreateTexture(const StringView& name) override;
     GPUShader* CreateShader(const StringView& name) override;
     GPUPipelineState* CreatePipelineState() override;
     GPUTimerQuery* CreateTimerQuery() override;
     GPUBuffer* CreateBuffer(const StringView& name) override;
     GPUSampler* CreateSampler() override;
+    GPUVertexLayout* CreateVertexLayout(const VertexElements& elements, bool explicitOffsets) override;
     GPUSwapChain* CreateSwapChain(Window* window) override;
+    GPUConstantBuffer* CreateConstantBuffer(uint32 size, const StringView& name) override;
 };
 
 extern GPUDevice* CreateGPUDeviceNull();

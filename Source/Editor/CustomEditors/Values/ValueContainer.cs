@@ -1,11 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using FlaxEditor.Scripting;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors
 {
@@ -78,7 +80,7 @@ namespace FlaxEditor.CustomEditors
                 var theFirstType = TypeUtils.GetObjectType(this[0]);
                 for (int i = 1; i < Count; i++)
                 {
-                    if (theFirstType != TypeUtils.GetObjectType(this[1]))
+                    if (theFirstType != TypeUtils.GetObjectType(this[i]))
                         return true;
                 }
                 return false;
@@ -139,6 +141,11 @@ namespace FlaxEditor.CustomEditors
         public bool IsArray => Type != ScriptType.Null && Type.IsArray;
 
         /// <summary>
+        /// True if member or type has <see cref="System.ObsoleteAttribute"/> that marks it as obsolete.
+        /// </summary>
+        public bool IsObsolete { get; }
+
+        /// <summary>
         /// Gets the values types array (without duplicates).
         /// </summary>
         public ScriptType[] ValuesTypes
@@ -159,6 +166,7 @@ namespace FlaxEditor.CustomEditors
         {
             Info = info;
             Type = Info.ValueType;
+            IsObsolete = Info.HasAttribute(typeof(ObsoleteAttribute), true);
         }
 
         /// <summary>
@@ -187,7 +195,7 @@ namespace FlaxEditor.CustomEditors
                     {
                         for (int i = 0; i < Count; i++)
                         {
-                            if (this[i] == referenceSceneObject)
+                            if ((SceneObject)this[i] == referenceSceneObject)
                                 continue;
 
                             if (this[i] == null || (this[i] is SceneObject valueSceneObject && valueSceneObject && valueSceneObject.PrefabObjectID != referenceSceneObject.PrefabObjectID))
@@ -198,7 +206,7 @@ namespace FlaxEditor.CustomEditors
                     {
                         for (int i = 0; i < Count; i++)
                         {
-                            if (!Equals(this[i], _referenceValue))
+                            if (!ValueEquals(this[i], _referenceValue))
                                 return true;
                         }
                     }
@@ -228,12 +236,21 @@ namespace FlaxEditor.CustomEditors
                 {
                     for (int i = 0; i < Count; i++)
                     {
-                        if (!Equals(this[i], _defaultValue))
+                        if (!ValueEquals(this[i], _defaultValue))
                             return true;
                     }
                 }
                 return false;
             }
+        }
+
+        private static bool ValueEquals(object objA, object objB)
+        {
+            // Special case for String (null string is kind of equal to empty string from the user perspective)
+            if (objA == null && objB is string objBStr && objBStr.Length == 0)
+                return true;
+
+            return FlaxEngine.Json.JsonSerializer.ValueEquals(objA, objB);
         }
 
         /// <summary>
@@ -263,6 +280,28 @@ namespace FlaxEditor.CustomEditors
                 {
                     _defaultValue = defaultValueAttribute.Value;
                     _hasDefaultValue = true;
+
+                    if (_defaultValue != null && _defaultValue.GetType() != Type.Type)
+                    {
+                        // Workaround for DefaultValueAttribute that doesn't support certain value types storage
+                        if (Type.Type == typeof(sbyte))
+                            _defaultValue = Convert.ToSByte(_defaultValue);
+                        else if (Type.Type == typeof(short))
+                            _defaultValue = Convert.ToInt16(_defaultValue);
+                        else if (Type.Type == typeof(ushort))
+                            _defaultValue = Convert.ToUInt16(_defaultValue);
+                        else if (Type.Type == typeof(uint))
+                            _defaultValue = Convert.ToUInt32(_defaultValue);
+                        else if (Type.Type == typeof(ulong))
+                            _defaultValue = Convert.ToUInt64(_defaultValue);
+                        else if (Type.Type == typeof(long))
+                            _defaultValue = Convert.ToInt64(_defaultValue);
+                    }
+                    else if (_defaultValue == null && Type.IsValueType)
+                    {
+                        // Use zero value for value-types that have null as default value for some reason
+                        _defaultValue = Type.CreateInstance();
+                    }
                 }
             }
             if (instanceValues._hasReferenceValue)
@@ -352,10 +391,21 @@ namespace FlaxEditor.CustomEditors
             if (instanceValues.Count != Count)
                 throw new ArgumentException();
 
-            for (int i = 0; i < Count; i++)
+            if (value is IList l && l.Count == Count && Count > 1)
             {
-                Info.SetValue(instanceValues[i], value);
-                this[i] = Info.GetValue(instanceValues[i]);
+                for (int i = 0; i < Count; i++)
+                {
+                    Info.SetValue(instanceValues[i], l[i]);
+                    this[i] = Info.GetValue(instanceValues[i]);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    Info.SetValue(instanceValues[i], value);
+                    this[i] = Info.GetValue(instanceValues[i]);
+                }
             }
         }
 

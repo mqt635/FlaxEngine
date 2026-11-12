@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -21,7 +21,9 @@ API_ENUM() enum class PlatformType
 
     /// <summary>
     /// Running Windows Store App (Universal Windows Platform).
+    /// [Deprecated and unsupported platform]
     /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"UWP\"), Obsolete")
     UWP = 3,
 
     /// <summary>
@@ -32,6 +34,7 @@ API_ENUM() enum class PlatformType
     /// <summary>
     /// Running on PlayStation 4.
     /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"PS4\")")
     PS4 = 5,
 
     /// <summary>
@@ -48,6 +51,28 @@ API_ENUM() enum class PlatformType
     /// Running on Switch.
     /// </summary>
     Switch = 8,
+
+    /// <summary>
+    /// Running on PlayStation 5.
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"PS5\")")
+    PS5 = 9,
+
+    /// <summary>
+    /// Running on Mac.
+    /// </summary>
+    Mac = 10,
+
+    /// <summary>
+    /// Running on iPhone.
+    /// </summary>
+    API_ENUM(Attributes="EditorDisplay(null, \"iOS\")")
+    iOS = 11,
+
+    /// <summary>
+    /// Running on Web.
+    /// </summary>
+    Web = 12,
 };
 
 /// <summary>
@@ -103,6 +128,9 @@ API_ENUM() enum class ArchitectureType
 #if !defined(PLATFORM_PS4)
 #define PLATFORM_PS4 0
 #endif
+#if !defined(PLATFORM_PS5)
+#define PLATFORM_PS5 0
+#endif
 #if !defined(PLATFORM_XBOX_SCARLETT)
 #define PLATFORM_XBOX_SCARLETT 0
 #endif
@@ -112,14 +140,17 @@ API_ENUM() enum class ArchitectureType
 #if !defined(PLATFORM_MAC)
 #define PLATFORM_MAC 0
 #endif
-#if !defined(PLATFORM_OSX)
-#define PLATFORM_OSX 0
-#endif
 #if !defined(PLATFORM_IOS)
 #define PLATFORM_IOS 0
 #endif
 #if !defined(PLATFORM_SWITCH)
 #define PLATFORM_SWITCH 0
+#endif
+#if !defined(PLATFORM_SDL)
+#define PLATFORM_SDL 0
+#endif
+#if !defined(PLATFORM_WEB)
+#define PLATFORM_WEB 0
 #endif
 
 #if PLATFORM_WINDOWS
@@ -130,6 +161,8 @@ API_ENUM() enum class ArchitectureType
 #include "Linux/LinuxDefines.h"
 #elif PLATFORM_PS4
 #include "Platforms/PS4/Engine/Platform/PS4Defines.h"
+#elif PLATFORM_PS5
+#include "Platforms/PS5/Engine/Platform/PS5Defines.h"
 #elif PLATFORM_XBOX_ONE
 #include "Platforms/XboxOne/Engine/Platform/XboxOneDefines.h"
 #elif PLATFORM_XBOX_SCARLETT
@@ -138,6 +171,12 @@ API_ENUM() enum class ArchitectureType
 #include "Android/AndroidDefines.h"
 #elif PLATFORM_SWITCH
 #include "Platforms/Switch/Engine/Platform/SwitchDefines.h"
+#elif PLATFORM_MAC
+#include "Mac/MacDefines.h"
+#elif PLATFORM_IOS
+#include "iOS/iOSDefines.h"
+#elif PLATFORM_WEB
+#include "Web/WebDefines.h"
 #else
 #error Missing Defines implementation!
 #endif
@@ -148,6 +187,9 @@ API_ENUM() enum class ArchitectureType
 #endif
 #ifndef PLATFORM_DESKTOP
 #define PLATFORM_DESKTOP 0
+#endif
+#ifndef PLATFORM_CONSOLE
+#define PLATFORM_CONSOLE 0
 #endif
 #ifndef PLATFORM_ARCH_X64
 #define PLATFORM_ARCH_X64 0
@@ -161,8 +203,8 @@ API_ENUM() enum class ArchitectureType
 #ifndef PLATFORM_ARCH_ARM64
 #define PLATFORM_ARCH_ARM64 0
 #endif
-#ifndef PLATFORM_WCHAR_IS_CHAR16
-#define PLATFORM_WCHAR_IS_CHAR16 0
+#ifndef PLATFORM_TEXT_IS_CHAR16
+#define PLATFORM_TEXT_IS_CHAR16 0
 #endif
 #ifndef PLATFORM_DEBUG_BREAK
 #define PLATFORM_DEBUG_BREAK
@@ -173,24 +215,34 @@ API_ENUM() enum class ArchitectureType
 #ifndef PLATFORM_THREADS_LIMIT
 #define PLATFORM_THREADS_LIMIT 64
 #endif
+#ifndef PLATFORM_MEMORY_ALIGNMENT
+#define PLATFORM_MEMORY_ALIGNMENT 16
+#endif
 #define PLATFORM_32BITS (!PLATFORM_64BITS)
 
 // Platform family defines
 #define PLATFORM_WINDOWS_FAMILY (PLATFORM_WINDOWS || PLATFORM_UWP || PLATFORM_XBOX_ONE || PLATFORM_XBOX_SCARLETT)
 #define PLATFORM_MICROSOFT_FAMILY (PLATFORM_WINDOWS_FAMILY)
-#define PLATFORM_UNIX_FAMILY (PLATFORM_LINUX || PLATFORM_ANDROID || PLATFORM_PS4)
-#define PLATFORM_APPLE_FAMILY (PLATFORM_IOS || PLATFORM_OSX)
+#define PLATFORM_APPLE_FAMILY (PLATFORM_MAC || PLATFORM_IOS)
+#define PLATFORM_UNIX_FAMILY (PLATFORM_LINUX || PLATFORM_ANDROID || PLATFORM_PS4 || PLATFORM_PS5 || PLATFORM_APPLE_FAMILY)
 
 // SIMD defines
-#if defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64) || (defined (__EMSCRIPTEN__) && defined(__SSE2__))
+#if !defined(PLATFORM_SIMD_SSE2) && (defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64) || defined(__SSE2__))
 #define PLATFORM_SIMD_SSE2 1
+#if !defined(PLATFORM_SIMD_SSE3) && (defined(__SSE3__))
+#define PLATFORM_SIMD_SSE3 1
 #endif
-#if defined(_M_ARM) || defined(__ARM_NEON__) || defined(__ARM_NEON)
+#if !defined(PLATFORM_SIMD_SSE4_1) && (defined(__SSE4_1__))
+#define PLATFORM_SIMD_SSE4_1 1
+#endif
+#if !defined(PLATFORM_SIMD_SSE4_2) && (defined(__SSE4_2__))
+#define PLATFORM_SIMD_SSE4_2 1
+#endif
+#endif
+#if !defined(PLATFORM_SIMD_NEON) && (defined(_M_ARM) || defined(__ARM_NEON__) || defined(__ARM_NEON))
 #define PLATFORM_SIMD_NEON 1
 #endif
-#if defined(_M_PPC) || defined(__CELLOS_LV2__)
-#define PLATFORM_SIMD_VMX 1
-#endif
+#define PLATFORM_SIMD (PLATFORM_SIMD_SSE2 || PLATFORM_SIMD_SSE3 || PLATFORM_SIMD_SSE4_1 || PLATFORM_SIMD_SSE4_2 || PLATFORM_SIMD_NEON)
 
 // Unicode text macro
 #if !defined(TEXT)

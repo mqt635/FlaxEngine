@@ -1,23 +1,687 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_MODEL_TOOL
 
 #include "ModelTool.h"
+#include "MeshAccelerationStructure.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/RandomStream.h"
+#include "Engine/Core/Math/Vector3.h"
+#include "Engine/Core/Math/Ray.h"
+#include "Engine/Core/Utilities.h"
+#include "Engine/Platform/ConditionVariable.h"
+#include "Engine/Profiler/Profiler.h"
+#include "Engine/Threading/JobSystem.h"
+#include "Engine/Threading/Threading.h"
+#include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/GPUBuffer.h"
+#include "Engine/Graphics/GPUTimerQuery.h"
+#include "Engine/Graphics/RenderTools.h"
+#include "Engine/Graphics/Async/GPUTask.h"
+#include "Engine/Graphics/Shaders/GPUShader.h"
+#include "Engine/Graphics/Textures/GPUTexture.h"
+#include "Engine/Graphics/Textures/TextureData.h"
+#include "Engine/Graphics/Models/ModelData.h"
+#include "Engine/Content/Assets/Model.h"
+#include "Engine/Content/Content.h"
+#include "Engine/Content/Assets/Shader.h"
+#include "Engine/Serialization/MemoryWriteStream.h"
+#include "Engine/Engine/Units.h"
+#if USE_EDITOR
+#include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Types/TimeSpan.h"
 #include "Engine/Core/Types/Pair.h"
+#include "Engine/Core/Types/Variant.h"
+#include "Engine/Platform/FileSystem.h"
 #include "Engine/Graphics/Models/SkeletonUpdater.h"
 #include "Engine/Graphics/Models/SkeletonMapping.h"
-#include "Engine/Core/Utilities.h"
-#include "Engine/Core/Types/StringView.h"
-#include "Engine/Platform/FileSystem.h"
-#include "Engine/Utilities/RectPack.h"
 #include "Engine/Tools/TextureTool/TextureTool.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
 #include "Engine/ContentImporters/CreateMaterial.h"
+#include "Engine/ContentImporters/CreateMaterialInstance.h"
+#include "Engine/ContentImporters/CreateCollisionData.h"
+#include "Engine/Serialization/Serialization.h"
 #include "Editor/Utilities/EditorUtilities.h"
+#include "Engine/Animations/Graph/AnimGraph.h"
 #include <ThirdParty/meshoptimizer/meshoptimizer.h>
+extern void InitMeshOpt();
+#endif
+
+ModelSDFHeader::ModelSDFHeader(const ModelBase::SDFData& sdf, const GPUTextureDescription& desc)
+    : LocalToUVWMul(sdf.LocalToUVWMul)
+    , WorldUnitsPerVoxel(sdf.WorldUnitsPerVoxel)
+    , LocalToUVWAdd(sdf.LocalToUVWAdd)
+    , MaxDistance(sdf.MaxDistance)
+    , LocalBoundsMin(sdf.LocalBoundsMin)
+    , MipLevels(desc.MipLevels)
+    , LocalBoundsMax(sdf.LocalBoundsMax)
+    , Width(desc.Width)
+    , Height(desc.Height)
+    , Depth(desc.Depth)
+    , Format(desc.Format)
+    , ResolutionScale(sdf.ResolutionScale)
+    , LOD(sdf.LOD)
+{
+}
+
+ModelSDFMip::ModelSDFMip(int32 mipIndex, uint32 rowPitch, uint32 slicePitch)
+    : MipIndex(mipIndex)
+    , RowPitch(rowPitch)
+    , SlicePitch(slicePitch)
+{
+}
+
+ModelSDFMip::ModelSDFMip(int32 mipIndex, const TextureMipData& mip)
+    : MipIndex(mipIndex)
+    , RowPitch(mip.RowPitch)
+    , SlicePitch(mip.Data.Length())
+{
+}
+
+class GPUModelSDFTask : public GPUTask
+{
+    ConditionVariable* _signal;
+    AssetReference<Shader> _shader;
+    MeshAccelerationStructure* _scene;
+    Model* _inputModel;
+    const ModelData* _modelData;
+    int32 _lodIndex;
+    float _backfacesThreshold;
+    Int3 _resolution;
+    ModelBase::SDFData* _sdf;
+    GPUTexture* _sdfResult;
+    Float3 _xyzToLocalMul, _xyzToLocalAdd;
+#if GPU_ALLOW_PROFILE_EVENTS
+    uint64 _timerQuery = 0;
+#endif
+
+    const uint32 ThreadGroupSize = 64;
+    GPU_CB_STRUCT(Data {
+        Int3 Resolution;
+        uint32 ResolutionSize;
+        float MaxDistance;
+        uint32 VertexStride;
+        float BackfacesThreshold;
+        uint32 TriangleCount;
+        Float3 VoxelToPosMul;
+        float WorldUnitsPerVoxel;
+        Float3 VoxelToPosAdd;
+        uint32 ThreadGroupsX;
+        });
+
+public:
+    GPUModelSDFTask(ConditionVariable& signal, MeshAccelerationStructure* scene, Model* inputModel, const ModelData* modelData, int32 lodIndex, const Int3& resolution, ModelBase::SDFData* sdf, GPUTexture* sdfResult, const Float3& xyzToLocalMul, const Float3& xyzToLocalAdd, float backfacesThreshold)
+        : GPUTask(Type::Custom, GPU_ALLOW_PROFILE_EVENTS ? 4 : GPU_ASYNC_LATENCY) // Fix timer query result reading with some more latency
+        , _signal(&signal)
+        , _shader(Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/SDF")))
+        , _scene(scene)
+        , _inputModel(inputModel)
+        , _modelData(modelData)
+        , _lodIndex(lodIndex)
+        , _backfacesThreshold(backfacesThreshold)
+        , _resolution(resolution)
+        , _sdf(sdf)
+        , _sdfResult(sdfResult)
+        , _xyzToLocalMul(xyzToLocalMul)
+        , _xyzToLocalAdd(xyzToLocalAdd)
+    {
+    }
+
+    ~GPUModelSDFTask()
+    {
+    }
+
+    Result run(GPUTasksContext* tasksContext) override
+    {
+        PROFILE_GPU_CPU("GPUModelSDFTask");
+        GPUContext* context = tasksContext->GPU;
+#if GPU_ALLOW_PROFILE_EVENTS
+        _timerQuery = context->BeginQuery(GPUQueryType::Timer);
+#endif
+
+        // Allocate resources
+        if (_shader == nullptr || _shader->WaitForLoaded())
+            return Result::Failed;
+        GPUShader* shader = _shader->GPU;
+        const uint32 resolutionSize = _resolution.X * _resolution.Y * _resolution.Z;
+        auto cb = shader->GetCB(0);
+        Data data;
+        data.Resolution = _resolution;
+        data.ResolutionSize = resolutionSize;
+        data.MaxDistance = _sdf->MaxDistance;
+        data.WorldUnitsPerVoxel = _sdf->WorldUnitsPerVoxel;
+        data.VoxelToPosMul = _xyzToLocalMul;
+        data.VoxelToPosAdd = _xyzToLocalAdd;
+        data.BackfacesThreshold = _backfacesThreshold - 0.05f; // Bias a bit
+
+        // Send BVH to the GPU
+        auto bvh = _scene->ToGPU();
+        CHECK_RETURN(bvh.BVHBuffer && bvh.VertexBuffer && bvh.IndexBuffer, Result::Failed);
+        data.VertexStride = sizeof(Float3);
+        data.TriangleCount = bvh.IndexBuffer->GetElementsCount() / 3;
+
+        // Dispatch in 1D and fallback to 2D when using large resolution
+        Int3 threadGroups(Math::CeilToInt((float)resolutionSize / ThreadGroupSize), 1, 1);
+        if (threadGroups.X > GPU_MAX_CS_DISPATCH_THREAD_GROUPS)
+        {
+            const uint32 groups = threadGroups.X;
+            threadGroups.X = Math::CeilToInt(Math::Sqrt((float)groups));
+            threadGroups.Y = Math::CeilToInt((float)groups / threadGroups.X);
+        }
+        data.ThreadGroupsX = threadGroups.X;
+
+        // Init constants
+        context->BindCB(0, cb);
+        context->UpdateCB(cb, &data);
+
+        // Allocate output texture
+        auto sdfTextureDesc = GPUTextureDescription::New3D(_resolution.X, _resolution.Y, _resolution.Z, PixelFormat::R16_UNorm, GPUTextureFlags::UnorderedAccess);
+        // TODO: use transient texture (single frame)
+        auto sdfTexture = GPUTexture::New();
+#if GPU_ENABLE_RESOURCE_NAMING
+        sdfTexture->SetName(TEXT("SDFTexture"));
+#endif
+        sdfTexture->Init(sdfTextureDesc);
+
+        // Renders directly to the output texture
+        context->BindUA(0, sdfTexture->ViewVolume());
+
+        // Init the volume (rasterization mixes with existing contents)
+        context->Dispatch(shader->GetCS("CS_Init"), threadGroups.X, threadGroups.Y, threadGroups.Z);
+
+        // Render input triangles into the SDF volume
+        {
+            PROFILE_GPU("Rasterize");
+            context->BindSR(0, bvh.VertexBuffer->View());
+            context->BindSR(1, bvh.IndexBuffer->View());
+            context->BindSR(2, bvh.BVHBuffer->View());
+            auto* rasterizeCS = shader->GetCS("CS_RasterizeTriangles");
+            context->Dispatch(rasterizeCS, threadGroups.X, threadGroups.Y, threadGroups.Z);
+        }
+
+        // Copy result data into readback buffer
+        if (_sdfResult)
+        {
+            sdfTextureDesc = sdfTextureDesc.ToStagingReadback();
+            _sdfResult->Init(sdfTextureDesc);
+            context->CopyTexture(_sdfResult, 0, 0, 0, 0, sdfTexture, 0);
+        }
+
+        SAFE_DELETE_GPU_RESOURCE(sdfTexture);
+
+#if GPU_ALLOW_PROFILE_EVENTS
+        context->EndQuery(_timerQuery);
+#endif
+        return Result::Ok;
+    }
+
+    void OnSync() override
+    {
+        GPUTask::OnSync();
+        _signal->NotifyOne();
+#if GPU_ALLOW_PROFILE_EVENTS
+        uint64 time;
+        if (GPUDevice::Instance->GetQueryResult(_timerQuery, time, true))
+            LOG(Info, "GPU SDF generation took {} ms", Utilities::RoundTo1DecimalPlace(time * 0.001f));
+#endif
+    }
+
+    void OnFail() override
+    {
+        GPUTask::OnFail();
+        _signal->NotifyOne();
+    }
+
+    void OnCancel() override
+    {
+        GPUTask::OnCancel();
+        _signal->NotifyOne();
+    }
+};
+
+bool ModelTool::GenerateModelSDF(Model* inputModel, const ModelData* modelData, float resolutionScale, int32 lodIndex, ModelBase::SDFData* outputSDF, MemoryWriteStream* outputStream, const StringView& assetName, float backfacesThreshold, bool useGPU)
+{
+    PROFILE_CPU();
+    auto startTime = Platform::GetTimeSeconds();
+
+    // Setup SDF texture properties
+    BoundingBox bounds;
+    if (inputModel)
+        bounds = inputModel->LODs[lodIndex].GetBox();
+    else if (modelData)
+        bounds = modelData->LODs[lodIndex].GetBox();
+    else
+        return true;
+    ModelBase::SDFData sdf;
+    sdf.WorldUnitsPerVoxel = METERS_TO_UNITS(0.1f) / Math::Max(resolutionScale, 0.0001f); // 1 voxel per 10 centimeters
+#if 0
+    const float boundsMargin = sdf.WorldUnitsPerVoxel * 0.5f; // Add half-texel margin around the mesh
+    bounds.Minimum -= boundsMargin;
+    bounds.Maximum += boundsMargin;
+#endif
+    const Float3 size = bounds.GetSize();
+    Int3 resolution(Float3::Ceil(Float3::Clamp(size / sdf.WorldUnitsPerVoxel, 4, 256)));
+    Float3 uvwToLocalMul = size;
+    Float3 uvwToLocalAdd = bounds.Minimum;
+    sdf.LocalToUVWMul = Float3::One / uvwToLocalMul;
+    sdf.LocalToUVWAdd = -uvwToLocalAdd / uvwToLocalMul;
+    sdf.MaxDistance = size.MaxValue();
+    sdf.LocalBoundsMin = bounds.Minimum;
+    sdf.LocalBoundsMax = bounds.Maximum;
+    sdf.ResolutionScale = resolutionScale;
+    sdf.LOD = lodIndex;
+    const int32 maxMips = 3;
+    const int32 mipCount = Math::Min(MipLevelsCount(resolution.X, resolution.Y, resolution.Z), maxMips);
+    PixelFormat format = PixelFormat::R16_UNorm;
+    int32 formatStride = 2;
+    float formatMaxValue = MAX_uint16;
+    typedef float (*FormatRead)(void* ptr);
+    typedef void (*FormatWrite)(void* ptr, float v);
+    FormatRead formatRead = [](void* ptr)
+    {
+        return (float)*(uint16*)ptr;
+    };
+    FormatWrite formatWrite = [](void* ptr, float v)
+    {
+        *(uint16*)ptr = (uint16)v;
+    };
+    if (resolution.MaxValue() < 8)
+    {
+        // For smaller meshes use more optimized format (gives small perf and memory gain but introduces artifacts on larger meshes)
+        format = PixelFormat::R8_UNorm;
+        formatStride = 1;
+        formatMaxValue = MAX_uint8;
+        formatRead = [](void* ptr)
+        {
+            return (float)*(uint8*)ptr;
+        };
+        formatWrite = [](void* ptr, float v)
+        {
+            *(uint8*)ptr = (uint8)v;
+        };
+    }
+    auto textureDesc = GPUTextureDescription::New3D(resolution.X, resolution.Y, resolution.Z, format, GPUTextureFlags::ShaderResource, mipCount);
+    if (outputSDF)
+    {
+        *outputSDF = sdf;
+        if (!outputSDF->Texture)
+            outputSDF->Texture = GPUTexture::New();
+        if (outputSDF->Texture->Init(textureDesc))
+        {
+            SAFE_DELETE_GPU_RESOURCE(outputSDF->Texture);
+            return true;
+        }
+#if GPU_ENABLE_RESOURCE_NAMING
+        outputSDF->Texture->SetName(TEXT("ModelSDF"));
+#endif
+    }
+
+    // Allocate memory for the distant field
+    const int32 voxelsSize = resolution.X * resolution.Y * resolution.Z * formatStride;
+    BytesContainer voxels;
+    voxels.Allocate(voxelsSize);
+    Float3 xyzToLocalMul = uvwToLocalMul / Float3(resolution - 1);
+    Float3 xyzToLocalAdd = uvwToLocalAdd;
+    const Float2 encodeMAD(0.5f / sdf.MaxDistance * formatMaxValue, 0.5f * formatMaxValue);
+    const Float2 decodeMAD(2.0f * sdf.MaxDistance / formatMaxValue, -sdf.MaxDistance);
+    int32 voxelSizeSum = voxelsSize;
+
+    // TODO: use optimized sparse storage for SDF data as hierarchical bricks as in papers below:
+    // https://gpuopen.com/gdc-presentations/2023/GDC-2023-Sparse-Distance-Fields-For-Games.pdf + https://www.youtube.com/watch?v=iY15xhuuHPQ&ab_channel=AMD
+    // https://graphics.pixar.com/library/IrradianceAtlas/paper.pdf
+    // http://maverick.inria.fr/Membres/Cyril.Crassin/thesis/CCrassinThesis_EN_Web.pdf
+    // http://ramakarl.com/pdfs/2016_Hoetzlein_GVDB.pdf
+    // https://www.cse.chalmers.se/~uffe/HighResolutionSparseVoxelDAGs.pdf
+
+    // Setup acceleration structure for fast ray tracing the mesh triangles
+    MeshAccelerationStructure scene;
+    if (inputModel)
+        scene.Add(inputModel, lodIndex);
+    else if (modelData)
+        scene.Add(modelData, lodIndex);
+
+    // Check if run SDF generation on a GPU via Compute Shader or on a Job System
+    useGPU &= GPUDevice::Instance
+            && GPUDevice::Instance->GetState() == GPUDevice::DeviceState::Ready
+            && GPUDevice::Instance->Limits.HasCompute
+            && format == PixelFormat::R16_UNorm
+            && !IsInMainThread() // TODO: support GPU to generate model SDF on-the-fly directly into virtual model (if called during rendering)
+            && resolution.MaxValue() > 8;
+    if (useGPU)
+    {
+        PROFILE_CPU_NAMED("GPU");
+
+        // TODO: skip using sdfResult and downloading SDF from GPU when updating virtual model
+        auto sdfResult = GPUTexture::New();
+#if GPU_ENABLE_RESOURCE_NAMING
+        sdfResult->SetName(TEXT("SDFResult"));
+#endif
+
+        // Run SDF generation via GPU async task
+        ConditionVariable signal;
+        CriticalSection mutex;
+        Task* task = New<GPUModelSDFTask>(signal, &scene, inputModel, modelData, lodIndex, resolution, &sdf, sdfResult, xyzToLocalMul, xyzToLocalAdd, backfacesThreshold);
+        task->Start();
+        mutex.Lock();
+        signal.Wait(mutex);
+        mutex.Unlock();
+        bool failed = task->IsFailed();
+
+        // Gather result data from GPU to CPU
+        if (!failed && sdfResult)
+        {
+            TextureMipData mipData;
+            const uint32 rowPitch = resolution.X * formatStride;
+            failed = sdfResult->GetData(0, 0, mipData, rowPitch);
+            failed |= voxels.Length() != mipData.Data.Length();
+            if (!failed)
+                voxels = mipData.Data;
+        }
+
+        SAFE_DELETE_GPU_RESOURCE(sdfResult);
+        if (failed)
+            return true;
+    }
+    else
+    {
+        scene.BuildBVH();
+
+        // Brute-force for each voxel to calculate distance to the closest triangle with point query and distance sign by raycasting around the voxel
+        constexpr int32 sampleCount = BUILD_DEBUG ? 6 : 12;
+        Float3 sampleDirections[sampleCount];
+        {
+            RandomStream rand;
+            sampleDirections[0] = Float3::Up;
+            sampleDirections[1] = Float3::Down;
+            sampleDirections[2] = Float3::Left;
+            sampleDirections[3] = Float3::Right;
+            sampleDirections[4] = Float3::Forward;
+            sampleDirections[5] = Float3::Backward;
+            for (int32 i = 6; i < sampleCount; i++)
+                sampleDirections[i] = rand.GetUnitVector();
+        }
+        Function<void(int32)> sdfJob = [&sdf, &resolution, &backfacesThreshold, sampleDirections, &sampleCount, &scene, &voxels, &xyzToLocalMul, &xyzToLocalAdd, &encodeMAD, &formatStride, &formatWrite](int32 z)
+        {
+            PROFILE_CPU_NAMED("Model SDF Job");
+            Real hitDistance;
+            Vector3 hitNormal, hitPoint;
+            Triangle hitTriangle;
+            const int32 zAddress = resolution.Y * resolution.X * z;
+            for (int32 y = 0; y < resolution.Y; y++)
+            {
+                const int32 yAddress = resolution.X * y + zAddress;
+                for (int32 x = 0; x < resolution.X; x++)
+                {
+                    Real minDistance = sdf.MaxDistance;
+                    Vector3 voxelPos = Float3((float)x, (float)y, (float)z) * xyzToLocalMul + xyzToLocalAdd;
+
+                    // Raycast samples around voxel to count triangle backfaces hit
+                    int32 hitBackCount = 0, minBackfaceHitCount = (int32)(sampleCount * backfacesThreshold);
+                    for (int32 sample = 0; sample < sampleCount; sample++)
+                    {
+                        Ray sampleRay(voxelPos, sampleDirections[sample]);
+                        sampleRay.Position -= sampleRay.Direction * 0.0001f; // Apply small margin
+                        if (scene.RayCast(sampleRay, hitDistance, hitNormal, hitTriangle))
+                        {
+                            minDistance = Math::Min(hitDistance, minDistance);
+                            if (Float3::Dot(sampleRay.Direction, hitTriangle.GetNormal()) > 0)
+                            {
+                                if (++hitBackCount >= minBackfaceHitCount)
+                                    break;
+                            }
+                        }
+                    }
+
+                    // Point query to find the distance to the closest surface
+                    scene.PointQuery(voxelPos, minDistance, hitPoint, hitTriangle, minDistance);
+                    if (hitBackCount >= minBackfaceHitCount)
+                        minDistance *= -1; // Voxel is inside the geometry so turn it into negative distance to the surface
+
+                    const int32 xAddress = x + yAddress;
+                    formatWrite(voxels.Get() + xAddress * formatStride, (float)minDistance * encodeMAD.X + encodeMAD.Y);
+                }
+            }
+        };
+        JobSystem::Execute(sdfJob, resolution.Z);
+    }
+
+    // Cache SDF data on a CPU
+    if (outputStream)
+    {
+        outputStream->WriteInt32(1); // Version
+        ModelSDFHeader data(sdf, textureDesc);
+        outputStream->WriteBytes(&data, sizeof(data));
+        ModelSDFMip mipData(0, resolution.X * formatStride, voxelsSize);
+        outputStream->WriteBytes(&mipData, sizeof(mipData));
+        outputStream->WriteBytes(voxels.Get(), voxelsSize);
+    }
+
+    // Upload data to the GPU
+    if (outputSDF)
+    {
+        auto task = outputSDF->Texture->UploadMipMapAsync(voxels, 0, resolution.X * formatStride, voxelsSize, true);
+        if (task)
+            task->Start();
+    }
+
+    // Generate mip maps
+    void* voxelsMipSrc = voxels.Get();
+    void* voxelsMip = nullptr;
+    for (int32 mipLevel = 1; mipLevel < mipCount; mipLevel++)
+    {
+        Int3 resolutionMip = Int3::Max(resolution / 2, Int3::One);
+        const int32 voxelsMipSize = resolutionMip.X * resolutionMip.Y * resolutionMip.Z * formatStride;
+        if (voxelsMip == nullptr)
+            voxelsMip = Allocator::Allocate(voxelsMipSize);
+
+        // Downscale mip
+        Function<void(int32)> mipJob = [&voxelsMip, &voxelsMipSrc, &resolution, &resolutionMip, &encodeMAD, &decodeMAD, &formatStride, &formatRead, &formatWrite](int32 z)
+        {
+            PROFILE_CPU_NAMED("Model SDF Mip Job");
+            const int32 zAddress = resolutionMip.Y * resolutionMip.X * z;
+            for (int32 y = 0; y < resolutionMip.Y; y++)
+            {
+                const int32 yAddress = resolutionMip.X * y + zAddress;
+                for (int32 x = 0; x < resolutionMip.X; x++)
+                {
+                    // Min-filter around the voxel
+                    float distance = MAX_float;
+                    for (int32 dz = 0; dz < 2; dz++)
+                    {
+                        const int32 dzAddress = (z * 2 + dz) * (resolution.Y * resolution.X);
+                        for (int32 dy = 0; dy < 2; dy++)
+                        {
+                            const int32 dyAddress = (y * 2 + dy) * (resolution.X) + dzAddress;
+                            for (int32 dx = 0; dx < 2; dx++)
+                            {
+                                const int32 dxAddress = (x * 2 + dx) + dyAddress;
+                                const float d = formatRead((byte*)voxelsMipSrc + dxAddress * formatStride) * decodeMAD.X + decodeMAD.Y;
+                                distance = Math::Min(distance, d);
+                            }
+                        }
+                    }
+
+                    const int32 xAddress = x + yAddress;
+                    formatWrite((byte*)voxelsMip + xAddress * formatStride, distance * encodeMAD.X + encodeMAD.Y);
+                }
+            }
+        };
+        JobSystem::Execute(mipJob, resolutionMip.Z);
+
+        // Cache SDF data on a CPU
+        if (outputStream)
+        {
+            ModelSDFMip mipData(mipLevel, resolutionMip.X * formatStride, voxelsMipSize);
+            outputStream->WriteBytes(&mipData, sizeof(mipData));
+            outputStream->WriteBytes(voxelsMip, voxelsMipSize);
+        }
+
+        // Upload to the GPU
+        if (outputSDF)
+        {
+            BytesContainer data;
+            data.Link((byte*)voxelsMip, voxelsMipSize);
+            auto task = outputSDF->Texture->UploadMipMapAsync(data, mipLevel, resolutionMip.X * formatStride, voxelsMipSize, true);
+            if (task)
+                task->Start();
+        }
+
+        // Go down
+        voxelSizeSum += voxelsSize;
+        Swap(voxelsMip, voxelsMipSrc);
+        resolution = resolutionMip;
+    }
+
+    Allocator::Free(voxelsMip);
+
+#if !BUILD_RELEASE
+    auto endTime = Platform::GetTimeSeconds();
+    LOG(Info, "Generated SDF {}x{}x{} ({} kB) in {}ms for {}", resolution.X, resolution.Y, resolution.Z, voxelSizeSum / 1024, (int32)((endTime - startTime) * 1000.0), assetName);
+#endif
+    return false;
+}
+
+#if USE_EDITOR
+
+void ModelTool::Options::Serialize(SerializeStream& stream, const void* otherObj)
+{
+    SERIALIZE_GET_OTHER_OBJ(ModelTool::Options);
+
+    SERIALIZE(Type);
+    SERIALIZE(CalculateNormals);
+    SERIALIZE(SmoothingNormalsAngle);
+    SERIALIZE(FlipNormals);
+    SERIALIZE(CalculateTangents);
+    SERIALIZE(SmoothingTangentsAngle);
+    SERIALIZE(ReverseWindingOrder);
+    SERIALIZE(OptimizeMeshes);
+    SERIALIZE(MergeMeshes);
+    SERIALIZE(ImportLODs);
+    SERIALIZE(ImportVertexColors);
+    SERIALIZE(ImportBlendShapes);
+    SERIALIZE(CalculateBoneOffsetMatrices);
+    SERIALIZE(LightmapUVsSource);
+    SERIALIZE(CollisionMeshesPrefix);
+    SERIALIZE(CollisionMeshesPostfix);
+    SERIALIZE(CollisionType);
+    SERIALIZE(PositionFormat);
+    SERIALIZE(TexCoordFormat);
+    SERIALIZE(Scale);
+    SERIALIZE(Rotation);
+    SERIALIZE(Translation);
+    SERIALIZE(UseLocalOrigin);
+    SERIALIZE(CenterGeometry);
+    SERIALIZE(IgnoreNodesScale);
+    SERIALIZE(Duration);
+    SERIALIZE(FramesRange);
+    SERIALIZE(DefaultFrameRate);
+    SERIALIZE(SamplingRate);
+    SERIALIZE(SkipEmptyCurves);
+    SERIALIZE(OptimizeKeyframes);
+    SERIALIZE(ImportScaleTracks);
+    SERIALIZE(RootMotion);
+    SERIALIZE(RootMotionFlags);
+    SERIALIZE(RootNodeName);
+    SERIALIZE(GenerateLODs);
+    SERIALIZE(BaseLOD);
+    SERIALIZE(LODCount);
+    SERIALIZE(TriangleReduction);
+    SERIALIZE(SloppyOptimization);
+    SERIALIZE(LODTargetError);
+    SERIALIZE(LODTargetErrorAbsolute);
+    SERIALIZE(LODLockBorder);
+    SERIALIZE(LODPreserveUVs);
+    SERIALIZE(LODPreserveUVsWeight);
+    SERIALIZE(ImportMaterials);
+    SERIALIZE(CreateEmptyMaterialSlots);
+    SERIALIZE(ImportMaterialsAsInstances);
+    SERIALIZE(InstanceToImportAs);
+    SERIALIZE(ImportTextures);
+    SERIALIZE(RestoreMaterialsOnReimport);
+    SERIALIZE(SkipExistingMaterialsOnReimport);
+    SERIALIZE(GenerateSDF);
+    SERIALIZE(SDFResolution);
+    SERIALIZE(SplitObjects);
+    SERIALIZE(ObjectIndex);
+    SERIALIZE(SubAssetFolder);
+}
+
+void ModelTool::Options::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
+{
+    DESERIALIZE(Type);
+    DESERIALIZE(CalculateNormals);
+    DESERIALIZE(SmoothingNormalsAngle);
+    DESERIALIZE(FlipNormals);
+    DESERIALIZE(CalculateTangents);
+    DESERIALIZE(SmoothingTangentsAngle);
+    DESERIALIZE(ReverseWindingOrder);
+    DESERIALIZE(OptimizeMeshes);
+    DESERIALIZE(MergeMeshes);
+    DESERIALIZE(ImportLODs);
+    DESERIALIZE(ImportVertexColors);
+    DESERIALIZE(ImportBlendShapes);
+    DESERIALIZE(CalculateBoneOffsetMatrices);
+    DESERIALIZE(LightmapUVsSource);
+    DESERIALIZE(CollisionMeshesPrefix);
+    DESERIALIZE(CollisionMeshesPostfix);
+    DESERIALIZE(CollisionType);
+    DESERIALIZE(PositionFormat);
+    DESERIALIZE(TexCoordFormat);
+    DESERIALIZE(Scale);
+    DESERIALIZE(Rotation);
+    DESERIALIZE(Translation);
+    DESERIALIZE(UseLocalOrigin);
+    DESERIALIZE(CenterGeometry);
+    DESERIALIZE(IgnoreNodesScale);
+    DESERIALIZE(Duration);
+    DESERIALIZE(FramesRange);
+    DESERIALIZE(DefaultFrameRate);
+    DESERIALIZE(SamplingRate);
+    DESERIALIZE(SkipEmptyCurves);
+    DESERIALIZE(OptimizeKeyframes);
+    DESERIALIZE(ImportScaleTracks);
+    DESERIALIZE(RootMotion);
+    DESERIALIZE(RootMotionFlags);
+    DESERIALIZE(RootNodeName);
+    DESERIALIZE(GenerateLODs);
+    DESERIALIZE(BaseLOD);
+    DESERIALIZE(LODCount);
+    DESERIALIZE(TriangleReduction);
+    DESERIALIZE(SloppyOptimization);
+    DESERIALIZE(LODTargetError);
+    DESERIALIZE(LODTargetErrorAbsolute);
+    DESERIALIZE(LODLockBorder);
+    DESERIALIZE(LODPreserveUVs);
+    DESERIALIZE(LODPreserveUVsWeight);
+    DESERIALIZE(ImportMaterials);
+    DESERIALIZE(CreateEmptyMaterialSlots);
+    DESERIALIZE(ImportMaterialsAsInstances);
+    DESERIALIZE(InstanceToImportAs);
+    DESERIALIZE(ImportTextures);
+    DESERIALIZE(RestoreMaterialsOnReimport);
+    DESERIALIZE(SkipExistingMaterialsOnReimport);
+    DESERIALIZE(GenerateSDF);
+    DESERIALIZE(SDFResolution);
+    DESERIALIZE(SplitObjects);
+    DESERIALIZE(ObjectIndex);
+    DESERIALIZE(SubAssetFolder);
+
+    // [Deprecated on 23.11.2021, expires on 21.11.2023]
+    int32 AnimationIndex = -1;
+    DESERIALIZE(AnimationIndex);
+    if (AnimationIndex != -1)
+        ObjectIndex = AnimationIndex;
+
+    // [Deprecated on 08.02.2024, expires on 08.02.2026]
+    bool EnableRootMotion = false;
+    DESERIALIZE(EnableRootMotion);
+    if (EnableRootMotion)
+    {
+        RootMotion = RootMotionMode::ExtractNode;
+        RootMotionFlags = AnimationRootMotionFlags::RootPositionXZ;
+    }
+}
 
 void RemoveNamespace(String& name)
 {
@@ -26,8 +690,10 @@ void RemoveNamespace(String& name)
         name = name.Substring(namespaceStart + 1);
 }
 
-bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options options, String& errorMsg)
+bool ModelTool::ImportData(const String& path, ModelData& data, Options& options, String& errorMsg)
 {
+    PROFILE_CPU();
+
     // Validate options
     options.Scale = Math::Clamp(options.Scale, 0.0001f, 100000.0f);
     options.SmoothingNormalsAngle = Math::Clamp(options.SmoothingNormalsAngle, 0.0f, 175.0f);
@@ -35,65 +701,40 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
     options.FramesRange.Y = Math::Max(options.FramesRange.Y, options.FramesRange.X);
     options.DefaultFrameRate = Math::Max(0.0f, options.DefaultFrameRate);
     options.SamplingRate = Math::Max(0.0f, options.SamplingRate);
-
-    // Validate path
-    // Note: Assimp/Autodesk supports only ANSI characters in imported file path
-    StringAnsi importPath;
-    String tmpPath;
-    if (path.IsANSI() == false)
-    {
-        // Use temporary file
-        LOG(Warning, "Model Tool doesn't support importing files from paths using non ASNI characters. Using temporary file.");
-        FileSystem::GetTempFilePath(tmpPath);
-        if (tmpPath.IsANSI() == false || FileSystem::CopyFile(tmpPath, path))
-        {
-            errorMsg = TEXT("Path with non ANSI characters is invalid.");
-            return true;
-        }
-        importPath = tmpPath.ToStringAnsi();
-    }
-    else
-    {
-        importPath = path.ToStringAnsi();
-    }
+    if (options.SplitObjects || options.Type == ModelType::Prefab)
+        options.MergeMeshes = false; // Meshes merging doesn't make sense when we want to import each mesh individually
+    // TODO: maybe we could update meshes merger to collapse meshes within the same name if splitting is enabled?
 
     // Call importing backend
 #if (USE_AUTODESK_FBX_SDK || USE_OPEN_FBX) && USE_ASSIMP
     if (path.EndsWith(TEXT(".fbx"), StringSearchCase::IgnoreCase))
     {
 #if USE_AUTODESK_FBX_SDK
-        if (ImportDataAutodeskFbxSdk(importPath.Get(), data, options, errorMsg))
+        if (ImportDataAutodeskFbxSdk(path, data, options, errorMsg))
             return true;
 #elif USE_OPEN_FBX
-        if (ImportDataOpenFBX(importPath.Get(), data, options, errorMsg))
+        if (ImportDataOpenFBX(path, data, options, errorMsg))
             return true;
 #endif
     }
     else
     {
-        if (ImportDataAssimp(importPath.Get(), data, options, errorMsg))
+        if (ImportDataAssimp(path, data, options, errorMsg))
             return true;
     }
 #elif USE_ASSIMP
-    if (ImportDataAssimp(importPath.Get(), data, options, errorMsg))
+    if (ImportDataAssimp(path, data, options, errorMsg))
         return true;
 #elif USE_AUTODESK_FBX_SDK
-	if (ImportDataAutodeskFbxSdk(importPath.Get(), data, options, errorMsg))
-		return true;
+    if (ImportDataAutodeskFbxSdk(path, data, options, errorMsg))
+        return true;
 #elif USE_OPEN_FBX
-	if (ImportDataOpenFBX(importPath.Get(), data, options, errorMsg))
-		return true;
+    if (ImportDataOpenFBX(path, data, options, errorMsg))
+        return true;
 #else
-#error Cannot use Model Tool without any importing backend!
+    LOG(Error, "Compiled without model importing backend.");
+    return true;
 #endif
-
-    // Remove temporary file
-    if (tmpPath.HasChars() && FileSystem::FileExists(tmpPath))
-    {
-        FileSystem::DeleteFile(tmpPath);
-    }
-
-    // TODO: check model LODs sequence (eg. {LOD0, LOD2, LOD5} is invalid)
 
     // Remove namespace prefixes from the nodes names
     {
@@ -105,9 +746,10 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
         {
             RemoveNamespace(node.Name);
         }
-        for (auto& channel : data.Animation.Channels)
+        for (auto& animation : data.Animations)
         {
-            RemoveNamespace(channel.NodeName);
+            for (auto& channel : animation.Channels)
+                RemoveNamespace(channel.NodeName);
         }
         for (auto& lod : data.LODs)
         {
@@ -115,18 +757,19 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
             {
                 RemoveNamespace(mesh->Name);
                 for (auto& blendShape : mesh->BlendShapes)
-                {
                     RemoveNamespace(blendShape.Name);
-                }
             }
         }
     }
 
     // Validate the animation channels
-    if (data.Animation.Channels.HasItems())
+    for (auto& animation : data.Animations)
     {
+        auto& channels = animation.Channels;
+        if (channels.IsEmpty())
+            continue;
+
         // Validate bone animations uniqueness
-        auto& channels = data.Animation.Channels;
         for (int32 i = 0; i < channels.Count(); i++)
         {
             for (int32 j = i + 1; j < channels.Count(); j++)
@@ -172,7 +815,7 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
     }
 
     // Flip normals of the imported geometry
-    if (options.FlipNormals && data.Types & ImportDataTypes::Geometry)
+    if (options.FlipNormals && EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Geometry))
     {
         for (auto& lod : data.LODs)
         {
@@ -180,6 +823,9 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
             {
                 for (auto& n : mesh->Normals)
                     n *= -1;
+                for (auto& shape : mesh->BlendShapes)
+                    for (auto& v : shape.Vertices)
+                        v.NormalDelta *= -1;
             }
         }
     }
@@ -194,62 +840,62 @@ bool ModelTool::ImportData(const String& path, ImportedModelData& data, Options 
 
 bool SortDepths(const Pair<int32, int32>& a, const Pair<int32, int32>& b)
 {
-	return a.First < b.First;
+    return a.First < b.First;
 }
 
 void CreateLinearListFromTree(Array<SkeletonNode>& nodes, Array<int32>& mapping)
 {
     // Customized breadth first tree algorithm (each node has no direct reference to the children so we build the cache for the nodes depth level)
-	const int32 count = nodes.Count();
-	Array<Pair<int32, int32>> depths(count); // Pair.First = Depth, Pair.Second = Node Index
-	depths.SetSize(count);
-	depths.Set(-1);
-	for (int32 i = 0; i < count; i++)
-	{
-		// Skip evaluated nodes
-		if (depths[i].First != -1)
-			continue;
+    const int32 count = nodes.Count();
+    Array<Pair<int32, int32>> depths(count); // Pair.First = Depth, Pair.Second = Node Index
+    depths.Resize(count);
+    depths.SetAll(-1);
+    for (int32 i = 0; i < count; i++)
+    {
+        // Skip evaluated nodes
+        if (depths[i].First != -1)
+            continue;
 
-		// Find the first node with calculated depth and get the distance to it
-		int32 end = i;
-		int32 lastDepth;
-		int32 relativeDepth = 0;
-		do
-		{
-			lastDepth = depths[end].First;
-			end = nodes[end].ParentIndex;
-			relativeDepth++;
-		} while (end != -1 && lastDepth == -1);
+        // Find the first node with calculated depth and get the distance to it
+        int32 end = i;
+        int32 lastDepth;
+        int32 relativeDepth = 0;
+        do
+        {
+            lastDepth = depths[end].First;
+            end = nodes[end].ParentIndex;
+            relativeDepth++;
+        } while (end != -1 && lastDepth == -1);
 
-		// Set the depth (second item is the node index)
-		depths[i] = MakePair(lastDepth + relativeDepth, i);
-	}
-	for (int32 i = 0; i < count; i++)
-	{
-		// Strange divide by 2 but works
-		depths[i].First = depths[i].First >> 1;
-	}
+        // Set the depth (second item is the node index)
+        depths[i] = ToPair(lastDepth + relativeDepth, i);
+    }
+    for (int32 i = 0; i < count; i++)
+    {
+        // Strange divide by 2 but works
+        depths[i].First = depths[i].First >> 1;
+    }
 
-	// Order nodes by depth O(n*log(n))
-	depths.Sort(SortDepths);
+    // Order nodes by depth O(n*log(n))
+    depths.Sort(SortDepths);
 
-	// Extract nodes mapping O(n^2)
-	mapping.EnsureCapacity(count, false);
-	mapping.SetSize(count);
-	for (int32 i = 0; i < count; i++)
-	{
-		int32 newIndex = -1;
-		for (int32 j = 0; j < count; j++)
-		{
-			if (depths[j].Second == i)
-			{
-				newIndex = j;
-				break;
-			}
-		}
-		ASSERT(newIndex != -1);
-		mapping[i] = newIndex;
-	}
+    // Extract nodes mapping O(n^2)
+    mapping.EnsureCapacity(count, false);
+    mapping.Resize(count);
+    for (int32 i = 0; i < count; i++)
+    {
+        int32 newIndex = -1;
+        for (int32 j = 0; j < count; j++)
+        {
+            if (depths[j].Second == i)
+            {
+                newIndex = j;
+                break;
+            }
+        }
+        ASSERT(newIndex != -1);
+        mapping[i] = newIndex;
+    }
 }
 
 #endif
@@ -303,69 +949,147 @@ void OptimizeCurve(LinearCurve<T>& curve)
     }
 }
 
-void* MeshOptAllocate(size_t size)
+void TrySetupMaterialParameter(MaterialInstance* instance, Span<const Char*> paramNames, const Variant& value, MaterialParameterType type)
 {
-    return Allocator::Allocate(size);
+    for (const Char* name : paramNames)
+    {
+        for (MaterialParameter& param : instance->Params)
+        {
+            const MaterialParameterType paramType = param.GetParameterType();
+            if (type != paramType)
+            {
+                if (type == MaterialParameterType::Color)
+                {
+                    if (paramType != MaterialParameterType::Vector3 ||
+                        paramType != MaterialParameterType::Vector4)
+                        continue;
+                }
+                else
+                    continue;
+            }
+            if (StringUtils::CompareIgnoreCase(name, param.GetName().Get()) != 0)
+                continue;
+            param.SetValue(value);
+            param.SetIsOverride(true);
+            return;
+        }
+    }
 }
 
-void MeshOptDeallocate(void* ptr)
+String GetAdditionalImportPath(const String& autoImportOutput, Array<String>& importedFileNames, const String& name)
 {
-    Allocator::Free(ptr);
+    String filename = name;
+    EditorUtilities::ValidatePathChars(filename);
+    if (importedFileNames.Contains(filename))
+    {
+        int32 counter = 1;
+        do
+        {
+            filename = name + TEXT(" ") + StringUtils::ToString(counter);
+            counter++;
+        } while (importedFileNames.Contains(filename));
+    }
+    importedFileNames.Add(filename);
+    return autoImportOutput / filename + ASSET_FILES_EXTENSION_WITH_DOT;
 }
 
-bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options options, String& errorMsg, const String& autoImportOutput)
+bool ModelTool::ImportModel(const String& path, ModelData& data, Options& options, String& errorMsg, const String& autoImportOutput)
 {
+    PROFILE_CPU();
     LOG(Info, "Importing model from \'{0}\'", path);
     const auto startTime = DateTime::NowUTC();
 
     // Import data
-    ImportDataTypes importDataTypes;
     switch (options.Type)
     {
     case ModelType::Model:
-        importDataTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Textures;
+        options.ImportTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes;
         if (options.ImportMaterials)
-            importDataTypes |= ImportDataTypes::Materials;
+            options.ImportTypes |= ImportDataTypes::Materials;
         if (options.ImportTextures)
-            importDataTypes |= ImportDataTypes::Textures;
+            options.ImportTypes |= ImportDataTypes::Textures;
         break;
     case ModelType::SkinnedModel:
-        importDataTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Skeleton;
+        options.ImportTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Skeleton;
         if (options.ImportMaterials)
-            importDataTypes |= ImportDataTypes::Materials;
+            options.ImportTypes |= ImportDataTypes::Materials;
         if (options.ImportTextures)
-            importDataTypes |= ImportDataTypes::Textures;
+            options.ImportTypes |= ImportDataTypes::Textures;
         break;
     case ModelType::Animation:
-        importDataTypes = ImportDataTypes::Animations;
+        options.ImportTypes = ImportDataTypes::Animations;
+        if (options.RootMotion == RootMotionMode::ExtractCenterOfMass)
+            options.ImportTypes |= ImportDataTypes::Skeleton;
+        break;
+    case ModelType::Prefab:
+        options.ImportTypes = ImportDataTypes::Geometry | ImportDataTypes::Nodes | ImportDataTypes::Skeleton | ImportDataTypes::Animations;
+        if (options.ImportMaterials)
+            options.ImportTypes |= ImportDataTypes::Materials;
+        if (options.ImportTextures)
+            options.ImportTypes |= ImportDataTypes::Textures;
         break;
     default:
         return true;
     }
-    ImportedModelData data(importDataTypes);
     if (ImportData(path, data, options, errorMsg))
         return true;
 
+    // Copy over data format options
+    data.PositionFormat = (ModelData::PositionFormats)options.PositionFormat;
+    data.TexCoordFormat = (ModelData::TexCoordFormats)options.TexCoordFormat;
+
     // Validate result data
-    switch (options.Type)
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Geometry))
     {
-    case ModelType::Model:
-    {
-        // Validate
-        if (data.LODs.IsEmpty() || data.LODs[0].Meshes.IsEmpty())
+        LOG(Info, "Imported model has {0} LODs, {1} meshes (in LOD0) and {2} materials", data.LODs.Count(), data.LODs.Count() != 0 ? data.LODs[0].Meshes.Count() : 0, data.Materials.Count());
+
+        // Process blend shapes
+        for (auto& lod : data.LODs)
         {
-            errorMsg = TEXT("Imported model has no valid geometry.");
-            return true;
+            for (auto& mesh : lod.Meshes)
+            {
+                if (mesh->BlendShapes.IsEmpty())
+                    continue;
+                for (int32 blendShapeIndex = mesh->BlendShapes.Count() - 1; blendShapeIndex >= 0; blendShapeIndex--)
+                {
+                    auto& blendShape = mesh->BlendShapes[blendShapeIndex];
+
+                    // Remove blend shape vertices with empty deltas
+                    for (int32 i = blendShape.Vertices.Count() - 1; i >= 0; i--)
+                    {
+                        auto& v = blendShape.Vertices.Get()[i];
+                        if (v.PositionDelta.IsZero() && v.NormalDelta.IsZero())
+                        {
+                            blendShape.Vertices.RemoveAt(i);
+                        }
+                    }
+
+                    // Remove empty blend shapes
+                    if (blendShape.Vertices.IsEmpty() || blendShape.Name.IsEmpty())
+                    {
+                        LOG(Info, "Removing empty blend shape '{0}' from mesh '{1}'", blendShape.Name, mesh->Name);
+                        mesh->BlendShapes.RemoveAt(blendShapeIndex);
+                    }
+                }
+            }
+        }
+    }
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Skeleton))
+    {
+        LOG(Info, "Imported skeleton has {0} bones and {1} nodes", data.Skeleton.Bones.Count(), data.Nodes.Count());
+
+        // Add single node if imported skeleton is empty
+        if (data.Skeleton.Nodes.IsEmpty())
+        {
+            data.Skeleton.Nodes.Resize(1);
+            data.Skeleton.Nodes[0].Name = TEXT("Root");
+            data.Skeleton.Nodes[0].LocalTransform = Transform::Identity;
+            data.Skeleton.Nodes[0].ParentIndex = -1;
         }
 
-        LOG(Info, "Imported model has {0} LODs, {1} meshes (in LOD0) and {2} materials", data.LODs.Count(), data.LODs[0].Meshes.Count(), data.Materials.Count());
-        break;
-    }
-    case ModelType::SkinnedModel:
-    {
         // Special case if imported model has no bones but has valid skeleton and meshes.
         // We assume that every mesh uses a single bone. Copy nodes to bones.
-        if (data.Skeleton.Bones.IsEmpty() && Math::IsInRange(data.Skeleton.Nodes.Count(), 1, MAX_BONES_PER_MODEL))
+        if (data.Skeleton.Bones.IsEmpty() && Math::IsInRange(data.Skeleton.Nodes.Count(), 1, (int32)MODEL_MAX_BONES_PER_MODEL))
         {
             data.Skeleton.Bones.Resize(data.Skeleton.Nodes.Count());
             for (int32 i = 0; i < data.Skeleton.Nodes.Count(); i++)
@@ -389,357 +1113,18 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
             }
         }
 
-        // Validate
-        if (data.LODs.IsEmpty() || data.LODs[0].Meshes.IsEmpty())
+        // Check bones limit currently supported by the engine
+        if (data.Skeleton.Bones.Count() > MODEL_MAX_BONES_PER_MODEL)
         {
-            errorMsg = TEXT("Imported model has no valid geometry.");
+            errorMsg = String::Format(TEXT("Imported model skeleton has too many bones. Imported: {0}, maximum supported: {1}. Please optimize your asset."), data.Skeleton.Bones.Count(), MODEL_MAX_BONES_PER_MODEL);
             return true;
-        }
-        if (data.Skeleton.Nodes.IsEmpty() || data.Skeleton.Bones.IsEmpty())
-        {
-            errorMsg = TEXT("Imported model has no skeleton.");
-            return true;
-        }
-        if (data.Skeleton.Bones.Count() > MAX_BONES_PER_MODEL)
-        {
-            errorMsg = String::Format(TEXT("Imported model skeleton has too many bones. Imported: {0}, maximum supported: {1}. Please optimize your asset."), data.Skeleton.Bones.Count(), MAX_BONES_PER_MODEL);
-            return true;
-        }
-        if (data.LODs.Count() > 1)
-        {
-            LOG(Warning, "Imported skinned model has more than one LOD. Removing the lower LODs. Only single one is supported.");
-            data.LODs.Resize(1);
-        }
-        for (int32 i = 0; i < data.LODs[0].Meshes.Count(); i++)
-        {
-            const auto mesh = data.LODs[0].Meshes[i];
-            if (mesh->BlendIndices.IsEmpty() || mesh->BlendWeights.IsEmpty())
-            {
-                LOG(Warning, "Imported mesh \'{0}\' has missing skinning data. It may result in invalid rendering.", mesh->Name);
-
-                auto indices = Int4::Zero;
-                auto weights = Vector4::UnitX;
-
-                // Check if use a single bone for skinning
-                auto nodeIndex = data.Skeleton.FindNode(mesh->Name);
-                auto boneIndex = data.Skeleton.FindBone(nodeIndex);
-                if (boneIndex != -1)
-                {
-                    LOG(Warning, "Using auto-detected bone {0} (index {1})", data.Skeleton.Nodes[nodeIndex].Name, boneIndex);
-                    indices.X = boneIndex;
-                }
-
-                mesh->BlendIndices.Resize(mesh->Positions.Count());
-                mesh->BlendWeights.Resize(mesh->Positions.Count());
-                mesh->BlendIndices.SetAll(indices);
-                mesh->BlendWeights.SetAll(weights);
-            }
-#if BUILD_DEBUG
-            else
-            {
-                auto& indices = mesh->BlendIndices;
-                for (int32 j = 0; j < indices.Count(); j++)
-                {
-                    const int32 min = indices[j].MinValue();
-                    const int32 max = indices[j].MaxValue();
-                    if (min < 0 || max >= data.Skeleton.Bones.Count())
-                    {
-                        LOG(Warning, "Imported mesh \'{0}\' has invalid blend indices. It may result in invalid rendering.", mesh->Name);
-                    }
-                }
-
-                auto& weights = mesh->BlendWeights;
-                for (int32 j = 0; j < weights.Count(); j++)
-                {
-                    const float sum = weights[j].SumValues();
-                    if (Math::Abs(sum - 1.0f) > ZeroTolerance)
-                    {
-                        LOG(Warning, "Imported mesh \'{0}\' has invalid blend weights. It may result in invalid rendering.", mesh->Name);
-                    }
-                }
-            }
-#endif
-        }
-
-        LOG(Info, "Imported skeleton has {0} bones, {3} nodes, {1} meshes and {2} material", data.Skeleton.Bones.Count(), data.LODs[0].Meshes.Count(), data.Materials.Count(), data.Nodes.Count());
-        break;
-    }
-    case ModelType::Animation:
-    {
-        // Validate
-        if (data.Animation.Channels.IsEmpty())
-        {
-            errorMsg = TEXT("Imported file has no valid animations.");
-            return true;
-        }
-
-        LOG(Info, "Imported animation has {0} channels, duration: {1} frames, frames per second: {2}", data.Animation.Channels.Count(), data.Animation.Duration, data.Animation.FramesPerSecond);
-        break;
-    }
-    }
-
-    // Prepare textures
-    Array<String> importedFileNames;
-    for (int32 i = 0; i < data.Textures.Count(); i++)
-    {
-        auto& texture = data.Textures[i];
-
-        // Auto-import textures
-        if (autoImportOutput.IsEmpty() || (data.Types & ImportDataTypes::Textures) == 0 || texture.FilePath.IsEmpty())
-            continue;
-        String filename = StringUtils::GetFileNameWithoutExtension(texture.FilePath);
-        for (int32 j = filename.Length() - 1; j >= 0; j--)
-        {
-            if (EditorUtilities::IsInvalidPathChar(filename[j]))
-                filename[j] = ' ';
-        }
-        if (importedFileNames.Contains(filename))
-        {
-            int32 counter = 1;
-            do
-            {
-                filename = String(StringUtils::GetFileNameWithoutExtension(texture.FilePath)) + TEXT(" ") + StringUtils::ToString(counter);
-                counter++;
-            } while (importedFileNames.Contains(filename));
-        }
-        importedFileNames.Add(filename);
-        auto assetPath = autoImportOutput / filename + ASSET_FILES_EXTENSION_WITH_DOT;
-        TextureTool::Options textureOptions;
-        switch (texture.Type)
-        {
-        case TextureEntry::TypeHint::ColorRGB:
-            textureOptions.Type = TextureFormatType::ColorRGB;
-            break;
-        case TextureEntry::TypeHint::ColorRGBA:
-            textureOptions.Type = TextureFormatType::ColorRGBA;
-            break;
-        case TextureEntry::TypeHint::Normals:
-            textureOptions.Type = TextureFormatType::NormalMap;
-            break;
-        default: ;
-        }
-        AssetsImportingManager::ImportIfEdited(texture.FilePath, assetPath, texture.AssetID, &textureOptions);
-    }
-
-    // Prepare material
-    for (int32 i = 0; i < data.Materials.Count(); i++)
-    {
-        auto& material = data.Materials[i];
-
-        if (material.Name.IsEmpty())
-            material.Name = TEXT("Material ") + StringUtils::ToString(i);
-
-        // Auto-import materials
-        if (autoImportOutput.IsEmpty() || (data.Types & ImportDataTypes::Materials) == 0 || !material.UsesProperties())
-            continue;
-        auto filename = material.Name;
-        for (int32 j = filename.Length() - 1; j >= 0; j--)
-        {
-            if (EditorUtilities::IsInvalidPathChar(filename[j]))
-                filename[j] = ' ';
-        }
-        if (importedFileNames.Contains(filename))
-        {
-            int32 counter = 1;
-            do
-            {
-                filename = material.Name + TEXT(" ") + StringUtils::ToString(counter);
-                counter++;
-            } while (importedFileNames.Contains(filename));
-        }
-        importedFileNames.Add(filename);
-        auto assetPath = autoImportOutput / filename + ASSET_FILES_EXTENSION_WITH_DOT;
-        CreateMaterial::Options materialOptions;
-        materialOptions.Diffuse.Color = material.Diffuse.Color;
-        if (material.Diffuse.TextureIndex != -1)
-            materialOptions.Diffuse.Texture = data.Textures[material.Diffuse.TextureIndex].AssetID;
-        materialOptions.Diffuse.HasAlphaMask = material.Diffuse.HasAlphaMask;
-        materialOptions.Emissive.Color = material.Emissive.Color;
-        if (material.Emissive.TextureIndex != -1)
-            materialOptions.Emissive.Texture = data.Textures[material.Emissive.TextureIndex].AssetID;
-        materialOptions.Opacity.Value = material.Opacity.Value;
-        if (material.Opacity.TextureIndex != -1)
-            materialOptions.Opacity.Texture = data.Textures[material.Opacity.TextureIndex].AssetID;
-        if (material.Normals.TextureIndex != -1)
-            materialOptions.Normals.Texture = data.Textures[material.Normals.TextureIndex].AssetID;
-        if (material.TwoSided | material.Diffuse.HasAlphaMask)
-            materialOptions.Info.CullMode = CullMode::TwoSided;
-        if (!Math::IsOne(material.Opacity.Value) || material.Opacity.TextureIndex != -1)
-            materialOptions.Info.BlendMode = MaterialBlendMode::Transparent;
-        AssetsImportingManager::Create(AssetsImportingManager::CreateMaterialTag, assetPath, material.AssetID, &materialOptions);
-    }
-
-    // Prepare import transformation
-    Transform importTransform(options.Translation, options.Rotation, Vector3(options.Scale));
-    if (options.CenterGeometry && data.LODs.HasItems() && data.LODs[0].Meshes.HasItems())
-    {
-        // Calculate the bounding box (use LOD0 as a reference)
-        BoundingBox box = data.LODs[0].GetBox();
-        importTransform.Translation -= box.GetCenter();
-    }
-    const bool applyImportTransform = !importTransform.IsIdentity();
-
-    // Post-process imported data based on a target asset type
-    if (options.Type == ModelType::Model)
-    {
-        if (data.Nodes.IsEmpty())
-        {
-            errorMsg = TEXT("Missing model nodes.");
-            return true;
-        }
-
-        // Apply the import transformation
-        if (applyImportTransform)
-        {
-            // Transform the root node using the import transformation
-            auto& root = data.Nodes[0];
-            root.LocalTransform = importTransform.LocalToWorld(root.LocalTransform);
-        }
-
-        // Perform simple nodes mapping to single node (will transform meshes to model local space)
-        SkeletonMapping<ImportedModelData::Node> skeletonMapping(data.Nodes, nullptr);
-
-        // Refresh skeleton updater with model skeleton
-        SkeletonUpdater<ImportedModelData::Node> hierarchyUpdater(data.Nodes);
-        hierarchyUpdater.UpdateMatrices();
-
-        // Move meshes in the new nodes
-        for (int32 lodIndex = 0; lodIndex < data.LODs.Count(); lodIndex++)
-        {
-            for (int32 meshIndex = 0; meshIndex < data.LODs[lodIndex].Meshes.Count(); meshIndex++)
-            {
-                auto& mesh = *data.LODs[lodIndex].Meshes[meshIndex];
-
-                // Check if there was a remap using model skeleton
-                if (skeletonMapping.SourceToSource[mesh.NodeIndex] != mesh.NodeIndex)
-                {
-                    // Transform vertices
-                    const auto transformationMatrix = hierarchyUpdater.CombineMatricesFromNodeIndices(skeletonMapping.SourceToSource[mesh.NodeIndex], mesh.NodeIndex);
-                    if (!transformationMatrix.IsIdentity())
-                        mesh.TransformBuffer(transformationMatrix);
-                }
-
-                // Update new node index using real asset skeleton
-                mesh.NodeIndex = skeletonMapping.SourceToTarget[mesh.NodeIndex];
-            }
-        }
-
-        // For generated lightmap UVs coordinates needs to be moved so all meshes are in unique locations in [0-1]x[0-1] coordinates space
-        if (options.LightmapUVsSource == ModelLightmapUVsSource::Generate && data.LODs.HasItems() && data.LODs[0].Meshes.Count() > 1)
-        {
-            // Use weight-based coordinates space placement and rect-pack to allocate more space for bigger meshes in the model lightmap chart
-            int32 lodIndex = 0;
-            auto& lod = data.LODs[lodIndex];
-
-            // Build list of meshes with their area
-            struct LightmapUVsPack : RectPack<LightmapUVsPack, float>
-            {
-                LightmapUVsPack(float x, float y, float width, float height)
-                    : RectPack<LightmapUVsPack, float>(x, y, width, height)
-                {
-                }
-
-                void OnInsert()
-                {
-                }
-            };
-            struct MeshEntry
-            {
-                MeshData* Mesh;
-                float Area;
-                float Size;
-                LightmapUVsPack* Slot;
-            };
-            Array<MeshEntry> entries;
-            entries.Resize(lod.Meshes.Count());
-            float areaSum = 0;
-            for (int32 meshIndex = 0; meshIndex < lod.Meshes.Count(); meshIndex++)
-            {
-                auto& entry = entries[meshIndex];
-                entry.Mesh = lod.Meshes[meshIndex];
-                entry.Area = entry.Mesh->CalculateTrianglesArea();
-                entry.Size = Math::Sqrt(entry.Area);
-                areaSum += entry.Area;
-            }
-
-            if (areaSum > ZeroTolerance)
-            {
-                // Pack all surfaces into atlas
-                float atlasSize = Math::Sqrt(areaSum) * 1.02f;
-                int32 triesLeft = 10;
-                while (triesLeft--)
-                {
-                    bool failed = false;
-                    const float chartsPadding = (4.0f / 256.0f) * atlasSize;
-                    LightmapUVsPack root(chartsPadding, chartsPadding, atlasSize - chartsPadding, atlasSize - chartsPadding);
-                    for (auto& entry : entries)
-                    {
-                        entry.Slot = root.Insert(entry.Size, entry.Size, chartsPadding);
-                        if (entry.Slot == nullptr)
-                        {
-                            // Failed to insert surface, increase atlas size and try again
-                            atlasSize *= 1.5f;
-                            failed = true;
-                            break;
-                        }
-                    }
-
-                    if (!failed)
-                    {
-                        // Transform meshes lightmap UVs into the slots in the whole atlas
-                        const float atlasSizeInv = 1.0f / atlasSize;
-                        for (const auto& entry : entries)
-                        {
-                            Vector2 uvOffset(entry.Slot->X * atlasSizeInv, entry.Slot->Y * atlasSizeInv);
-                            Vector2 uvScale((entry.Slot->Width - chartsPadding) * atlasSizeInv, (entry.Slot->Height - chartsPadding) * atlasSizeInv);
-                            // TODO: SIMD
-                            for (auto& uv : entry.Mesh->LightmapUVs)
-                            {
-                                uv = uv * uvScale + uvOffset;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    else if (options.Type == ModelType::SkinnedModel)
-    {
-        // Process blend shapes
-        for (auto& lod : data.LODs)
-        {
-            for (auto& mesh : lod.Meshes)
-            {
-                for (int32 blendShapeIndex = mesh->BlendShapes.Count() - 1; blendShapeIndex >= 0; blendShapeIndex--)
-                {
-                    auto& blendShape = mesh->BlendShapes[blendShapeIndex];
-
-                    // Remove blend shape vertices with empty deltas
-                    for (int32 i = blendShape.Vertices.Count() - 1; i >= 0; i--)
-                    {
-                        auto& v = blendShape.Vertices[i];
-                        if (v.PositionDelta.IsZero() && v.NormalDelta.IsZero())
-                        {
-                            blendShape.Vertices.RemoveAt(i);
-                        }
-                    }
-
-                    // Remove empty blend shapes
-                    if (blendShape.Vertices.IsEmpty() || blendShape.Name.IsEmpty())
-                    {
-                        LOG(Info, "Removing empty blend shape '{0}' from mesh '{1}'", blendShape.Name, mesh->Name);
-                        mesh->BlendShapes.RemoveAt(blendShapeIndex);
-                    }
-                }
-            }
         }
 
         // Ensure that root node is at index 0
         int32 rootIndex = -1;
         for (int32 i = 0; i < data.Skeleton.Nodes.Count(); i++)
         {
-            const auto idx = data.Skeleton.Nodes[i].ParentIndex;
+            const auto idx = data.Skeleton.Nodes.Get()[i].ParentIndex;
             if (idx == -1 && rootIndex == -1)
             {
                 // Found root
@@ -767,7 +1152,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
             Swap(data.Skeleton.Nodes[rootIndex], data.Skeleton.Nodes[prevRootIndex]);
             for (int32 i = 0; i < data.Skeleton.Nodes.Count(); i++)
             {
-                auto& node = data.Skeleton.Nodes[i];
+                auto& node = data.Skeleton.Nodes.Get()[i];
                 if (node.ParentIndex == prevRootIndex)
                     node.ParentIndex = rootIndex;
                 else if (node.ParentIndex == rootIndex)
@@ -775,7 +1160,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
             }
             for (int32 i = 0; i < data.Skeleton.Bones.Count(); i++)
             {
-                auto& bone = data.Skeleton.Bones[i];
+                auto& bone = data.Skeleton.Bones.Get()[i];
                 if (bone.NodeIndex == prevRootIndex)
                     bone.NodeIndex = rootIndex;
                 else if (bone.NodeIndex == rootIndex)
@@ -821,41 +1206,398 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
             }
         }
 #endif
-
-        // Apply the import transformation
-        if (applyImportTransform)
+    }
+    if (EnumHasAllFlags(options.ImportTypes, ImportDataTypes::Geometry | ImportDataTypes::Skeleton))
+    {
+        // Validate skeleton bones used by the meshes
+        const int32 meshesCount = data.LODs.Count() != 0 ? data.LODs[0].Meshes.Count() : 0;
+        for (int32 i = 0; i < meshesCount; i++)
         {
-            // Transform the root node using the import transformation
-            auto& root = data.Skeleton.RootNode();
-            root.LocalTransform = importTransform.LocalToWorld(root.LocalTransform);
+            const auto mesh = data.LODs[0].Meshes[i];
 
-            // Apply import transform on meshes
-            Matrix importTransformMatrix;
-            importTransform.GetWorld(importTransformMatrix);
-            for (int32 lodIndex = 0; lodIndex < data.LODs.Count(); lodIndex++)
+            // If imported mesh has skeleton but no indices or weights then need to setup those (except in Prefab mode when we conditionally import meshes based on type)
+            if ((mesh->BlendIndices.IsEmpty() || mesh->BlendWeights.IsEmpty()) && data.Skeleton.Bones.HasItems() && (options.Type != ModelType::Prefab))
             {
-                for (int32 meshIndex = 0; meshIndex < data.LODs[lodIndex].Meshes.Count(); meshIndex++)
+                auto indices = Int4::Zero;
+                auto weights = Float4::UnitX;
+
+                // Check if use a single bone for skinning
+                auto nodeIndex = data.Skeleton.FindNode(mesh->Name);
+                auto boneIndex = data.Skeleton.FindBone(nodeIndex);
+                if (boneIndex == -1 && nodeIndex != -1 && data.Skeleton.Bones.Count() < MODEL_MAX_BONES_PER_MODEL)
                 {
-                    data.LODs[lodIndex].Meshes[meshIndex]->TransformBuffer(importTransformMatrix);
+                    // Add missing bone to be used by skinned model from animated nodes pose
+                    boneIndex = data.Skeleton.Bones.Count();
+                    auto& bone = data.Skeleton.Bones.AddOne();
+                    bone.ParentIndex = -1;
+                    bone.NodeIndex = nodeIndex;
+                    bone.LocalTransform = CombineTransformsFromNodeIndices(data.Nodes, -1, nodeIndex);
+                    CalculateBoneOffsetMatrix(data.Skeleton.Nodes, bone.OffsetMatrix, bone.NodeIndex);
+                    LOG(Warning, "Using auto-created bone {0} (index {1}) for mesh \'{2}\'", data.Skeleton.Nodes[nodeIndex].Name, boneIndex, mesh->Name);
+                    indices.X = boneIndex;
                 }
-            }
-
-            // Apply import transform on root bones
-            for (int32 i = 0; i < data.Skeleton.Bones.Count(); i++)
-            {
-                auto& bone = data.Skeleton.Bones[i];
-                if (bone.ParentIndex == -1)
+                else if (boneIndex != -1)
                 {
-                    bone.LocalTransform = importTransform.LocalToWorld(bone.LocalTransform);
+                    // Fallback to already added bone
+                    LOG(Warning, "Using auto-detected bone {0} (index {1}) for mesh \'{2}\'", data.Skeleton.Nodes[nodeIndex].Name, boneIndex, mesh->Name);
+                    indices.X = boneIndex;
+                }
+                else
+                {
+                    // No bone
+                    LOG(Warning, "Imported mesh \'{0}\' has missing skinning data. It may result in invalid rendering.", mesh->Name);
+                }
+
+                mesh->BlendIndices.Resize(mesh->Positions.Count());
+                mesh->BlendWeights.Resize(mesh->Positions.Count());
+                mesh->BlendIndices.SetAll(indices);
+                mesh->BlendWeights.SetAll(weights);
+            }
+            else
+            {
+                auto& indices = mesh->BlendIndices;
+                for (int32 j = 0; j < indices.Count(); j++)
+                {
+                    const Int4 ij = indices.Get()[j];
+                    const int32 min = ij.MinValue();
+                    const int32 max = ij.MaxValue();
+                    if (min < 0 || max >= data.Skeleton.Bones.Count())
+                    {
+                        LOG(Warning, "Imported mesh \'{0}\' has invalid blend indices. It may result in invalid rendering.", mesh->Name);
+                        break;
+                    }
+                }
+                auto& weights = mesh->BlendWeights;
+                for (int32 j = 0; j < weights.Count(); j++)
+                {
+                    const float sum = weights.Get()[j].SumValues();
+                    if (Math::Abs(sum - 1.0f) > ZeroTolerance)
+                    {
+                        LOG(Warning, "Imported mesh \'{0}\' has invalid blend weights. It may result in invalid rendering.", mesh->Name);
+                        break;
+                    }
                 }
             }
         }
+    }
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Animations))
+    {
+        int32 index = 0;
+        for (auto& animation : data.Animations)
+        {
+            LOG(Info, "Imported animation '{}' at index {} has {} channels, duration: {} frames ({} seconds), frames per second: {}", animation.Name, index, animation.Channels.Count(), animation.Duration, animation.GetLength(), animation.FramesPerSecond);
+            if (animation.Duration <= ZeroTolerance || animation.FramesPerSecond <= ZeroTolerance)
+            {
+                errorMsg = TEXT("Invalid animation duration.");
+                return true;
+            }
+            index++;
+        }
+    }
+    switch (options.Type)
+    {
+    case ModelType::Model:
+        if (data.LODs.IsEmpty() || data.LODs[0].Meshes.IsEmpty())
+        {
+            errorMsg = TEXT("Imported model has no valid geometry.");
+            return true;
+        }
+        if (data.Nodes.IsEmpty())
+        {
+            errorMsg = TEXT("Missing model nodes.");
+            return true;
+        }
+        break;
+    case ModelType::SkinnedModel:
+        if (data.LODs.IsEmpty() || data.LODs[0].Meshes.IsEmpty())
+        {
+            errorMsg = TEXT("Imported skinned model has no valid geometry.");
+            return true;
+        }
+        break;
+    case ModelType::Animation:
+        if (data.Animations.IsEmpty())
+        {
+            errorMsg = TEXT("Imported file has no valid animations.");
+            return true;
+        }
+        break;
+    }
 
+    // Keep additionally imported files well organized
+    Array<String> importedFileNames;
+
+    // Prepare textures
+    for (int32 i = 0; i < data.Textures.Count(); i++)
+    {
+        auto& texture = data.Textures[i];
+
+        // Auto-import textures
+        if (autoImportOutput.IsEmpty() || EnumHasNoneFlags(options.ImportTypes, ImportDataTypes::Textures) || texture.FilePath.IsEmpty() || options.CreateEmptyMaterialSlots)
+            continue;
+        String assetPath = GetAdditionalImportPath(autoImportOutput, importedFileNames, StringUtils::GetFileNameWithoutExtension(texture.FilePath));
+#if COMPILE_WITH_ASSETS_IMPORTER
+        TextureTool::Options textureOptions;
+        textureOptions.sRGB = texture.sRGB;
+        switch (texture.Type)
+        {
+        case TextureEntry::TypeHint::ColorRGB:
+            textureOptions.Type = TextureFormatType::ColorRGB;
+            break;
+        case TextureEntry::TypeHint::ColorRGBA:
+            textureOptions.Type = TextureFormatType::ColorRGBA;
+            break;
+        case TextureEntry::TypeHint::Normals:
+            textureOptions.Type = TextureFormatType::NormalMap;
+            textureOptions.sRGB = false;
+            break;
+        }
+        AssetsImportingManager::ImportIfEdited(texture.FilePath, assetPath, texture.AssetID, &textureOptions);
+#endif
+    }
+
+    // Prepare materials
+    for (int32 i = 0; i < data.Materials.Count(); i++)
+    {
+        auto& material = data.Materials[i];
+
+        if (material.Name.IsEmpty())
+            material.Name = TEXT("Material ") + StringUtils::ToString(i);
+
+        // Auto-import materials
+        if (autoImportOutput.IsEmpty() || EnumHasNoneFlags(options.ImportTypes, ImportDataTypes::Materials) || !material.UsesProperties())
+            continue;
+        String assetPath = GetAdditionalImportPath(autoImportOutput, importedFileNames, material.Name);
+#if COMPILE_WITH_ASSETS_IMPORTER
+        // When splitting imported meshes allow only the first mesh to import assets (mesh[0] is imported after all following ones so import assets during mesh[1])
+        if (!options.SplitObjects && options.ObjectIndex != 1 && options.ObjectIndex != -1)
+        {
+            // Find that asset created previously
+            AssetInfo info;
+            if (Content::GetAssetInfo(assetPath, info))
+                material.AssetID = info.ID;
+            continue;
+        }
+
+        // Skip any materials that already exist from the model.
+        // This allows the use of "import as material instances" without material properties getting overridden on each import.
+        if (options.SkipExistingMaterialsOnReimport)
+        {
+            AssetInfo info;
+            if (Content::GetAssetInfo(assetPath, info))
+            {
+                material.AssetID = info.ID;
+                continue;
+            }
+        }
+
+        // The rest of the steps this function performs become irrelevant when we're only creating slots.
+        if (options.CreateEmptyMaterialSlots)
+            continue;
+
+        if (options.ImportMaterialsAsInstances)
+        {
+            // Create material instance
+            AssetsImportingManager::Create(AssetsImportingManager::CreateMaterialInstanceTag, assetPath, material.AssetID);
+            if (auto* materialInstance = Content::Load<MaterialInstance>(assetPath))
+            {
+                materialInstance->SetBaseMaterial(options.InstanceToImportAs);
+                materialInstance->ResetParameters();
+
+                // Customize base material based on imported material (blind guess based on the common names used in materials)
+                Texture* tex;
+#define TRY_SETUP_TEXTURE_PARAM(component, names, type) if (material.component.TextureIndex != -1 && ((tex = Content::LoadAsync<Texture>(data.Textures[material.component.TextureIndex].AssetID)))) TrySetupMaterialParameter(materialInstance, ToSpan(names, ARRAY_COUNT(names)), tex, MaterialParameterType::type);
+                const Char* diffuseNames[] = { TEXT("color"), TEXT("col"), TEXT("diffuse"), TEXT("basecolor"), TEXT("base color"), TEXT("tint") };
+                TrySetupMaterialParameter(materialInstance, ToSpan(diffuseNames, ARRAY_COUNT(diffuseNames)), material.Diffuse.Color, MaterialParameterType::Color);
+                TRY_SETUP_TEXTURE_PARAM(Diffuse, diffuseNames, Texture);
+                const Char* normalMapNames[] = { TEXT("normals"), TEXT("normalmap"), TEXT("normal map"), TEXT("normal") };
+                TRY_SETUP_TEXTURE_PARAM(Normals, normalMapNames, NormalMap);
+                const Char* emissiveNames[] = { TEXT("emissive"), TEXT("emission"), TEXT("light"), TEXT("glow") };
+                TrySetupMaterialParameter(materialInstance, ToSpan(emissiveNames, ARRAY_COUNT(emissiveNames)), material.Emissive.Color, MaterialParameterType::Color);
+                TRY_SETUP_TEXTURE_PARAM(Emissive, emissiveNames, Texture);
+                const Char* opacityNames[] = { TEXT("opacity"), TEXT("alpha") };
+                TrySetupMaterialParameter(materialInstance, ToSpan(opacityNames, ARRAY_COUNT(opacityNames)), material.Opacity.Value, MaterialParameterType::Float);
+                TRY_SETUP_TEXTURE_PARAM(Opacity, opacityNames, Texture);
+                const Char* roughnessNames[] = { TEXT("roughness"), TEXT("rough") };
+                TrySetupMaterialParameter(materialInstance, ToSpan(roughnessNames, ARRAY_COUNT(roughnessNames)), material.Roughness.Value, MaterialParameterType::Float);
+                TRY_SETUP_TEXTURE_PARAM(Roughness, roughnessNames, Texture);
+                const Char* metalnessNames[] = { TEXT("metalness"), TEXT("metallic") };
+                TrySetupMaterialParameter(materialInstance, ToSpan(metalnessNames, ARRAY_COUNT(metalnessNames)), material.Metalness.Value, MaterialParameterType::Float);
+                TRY_SETUP_TEXTURE_PARAM(Metalness, metalnessNames, Texture);
+#undef TRY_SETUP_TEXTURE_PARAM
+
+                materialInstance->Save();
+            }
+            else
+            {
+                LOG(Error, "Failed to load material instance after creation. ({0})", assetPath);
+            }
+        }
+        else
+        {
+            // Create material
+            CreateMaterial::Options materialOptions;
+            materialOptions.Diffuse.Color = material.Diffuse.Color;
+            if (material.Diffuse.TextureIndex != -1)
+                materialOptions.Diffuse.Texture = data.Textures[material.Diffuse.TextureIndex].AssetID;
+            materialOptions.Diffuse.HasAlphaMask = material.Diffuse.HasAlphaMask;
+            materialOptions.Emissive.Color = material.Emissive.Color;
+            if (material.Emissive.TextureIndex != -1)
+                materialOptions.Emissive.Texture = data.Textures[material.Emissive.TextureIndex].AssetID;
+            materialOptions.Opacity.Value = material.Opacity.Value;
+            if (material.Opacity.TextureIndex != -1)
+                materialOptions.Opacity.Texture = data.Textures[material.Opacity.TextureIndex].AssetID;
+            materialOptions.Roughness.Value = material.Roughness.Value;
+            if (material.Roughness.TextureIndex != -1)
+            {
+                materialOptions.Roughness.Texture = data.Textures[material.Roughness.TextureIndex].AssetID;
+                materialOptions.Roughness.Channel = material.Roughness.Channel;
+            }
+            materialOptions.Metalness.Value = material.Metalness.Value;
+            if (material.Metalness.TextureIndex != -1)
+            {
+                materialOptions.Metalness.Texture = data.Textures[material.Metalness.TextureIndex].AssetID;
+                materialOptions.Metalness.Channel = material.Metalness.Channel;
+            }
+            if (material.Normals.TextureIndex != -1)
+                materialOptions.Normals.Texture = data.Textures[material.Normals.TextureIndex].AssetID;
+            if (material.TwoSided || material.Diffuse.HasAlphaMask)
+                materialOptions.Info.CullMode = CullMode::TwoSided;
+            if (material.Wireframe)
+                materialOptions.Info.FeaturesFlags |= MaterialFeaturesFlags::Wireframe;
+            if (!Math::IsOne(material.Opacity.Value) || material.Opacity.TextureIndex != -1)
+                materialOptions.Info.BlendMode = MaterialBlendMode::Transparent;
+            AssetsImportingManager::Create(AssetsImportingManager::CreateMaterialTag, assetPath, material.AssetID, &materialOptions);
+        }
+#endif
+    }
+
+    // Prepare import transformation
+    Transform importTransform(options.Translation, options.Rotation, Float3(options.Scale));
+
+    // Apply the import transformation
+    if ((!importTransform.IsIdentity() || options.UseLocalOrigin || options.CenterGeometry) && data.Nodes.HasItems())
+    {
+        if (options.Type == ModelType::SkinnedModel)
+        {
+            // Setup other transform options
+            if (options.UseLocalOrigin && data.LODs.HasItems() && data.LODs[0].Meshes.HasItems())
+            {
+                importTransform.Translation -= importTransform.Orientation * data.LODs[0].Meshes[0]->OriginTranslation * importTransform.Scale;
+            }
+            if (options.CenterGeometry && data.LODs.HasItems() && data.LODs[0].Meshes.HasItems())
+            {
+                // Calculate the bounding box (use LOD0 as a reference)
+                BoundingBox box = data.LODs[0].GetBox();
+                auto center = data.LODs[0].Meshes[0]->OriginOrientation * importTransform.Orientation * box.GetCenter() * importTransform.Scale * data.LODs[0].Meshes[0]->Scaling;
+                importTransform.Translation -= center;
+            }
+            
+            // Transform the root node using the import transformation
+            auto& root = data.Skeleton.RootNode();
+            Transform meshTransform = root.LocalTransform.WorldToLocal(importTransform).LocalToWorld(root.LocalTransform);
+            root.LocalTransform = importTransform.LocalToWorld(root.LocalTransform);
+
+            // Apply import transform on meshes
+            Matrix meshTransformMatrix;
+            meshTransform.GetWorld(meshTransformMatrix);
+            for (int32 lodIndex = 0; lodIndex < data.LODs.Count(); lodIndex++)
+            {
+                auto& lod = data.LODs[lodIndex];
+                for (int32 meshIndex = 0; meshIndex < lod.Meshes.Count(); meshIndex++)
+                {
+                    lod.Meshes[meshIndex]->TransformBuffer(meshTransformMatrix);
+                }
+            }
+
+            // Apply import transform on bones
+            Matrix importMatrixInv;
+            importTransform.GetWorld(importMatrixInv);
+            importMatrixInv.Invert();
+            for (SkeletonBone& bone : data.Skeleton.Bones)
+            {
+                if (bone.ParentIndex == -1)
+                    bone.LocalTransform = importTransform.LocalToWorld(bone.LocalTransform);
+                bone.OffsetMatrix = importMatrixInv * bone.OffsetMatrix;
+            }
+        }
+        else
+        {
+            // Transform the nodes using the import transformation
+            if (data.LODs.HasItems() && data.LODs[0].Meshes.HasItems())
+            {
+                BitArray<> visitedNodes;
+                visitedNodes.Resize(data.Nodes.Count());
+                visitedNodes.SetAll(false);
+                for (int i = 0; i < data.LODs[0].Meshes.Count(); ++i)
+                {
+                    auto* meshData = data.LODs[0].Meshes[i];
+                    int32 nodeIndex = meshData->NodeIndex;
+                    if (visitedNodes[nodeIndex])
+                        continue;
+                    visitedNodes.Set(nodeIndex, true);
+                    Transform transform = importTransform;
+                    if (options.UseLocalOrigin)
+                    {
+                        transform.Translation -= transform.Orientation * meshData->OriginTranslation * transform.Scale;
+                    }
+                    if (options.CenterGeometry)
+                    {
+                        // Calculate the bounding box (use LOD0 as a reference)
+                        BoundingBox box = data.LODs[0].GetBox();
+                        auto center = meshData->OriginOrientation * transform.Orientation * box.GetCenter() * transform.Scale * meshData->Scaling;
+                        transform.Translation -= center;
+                    }
+
+                    auto& node = data.Nodes[nodeIndex];
+                    node.LocalTransform = transform.LocalToWorld(node.LocalTransform);
+                }
+            }
+        }
+    }
+
+    // Post-process imported data
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Skeleton))
+    {
+        if (options.CalculateBoneOffsetMatrices)
+        {
+            // Calculate offset matrix (inverse bind pose transform) for every bone manually
+            for (SkeletonBone& bone : data.Skeleton.Bones)
+            {
+                CalculateBoneOffsetMatrix(data.Skeleton.Nodes, bone.OffsetMatrix, bone.NodeIndex);
+            }
+        }
+
+#if USE_SKELETON_NODES_SORTING
+        // Sort skeleton nodes and bones hierarchy (parents first)
+        // Then it can be used with a simple linear loop update
+        {
+            const int32 nodesCount = data.Skeleton.Nodes.Count();
+            const int32 bonesCount = data.Skeleton.Bones.Count();
+            Array<int32> mapping;
+            CreateLinearListFromTree(data.Skeleton.Nodes, mapping);
+            for (int32 i = 0; i < nodesCount; i++)
+            {
+                auto& node = data.Skeleton.Nodes[i];
+                node.ParentIndex = mapping[node.ParentIndex];
+            }
+            for (int32 i = 0; i < bonesCount; i++)
+            {
+                auto& bone = data.Skeleton.Bones[i];
+                bone.NodeIndex = mapping[bone.NodeIndex];
+            }
+        }
+        reorder_nodes_and_test_it_out
+        !
+#endif
+    }
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Geometry) && options.Type != ModelType::Prefab)
+    {
         // Perform simple nodes mapping to single node (will transform meshes to model local space)
-        SkeletonMapping<ImportedModelData::Node> skeletonMapping(data.Nodes, nullptr);
+        SkeletonMapping<ModelDataNode> skeletonMapping(data.Nodes, nullptr);
 
         // Refresh skeleton updater with model skeleton
-        SkeletonUpdater<ImportedModelData::Node> hierarchyUpdater(data.Nodes);
+        SkeletonUpdater<ModelDataNode> hierarchyUpdater(data.Nodes);
         hierarchyUpdater.UpdateMatrices();
 
         // Move meshes in the new nodes
@@ -869,7 +1611,8 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
                 if (skeletonMapping.SourceToSource[mesh.NodeIndex] != mesh.NodeIndex)
                 {
                     // Transform vertices
-                    const auto transformationMatrix = hierarchyUpdater.CombineMatricesFromNodeIndices(skeletonMapping.SourceToSource[mesh.NodeIndex], mesh.NodeIndex);
+                    const Matrix transformationMatrix = hierarchyUpdater.CombineMatricesFromNodeIndices(skeletonMapping.SourceToSource[mesh.NodeIndex], mesh.NodeIndex);
+
                     if (!transformationMatrix.IsIdentity())
                         mesh.TransformBuffer(transformationMatrix);
                 }
@@ -878,125 +1621,309 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
                 mesh.NodeIndex = skeletonMapping.SourceToTarget[mesh.NodeIndex];
             }
         }
-
-        // TODO: allow to link skeleton asset to model to retarget model bones skeleton for an animation
-        // use SkeletonMapping<SkeletonBone> to map bones?
-
-        // Calculate offset matrix (inverse bind pose transform) for every bone manually
-        {
-            for (int32 i = 0; i < data.Skeleton.Bones.Count(); i++)
-            {
-                Matrix t = Matrix::Identity;
-                int32 idx = data.Skeleton.Bones[i].NodeIndex;
-                do
-                {
-                    t *= data.Skeleton.Nodes[idx].LocalTransform.GetWorld();
-                    idx = data.Skeleton.Nodes[idx].ParentIndex;
-                } while (idx != -1);
-                t.Invert();
-                data.Skeleton.Bones[i].OffsetMatrix = t;
-            }
-        }
-
-#if USE_SKELETON_NODES_SORTING
-        // Sort skeleton nodes and bones hierarchy (parents first)
-		// Then it can be used with a simple linear loop update
-		{
-			const int32 nodesCount = data.Skeleton.Nodes.Count();
-			const int32 bonesCount = data.Skeleton.Bones.Count();
-			Array<int32> mapping;
-			CreateLinearListFromTree(data.Skeleton.Nodes, mapping);
-			for (int32 i = 0; i < nodesCount; i++)
-			{
-				auto& node = data.Skeleton.Nodes[i];
-				node.ParentIndex = mapping[node.ParentIndex];
-			}
-			for (int32 i = 0; i < bonesCount; i++)
-			{
-				auto& bone = data.Skeleton.Bones[i];
-				bone.NodeIndex = mapping[bone.NodeIndex];
-			}
-		}
-		reorder_nodes_and_test_it_out!
-#endif
-
-        // TODO: remove nodes that don't have bone attached and all child nodes don' have any bones
     }
-    else if (options.Type == ModelType::Animation)
+#if 0
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Geometry) && options.Type == ModelType::Prefab)
     {
-        // Trim the animation keyframes range if need to
-        if (options.Duration == AnimationDuration::Custom)
+        // Apply just the scale and rotations.
+        for (int32 lodIndex = 0; lodIndex < data.LODs.Count(); lodIndex++)
         {
-            const float start = (float)(options.FramesRange.X / data.Animation.FramesPerSecond);
-            const float end = (float)(options.FramesRange.Y / data.Animation.FramesPerSecond);
-            for (int32 i = 0; i < data.Animation.Channels.Count(); i++)
+            for (int32 meshIndex = 0; meshIndex < data.LODs[lodIndex].Meshes.Count(); meshIndex++)
             {
-                auto& anim = data.Animation.Channels[i];
+                auto& mesh = *data.LODs[lodIndex].Meshes[meshIndex];
+                auto& node = data.Nodes[mesh.NodeIndex];
+                auto currentNode = &data.Nodes[mesh.NodeIndex];
 
-                anim.Position.Trim(start, end);
-                anim.Rotation.Trim(start, end);
-                anim.Scale.Trim(start, end);
-            }
-            data.Animation.Duration = (end - start) * data.Animation.FramesPerSecond;
-        }
-
-        // Change the sampling rate if need to
-        if (!Math::IsZero(options.SamplingRate))
-        {
-            const float timeScale = (float)(data.Animation.FramesPerSecond / options.SamplingRate);
-            if (!Math::IsOne(timeScale))
-            {
-                data.Animation.FramesPerSecond = options.SamplingRate;
-                for (int32 i = 0; i < data.Animation.Channels.Count(); i++)
+                Vector3 scale = Vector3::One;
+                Quaternion rotation = Quaternion::Identity;
+                while (true)
                 {
-                    auto& anim = data.Animation.Channels[i];
+                    scale *= currentNode->LocalTransform.Scale;
+                    rotation *= currentNode->LocalTransform.Orientation;
+                    if (currentNode->ParentIndex == -1)
+                        break;
+                    currentNode = &data.Nodes[currentNode->ParentIndex];
+                }
 
-                    anim.Position.TransformTime(timeScale, 0.0f);
-                    anim.Rotation.TransformTime(timeScale, 0.0f);
-                    anim.Scale.TransformTime(timeScale, 0.0f);
+                // Transform vertices
+                auto transformationMatrix = Matrix::Identity;
+                transformationMatrix.SetScaleVector(scale);
+                transformationMatrix = transformationMatrix * Matrix::RotationQuaternion(rotation);
+
+                if (!transformationMatrix.IsIdentity())
+                    mesh.TransformBuffer(transformationMatrix);
+            }
+        }
+    }
+#endif
+    if (EnumHasAnyFlags(options.ImportTypes, ImportDataTypes::Animations))
+    {
+        for (auto& animation : data.Animations)
+        {
+            // Trim the animation keyframes range if need to
+            if (options.Duration == AnimationDuration::Custom)
+            {
+                // Custom animation import, frame index start and end
+                const float start = options.FramesRange.X;
+                const float end = options.FramesRange.Y;
+                for (int32 i = 0; i < animation.Channels.Count(); i++)
+                {
+                    auto& anim = animation.Channels[i];
+                    anim.Position.Trim(start, end);
+                    anim.Rotation.Trim(start, end);
+                    anim.Scale.Trim(start, end);
+                }
+                animation.Duration = end - start;
+            }
+
+            // Change the sampling rate if need to
+            if (!Math::IsZero(options.SamplingRate))
+            {
+                const float timeScale = (float)(animation.FramesPerSecond / options.SamplingRate);
+                if (!Math::IsOne(timeScale))
+                {
+                    animation.FramesPerSecond = options.SamplingRate;
+                    for (int32 i = 0; i < animation.Channels.Count(); i++)
+                    {
+                        auto& anim = animation.Channels[i];
+                        anim.Position.TransformTime(timeScale, 0.0f);
+                        anim.Rotation.TransformTime(timeScale, 0.0f);
+                        anim.Scale.TransformTime(timeScale, 0.0f);
+                    }
+                }
+            }
+
+            // Process root motion setup
+            animation.RootMotionFlags = options.RootMotion != RootMotionMode::None ? options.RootMotionFlags : AnimationRootMotionFlags::None;
+            animation.RootNodeName = options.RootNodeName.TrimTrailing();
+            if (animation.RootMotionFlags != AnimationRootMotionFlags::None && animation.Channels.HasItems())
+            {
+                if (options.RootMotion == RootMotionMode::ExtractNode)
+                {
+                    if (animation.RootNodeName.HasChars() && animation.GetChannel(animation.RootNodeName) == nullptr)
+                    {
+                        LOG(Warning, "Missing Root Motion node '{}'", animation.RootNodeName);
+                    }
+                }
+                else if (options.RootMotion == RootMotionMode::ExtractCenterOfMass && data.Skeleton.Nodes.HasItems()) // TODO: finish implementing this
+                {
+                    // Setup root node animation track
+                    const auto& rootName = data.Skeleton.Nodes.First().Name;
+                    auto rootChannelPtr = animation.GetChannel(rootName);
+                    if (!rootChannelPtr)
+                    {
+                        animation.Channels.Insert(0, NodeAnimationData());
+                        rootChannelPtr = &animation.Channels[0];
+                        rootChannelPtr->NodeName = rootName;
+                    }
+                    animation.RootNodeName = rootName;
+                    auto& rootChannel = *rootChannelPtr;
+                    rootChannel.Position.Clear();
+
+                    // Calculate skeleton center of mass position over the animation frames
+                    const int32 frames = (int32)animation.Duration;
+                    const int32 nodes = data.Skeleton.Nodes.Count();
+                    Array<Float3> centerOfMass;
+                    centerOfMass.Resize(frames);
+                    for (int32 frame = 0; frame < frames; frame++)
+                    {
+                        auto& key = centerOfMass[frame];
+
+                        // Evaluate skeleton pose at the animation frame
+                        AnimGraphImpulse pose;
+                        pose.Nodes.Resize(nodes);
+                        for (int32 nodeIndex = 0; nodeIndex < nodes; nodeIndex++)
+                        {
+                            Transform srcNode = data.Skeleton.Nodes[nodeIndex].LocalTransform;
+                            auto& node = data.Skeleton.Nodes[nodeIndex];
+                            if (auto* channel = animation.GetChannel(node.Name))
+                                channel->Evaluate((float)frame, &srcNode, false);
+                            pose.Nodes[nodeIndex] = srcNode;
+                        }
+
+                        // Calculate average location of the pose (center of mass)
+                        key = Float3::Zero;
+                        for (int32 nodeIndex = 0; nodeIndex < nodes; nodeIndex++)
+                            key += pose.GetNodeModelTransformation(data.Skeleton, nodeIndex).Translation;
+                        key /= (float)nodes;
+                    }
+
+                    // Calculate skeleton center of mass movement over the animation frames
+                    rootChannel.Position.Resize(frames);
+                    const Float3 centerOfMassRefPose = centerOfMass[0];
+                    for (int32 frame = 0; frame < frames; frame++)
+                    {
+                        auto& key = rootChannel.Position[frame];
+                        key.Time = (float)frame;
+                        key.Value = centerOfMass[frame] - centerOfMassRefPose;
+                    }
+
+                    // Remove root motion from the children (eg. if Root moves, then Hips should skip that movement delta)
+                    Float3 maxMotion = Float3::Zero;
+                    for (int32 i = 0; i < animation.Channels.Count(); i++)
+                    {
+                        auto& anim = animation.Channels[i];
+                        const int32 animNodeIndex = data.Skeleton.FindNode(anim.NodeName);
+
+                        // Skip channels that have one of their parents already animated
+                        {
+                            int32 nodeIndex = animNodeIndex;
+                            nodeIndex = data.Skeleton.Nodes[nodeIndex].ParentIndex;
+                            while (nodeIndex > 0)
+                            {
+                                const String& nodeName = data.Skeleton.Nodes[nodeIndex].Name;
+                                if (animation.GetChannel(nodeName) != nullptr)
+                                    break;
+                                nodeIndex = data.Skeleton.Nodes[nodeIndex].ParentIndex;
+                            }
+                            if (nodeIndex > 0 || &anim == rootChannelPtr)
+                                continue;
+                        }
+
+                        // Remove motion
+                        auto& animPos = anim.Position.GetKeyframes();
+                        for (int32 frame = 0; frame < animPos.Count(); frame++)
+                        {
+                            auto& key = animPos[frame];
+
+                            // Evaluate root motion at the keyframe location
+                            Float3 rootMotion;
+                            rootChannel.Position.Evaluate(rootMotion, key.Time, false);
+                            Float3::Max(maxMotion, rootMotion, maxMotion);
+
+                            // Evaluate skeleton pose at the animation frame
+                            AnimGraphImpulse pose;
+                            pose.Nodes.Resize(nodes);
+                            pose.Nodes[0] = data.Skeleton.Nodes[0].LocalTransform; // Use ref pose of root
+                            for (int32 nodeIndex = 1; nodeIndex < nodes; nodeIndex++) // Skip new root
+                            {
+                                Transform srcNode = data.Skeleton.Nodes[nodeIndex].LocalTransform;
+                                auto& node = data.Skeleton.Nodes[nodeIndex];
+                                if (auto* channel = animation.GetChannel(node.Name))
+                                    channel->Evaluate((float)frame, &srcNode, false);
+                                pose.Nodes[nodeIndex] = srcNode;
+                            }
+
+                            // Convert root motion to the local space of this node so the node stays at the same location after adding new root channel
+                            Transform parentNodeTransform = pose.GetNodeModelTransformation(data.Skeleton, data.Skeleton.Nodes[animNodeIndex].ParentIndex);
+                            rootMotion = parentNodeTransform.WorldToLocal(rootMotion);
+
+                            // Remove motion
+                            key.Value -= rootMotion;
+                        }
+                    }
+                    LOG(Info, "Calculated root motion: {}", maxMotion);
+                }
+            }
+
+            // Optimize the keyframes
+            if (options.OptimizeKeyframes)
+            {
+                const int32 before = animation.GetKeyframesCount();
+                for (int32 i = 0; i < animation.Channels.Count(); i++)
+                {
+                    auto& anim = animation.Channels[i];
+
+                    // Optimize keyframes
+                    OptimizeCurve(anim.Position);
+                    OptimizeCurve(anim.Rotation);
+                    OptimizeCurve(anim.Scale);
+
+                    // Remove empty channels
+                    if (anim.GetKeyframesCount() == 0)
+                    {
+                        animation.Channels.RemoveAt(i--);
+                    }
+                }
+                const int32 after = animation.GetKeyframesCount();
+                LOG(Info, "Optimized {0} animation keyframe(s). Before: {1}, after: {2}, Ratio: {3}%", before - after, before, after, Utilities::RoundTo2DecimalPlaces((float)after / before));
+            }
+        }
+    }
+
+    // Collision mesh output
+    if (options.CollisionMeshesPrefix.HasChars() || options.CollisionMeshesPostfix.HasChars())
+    {
+        // Extract collision meshes from the model
+        ModelData collisionModel;
+        for (auto& lod : data.LODs)
+        {
+            for (int32 i = lod.Meshes.Count() - 1; i >= 0; i--)
+            {
+                auto mesh = lod.Meshes[i];
+                if ((options.CollisionMeshesPrefix.HasChars() && mesh->Name.StartsWith(options.CollisionMeshesPrefix, StringSearchCase::IgnoreCase)) ||
+                    (options.CollisionMeshesPostfix.HasChars() && mesh->Name.EndsWith(options.CollisionMeshesPostfix, StringSearchCase::IgnoreCase)))
+                {
+                    // Remove material slot used by this mesh (if no other mesh else uses it)
+                    int32 materialSlotUsageCount = 0;
+                    for (const auto& e : data.LODs)
+                    {
+                        for (const MeshData* q : e.Meshes)
+                        {
+                            if (q->MaterialSlotIndex == mesh->MaterialSlotIndex)
+                                materialSlotUsageCount++;
+                        }
+                    }
+                    if (materialSlotUsageCount == 1)
+                    {
+                        data.Materials.RemoveAt(mesh->MaterialSlotIndex);
+
+                        // Fixup linkage of other meshes to materials
+                        for (auto& e : data.LODs)
+                        {
+                            for (MeshData* q : e.Meshes)
+                            {
+                                if (q->MaterialSlotIndex > mesh->MaterialSlotIndex)
+                                {
+                                    q->MaterialSlotIndex--;
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove data linkage
+                    mesh->NodeIndex = 0;
+                    mesh->MaterialSlotIndex = 0;
+
+                    // Add mesh to collision
+                    if (collisionModel.LODs.Count() == 0)
+                        collisionModel.LODs.AddOne();
+                    collisionModel.LODs[0].Meshes.Add(mesh);
+
+                    // Remove mesh from model
+                    lod.Meshes.RemoveAtKeepOrder(i);
+                    if (lod.Meshes.IsEmpty())
+                        break;
                 }
             }
         }
-
-        // Optimize the keyframes
-        if (options.OptimizeKeyframes)
+#if COMPILE_WITH_PHYSICS_COOKING
+        if (collisionModel.LODs.HasItems() && options.CollisionType != CollisionDataType::None)
         {
-            const int32 before = data.Animation.GetKeyframesCount();
-            for (int32 i = 0; i < data.Animation.Channels.Count(); i++)
+            // Cook collision
+            String assetPath = GetAdditionalImportPath(autoImportOutput, importedFileNames, TEXT("Collision"));
+            CollisionCooking::Argument arg;
+            arg.Type = options.CollisionType;
+            arg.OverrideModelData = &collisionModel;
+            if (CreateCollisionData::CookMeshCollision(assetPath, arg))
             {
-                auto& anim = data.Animation.Channels[i];
-
-                // Optimize keyframes
-                OptimizeCurve(anim.Position);
-                OptimizeCurve(anim.Rotation);
-                OptimizeCurve(anim.Scale);
-
-                // Remove empty channels
-                if (anim.GetKeyframesCount() == 0)
-                {
-                    data.Animation.Channels.RemoveAt(i--);
-                }
+                LOG(Error, "Failed to create collision mesh.");
             }
-            const int32 after = data.Animation.GetKeyframesCount();
-            LOG(Info, "Optimized {0} animation keyframe(s). Before: {1}, after: {2}, Ratio: {3}%", before - after, before, after, Utilities::RoundTo2DecimalPlaces((float)after / before));
         }
-
-        data.Animation.EnableRootMotion = options.EnableRootMotion;
-        data.Animation.RootNodeName = options.RootNodeName;
+#endif
     }
 
     // Merge meshes with the same parent nodes, material and skinning
     if (options.MergeMeshes)
     {
         int32 meshesMerged = 0;
-
         for (int32 lodIndex = 0; lodIndex < data.LODs.Count(); lodIndex++)
         {
             auto& meshes = data.LODs[lodIndex].Meshes;
 
             // Group meshes that can be merged together
             typedef Pair<int32, int32> MeshGroupKey;
-            const std::function<MeshGroupKey(MeshData* const&)> f = [](MeshData* const& x) -> MeshGroupKey
+            const Function<MeshGroupKey(MeshData* const&)> f = [](MeshData* const& x) -> MeshGroupKey
             {
                 return MeshGroupKey(x->NodeIndex, x->MaterialSlotIndex);
             };
@@ -1021,18 +1948,16 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
                 }
             }
         }
-
         if (meshesMerged)
-        {
             LOG(Info, "Merged {0} meshes", meshesMerged);
-        }
     }
 
     // Automatic LOD generation
-    if (options.GenerateLODs && data.LODs.HasItems() && options.TriangleReduction < 1.0f - ZeroTolerance)
+    if (options.GenerateLODs && options.LODCount > 1 && data.LODs.HasItems() && options.TriangleReduction < 1.0f - ZeroTolerance)
     {
+        PROFILE_CPU_NAMED("GenerateLODs");
         auto lodStartTime = DateTime::NowUTC();
-        meshopt_setAllocator(MeshOptAllocate, MeshOptDeallocate);
+        InitMeshOpt();
         float triangleReduction = Math::Saturate(options.TriangleReduction);
         int32 lodCount = Math::Max(options.LODCount, data.LODs.Count());
         int32 baseLOD = Math::Clamp(options.BaseLOD, 0, lodCount - 1);
@@ -1043,6 +1968,7 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
             baseLodTriangleCount += mesh->Indices.Count() / 3;
             baseLodVertexCount += mesh->Positions.Count();
         }
+        Array<unsigned int> indices;
         for (int32 lodIndex = Math::Clamp(baseLOD + 1, 1, lodCount - 1); lodIndex < lodCount; lodIndex++)
         {
             auto& dstLod = data.LODs[lodIndex];
@@ -1064,12 +1990,56 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
                 int32 srcMeshIndexCount = srcMesh->Indices.Count();
                 int32 srcMeshVertexCount = srcMesh->Positions.Count();
                 int32 dstMeshIndexCountTarget = int32(srcMeshIndexCount * triangleReduction) / 3 * 3;
-                Array<unsigned int> indices;
-                indices.Resize(dstMeshIndexCountTarget);
-                int32 dstMeshIndexCount = (int32)meshopt_simplifySloppy(indices.Get(), srcMesh->Indices.Get(), srcMeshIndexCount, (const float*)srcMesh->Positions.Get(), srcMeshVertexCount, sizeof(Vector3), dstMeshIndexCountTarget);
-                indices.Resize(dstMeshIndexCount);
-                if (dstMeshIndexCount == 0)
+                if (dstMeshIndexCountTarget < 3 || dstMeshIndexCountTarget >= srcMeshIndexCount)
                     continue;
+                indices.Clear();
+                indices.Resize(srcMeshIndexCount);
+                int32 dstMeshIndexCount = 0;
+                if (options.SloppyOptimization)
+                {
+                    PROFILE_CPU_NAMED("meshopt_simplifySloppy");
+                    dstMeshIndexCount = (int32)meshopt_simplifySloppy(indices.Get(), srcMesh->Indices.Get(), srcMeshIndexCount, (const float*)srcMesh->Positions.Get(), srcMeshVertexCount, sizeof(Float3), dstMeshIndexCountTarget, options.LODTargetError);
+                }
+                else
+                {
+                    // Build simplification flags
+                    unsigned int simplifyOptions = 0;
+                    if (options.LODLockBorder)
+                        simplifyOptions |= meshopt_SimplifyLockBorder;
+                    if (options.LODTargetErrorAbsolute)
+                        simplifyOptions |= meshopt_SimplifyErrorAbsolute;
+                    if (options.LODPreserveUVs && srcMesh->UVs.HasItems())
+                    {
+                        // Pack UV channels as attributes for meshopt_simplifyWithAttributes
+                        int32 uvChannelCount = srcMesh->UVs.Count();
+                        int32 attributeCount = uvChannelCount * 2; // 2 floats (U, V) per channel
+                        Array<float> attributes;
+                        attributes.Resize(srcMeshVertexCount * attributeCount);
+                        Array<float> attributeWeights;
+                        attributeWeights.Resize(attributeCount);
+                        for (int32 ch = 0; ch < uvChannelCount; ch++)
+                        {
+                            for (int32 v = 0; v < srcMeshVertexCount; v++)
+                            {
+                                Float2 uv = srcMesh->UVs[ch][v];
+                                attributes[v * attributeCount + ch * 2 + 0] = uv.X;
+                                attributes[v * attributeCount + ch * 2 + 1] = uv.Y;
+                            }
+                            attributeWeights[ch * 2 + 0] = options.LODPreserveUVsWeight;
+                            attributeWeights[ch * 2 + 1] = options.LODPreserveUVsWeight;
+                        }
+                        PROFILE_CPU_NAMED("meshopt_simplifyWithAttributes");
+                        dstMeshIndexCount = (int32)meshopt_simplifyWithAttributes(indices.Get(), srcMesh->Indices.Get(), srcMeshIndexCount, (const float*)srcMesh->Positions.Get(), srcMeshVertexCount, sizeof(Float3), attributes.Get(), sizeof(float) * attributeCount, attributeWeights.Get(), attributeCount, nullptr, dstMeshIndexCountTarget, options.LODTargetError, simplifyOptions, nullptr);
+                    }
+                    else
+                    {
+                        PROFILE_CPU_NAMED("meshopt_simplify");
+                        dstMeshIndexCount = (int32)meshopt_simplify(indices.Get(), srcMesh->Indices.Get(), srcMeshIndexCount, (const float*)srcMesh->Positions.Get(), srcMeshVertexCount, sizeof(Float3), dstMeshIndexCountTarget, options.LODTargetError, simplifyOptions, nullptr);
+                    }
+                }
+                if (dstMeshIndexCount <= 0 || dstMeshIndexCount >= indices.Count())
+                    continue; // Skip if failed to generate LOD or it doesn't have less vertices than source
+                indices.Resize(dstMeshIndexCount);
 
                 // Generate simplified vertex buffer remapping table (use only vertices from LOD index buffer)
                 Array<unsigned int> remap;
@@ -1088,24 +2058,26 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
         dstMesh->name.Resize(dstMeshVertexCount); \
         meshopt_remapVertexBuffer(dstMesh->name.Get(), srcMesh->name.Get(), srcMeshVertexCount, sizeof(type), remap.Get()); \
     }
-                REMAP_VERTEX_BUFFER(Positions, Vector3);
-                REMAP_VERTEX_BUFFER(UVs, Vector2);
-                REMAP_VERTEX_BUFFER(Normals, Vector3);
-                REMAP_VERTEX_BUFFER(Tangents, Vector3);
-                REMAP_VERTEX_BUFFER(Tangents, Vector3);
-                REMAP_VERTEX_BUFFER(LightmapUVs, Vector2);
+                REMAP_VERTEX_BUFFER(Positions, Float3);
+                dstMesh->UVs.Resize(srcMesh->UVs.Count());
+                for (int32 channelIdx = 0; channelIdx < srcMesh->UVs.Count(); channelIdx++)
+                {
+                    REMAP_VERTEX_BUFFER(UVs[channelIdx], Float2);
+                }
+                REMAP_VERTEX_BUFFER(Normals, Float3);
+                REMAP_VERTEX_BUFFER(Tangents, Float3);
+                REMAP_VERTEX_BUFFER(Tangents, Float3);
                 REMAP_VERTEX_BUFFER(Colors, Color);
                 REMAP_VERTEX_BUFFER(BlendIndices, Int4);
-                REMAP_VERTEX_BUFFER(BlendWeights, Vector4);
+                REMAP_VERTEX_BUFFER(BlendWeights, Float4);
 #undef REMAP_VERTEX_BUFFER
 
                 // Remap blend shapes
-                dstMesh->BlendShapes.Resize(srcMesh->BlendShapes.Count());
+                dstMesh->BlendShapes.EnsureCapacity(srcMesh->BlendShapes.Count(), false);
                 for (int32 blendShapeIndex = 0; blendShapeIndex < srcMesh->BlendShapes.Count(); blendShapeIndex++)
                 {
                     const auto& srcBlendShape = srcMesh->BlendShapes[blendShapeIndex];
-                    auto& dstBlendShape = dstMesh->BlendShapes[blendShapeIndex];
-
+                    BlendShape dstBlendShape;
                     dstBlendShape.Name = srcBlendShape.Name;
                     dstBlendShape.Weight = srcBlendShape.Weight;
                     dstBlendShape.Vertices.EnsureCapacity(srcBlendShape.Vertices.Count());
@@ -1114,39 +2086,45 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
                         auto v = srcBlendShape.Vertices[i];
                         v.VertexIndex = remap[v.VertexIndex];
                         if (v.VertexIndex != ~0u)
-                        {
                             dstBlendShape.Vertices.Add(v);
-                        }
                     }
-                }
 
-                // Remove empty blend shapes
-                for (int32 blendShapeIndex = dstMesh->BlendShapes.Count() - 1; blendShapeIndex >= 0; blendShapeIndex--)
-                {
-                    if (dstMesh->BlendShapes[blendShapeIndex].Vertices.IsEmpty())
-                        dstMesh->BlendShapes.RemoveAt(blendShapeIndex);
+                    // Add only valid blend shapes 
+                    if (dstBlendShape.Vertices.HasItems())
+                        dstMesh->BlendShapes.Add(dstBlendShape);
                 }
 
                 // Optimize generated LOD
                 meshopt_optimizeVertexCache(dstMesh->Indices.Get(), dstMesh->Indices.Get(), dstMeshIndexCount, dstMeshVertexCount);
-                meshopt_optimizeOverdraw(dstMesh->Indices.Get(), dstMesh->Indices.Get(), dstMeshIndexCount, (const float*)dstMesh->Positions.Get(), dstMeshVertexCount, sizeof(Vector3), 1.05f);
+                meshopt_optimizeOverdraw(dstMesh->Indices.Get(), dstMesh->Indices.Get(), dstMeshIndexCount, (const float*)dstMesh->Positions.Get(), dstMeshVertexCount, sizeof(Float3), 1.05f);
 
                 lodTriangleCount += dstMeshIndexCount / 3;
                 lodVertexCount += dstMeshVertexCount;
                 generatedLod++;
             }
 
-            // Remove empty meshes
+            // Remove empty meshes (no LOD was generated for them)
             for (int32 i = dstLod.Meshes.Count() - 1; i >= 0; i--)
             {
-                if (dstLod.Meshes[i]->Indices.IsEmpty())
-                    dstLod.Meshes.RemoveAt(i--);
+                MeshData* mesh = dstLod.Meshes[i];
+                if (mesh->Indices.IsEmpty() || mesh->Positions.IsEmpty())
+                {
+                    Delete(mesh);
+                    dstLod.Meshes.RemoveAtKeepOrder(i);
+                }
             }
 
             LOG(Info, "Generated LOD{0}: triangles: {1} ({2}% of base LOD), verticies: {3} ({4}% of base LOD)",
                 lodIndex,
                 lodTriangleCount, (int32)(lodTriangleCount * 100 / baseLodTriangleCount),
                 lodVertexCount, (int32)(lodVertexCount * 100 / baseLodVertexCount));
+        }
+        for (int32 lodIndex = data.LODs.Count() - 1; lodIndex > 0; lodIndex--)
+        {
+            if (data.LODs[lodIndex].Meshes.IsEmpty())
+                data.LODs.RemoveAt(lodIndex);
+            else
+                break;
         }
         if (generatedLod)
         {
@@ -1155,30 +2133,13 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
         }
     }
 
-    // Export imported data to the output container (we reduce vertex data copy operations to minimum)
-    {
-        meshData.Textures.Swap(data.Textures);
-        meshData.Materials.Swap(data.Materials);
-        meshData.LODs.Resize(data.LODs.Count(), false);
-        for (int32 i = 0; i < data.LODs.Count(); i++)
-        {
-            auto& dst = meshData.LODs[i];
-            auto& src = data.LODs[i];
-
-            dst.Meshes = src.Meshes;
-        }
-        meshData.Skeleton.Swap(data.Skeleton);
-        meshData.Animation.Swap(data.Animation);
-
-        // Clear meshes from imported data (we link them to result model data). This reduces amount of allocations.
-        data.LODs.Resize(0);
-    }
-
     // Calculate blend shapes vertices ranges
-    for (auto& lod : meshData.LODs)
+    for (auto& lod : data.LODs)
     {
         for (auto& mesh : lod.Meshes)
         {
+            if (mesh->BlendShapes.IsEmpty())
+                continue;
             for (auto& blendShape : mesh->BlendShapes)
             {
                 // Compute min/max for used vertex indices
@@ -1196,6 +2157,9 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
         }
     }
 
+    // Auto calculate LODs transition settings
+    data.CalculateLODsScreenSizes();
+
     const auto endTime = DateTime::NowUTC();
     LOG(Info, "Model file imported in {0} ms", static_cast<int32>((endTime - startTime).GetTotalMilliseconds()));
 
@@ -1204,21 +2168,21 @@ bool ModelTool::ImportModel(const String& path, ModelData& meshData, Options opt
 
 int32 ModelTool::DetectLodIndex(const String& nodeName)
 {
-    const int32 index = nodeName.FindLast(TEXT("LOD"));
+    int32 index = nodeName.FindLast(TEXT("LOD"), StringSearchCase::IgnoreCase);
     if (index != -1)
     {
+        // Some models use LOD_0 to identify LOD levels
+        if (nodeName.Length() > index + 4 && nodeName[index + 3] == '_')
+            index++;
+
         int32 num;
         if (!StringUtils::Parse(nodeName.Get() + index + 3, &num))
         {
             if (num >= 0 && num < MODEL_MAX_LODS)
-            {
                 return num;
-            }
-
             LOG(Warning, "Invalid mesh level of detail index at node \'{0}\'. Maximum supported amount of LODs is {1}.", nodeName, MODEL_MAX_LODS);
         }
     }
-
     return 0;
 }
 
@@ -1270,5 +2234,20 @@ bool ModelTool::FindTexture(const String& sourcePath, const String& file, String
     FileSystem::NormalizePath(path);
     return false;
 }
+
+void ModelTool::CalculateBoneOffsetMatrix(const Array<SkeletonNode>& nodes, Matrix& offsetMatrix, int32 nodeIndex)
+{
+    offsetMatrix = Matrix::Identity;
+    int32 idx = nodeIndex;
+    do
+    {
+        const SkeletonNode& node = nodes[idx];
+        offsetMatrix *= node.LocalTransform.GetWorld();
+        idx = node.ParentIndex;
+    } while (idx != -1);
+    offsetMatrix.Invert();
+}
+
+#endif
 
 #endif

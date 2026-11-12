@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ParticlesSimulation.h"
 #include "ParticleSystem.h"
@@ -25,6 +25,7 @@ void ParticleEmitterInstance::ClearState()
     Time = 0;
     SpawnModulesData.Clear();
     CustomData.Clear();
+    CustomSpawnCount = 0;
 #if COMPILE_WITH_GPU_PARTICLES
     GPU.DeltaTime = 0.0f;
     GPU.SpawnCount = 0;
@@ -104,15 +105,18 @@ int32 ParticleSystemInstance::GetParticlesCount() const
     if (GPUParticlesCountReadback && GPUParticlesCountReadback->IsAllocated())
     {
         auto data = static_cast<uint32*>(GPUParticlesCountReadback->Map(GPUResourceMapMode::Read));
-        for (const auto& emitter : Emitters)
+        if (data)
         {
-            if (emitter.Buffer && emitter.Buffer->Mode == ParticlesSimulationMode::GPU && emitter.Buffer->GPU.HasValidCount)
+            for (const auto& emitter : Emitters)
             {
-                result += *data;
+                if (emitter.Buffer && emitter.Buffer->Mode == ParticlesSimulationMode::GPU && emitter.Buffer->GPU.HasValidCount)
+                {
+                    result += *data;
+                }
+                ++data;
             }
-            ++data;
+            GPUParticlesCountReadback->Unmap();
         }
-        GPUParticlesCountReadback->Unmap();
     }
     else if (Emitters.HasItems())
     {
@@ -151,7 +155,7 @@ void ParticleSystemInstance::Sync(ParticleSystem* system)
         if (GPUParticlesCountReadback)
             GPUParticlesCountReadback->ReleaseGPU();
     }
-    ASSERT(Emitters.Count() == system->Emitters.Count());
+    CHECK(Emitters.Count() == system->Emitters.Count());
 }
 
 bool ParticleSystemInstance::ContainsEmitter(ParticleEmitter* emitter) const

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
@@ -22,7 +22,9 @@ namespace FlaxEngine.GUI
         private Orientation _orientation;
         private float _splitterValue;
         private Rectangle _splitterRect;
+        private Margin _splitterMargin;
         private bool _splitterClicked, _mouseOverSplitter;
+        private bool _cursorChanged;
 
         /// <summary>
         /// The first panel (left or upper based on Orientation).
@@ -37,9 +39,6 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the panel orientation.
         /// </summary>
-        /// <value>
-        /// The orientation.
-        /// </value>
         public Orientation Orientation
         {
             get => _orientation;
@@ -57,9 +56,6 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the splitter value (always in range [0; 1]).
         /// </summary>
-        /// <value>
-        /// The splitter value (always in range [0; 1]).
-        /// </value>
         public float SplitterValue
         {
             get => _splitterValue;
@@ -77,6 +73,24 @@ namespace FlaxEngine.GUI
                 }
             }
         }
+
+        /// <summary>
+        /// Margins for splitter UI, used to adjust it's area.
+        /// </summary>
+        public Margin SplitterMargin
+        {
+            get => _splitterMargin;
+            set
+            {
+                _splitterMargin = value;
+                UpdateSplitRect();
+            }
+        }
+
+        /// <summary>
+        /// Gets the area of the splitter bounds.
+        /// </summary>
+        public Rectangle SplitterRectangle => _splitterRect;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SplitPanel"/> class.
@@ -112,6 +126,7 @@ namespace FlaxEngine.GUI
                 var split = Mathf.RoundToInt(_splitterValue * Height);
                 _splitterRect = new Rectangle(0, Mathf.Clamp(split - SplitterSizeHalf, 0.0f, Height), Width, SplitterSize);
             }
+            SplitterMargin.ShrinkRectangle(ref _splitterRect);
         }
 
         private void StartTracking()
@@ -129,6 +144,7 @@ namespace FlaxEngine.GUI
             {
                 // Clear flag
                 _splitterClicked = false;
+                PerformLayout();
 
                 // End capturing mouse
                 EndMouseCapture();
@@ -142,7 +158,8 @@ namespace FlaxEngine.GUI
 
             // Draw splitter
             var style = Style.Current;
-            Render2D.FillRectangle(_splitterRect, _splitterClicked ? style.BackgroundSelected : _mouseOverSplitter ? style.BackgroundHighlighted : style.LightBackground);
+            var color = _splitterClicked ? style.BackgroundSelected : _mouseOverSplitter ? style.BackgroundHighlighted : style.LightBackground;
+            Render2D.FillRectangle(_splitterRect, color);
         }
 
         /// <inheritdoc />
@@ -154,36 +171,49 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             _mouseOverSplitter = _splitterRect.Contains(location);
 
             if (_splitterClicked)
             {
-                SplitterValue = _orientation == Orientation.Horizontal ? location.X / Width : location.Y / Height;
+                if (_orientation == Orientation.Horizontal && Width > 0)
+                    SplitterValue = location.X / Width;
+                else if (_orientation == Orientation.Vertical && Height > 0)
+                    SplitterValue = location.Y / Height;
+                Cursor = _orientation == Orientation.Horizontal ? CursorType.SizeWE : CursorType.SizeNS;
+                _cursorChanged = true;
+            }
+            else if (_mouseOverSplitter)
+            {
+                Cursor = _orientation == Orientation.Horizontal ? CursorType.SizeWE : CursorType.SizeNS;
+                _cursorChanged = true;
+            }
+            else if (_cursorChanged)
+            {
+                Cursor = CursorType.Default;
+                _cursorChanged = false;
             }
 
             base.OnMouseMove(location);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
-            if (button == MouseButton.Left)
+            if (button == MouseButton.Left && _splitterRect.Contains(location))
             {
-                if (_splitterRect.Contains(location))
-                {
-                    // Start moving splitter
-                    StartTracking();
-                    return false;
-                }
+                // Start moving splitter
+                StartTracking();
+                Focus();
+                return true;
             }
 
             return base.OnMouseDown(location, button);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (_splitterClicked)
             {
@@ -199,6 +229,11 @@ namespace FlaxEngine.GUI
         {
             // Clear flag
             _mouseOverSplitter = false;
+            if (_cursorChanged)
+            {
+                Cursor = CursorType.Default;
+                _cursorChanged = false;
+            }
 
             base.OnMouseLeave();
         }

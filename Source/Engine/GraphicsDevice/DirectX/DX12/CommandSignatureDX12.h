@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -181,6 +181,8 @@ public:
 
         const auto result = _device->GetDevice()->CreateCommandSignature(&desc, rootSig, IID_PPV_ARGS(&_signature));
         LOG_DIRECTX_RESULT(result);
+        if (FAILED(result))
+            return;
 
         _signature->SetName(L"CommandSignature");
 
@@ -190,9 +192,9 @@ public:
 public:
 
     // [GPUResourceDX12]
-    ResourceType GetResourceType() const override
+    GPUResourceType GetResourceType() const override
     {
-        return ResourceType::Descriptor;
+        return GPUResourceType::Descriptor;
     }
 
 protected:

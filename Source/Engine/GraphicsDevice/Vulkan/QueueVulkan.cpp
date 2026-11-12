@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
@@ -6,6 +6,7 @@
 #include "GPUDeviceVulkan.h"
 #include "CmdBufferVulkan.h"
 #include "RenderToolsVulkan.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 
 QueueVulkan::QueueVulkan(GPUDeviceVulkan* device, uint32 familyIndex)
     : _queue(VK_NULL_HANDLE)
@@ -14,17 +15,16 @@ QueueVulkan::QueueVulkan(GPUDeviceVulkan* device, uint32 familyIndex)
     , _device(device)
     , _lastSubmittedCmdBuffer(nullptr)
     , _lastSubmittedCmdBufferFenceCounter(0)
-    , _submitCounter(0)
 {
     vkGetDeviceQueue(device->Device, familyIndex, 0, &_queue);
 }
 
-void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 numSignalSemaphores, VkSemaphore* signalSemaphores)
+void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 signalSemaphoresCount, const VkSemaphore* signalSemaphores)
 {
+    PROFILE_CPU_NAMED("vkQueueSubmit");
     ASSERT(cmdBuffer->HasEnded());
-
     auto fence = cmdBuffer->GetFence();
-    ASSERT(!fence->IsSignaled());
+    ASSERT(!fence->IsSignaled);
 
     const VkCommandBuffer cmdBuffers[] = { cmdBuffer->GetHandle() };
 
@@ -32,7 +32,7 @@ void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 numSignalSemaphores,
     RenderToolsVulkan::ZeroStruct(submitInfo, VK_STRUCTURE_TYPE_SUBMIT_INFO);
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = cmdBuffers;
-    submitInfo.signalSemaphoreCount = numSignalSemaphores;
+    submitInfo.signalSemaphoreCount = signalSemaphoresCount;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
     Array<VkSemaphore, InlinedAllocation<8>> waitSemaphores;
@@ -48,7 +48,7 @@ void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 numSignalSemaphores,
         submitInfo.pWaitDstStageMask = cmdBuffer->_waitFlags.Get();
     }
 
-    VALIDATE_VULKAN_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, fence->GetHandle()));
+    VALIDATE_VULKAN_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, fence->Handle));
 
     // Mark semaphores as submitted
     cmdBuffer->_state = CmdBufferVulkan::State::Submitted;
@@ -62,11 +62,7 @@ void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 numSignalSemaphores,
 	const bool WaitForIdleOnSubmit = false;
 	if (WaitForIdleOnSubmit)
 	{
-		// Use 200ms timeout
-		bool success = _device->FenceManager.WaitForFence(fence, 200 * 1000 * 1000);
-		ASSERT(success);
-		ASSERT(_device->FenceManager.IsFenceSignaled(fence));
-		cmdBuffer->GetOwner()->RefreshFenceStatus();
+        cmdBuffer->Wait();
 	}
 #endif
 
@@ -78,21 +74,16 @@ void QueueVulkan::Submit(CmdBufferVulkan* cmdBuffer, uint32 numSignalSemaphores,
 void QueueVulkan::GetLastSubmittedInfo(CmdBufferVulkan*& cmdBuffer, uint64& fenceCounter) const
 {
     _locker.Lock();
-
     cmdBuffer = _lastSubmittedCmdBuffer;
     fenceCounter = _lastSubmittedCmdBufferFenceCounter;
-
     _locker.Unlock();
 }
 
 void QueueVulkan::UpdateLastSubmittedCommandBuffer(CmdBufferVulkan* cmdBuffer)
 {
     _locker.Lock();
-
     _lastSubmittedCmdBuffer = cmdBuffer;
     _lastSubmittedCmdBufferFenceCounter = cmdBuffer->GetFenceSignaledCounter();
-    _submitCounter++;
-
     _locker.Unlock();
 }
 

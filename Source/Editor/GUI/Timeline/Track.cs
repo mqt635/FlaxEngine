@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -41,6 +41,7 @@ namespace FlaxEditor.GUI.Timeline
 
         private Timeline _timeline;
         private int _trackIndexCached = -1;
+        private TrackFlags _flags;
         private Track _parentTrack;
         internal float _xOffset;
         private Margin _margin = new Margin(2.0f);
@@ -49,7 +50,7 @@ namespace FlaxEditor.GUI.Timeline
         private bool _opened;
         private bool _isMouseDown;
         private bool _mouseOverArrow;
-        private Vector2 _mouseDownPos;
+        private Float2 _mouseDownPos;
 
         /// <summary>
         /// The mute track checkbox.
@@ -144,7 +145,7 @@ namespace FlaxEditor.GUI.Timeline
         /// <summary>
         /// The track title color.
         /// </summary>
-        public Color TitleTintColor = Color.White;
+        public Color TextColor = Color.White;
 
         /// <summary>
         /// The track icon.
@@ -162,14 +163,38 @@ namespace FlaxEditor.GUI.Timeline
         public Color Color = Color.White;
 
         /// <summary>
-        /// The mute flag. Muted tracks are disabled.
+        /// The track flags.
         /// </summary>
-        public bool Mute;
+        public TrackFlags Flags
+        {
+            get => _flags;
+            set
+            {
+                if (_flags == value)
+                    return;
+                _flags = value;
+                _muteCheckbox.Checked = (Flags & TrackFlags.Mute) == 0;
+                Timeline?.MarkAsEdited();
+            }
+        }
 
         /// <summary>
-        /// The loop flag. Looped tracks are doing a playback of its data in a loop.
+        /// Controls <see cref="TrackFlags.Mute"/> flag.
         /// </summary>
-        public bool Loop;
+        public bool Mute
+        {
+            get => (Flags & TrackFlags.Mute) != 0;
+            set => Flags = value ? (Flags | TrackFlags.Mute) : (Flags & ~TrackFlags.Mute);
+        }
+
+        /// <summary>
+        /// Controls <see cref="TrackFlags.Loop"/> flag.
+        /// </summary>
+        public bool Loop
+        {
+            get => (Flags & TrackFlags.Loop) != 0;
+            set => Flags = value ? (Flags | TrackFlags.Loop) : (Flags & ~TrackFlags.Loop);
+        }
 
         /// <summary>
         /// The minimum amount of media items for this track.
@@ -245,8 +270,8 @@ namespace FlaxEditor.GUI.Timeline
             Archetype = options.Archetype;
             Name = options.Archetype.Name;
             Icon = options.Archetype.Icon;
-            Mute = options.Mute;
-            Loop = options.Loop;
+            _flags = options.Flags;
+            TextColor = Style.Current.Foreground;
 
             // Mute checkbox
             const float buttonSize = 14;
@@ -254,7 +279,7 @@ namespace FlaxEditor.GUI.Timeline
             {
                 TooltipText = "Mute track",
                 AutoFocus = true,
-                Checked = !Mute,
+                Checked = (Flags & TrackFlags.Mute) == 0,
                 AnchorPreset = AnchorPresets.MiddleRight,
                 Offsets = new Margin(-buttonSize - 2, buttonSize, buttonSize * -0.5f, buttonSize),
                 IsScrollable = false,
@@ -263,19 +288,12 @@ namespace FlaxEditor.GUI.Timeline
             _muteCheckbox.StateChanged += OnMuteButtonStateChanged;
         }
 
-        internal void SetMute(bool mute)
-        {
-            Mute = mute;
-            _muteCheckbox.Checked = !mute;
-        }
-
         private void OnMuteButtonStateChanged(CheckBox checkBox)
         {
             if (Mute == !checkBox.Checked)
                 return;
             using (new TrackUndoBlock(this))
                 Mute = !checkBox.Checked;
-            Timeline.MarkAsEdited();
         }
 
         /// <summary>
@@ -757,14 +775,33 @@ namespace FlaxEditor.GUI.Timeline
         /// Updates the drag over mode based on the given mouse location.
         /// </summary>
         /// <param name="location">The location.</param>
-        private void UpdateDrawPositioning(ref Vector2 location)
+        private void UpdateDragPositioning(ref Float2 location)
         {
+            // Check collision with drag areas
             if (new Rectangle(0, 0 - DefaultDragInsertPositionMargin - DefaultNodeOffsetY, Width, DefaultDragInsertPositionMargin * 2.0f).Contains(location))
                 _dragOverMode = DragItemPositioning.Above;
             else if (IsCollapsed && new Rectangle(0, Height - DefaultDragInsertPositionMargin, Width, DefaultDragInsertPositionMargin * 2.0f).Contains(location))
                 _dragOverMode = DragItemPositioning.Below;
             else
                 _dragOverMode = DragItemPositioning.At;
+
+            // Update DraggedOverTrack
+            var timeline = Timeline;
+            if (_dragOverMode == DragItemPositioning.None)
+            {
+                if (timeline != null && timeline.DraggedOverTrack == this)
+                    timeline.DraggedOverTrack = null;
+            }
+            else if (timeline != null)
+                timeline.DraggedOverTrack = this;
+        }
+
+        private void ClearDragPositioning()
+        {
+            _dragOverMode = DragItemPositioning.None;
+            var timeline = Timeline;
+            if (timeline != null && timeline.DraggedOverTrack == this)
+                timeline.DraggedOverTrack = null;
         }
 
         /// <summary>
@@ -772,7 +809,7 @@ namespace FlaxEditor.GUI.Timeline
         /// </summary>
         /// <param name="location">The location.</param>
         /// <returns>True if hits it.</returns>
-        protected virtual bool TestHeaderHit(ref Vector2 location)
+        protected virtual bool TestHeaderHit(ref Float2 location)
         {
             return new Rectangle(0, 0, Width, HeaderHeight).Contains(ref location);
         }
@@ -818,11 +855,9 @@ namespace FlaxEditor.GUI.Timeline
         /// <param name="name">The base name.</param>
         public void Rename(string name)
         {
-            string newName = name;
-            int count = 0;
-            while (_timeline != null && !_timeline.IsTrackNameValid(newName))
-                newName = string.Format("{0} {1}", name, count++);
-            OnRename(newName);
+            if (_timeline != null)
+                name = _timeline.GetValidTrackName(name);
+            OnRename(name);
         }
 
         /// <summary>
@@ -918,10 +953,9 @@ namespace FlaxEditor.GUI.Timeline
             bool isFocused = _timeline.ContainsFocus;
             var left = _xOffset + 16; // offset + arrow
             var height = HeaderHeight;
-            var bounds = new Rectangle(Vector2.Zero, Size);
+            var bounds = new Rectangle(Float2.Zero, Size);
             var textRect = new Rectangle(left, 0, bounds.Width - left, height);
             _margin.ShrinkRectangle(ref textRect);
-            var textColor = style.Foreground * TitleTintColor;
             var backgroundColorSelected = style.BackgroundSelected;
             var backgroundColorHighlighted = style.BackgroundHighlighted;
             var backgroundColorSelectedUnfocused = style.LightBackground;
@@ -948,7 +982,7 @@ namespace FlaxEditor.GUI.Timeline
             }
 
             // Draw text
-            Render2D.DrawText(style.FontSmall, Title ?? Name, textRect, textColor, TextAlignment.Near, TextAlignment.Center);
+            Render2D.DrawText(style.FontSmall, Title ?? Name, textRect, TextColor, TextAlignment.Near, TextAlignment.Center);
 
             // Disabled overlay
             DrawDisabled = Mute || (ParentTrack != null && ParentTrack.DrawDisabled);
@@ -958,26 +992,21 @@ namespace FlaxEditor.GUI.Timeline
             }
 
             // Draw drag and drop effect
-            if (IsDragOver && _isDragOverHeader)
+            if (IsDragOver && _timeline.DraggedOverTrack == this)
             {
-                Color dragOverColor = style.BackgroundSelected * 0.6f;
-                Rectangle rect;
                 switch (_dragOverMode)
                 {
                 case DragItemPositioning.At:
-                    rect = textRect;
+                    Render2D.FillRectangle(textRect, style.Selection);
+                    Render2D.DrawRectangle(textRect, style.SelectionBorder);
                     break;
                 case DragItemPositioning.Above:
-                    rect = new Rectangle(textRect.X, textRect.Y - DefaultDragInsertPositionMargin - DefaultNodeOffsetY, textRect.Width, DefaultDragInsertPositionMargin * 2.0f);
+                    Render2D.DrawRectangle(new Rectangle(textRect.X, textRect.Top - DefaultDragInsertPositionMargin * 0.5f - DefaultNodeOffsetY - _margin.Top, textRect.Width, DefaultDragInsertPositionMargin), style.SelectionBorder);
                     break;
                 case DragItemPositioning.Below:
-                    rect = new Rectangle(textRect.X, textRect.Bottom - DefaultDragInsertPositionMargin, textRect.Width, DefaultDragInsertPositionMargin * 2.0f);
-                    break;
-                default:
-                    rect = Rectangle.Empty;
+                    Render2D.DrawRectangle(new Rectangle(textRect.X, textRect.Bottom + _margin.Bottom - DefaultDragInsertPositionMargin * 0.5f, textRect.Width, DefaultDragInsertPositionMargin), style.SelectionBorder);
                     break;
                 }
-                Render2D.FillRectangle(rect, dragOverColor);
             }
 
             base.Draw();
@@ -985,7 +1014,7 @@ namespace FlaxEditor.GUI.Timeline
 
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             // Base
             if (base.OnMouseDown(location, button))
@@ -1012,6 +1041,15 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         /// <summary>
+        /// Called when showing timeline context menu to the user. Can be used to add custom buttons.
+        /// </summary>
+        /// <param name="menu">The menu.</param>
+        /// <param name="time">The time (in seconds) at which context menu is shown (user clicked on a timeline).</param>
+        public virtual void OnTimelineContextMenu(ContextMenu.ContextMenu menu, float time)
+        {
+        }
+
+        /// <summary>
         /// Called when context menu is being prepared to show. Can be used to add custom options.
         /// </summary>
         /// <param name="menu">The menu.</param>
@@ -1020,7 +1058,7 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             // Base
             if (base.OnMouseUp(location, button))
@@ -1034,7 +1072,7 @@ namespace FlaxEditor.GUI.Timeline
                 if (CanRename)
                     menu.AddButton("Rename", "F2", StartRenaming);
                 if (CanCopyPaste)
-                    menu.AddButton("Duplicate", "Ctrl+D", () => Timeline.DuplicateSelection());
+                    menu.AddButton("Duplicate", "Ctrl+D", () => Timeline.DuplicateSelectedTracks());
                 menu.AddButton("Delete", "Del", Delete);
                 if (CanExpand)
                 {
@@ -1090,7 +1128,7 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             base.OnMouseMove(location);
 
@@ -1098,7 +1136,7 @@ namespace FlaxEditor.GUI.Timeline
             _mouseOverArrow = CanExpand && ArrowRect.Contains(location);
 
             // Check if start drag and drop
-            if (_isMouseDown && Vector2.Distance(_mouseDownPos, location) > 10.0f)
+            if (_isMouseDown && Float2.Distance(_mouseDownPos, location) > 10.0f)
             {
                 // Clear flag
                 _isMouseDown = false;
@@ -1136,7 +1174,7 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragEnter(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragEnter(ref Float2 location, DragData data)
         {
             var result = base.OnDragEnter(ref location, data);
 
@@ -1144,18 +1182,18 @@ namespace FlaxEditor.GUI.Timeline
             _dragOverMode = DragItemPositioning.None;
             if (result == DragDropEffect.None)
             {
-                UpdateDrawPositioning(ref location);
+                UpdateDragPositioning(ref location);
 
                 // Check if mouse is over header
                 _isDragOverHeader = TestHeaderHit(ref location);
                 if (_isDragOverHeader)
                 {
-                    // Check if mouse is over arrow
+                    if (Timeline != null)
+                        Timeline.DraggedOverTrack = this;
+
+                    // Expand node if mouse goes over arrow
                     if (_children.Count > 0 && ArrowRect.Contains(location))
-                    {
-                        // Expand track
                         Expand();
-                    }
 
                     result = OnDragEnterHeader(data);
                 }
@@ -1168,26 +1206,23 @@ namespace FlaxEditor.GUI.Timeline
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragMove(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragMove(ref Float2 location, DragData data)
         {
             var result = base.OnDragMove(ref location, data);
 
             // Check if no children handled that event
-            _dragOverMode = DragItemPositioning.None;
+            ClearDragPositioning();
             if (result == DragDropEffect.None)
             {
-                UpdateDrawPositioning(ref location);
+                UpdateDragPositioning(ref location);
 
                 // Check if mouse is over header
                 bool isDragOverHeader = TestHeaderHit(ref location);
                 if (isDragOverHeader)
                 {
-                    // Check if mouse is over arrow
+                    // Expand node if mouse goes over arrow
                     if (_children.Count > 0 && ArrowRect.Contains(location))
-                    {
-                        // Expand track
                         Expand();
-                    }
 
                     if (!_isDragOverHeader)
                         result = OnDragEnterHeader(data);
@@ -1200,24 +1235,22 @@ namespace FlaxEditor.GUI.Timeline
                 }
                 _isDragOverHeader = isDragOverHeader;
 
-                if (result == DragDropEffect.None || !isDragOverHeader)
-                {
+                if (result == DragDropEffect.None)
                     _dragOverMode = DragItemPositioning.None;
-                }
             }
 
             return result;
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragDrop(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragDrop(ref Float2 location, DragData data)
         {
             var result = base.OnDragDrop(ref location, data);
 
             // Check if no children handled that event
             if (result == DragDropEffect.None)
             {
-                UpdateDrawPositioning(ref location);
+                UpdateDragPositioning(ref location);
 
                 // Check if mouse is over header
                 if (TestHeaderHit(ref location))
@@ -1228,7 +1261,7 @@ namespace FlaxEditor.GUI.Timeline
 
             // Clear cache
             _isDragOverHeader = false;
-            _dragOverMode = DragItemPositioning.None;
+            ClearDragPositioning();
 
             return result;
         }
@@ -1236,24 +1269,24 @@ namespace FlaxEditor.GUI.Timeline
         /// <inheritdoc />
         public override void OnDragLeave()
         {
-            base.OnDragLeave();
-
             // Clear cache
             if (_isDragOverHeader)
             {
                 _isDragOverHeader = false;
                 OnDragLeaveHeader();
             }
-            _dragOverMode = DragItemPositioning.None;
+            ClearDragPositioning();
+
+            base.OnDragLeave();
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
             if (base.OnMouseDoubleClick(location, button))
                 return true;
 
-            if (CanRename && TestHeaderHit(ref location))
+            if (button == MouseButton.Left && CanRename && TestHeaderHit(ref location))
             {
                 StartRenaming();
                 return true;
@@ -1275,12 +1308,12 @@ namespace FlaxEditor.GUI.Timeline
                         StartRenaming();
                     return true;
                 case KeyboardKeys.Delete:
-                    _timeline.DeleteSelection();
+                    _timeline.DeleteSelectedTracks();
                     return true;
                 case KeyboardKeys.D:
                     if (Root.GetKey(KeyboardKeys.Control) && CanCopyPaste)
                     {
-                        _timeline.DuplicateSelection();
+                        _timeline.DuplicateSelectedTracks();
                         return true;
                     }
                     break;

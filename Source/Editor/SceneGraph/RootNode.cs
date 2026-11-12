@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
 using System.Collections.Generic;
@@ -20,6 +26,7 @@ namespace FlaxEditor.SceneGraph
         protected RootNode()
         : base(null, Guid.NewGuid())
         {
+            _treeNode.AutoFocus = false;
         }
 
         /// <summary>
@@ -29,6 +36,7 @@ namespace FlaxEditor.SceneGraph
         protected RootNode(Guid id)
         : base(null, id)
         {
+            _treeNode.AutoFocus = false;
         }
 
         /// <summary>
@@ -87,15 +95,18 @@ namespace FlaxEditor.SceneGraph
         /// <param name="distance">The result distance.</param>
         /// <param name="flags">The raycasting flags.</param>
         /// <returns>Hit object or null if there is no intersection at all.</returns>
-        public SceneGraphNode RayCast(ref Ray ray, ref Ray view, out float distance, RayCastData.FlagTypes flags = RayCastData.FlagTypes.None)
+        public SceneGraphNode RayCast(ref Ray ray, ref Ray view, out Real distance, RayCastData.FlagTypes flags = RayCastData.FlagTypes.None)
         {
+            Profiler.BeginEvent("RayCastScene");
             var data = new RayCastData
             {
                 Ray = ray,
                 View = view,
                 Flags = flags
             };
-            return RayCast(ref data, out distance, out _);
+            var result = RayCast(ref data, out distance, out _);
+            Profiler.EndEvent();
+            return result;
         }
 
         /// <summary>
@@ -107,19 +118,32 @@ namespace FlaxEditor.SceneGraph
         /// <param name="normal">The result intersection surface normal vector.</param>
         /// <param name="flags">The raycasting flags.</param>
         /// <returns>Hit object or null if there is no intersection at all.</returns>
-        public SceneGraphNode RayCast(ref Ray ray, ref Ray view, out float distance, out Vector3 normal, RayCastData.FlagTypes flags = RayCastData.FlagTypes.None)
+        public SceneGraphNode RayCast(ref Ray ray, ref Ray view, out Real distance, out Vector3 normal, RayCastData.FlagTypes flags = RayCastData.FlagTypes.None)
         {
+            Profiler.BeginEvent("RayCastScene");
             var data = new RayCastData
             {
                 Ray = ray,
                 View = view,
                 Flags = flags
             };
-            return RayCast(ref data, out distance, out normal);
+            var result = RayCast(ref data, out distance, out normal);
+            Profiler.EndEvent();
+            return result;
+        }
+
+        internal static Quaternion RaycastNormalRotation(ref Vector3 normal)
+        {
+            Quaternion rotation;
+            if (normal == Vector3.Down)
+                rotation = Quaternion.RotationZ(Mathf.Pi);
+            else
+                rotation = Quaternion.LookRotation(Vector3.Cross(Vector3.Cross(normal, Vector3.Forward), normal), normal);
+            return rotation;
         }
 
         /// <inheritdoc />
-        public override bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+        public override bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             distance = 0;
             normal = Vector3.Up;
@@ -141,7 +165,8 @@ namespace FlaxEditor.SceneGraph
         /// </summary>
         /// <param name="actor">The actor.</param>
         /// <param name="parent">The parent.</param>
-        public abstract void Spawn(Actor actor, Actor parent);
+        /// <param name="orderInParent">Custom index in parent to use. Value -1 means the default one (the last one).</param>
+        public abstract void Spawn(Actor actor, Actor parent, int orderInParent = -1);
 
         /// <summary>
         /// Gets the undo.
@@ -150,7 +175,14 @@ namespace FlaxEditor.SceneGraph
 
         /// <summary>
         /// Gets the list of selected scene graph nodes in the editor context.
+        /// [Deprecated in v1.10]
         /// </summary>
-        public abstract List<SceneGraphNode> Selection { get; }
+        [Obsolete("Use SceneContext.Selection instead.")]
+        public List<SceneGraphNode> Selection => SceneContext.Selection;
+
+        /// <summary>
+        /// Gets the scene editing context.
+        /// </summary>
+        public abstract ISceneEditingContext SceneContext { get; }
     }
 }

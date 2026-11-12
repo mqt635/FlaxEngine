@@ -1,13 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
-
-using FlaxEditor.History;
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEditor
 {
     /// <summary>
     /// Interface for <see cref="Undo"/> actions.
     /// </summary>
-    /// <seealso cref="FlaxEditor.History.IHistoryAction" />
+    /// <seealso cref="FlaxEditor.IHistoryAction" />
     public interface IUndoAction : IHistoryAction
     {
         /// <summary>

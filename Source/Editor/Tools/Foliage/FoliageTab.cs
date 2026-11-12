@@ -1,11 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using FlaxEditor.GUI.Tabs;
 using FlaxEditor.Modules;
 using FlaxEditor.SceneGraph.Actors;
-using FlaxEditor.Viewport.Modes;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -100,6 +99,7 @@ namespace FlaxEditor.Tools.Foliage
         public FoliageTab(SpriteHandle icon, Editor editor)
         : base(string.Empty, icon)
         {
+            TooltipText = "Foliage editing tool.";
             Level.SceneLoaded += OnSceneLoaded;
             Editor = editor;
             Editor.SceneEditing.SelectionChanged += OnSelectionChanged;
@@ -112,7 +112,7 @@ namespace FlaxEditor.Tools.Foliage
                 UseScroll = true,
                 AnchorPreset = AnchorPresets.StretchAll,
                 Offsets = Margin.Zero,
-                TabsSize = new Vector2(50, 32),
+                TabsSize = new Float2(50, 32),
                 Parent = this
             };
 
@@ -137,14 +137,23 @@ namespace FlaxEditor.Tools.Foliage
                 Offsets = Margin.Zero,
                 Parent = _noFoliagePanel
             };
+
+            var buttonText = "Create new foliage";
             _createNewFoliage = new Button
             {
-                Text = "Create new foliage",
+                Text = buttonText,
                 AnchorPreset = AnchorPresets.MiddleCenter,
                 Offsets = new Margin(-60, 120, -12, 24),
                 Parent = _noFoliagePanel,
                 Enabled = false
             };
+            var textSize = Style.Current.FontMedium.MeasureText(buttonText);
+            if (_createNewFoliage.Width < textSize.X)
+            {
+                _createNewFoliage.LocalX -= (textSize.X - _createNewFoliage.Width) / 2;
+                _createNewFoliage.Width = textSize.X + 6;
+            }
+
             _createNewFoliage.Clicked += OnCreateNewFoliageClicked;
         }
 
@@ -205,7 +214,7 @@ namespace FlaxEditor.Tools.Foliage
 
         private void InitSculptMode()
         {
-            var tab = _modes.AddTab(FoliageTypes = new FoliageTypesTab(this));
+            var tab = _modes.AddTab(FoliageTypes = new FoliageTypesTab(this, Editor.Windows.EditWin.Viewport.EditFoliageTypesGizmo));
             tab.Selected += OnTabSelected;
         }
 
@@ -242,13 +251,13 @@ namespace FlaxEditor.Tools.Foliage
             switch (_modes.SelectedTabIndex)
             {
             case 0:
-                Editor.Windows.EditWin.Viewport.SetActiveMode<NoGizmoMode>();
+                Editor.Windows.EditWin.Viewport.Gizmos.SetActiveMode<FoliageTypesGizmoMode>();
                 break;
             case 1:
-                Editor.Windows.EditWin.Viewport.SetActiveMode<PaintFoliageGizmoMode>();
+                Editor.Windows.EditWin.Viewport.Gizmos.SetActiveMode<PaintFoliageGizmoMode>();
                 break;
             case 2:
-                Editor.Windows.EditWin.Viewport.SetActiveMode<EditFoliageGizmoMode>();
+                Editor.Windows.EditWin.Viewport.Gizmos.SetActiveMode<EditFoliageGizmoMode>();
                 break;
             default: throw new IndexOutOfRangeException("Invalid foliage tab mode.");
             }

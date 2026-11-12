@@ -1,12 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "LocalizedStringTable.h"
 #include "Engine/Serialization/JsonTools.h"
+#include "Engine/Serialization/JsonWriters.h"
 #include "Engine/Serialization/SerializationFwd.h"
 #include "Engine/Content/Factories/JsonAssetFactory.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if USE_EDITOR
-#include "Engine/ContentImporters/CreateJson.h"
-#include "Engine/Serialization/JsonWriters.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Core/Log.h"
 #endif
@@ -16,10 +16,12 @@ REGISTER_JSON_ASSET(LocalizedStringTable, "FlaxEngine.LocalizedStringTable", tru
 LocalizedStringTable::LocalizedStringTable(const SpawnParams& params, const AssetInfo* info)
     : JsonAssetBase(params, info)
 {
+    DataTypeName = TypeName;
 }
 
 void LocalizedStringTable::AddString(const StringView& id, const StringView& value)
 {
+    PROFILE_MEM(Localization);
     auto& values = Entries[id];
     values.Resize(1);
     values[0] = value;
@@ -27,81 +29,46 @@ void LocalizedStringTable::AddString(const StringView& id, const StringView& val
 
 void LocalizedStringTable::AddPluralString(const StringView& id, const StringView& value, int32 n)
 {
+    PROFILE_MEM(Localization);
     CHECK(n >= 0 && n < 1024);
     auto& values = Entries[id];
     values.Resize(Math::Max(values.Count(), n + 1));
     values[n] = value;
 }
 
-#if USE_EDITOR
-
-bool LocalizedStringTable::Save(const StringView& path)
+String LocalizedStringTable::GetString(const String& id) const
 {
-    // Validate state
-    if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
-        return true;
-    }
-    if (IsVirtual() && path.IsEmpty())
-    {
-        LOG(Error, "To save virtual asset asset you need to specify the target asset path location.");
-        return true;
-    }
-
-    ScopeLock lock(Locker);
-
-    // Serialize data
-    rapidjson_flax::StringBuffer outputData;
-    PrettyJsonWriter writerObj(outputData);
-    JsonWriter& writer = writerObj;
-    writer.StartObject();
-    {
-        writer.JKEY("Locale");
-        writer.String(Locale);
-
-        writer.JKEY("Entries");
-        writer.StartObject();
-        for (auto& e : Entries)
-        {
-            writer.Key(e.Key);
-            if (e.Value.Count() == 1)
-            {
-                writer.String(e.Value[0]);
-            }
-            else
-            {
-                writer.StartArray();
-                for (auto& q : e.Value)
-                    writer.String(q);
-                writer.EndArray();
-            }
-        }
-        writer.EndObject();
-    }
-    writer.EndObject();
-
-    // Save asset
-    const bool saveResult = CreateJson::Create(path.HasChars() ? path : StringView(GetPath()), outputData, TypeName);
-    if (saveResult)
-    {
-        LOG(Error, "Cannot save \'{0}\'", ToString());
-        return true;
-    }
-
-    return false;
+    StringView result;
+    const auto messages = Entries.TryGet(id);
+    if (messages && messages->Count() != 0)
+        result = messages->At(0);
+    if (result.IsEmpty() && FallbackTable)
+        result = FallbackTable->GetString(id);
+    return result;
 }
 
-#endif
+String LocalizedStringTable::GetPluralString(const String& id, int32 n) const
+{
+    StringView result;
+    const auto messages = Entries.TryGet(id);
+    if (messages && messages->Count() > n)
+        result = messages->At(n);
+    if (result.IsEmpty() && FallbackTable)
+        result = FallbackTable->GetPluralString(id, n);
+    return String::Format(result.GetText(), n);
+}
 
 Asset::LoadResult LocalizedStringTable::loadAsset()
 {
+    PROFILE_MEM(Localization);
+
     // Base
     auto result = JsonAssetBase::loadAsset();
     if (result != LoadResult::Ok || IsInternalType())
         return result;
 
     JsonTools::GetString(Locale, *Data, "Locale");
+    JsonTools::GetReference(FallbackTable, *Data, "FallbackTable");
     const auto entriesMember = SERIALIZE_FIND_MEMBER((*Data), "Entries");
     if (entriesMember != Data->MemberEnd() && entriesMember->value.IsObject())
     {
@@ -134,5 +101,44 @@ void LocalizedStringTable::unload(bool isReloading)
     JsonAssetBase::unload(isReloading);
 
     Locale.Clear();
+    FallbackTable = nullptr;
     Entries.Clear();
 }
+
+void LocalizedStringTable::OnGetData(rapidjson_flax::StringBuffer& buffer) const
+{
+    PrettyJsonWriter writerObj(buffer);
+    JsonWriter& writer = writerObj;
+    writer.StartObject();
+    {
+        writer.JKEY("Locale");
+        writer.String(Locale);
+
+        if (FallbackTable.GetID().IsValid())
+        {
+            writer.JKEY("FallbackTable");
+            writer.Guid(FallbackTable.GetID());
+        }
+
+        writer.JKEY("Entries");
+        writer.StartObject();
+        for (auto& e : Entries)
+        {
+            writer.Key(e.Key);
+            if (e.Value.Count() == 1)
+            {
+                writer.String(e.Value[0]);
+            }
+            else
+            {
+                writer.StartArray();
+                for (auto& q : e.Value)
+                    writer.String(q);
+                writer.EndArray();
+            }
+        }
+        writer.EndObject();
+    }
+    writer.EndObject();
+}
+

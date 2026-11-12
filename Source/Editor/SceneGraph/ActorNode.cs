@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
 using System.Collections.Generic;
@@ -14,7 +20,7 @@ namespace FlaxEditor.SceneGraph
     /// It's part of the Scene Graph.
     /// </summary>
     /// <seealso cref="SceneGraphNode" />
-    /// <seealso cref="Actor" />
+    /// <seealso cref="FlaxEngine.Actor" />
     [HideInEditor]
     public class ActorNode : SceneGraphNode
     {
@@ -177,14 +183,68 @@ namespace FlaxEditor.SceneGraph
         }
 
         /// <summary>
+        /// Get all nested actor nodes under this actor node.
+        /// </summary>
+        /// <returns>An array of ActorNodes</returns>
+        public ActorNode[] GetAllChildActorNodes()
+        {
+            var nodes = new List<ActorNode>();
+            GetAllChildActorNodes(nodes);
+            return nodes.ToArray();
+        }
+
+        /// <summary>
+        /// Get all nested actor nodes under this actor node.
+        /// </summary>
+        /// <param name="nodes">The output list to fill with results.</param>
+        public void GetAllChildActorNodes(List<ActorNode> nodes)
+        {
+            var children = ChildNodes;
+            if (children == null)
+                return;
+            for (int i = 0; i < children.Count; i++)
+            {
+                if (children[i] is ActorNode node)
+                {
+                    nodes.Add(node);
+                    node.GetAllChildActorNodes(nodes);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Whether an actor node can be selected with a selector inside editor viewport.
+        /// </summary>
+        public virtual bool CanSelectInViewport
+        {
+            get
+            {
+                var actor = Actor;
+                return actor &&
+                       actor.IsActiveInHierarchy &&
+                       (actor.HideFlags & HideFlags.DontSelect) == HideFlags.None &&
+                       actor.GetType() != typeof(EmptyActor);
+            }
+        }
+
+        /// <summary>
+        /// The selection points used to check if an actor node can be selected.
+        /// </summary>
+        /// <returns>The points to use if the actor can be selected.</returns>
+        public virtual Vector3[] GetActorSelectionPoints()
+        {
+            return Actor.EditorBoundingBox.GetCorners();
+        }
+
+        /// <summary>
         /// Gets a value indicating whether this actor can be used to create prefab from it (as a root).
         /// </summary>
-        public virtual bool CanCreatePrefab => (Actor.HideFlags & HideFlags.DontSave) != HideFlags.DontSave;
+        public virtual bool CanCreatePrefab => (_actor.HideFlags & HideFlags.DontSave) != HideFlags.DontSave;
 
         /// <summary>
         /// Gets a value indicating whether this actor has a valid linkage to the prefab asset.
         /// </summary>
-        public virtual bool HasPrefabLink => Actor.HasPrefabLink;
+        public virtual bool HasPrefabLink => _actor.HasPrefabLink;
 
         /// <inheritdoc />
         public override string Name => _actor.Name;
@@ -209,10 +269,10 @@ namespace FlaxEditor.SceneGraph
         public override bool CanDuplicate => (_actor.HideFlags & HideFlags.HideInHierarchy) == 0;
 
         /// <inheritdoc />
-        public override bool IsActive => _actor.IsActive;
+        public override bool IsActive => _actor?.IsActive ?? false;
 
         /// <inheritdoc />
-        public override bool IsActiveInHierarchy => _actor.IsActiveInHierarchy;
+        public override bool IsActiveInHierarchy => _actor?.IsActiveInHierarchy ?? false;
 
         /// <inheritdoc />
         public override int OrderInParent
@@ -228,6 +288,7 @@ namespace FlaxEditor.SceneGraph
             set => _actor.Transform = value;
         }
 
+#if false
         /// <inheritdoc />
         public override SceneGraphNode ParentNode
         {
@@ -238,26 +299,27 @@ namespace FlaxEditor.SceneGraph
                 base.ParentNode = value;
             }
         }
+#endif
 
         /// <inheritdoc />
         public override object EditableObject => _actor;
 
         /// <inheritdoc />
-        public override SceneGraphNode RayCast(ref RayCastData ray, out float distance, out Vector3 normal)
+        public override SceneGraphNode RayCast(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             var hit = base.RayCast(ref ray, out distance, out normal);
 
             // Skip actors that should not be selected
             if (hit != null && _actor != null && (_actor.HideFlags & HideFlags.DontSelect) == HideFlags.DontSelect)
             {
-                hit = ParentNode;
+                hit = null;
             }
 
             return hit;
         }
 
         /// <inheritdoc />
-        public override bool RayCastSelf(ref RayCastData ray, out float distance, out Vector3 normal)
+        public override bool RayCastSelf(ref RayCastData ray, out Real distance, out Vector3 normal)
         {
             return _actor.IntersectsItself(ray.Ray, out distance, out normal);
         }
@@ -295,25 +357,20 @@ namespace FlaxEditor.SceneGraph
         {
         }
 
+        /// <summary>
+        /// Action called after converting actor in editor.
+        /// </summary>
+        /// <param name="source">The source actor node from which this node was converted.</param>
+        public virtual void PostConvert(ActorNode source)
+        {
+        }
+
         /// <inheritdoc />
         protected override void OnParentChanged()
         {
-            // Update UI node connections
-            _treeNode.Parent = (ParentNode as ActorNode)?.TreeNode;
-
-            // Check if it's a new node and parent has been already ready
-            // (eg. we build new node for spawned actor and link it to the game)
-            if (_treeNode.Parent != null && !_treeNode.Parent.IsLayoutLocked)
-            {
-                _treeNode.IndexInParent = _actor.OrderInParent;
-                _treeNode.Parent.SortChildren();
-
-                // Update UI
-                _treeNode.IsLayoutLocked = false;
-                _treeNode.PerformLayout();
-            }
-
             base.OnParentChanged();
+
+            _treeNode.OnParentChanged(_actor, parentNode as ActorNode);
         }
 
         /// <inheritdoc />

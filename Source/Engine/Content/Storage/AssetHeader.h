@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,6 +6,7 @@
 #include "Engine/Core/Types/Pair.h"
 #include "Engine/Core/Types/String.h"
 #if USE_EDITOR
+#include "Engine/Core/Types/DateTime.h"
 #include "Engine/Core/Collections/Array.h"
 #endif
 #include "FlaxChunk.h"
@@ -19,7 +20,7 @@ typedef uint16 AssetChunksFlag;
 #define ALL_ASSET_CHUNKS MAX_uint16
 
 /// <summary>
-/// Flax Asset header
+/// Flax asset file header.
 /// </summary>
 struct FLAXENGINE_API AssetHeader
 {
@@ -39,7 +40,6 @@ struct FLAXENGINE_API AssetHeader
     FlaxChunk* Chunks[ASSET_FILE_DATA_CHUNKS];
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="AssetHeader"/> struct.
     /// </summary>
@@ -51,78 +51,29 @@ public:
     }
 
 public:
-
-    /// <summary>
-    /// Gets the chunks.
-    /// </summary>
-    /// <param name="output">The output data.</param>
-    template<typename AllocationType = HeapAllocation>
-    void GetChunks(Array<FlaxChunk*, AllocationType>& output) const
-    {
-        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
-        {
-            if (Chunks[i] != nullptr)
-                output.Add(Chunks[i]);
-        }
-    }
-
-    /// <summary>
-    /// Gets the chunks that are loaded.
-    /// </summary>
-    /// <param name="output">The output data.</param>
-    template<typename AllocationType = HeapAllocation>
-    void GetLoadedChunks(Array<FlaxChunk*, AllocationType>& output) const
-    {
-        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
-        {
-            if (Chunks[i] != nullptr && Chunks[i]->IsLoaded())
-                output.Add(Chunks[i]);
-        }
-    }
-
     /// <summary>
     /// Gets the amount of created asset chunks.
     /// </summary>
-    /// <returns>Created asset chunks</returns>
-    int32 GetChunksCount() const
-    {
-        int32 result = 0;
-        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
-        {
-            if (Chunks[i] != nullptr)
-                result++;
-        }
-        return result;
-    }
+    int32 GetChunksCount() const;
 
     /// <summary>
     /// Deletes all chunks. Warning! Chunks are managed internally, use with caution!
     /// </summary>
-    void DeleteChunks()
-    {
-        for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
-        {
-            SAFE_DELETE(Chunks[i]);
-        }
-    }
+    void DeleteChunks();
 
     /// <summary>
     /// Unlinks all chunks.
     /// </summary>
-    void UnlinkChunks()
-    {
-        Platform::MemoryClear(Chunks, sizeof(Chunks));
-    }
+    void UnlinkChunks();
 
     /// <summary>
-    /// Gets string with a human-readable info about that header
+    /// Gets string with a human-readable info about that header.
     /// </summary>
-    /// <returns>Header info string</returns>
     String ToString() const;
 };
 
 /// <summary>
-/// Flax Asset header data
+/// Flax asset header with data.
 /// </summary>
 struct FLAXENGINE_API AssetInitData
 {
@@ -154,16 +105,8 @@ struct FLAXENGINE_API AssetInitData
 #endif
 
 public:
-
     /// <summary>
     /// Gets the hash code.
     /// </summary>
-    uint32 GetHashCode() const
-    {
-        // Note: do not use Metadata/Dependencies because it may not be loaded (it's optional)
-        uint32 hashCode = GetHash(Header.ID);
-        hashCode = (hashCode * 397) ^ SerializedVersion;
-        hashCode = (hashCode * 397) ^ CustomData.Length();
-        return hashCode;
-    }
+    uint32 GetHashCode() const;
 };

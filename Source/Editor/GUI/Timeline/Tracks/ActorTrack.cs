@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
 using System.Linq;
-using FlaxEditor.CustomEditors;
 using FlaxEditor.GUI.ContextMenu;
 using FlaxEditor.GUI.Timeline.Undo;
 using FlaxEditor.SceneGraph;
@@ -62,8 +61,57 @@ namespace FlaxEditor.GUI.Timeline.Tracks
         /// </summary>
         public Actor Actor
         {
-            get => FlaxEngine.Object.TryFind<Actor>(ref ActorID);
-            set => ActorID = value?.ID ?? Guid.Empty;
+            get
+            {
+                if (Flags.HasFlag(TrackFlags.PrefabObject))
+                {
+                    // TODO: reuse cached actor to improve perf
+                    foreach (var window in Editor.Instance.Windows.Windows)
+                    {
+                        if (window is Windows.Assets.PrefabWindow prefabWindow && prefabWindow.Graph.MainActor)
+                        {
+                            var actor = FindActorWithPrefabObjectID(prefabWindow.Graph.MainActor, ref ActorID);
+                            if (actor != null)
+                                return actor;
+                        }
+                    }
+                    return null;
+                }
+                return FlaxEngine.Object.TryFind<Actor>(ref ActorID);
+            }
+            set
+            {
+                if (value != null)
+                {
+                    if (value.HasPrefabLink && value.Scene == null)
+                    {
+                        // Track with prefab object reference assigned in Editor
+                        ActorID = value.PrefabObjectID;
+                        Flags |= TrackFlags.PrefabObject;
+                    }
+                    else
+                    {
+                        ActorID = value.ID;
+                    }
+                }
+                else
+                {
+                    ActorID = Guid.Empty;
+                }
+            }
+        }
+
+        private static Actor FindActorWithPrefabObjectID(Actor a, ref Guid id)
+        {
+            if (a.PrefabObjectID == id)
+                return a;
+            for (int i = 0; i < a.ChildrenCount; i++)
+            {
+                var e = FindActorWithPrefabObjectID(a.GetChild(i), ref id);
+                if (e != null)
+                    return e;
+            }
+            return null;
         }
 
         /// <summary>
@@ -125,10 +173,10 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                     continue;
 
                 // Prevent from adding the same track twice
-                if (SubTracks.Any(x => x is IObjectTrack y && y.Object == script))
+                if (SubTracks.Any(x => x is IObjectTrack y && y.Object as SceneObject == script))
                     continue;
 
-                var name = CustomEditorsUtil.GetPropertyNameUI(script.GetType().Name);
+                var name = Utilities.Utils.GetPropertyNameUI(script.GetType().Name);
                 menu.AddButton(name, OnAddScriptTrack).Tag = script;
             }
         }
@@ -155,7 +203,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
                     b.TooltipText = Utilities.Utils.GetTooltip(actorNode.Actor);
                 }
             }
-            menu.AddButton("Select...", OnClickedSelect).TooltipText = "Opens actor picker dialog to select the target actor for this track";
+            menu.AddButton("Retarget...", OnClickedSelect).TooltipText = "Opens actor picker dialog to select the target actor for this track";
         }
 
         /// <summary>
@@ -215,7 +263,7 @@ namespace FlaxEditor.GUI.Timeline.Tracks
 
         private void OnClickedSelect()
         {
-            ActorSearchPopup.Show(this, PointFromScreen(FlaxEngine.Input.MouseScreenPosition), IsActorValid, SetActor);
+            ActorSearchPopup.Show(this, PointFromScreen(FlaxEngine.Input.MouseScreenPosition), IsActorValid, SetActor, null);
         }
 
         private void OnClickedSelectActor(Image image, MouseButton button)

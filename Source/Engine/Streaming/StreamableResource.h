@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
+#include "Engine/Core/Delegate.h"
 #include "Engine/Core/Collections/SamplesBuffer.h"
 
 class StreamingGroup;
@@ -100,25 +101,39 @@ public:
     /// <returns>Async task or tasks that update resource residency level. Must be preceded with UpdateAllocation call.</returns>
     virtual Task* CreateStreamingTask(int32 residency) = 0;
 
+    /// <summary>
+    /// Cancels any streaming task (or tasks sequence) started for this resource.
+    /// </summary>
+    virtual void CancelStreamingTasks() = 0;
+
 public:
 
     struct StreamingCache
     {
-        int64 LastUpdate = 0;
+        double LastUpdateTime = 0.0;
+        double TargetResidencyChangeTime = 0;
         int32 TargetResidency = 0;
-        int64 TargetResidencyChange = 0;
+        bool Error = false;
         SamplesBuffer<float, 5> QualitySamples;
     };
 
     StreamingCache Streaming;
+    
+    /// <summary>
+    /// Event called when current resource residency gets changed (eg. model LOD or texture MIP gets loaded). Usually called from async thread.
+    /// </summary>
+    Action ResidencyChanged;
 
     /// <summary>
     /// Requests the streaming update for this resource during next streaming manager update.
     /// </summary>
-    void RequestStreamingUpdate()
-    {
-        Streaming.LastUpdate = 0;
-    }
+    void RequestStreamingUpdate();
+    
+    /// <summary>
+    /// Stops the streaming (eg. on streaming fail).
+    /// </summary>
+    /// <param name="error">True if streaming failed.</param>
+    void ResetStreaming(bool error = true);
 
 protected:
 

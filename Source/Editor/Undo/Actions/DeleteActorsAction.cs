@@ -1,10 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
 using FlaxEditor.SceneGraph;
-using FlaxEditor.Scripting;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.Actions
 {
@@ -25,6 +25,9 @@ namespace FlaxEditor.Actions
         private Guid[] _nodeParentsIDs;
 
         [Serialize]
+        private int[] _nodeParentsOrders;
+
+        [Serialize]
         private Guid[] _prefabIds;
 
         [Serialize]
@@ -33,18 +36,44 @@ namespace FlaxEditor.Actions
         [Serialize]
         private bool _isInverted;
 
-        /// <summary>
-        /// The node parents.
-        /// </summary>
+        [Serialize]
+        private bool _affectsCSG;
+
+        [Serialize]
+        private bool _affectsNavigation;
+
         [Serialize]
         protected List<SceneGraphNode> _nodeParents;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DeleteActorsAction"/> class.
         /// </summary>
+        /// <param name="actor">The actor.</param>
+        /// <param name="isInverted">If set to <c>true</c> action will be inverted - instead of delete it will create actors.</param>
+        /// <param name="preserveOrder">If set to <c>true</c> action will be preserve actors order when performing undo.</param>
+        internal DeleteActorsAction(Actor actor, bool isInverted = false, bool preserveOrder = true)
+        : this(new List<SceneGraphNode>(1) { SceneGraphFactory.FindNode(actor.ID) }, isInverted, preserveOrder)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="DeleteActorsAction"/> class.
+        /// </summary>
+        /// <param name="node">The object.</param>
+        /// <param name="isInverted">If set to <c>true</c> action will be inverted - instead of delete it will create actors.</param>
+        /// <param name="preserveOrder">If set to <c>true</c> action will be preserve actors order when performing undo.</param>
+        internal DeleteActorsAction(SceneGraphNode node, bool isInverted = false, bool preserveOrder = true)
+        : this(new List<SceneGraphNode>(1) { node }, isInverted, preserveOrder)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="DeleteActorsAction"/> class.
+        /// </summary>
         /// <param name="nodes">The objects.</param>
-        /// <param name="isInverted">If set to <c>true</c> action will be inverted - instead of delete it will be create actors.</param>
-        internal DeleteActorsAction(List<SceneGraphNode> nodes, bool isInverted = false)
+        /// <param name="isInverted">If set to <c>true</c> action will be inverted - instead of delete it will create actors.</param>
+        /// <param name="preserveOrder">If set to <c>true</c> action will be preserve actors order when performing undo.</param>
+        internal DeleteActorsAction(List<SceneGraphNode> nodes, bool isInverted = false, bool preserveOrder = true)
         {
             _isInverted = isInverted;
 
@@ -74,9 +103,16 @@ namespace FlaxEditor.Actions
             // Collect parent nodes to delete
             _nodeParents = new List<SceneGraphNode>(nodes.Count);
             deleteNodes.BuildNodesParents(_nodeParents);
+            OnDirtyInit();
             _nodeParentsIDs = new Guid[_nodeParents.Count];
             for (int i = 0; i < _nodeParentsIDs.Length; i++)
                 _nodeParentsIDs[i] = _nodeParents[i].ID;
+            if (preserveOrder)
+            {
+                _nodeParentsOrders = new int[_nodeParents.Count];
+                for (int i = 0; i < _nodeParentsOrders.Length; i++)
+                    _nodeParentsOrders[i] = _nodeParents[i].OrderInParent;
+            }
 
             // Serialize actors
             _actorsData = Actor.ToBytes(actors.ToArray());
@@ -117,6 +153,7 @@ namespace FlaxEditor.Actions
         {
             _actorsData = null;
             _nodeParentsIDs = null;
+            _nodeParentsOrders = null;
             _prefabIds = null;
             _prefabObjectIds = null;
             _nodeParents.Clear();
@@ -128,10 +165,10 @@ namespace FlaxEditor.Actions
         protected virtual void Delete()
         {
             // Remove objects
+            OnDirty();
             for (int i = 0; i < _nodeParents.Count; i++)
             {
                 var node = _nodeParents[i];
-                Editor.Instance.Scene.MarkSceneEdited(node.ParentScene);
                 node.Delete();
             }
             _nodeParents.Clear();
@@ -206,14 +243,69 @@ namespace FlaxEditor.Actions
                 if (foundNode is ActorNode node)
                 {
                     nodes.Add(node);
+                    if (_nodeParentsOrders != null)
+                        node.Actor.OrderInParent = _nodeParentsOrders[i];
                 }
             }
             nodes.BuildNodesParents(_nodeParents);
+            OnDirty();
+        }
 
-            // Mark scenes as modified
+        private void OnDirtyInit()
+        {
             for (int i = 0; i < _nodeParents.Count; i++)
             {
-                Editor.Instance.Scene.MarkSceneEdited(_nodeParents[i].ParentScene);
+                if (_nodeParents[i] is ActorNode node && node.Actor is BoxBrush)
+                {
+                    _affectsCSG = true;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < _nodeParents.Count; i++)
+            {
+                if (_nodeParents[i] is ActorNode actorNode && actorNode.AffectsNavigationWithChildren)
+                {
+                    _affectsNavigation = true;
+                    break;
+                }
+            }
+        }
+
+        private void OnDirty()
+        {
+            // Mark scene as modified
+            foreach (var obj in _nodeParents)
+            {
+                Editor.Instance.Scene.MarkSceneEdited(obj.ParentScene);
+            }
+
+            var editor = Editor.Instance;
+            if (editor.StateMachine.IsPlayMode)
+                return;
+            var options = editor.Options.Options;
+
+            // Auto CSG mesh rebuild
+            if (_affectsCSG && options.General.AutoRebuildCSG)
+            {
+                for (var i = 0; i < _nodeParents.Count; i++)
+                {
+                    if (_nodeParents[i] is ActorNode node && node.Actor is BoxBrush)
+                        node.Actor.Scene.BuildCSG(options.General.AutoRebuildCSGTimeoutMs);
+                }
+            }
+
+            // Auto NavMesh rebuild
+            if (_affectsNavigation && options.General.AutoRebuildNavMesh)
+            {
+                for (var i = 0; i < _nodeParents.Count; i++)
+                {
+                    if (_nodeParents[i] is ActorNode node && node.Actor && node.Actor.Scene && node.AffectsNavigationWithChildren)
+                    {
+                        var bounds = node.Actor.BoundingBoxWithChildren;
+                        Navigation.BuildNavMesh(bounds, options.General.AutoRebuildNavMeshTimeoutMs);
+                    }
+                }
             }
         }
     }

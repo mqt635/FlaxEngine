@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 // -----------------------------------------------------------------------------
 // Original code from SharpDX project. https://github.com/sharpdx/SharpDX/
@@ -148,23 +148,23 @@ namespace FlaxEngine
         }
 
         /// <summary>
-        /// Performs an explicit conversion from <see cref="Vector4"/> to <see cref="Half4"/>.
+        /// Performs an explicit conversion from <see cref="Float4"/> to <see cref="Half4"/>.
         /// </summary>
         /// <param name="value">The value.</param>
         /// <returns>The result of the conversion.</returns>
-        public static explicit operator Half4(Vector4 value)
+        public static explicit operator Half4(Float4 value)
         {
             return new Half4((Half)value.X, (Half)value.Y, (Half)value.Z, (Half)value.W);
         }
 
         /// <summary>
-        /// Performs an explicit conversion from <see cref="Vector4"/> to <see cref="Half4"/>.
+        /// Performs an explicit conversion from <see cref="Float4"/> to <see cref="Half4"/>.
         /// </summary>
         /// <param name="value">The value.</param>
         /// <returns>The result of the conversion.</returns>
-        public static explicit operator Vector4(Half4 value)
+        public static explicit operator Float4(Half4 value)
         {
-            return new Vector4(value.X, value.Y, value.Z, value.W);
+            return new Float4(value.X, value.Y, value.Z, value.W);
         }
 
         /// <summary>
@@ -184,6 +184,15 @@ namespace FlaxEngine
                 return false;
             }
             return Equals((Half4)obj);
+        }
+
+        /// <summary>
+        /// Returns a <see cref="System.String" /> that represents this instance.
+        /// </summary>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
+        public override string ToString()
+        {
+            return ((Float4)this).ToString();
         }
     }
 }

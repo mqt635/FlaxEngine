@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SpriteAtlas.h"
 #include "Engine/Core/Log.h"
@@ -47,8 +47,14 @@ int32 SpriteAtlas::GetSpritesCount() const
 
 Sprite SpriteAtlas::GetSprite(int32 index) const
 {
-    CHECK_RETURN(index >= 0 && index < Sprites.Count(), Sprite())
+    CHECK_RETURN(index >= 0 && index < Sprites.Count(), Sprite());
     return Sprites.Get()[index];
+}
+
+void SpriteAtlas::GetSpriteArea(int32 index, Rectangle& result) const
+{
+    CHECK(index >= 0 && index < Sprites.Count());
+    result = Sprites.Get()[index].Area;
 }
 
 void SpriteAtlas::SetSprite(int32 index, const Sprite& value)
@@ -102,12 +108,12 @@ bool SpriteAtlas::SaveSprites()
 
     // Write sprites data
     MemoryWriteStream stream(1024);
-    stream.WriteInt32(1); // Version
-    stream.WriteInt32(Sprites.Count()); // Sprites Count
+    stream.Write(1); // Version
+    stream.Write(Sprites.Count()); // Sprites Count
     for (Sprite& t : Sprites)
     {
-        stream.Write(&t.Area);
-        stream.WriteString(t.Name, 49);
+        stream.Write(t.Area);
+        stream.Write(t.Name, 49);
     }
 
     // Link sprites data (unlink after safe)
@@ -142,7 +148,7 @@ bool SpriteAtlas::LoadSprites(ReadStream& stream)
     Sprites.Clear();
 
     int32 tilesVersion, tilesCount;
-    stream.ReadInt32(&tilesVersion);
+    stream.Read(tilesVersion);
     if (tilesVersion != 1)
     {
 #if USE_EDITOR
@@ -152,12 +158,12 @@ bool SpriteAtlas::LoadSprites(ReadStream& stream)
         LOG(Warning, "Invalid tiles version.");
         return true;
     }
-    stream.ReadInt32(&tilesCount);
+    stream.Read(tilesCount);
     Sprites.Resize(tilesCount);
     for (Sprite& t : Sprites)
     {
-        stream.Read(&t.Area);
-        stream.ReadString(&t.Name, 49);
+        stream.Read(t.Area);
+        stream.Read(t.Name, 49);
     }
 
 #if USE_EDITOR

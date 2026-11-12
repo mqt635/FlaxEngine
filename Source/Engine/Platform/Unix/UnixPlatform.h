@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,7 +12,6 @@
 class FLAXENGINE_API UnixPlatform : public PlatformBase
 {
 public:
-    
     // [PlatformBase]
     static void* Allocate(uint64 size, uint64 alignment);
     static void Free(void* ptr);

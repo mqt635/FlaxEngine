@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using FlaxEditor.Windows;
 using FlaxEngine;
 using FlaxEngine.GUI;
 
@@ -12,20 +13,17 @@ namespace FlaxEditor.GUI
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
     public class ToolStrip : ContainerControl
     {
-        /// <summary>
-        /// The default margin vertically.
-        /// </summary>
-        public const int DefaultMarginV = 1;
+        private Margin _itemsMargin;
 
         /// <summary>
-        /// The default margin horizontally.
-        /// </summary>
-        public const int DefaultMarginH = 2;
-
-        /// <summary>
-        /// Event fired when button gets clicked.
+        /// Event fired when button gets clicked with the primary mouse button.
         /// </summary>
         public Action<ToolStripButton> ButtonClicked;
+
+        /// <summary>
+        /// Event fired when button gets clicked with the secondary mouse button.
+        /// </summary>
+        public Action<ToolStripButton> SecondaryButtonClicked;
 
         /// <summary>
         /// Tries to get the last button.
@@ -61,9 +59,25 @@ namespace FlaxEditor.GUI
         }
 
         /// <summary>
+        /// Gets or sets the space around items.
+        /// </summary>
+        public Margin ItemsMargin
+        {
+            get => _itemsMargin;
+            set
+            {
+                if (_itemsMargin != value)
+                {
+                    _itemsMargin = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the height for the items.
         /// </summary>
-        public float ItemsHeight => Height - 2 * DefaultMarginV;
+        public float ItemsHeight => Height - _itemsMargin.Height;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ToolStrip"/> class.
@@ -74,8 +88,9 @@ namespace FlaxEditor.GUI
         {
             AutoFocus = false;
             AnchorPreset = AnchorPresets.HorizontalStretchTop;
-            BackgroundColor = Style.Current.LightBackground;
+            BackgroundColor = Style.Current.Background;
             Offsets = new Margin(0, 0, y, height * Editor.Instance.Options.Options.Interface.IconsScale);
+            _itemsMargin = new Margin(2, 2, 1, 1);
         }
 
         /// <summary>
@@ -146,20 +161,66 @@ namespace FlaxEditor.GUI
             ButtonClicked?.Invoke(button);
         }
 
+        internal void OnSecondaryButtonClicked(ToolStripButton button)
+        {
+            SecondaryButtonClicked?.Invoke(button);
+        }
+
         /// <inheritdoc />
         protected override void PerformLayoutBeforeChildren()
         {
-            // Arrange controls
-            float x = DefaultMarginH;
-            float h = ItemsHeight;
+            // Check size of the controls to place in each area
+            float leftSize = 0, middleSize = 0;
             for (int i = 0; i < _children.Count; i++)
             {
                 var c = _children[i];
-                if (c.Visible)
+                if (!c.Visible)
+                    continue;
+                float w = c.Width + _itemsMargin.Width;
+                if (c.AnchorPreset == AnchorPresets.MiddleCenter)
+                    middleSize += w;
+                else
+                    leftSize += w;
+            }
+            if (middleSize > 0)
+                middleSize -= _itemsMargin.Left;
+            float totalSize = leftSize + middleSize + _itemsMargin.Width;
+            float x = _itemsMargin.Left;
+            float xMiddle = (Width - middleSize) * 0.5f;
+            float h = ItemsHeight;
+            if (xMiddle <= leftSize)
+            {
+                // Arrange controls packed
+                for (int i = 0; i < _children.Count; i++)
                 {
+                    var c = _children[i];
+                    if (c.Visible)
+                    {
+                        var w = c.Width;
+                        c.Bounds = new Rectangle(x, _itemsMargin.Top, w, h);
+                        x += w + _itemsMargin.Width;
+                    }
+                }
+            }
+            else
+            {
+                // Arrange controls in groups
+                for (int i = 0; i < _children.Count; i++)
+                {
+                    var c = _children[i];
+                    if (!c.Visible)
+                        continue;
                     var w = c.Width;
-                    c.Bounds = new Rectangle(x, DefaultMarginV, w, h);
-                    x += w + DefaultMarginH;
+                    if (c.AnchorPreset == AnchorPresets.MiddleCenter)
+                    {
+                        c.Bounds = new Rectangle(xMiddle, _itemsMargin.Top, w, h);
+                        xMiddle += w + _itemsMargin.Width;
+                    }
+                    else
+                    {
+                        c.Bounds = new Rectangle(x, _itemsMargin.Top, w, h);
+                        x += w + _itemsMargin.Width;
+                    }
                 }
             }
         }
@@ -170,6 +231,26 @@ namespace FlaxEditor.GUI
             base.OnChildResized(control);
 
             PerformLayout();
+        }
+
+        /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            if (base.OnKeyDown(key))
+                return true;
+
+            // Fallback to the owning window for shortcuts
+            EditorWindow editorWindow = null;
+            ContainerControl c = Parent;
+            while (c != null && editorWindow == null)
+            {
+                editorWindow = c as EditorWindow;
+                c = c.Parent;
+            }
+            var editor = Editor.Instance;
+            if (editorWindow == null)
+                editorWindow = editor.Windows.EditWin; // Fallback to main editor window
+            return editorWindow.InputActions.Process(editor, this, key);
         }
     }
 }

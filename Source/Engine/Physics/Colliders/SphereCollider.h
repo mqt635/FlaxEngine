@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,22 +8,20 @@
 /// A sphere-shaped primitive collider.
 /// </summary>
 /// <seealso cref="Collider" />
-API_CLASS() class FLAXENGINE_API SphereCollider : public Collider
+API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Colliders/Sphere Collider\"), ActorToolbox(\"Physics\")")
+class FLAXENGINE_API SphereCollider : public Collider
 {
-DECLARE_SCENE_OBJECT(SphereCollider);
+    API_AUTO_SERIALIZATION();
+    DECLARE_SCENE_OBJECT(SphereCollider);
 private:
-
     float _radius;
 
 public:
-
     /// <summary>
     /// Gets the radius of the sphere, measured in the object's local space.
     /// </summary>
-    /// <remarks>
-    /// The sphere radius will be scaled by the actor's world scale.
-    /// </remarks>
-    API_PROPERTY(Attributes="EditorOrder(100), DefaultValue(50.0f), EditorDisplay(\"Collider\")")
+    /// <remarks>The sphere radius will be scaled by the actor's world scale.</remarks>
+    API_PROPERTY(Attributes="EditorOrder(100), DefaultValue(50.0f), EditorDisplay(\"Collider\"), ValueCategory(Utils.ValueCategory.Distance)")
     FORCE_INLINE float GetRadius() const
     {
         return _radius;
@@ -32,27 +30,20 @@ public:
     /// <summary>
     /// Sets the radius of the sphere, measured in the object's local space.
     /// </summary>
-    /// <remarks>
-    /// The sphere radius will be scaled by the actor's world scale.
-    /// </remarks>
+    /// <remarks>The sphere radius will be scaled by the actor's world scale.</remarks>
     API_PROPERTY() void SetRadius(float value);
 
 public:
-
     // [Collider]
 #if USE_EDITOR
+    void OnDebugDrawSelf() override;
     void OnDebugDrawSelected() override;
 #endif
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
-    void Serialize(SerializeStream& stream, const void* otherObj) override;
-    void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
 protected:
-
     // [Collider]
-#if USE_EDITOR
-    void DrawPhysicsDebug(RenderView& view) override;
-#endif
+    ImplementPhysicsDebug;
     void UpdateBounds() override;
-    void GetGeometry(PxGeometryHolder& geometry) override;
+    void GetGeometry(CollisionShape& collision) override;
 };

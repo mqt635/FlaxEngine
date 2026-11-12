@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
 using System.Linq;
+using System.Text;
 using Flax.Build;
 
 namespace Flax.Deps
@@ -21,6 +22,9 @@ namespace Flax.Deps
 
         public static bool Run()
         {
+            // Fix error 'IBM437' is not a supported encoding name from Ionic.Zip.ZipFile
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
             // Setup
             var buildPlatform = Platform.BuildPlatform;
             var options = new Dependency.BuildOptions
@@ -34,20 +38,21 @@ namespace Flax.Deps
             var platforms = Globals.AllPlatforms;
             if (Configuration.BuildPlatforms != null && Configuration.BuildPlatforms.Length != 0)
                 platforms = Configuration.BuildPlatforms;
-            platforms = platforms.Where(x => buildPlatform.CanBuildPlatform(x)).ToArray();
-            Log.Verbose("Building deps for platforms:");
+            platforms = platforms.Where(buildPlatform.CanBuildPlatform).ToArray();
+            var architectures = Globals.AllArchitectures;
+            if (Configuration.BuildArchitectures != null && Configuration.BuildArchitectures.Length != 0)
+                architectures = Configuration.BuildArchitectures;
+            architectures = architectures.Where(x => platforms.Any(y => Platform.GetPlatform(y, true)?.CanBuildArchitecture(x) ?? false)).ToArray();
+            Log.Verbose($"Building deps for platforms {string.Join(',', platforms)}, {string.Join(',', architectures)}:");
             foreach (var platform in platforms)
             {
-                Log.Verbose(" - " + platform);
+                foreach (var architecture in architectures)
+                {
+                    Log.Verbose($" - {platform} ({architecture})");
 
-                if (Platform.IsPlatformSupported(platform, TargetArchitecture.x64))
-                    SetupDepsOutputFolder(options, platform, TargetArchitecture.x64);
-                if (Platform.IsPlatformSupported(platform, TargetArchitecture.x86))
-                    SetupDepsOutputFolder(options, platform, TargetArchitecture.x86);
-                if (Platform.IsPlatformSupported(platform, TargetArchitecture.ARM))
-                    SetupDepsOutputFolder(options, platform, TargetArchitecture.ARM);
-                if (Platform.IsPlatformSupported(platform, TargetArchitecture.ARM64))
-                    SetupDepsOutputFolder(options, platform, TargetArchitecture.ARM64);
+                    if (Platform.IsPlatformSupported(platform, architecture))
+                        SetupDepsOutputFolder(options, platform, architecture);
+                }
             }
 
             // Get all deps
@@ -58,7 +63,7 @@ namespace Flax.Deps
             {
                 var dependency = dependencies[i];
                 var name = dependency.GetType().Name;
-                if (depsToBuild.Length > 0)
+                if (depsToBuild.Length > 0 || !dependency.BuildByDefault)
                 {
                     if (!depsToBuild.Contains(name.ToLower()))
                     {
@@ -76,6 +81,14 @@ namespace Flax.Deps
                     continue;
                 }
 
+                options.Architectures = architectures.Intersect(dependency.Architectures).ToArray();
+                if (options.Architectures.Length == 0)
+                {
+                    Log.Info(string.Format("Skipping {0} ({1}/{2})", name, i + 1, dependencies.Length));
+                    Log.Verbose("Architecture not used on any of the build platforms.");
+                    continue;
+                }
+
                 Log.Info(string.Format("Building {0} ({1}/{2})", name, i + 1, dependencies.Length));
 
                 options.IntermediateFolder = Path.Combine(Environment.CurrentDirectory, "Cache", "Intermediate", "Deps", name).Replace('\\', '/');
@@ -85,7 +98,7 @@ namespace Flax.Deps
                     continue;
                 }
 
-                var forceEmpty = Configuration.ReBuildDeps;
+                var forceEmpty = false; //Configuration.ReBuildDeps;
                 Dependency.SetupDirectory(options.IntermediateFolder, forceEmpty);
 
                 dependency.Build(options);

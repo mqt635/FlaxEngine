@@ -1,17 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
-
-#if USE_EDITOR
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "VertexColors.h"
+
+#if GPU_ENABLE_DEVELOPMENT
+
 #include "Engine/Content/Content.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUPipelineState.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Renderer/DrawCall.h"
+#include "Engine/Renderer/RendererPass.h"
 
-PACK_STRUCT(struct VertexColorsMaterialShaderData {
+GPU_CB_STRUCT(VertexColorsMaterialShaderData {
     Matrix ViewProjectionMatrix;
     Matrix WorldMatrix;
     });
@@ -22,9 +25,7 @@ VertexColorsMaterialShader::VertexColorsMaterialShader()
     _shader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Editor/VertexColors"));
     if (!_shader)
         return;
-#if COMPILE_WITH_DEV_ENV
-    _shader.Get()->OnReloading.Bind<VertexColorsMaterialShader, &VertexColorsMaterialShader::OnShaderReloading>(this);
-#endif
+    BIND_SHADER_RELOADING(_shader, VertexColorsMaterialShader, OnShaderReloading);
 }
 
 #if COMPILE_WITH_DEV_ENV
@@ -41,6 +42,11 @@ const MaterialInfo& VertexColorsMaterialShader::GetInfo() const
     return _info;
 }
 
+GPUShader* VertexColorsMaterialShader::GetShader() const
+{
+    return _shader->GPU;
+}
+
 bool VertexColorsMaterialShader::IsReady() const
 {
     return _shader && _shader->IsLoaded();
@@ -55,10 +61,10 @@ void VertexColorsMaterialShader::Bind(BindParameters& params)
 {
     // Prepare
     auto context = params.GPUContext;
-    auto& drawCall = *params.FirstDrawCall;
+    auto& drawCall = *params.DrawCall;
 
     // Setup
-    auto shader = _shader->GetShader();
+    auto shader = _shader->GPU;
     auto cb = shader->GetCB(0);
     if (!_ps->IsValid())
     {

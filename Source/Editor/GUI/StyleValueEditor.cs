@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Windows;
@@ -100,7 +100,6 @@ namespace FlaxEditor.GUI
                 /*
                 -Background
                 -LightBackground
-                -DragWindow
                 -Foreground
                 -ForegroundDisabled
                 -BackgroundHighlighted
@@ -114,14 +113,12 @@ namespace FlaxEditor.GUI
                 -ProgressNormal
                 */
 
-                var size = new Vector2(r.Width / 7f, r.Height / 2f);
+                var size = new Float2(r.Width / 7f, r.Height / 2f);
                 float x = 2;
 
                 Render2D.FillRectangle(new Rectangle(x, 2, size), Value.Foreground);
                 x += size.X;
                 Render2D.FillRectangle(new Rectangle(x, 2, size), Value.ForegroundDisabled);
-                x += size.X;
-                Render2D.FillRectangle(new Rectangle(x, 2, size), Value.DragWindow);
                 x += size.X;
                 Render2D.FillRectangle(new Rectangle(x, 2, size), Value.BorderNormal);
                 x += size.X;
@@ -162,7 +159,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (Value == null)
             {

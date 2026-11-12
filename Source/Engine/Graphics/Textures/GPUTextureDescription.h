@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -85,7 +85,7 @@ API_ENUM() enum class TextureDimensions
 /// </summary>
 API_STRUCT() struct FLAXENGINE_API GPUTextureDescription
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(GPUTextureDescription);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(GPUTextureDescription);
 
     /// <summary>
     /// The dimensions of the texture.
@@ -143,13 +143,12 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(GPUTextureDescription);
     API_FIELD() Color DefaultClearColor;
 
 public:
-
     /// <summary>
     /// Gets a value indicating whether this instance is a render target.
     /// </summary>
     FORCE_INLINE bool IsRenderTarget() const
     {
-        return (Flags & GPUTextureFlags::RenderTarget) != 0;
+        return (Flags & GPUTextureFlags::RenderTarget) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -157,7 +156,7 @@ public:
     /// </summary>
     FORCE_INLINE bool IsDepthStencil() const
     {
-        return (Flags & GPUTextureFlags::DepthStencil) != 0;
+        return (Flags & GPUTextureFlags::DepthStencil) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -165,7 +164,7 @@ public:
     /// </summary>
     FORCE_INLINE bool IsShaderResource() const
     {
-        return (Flags & GPUTextureFlags::ShaderResource) != 0;
+        return (Flags & GPUTextureFlags::ShaderResource) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -173,7 +172,7 @@ public:
     /// </summary>
     FORCE_INLINE bool IsUnorderedAccess() const
     {
-        return (Flags & GPUTextureFlags::UnorderedAccess) != 0;
+        return (Flags & GPUTextureFlags::UnorderedAccess) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -181,7 +180,7 @@ public:
     /// </summary>
     FORCE_INLINE bool HasPerMipViews() const
     {
-        return (Flags & GPUTextureFlags::PerMipViews) != 0;
+        return (Flags & GPUTextureFlags::PerMipViews) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -189,7 +188,7 @@ public:
     /// </summary>
     FORCE_INLINE bool HasPerSliceViews() const
     {
-        return (Flags & GPUTextureFlags::PerSliceViews) != 0;
+        return (Flags & GPUTextureFlags::PerSliceViews) != GPUTextureFlags::None;
     }
 
     /// <summary>
@@ -225,7 +224,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Creates a new 1D <see cref="GPUTextureDescription" /> with a single mipmap.
     /// </summary>
@@ -265,7 +263,6 @@ public:
     static GPUTextureDescription New1D(int32 width, PixelFormat format, GPUTextureFlags textureFlags, int32 mipCount, int32 arraySize);
 
 public:
-
     /// <summary>
     /// Creates a new <see cref="GPUTextureDescription" /> with a single mipmap.
     /// </summary>
@@ -310,7 +307,6 @@ public:
     static GPUTextureDescription New2D(int32 width, int32 height, PixelFormat format, GPUTextureFlags textureFlags, int32 mipCount, int32 arraySize, MSAALevel msaaLevel = MSAALevel::None);
 
 public:
-
     /// <summary>
     /// Creates a new <see cref="GPUTextureDescription" /> with a single mipmap.
     /// </summary>
@@ -318,7 +314,7 @@ public:
     /// <param name="format">Describes the format to use.</param>
     /// <param name="textureFlags">true if the texture needs to support unordered read write.</param>
     /// <returns>A new instance of <see cref="GPUTextureDescription" /> class.</returns>
-    static GPUTextureDescription New3D(const Vector3& size, PixelFormat format, GPUTextureFlags textureFlags = GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget);
+    static GPUTextureDescription New3D(const Float3& size, PixelFormat format, GPUTextureFlags textureFlags = GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget);
 
     /// <summary>
     /// Creates a new <see cref="GPUTextureDescription" /> with a single mipmap.
@@ -362,7 +358,6 @@ public:
     static GPUTextureDescription New3D(int32 width, int32 height, int32 depth, PixelFormat format, GPUTextureFlags textureFlags, int32 mipCount);
 
 public:
-
     /// <summary>
     /// Creates a new Cube <see cref="GPUTextureDescription" />.
     /// </summary>
@@ -399,15 +394,14 @@ public:
     static GPUTextureDescription NewCube(int32 size, PixelFormat format, GPUTextureFlags textureFlags, int32 mipCount);
 
 public:
-    
     void Clear();
     GPUTextureDescription ToStagingUpload() const;
     GPUTextureDescription ToStagingReadback() const;
+    GPUTextureDescription ToStaging() const;
     bool Equals(const GPUTextureDescription& other) const;
     String ToString() const;
 
 public:
-
     FORCE_INLINE bool operator==(const GPUTextureDescription& other) const
     {
         return Equals(other);

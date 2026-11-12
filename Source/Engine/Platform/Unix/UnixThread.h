@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#if PLATFORM_UNIX
+#if PLATFORM_UNIX && !PLATFORM_WEB
 
 #include "Engine/Platform/Base/ThreadBase.h"
 #include <pthread.h>
@@ -10,7 +10,7 @@
 /// <summary>
 /// Thread object for Unix platform.
 /// </summary>
-class UnixThread : public ThreadBase
+class FLAXENGINE_API UnixThread : public ThreadBase
 {
 protected:
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,7 @@
 /// <summary>
 /// Implementation of the window class for Universal Windows Platform (UWP)
 /// </summary>
-class UWPWindow : public WindowBase
+class FLAXENGINE_API UWPWindow : public WindowBase
 {
     friend UWPPlatform;
 
@@ -29,7 +29,7 @@ public:
         int IsRightButtonPressed : 1;
         int IsXButton1Pressed : 1;
         int IsXButton2Pressed : 1;
-        Vector2 MousePosition;
+        Float2 MousePosition;
 
     public:
 
@@ -41,7 +41,7 @@ public:
             IsRightButtonPressed = 0;
             IsXButton1Pressed = 0;
             IsXButton2Pressed = 0;
-            MousePosition = Vector2::Zero;
+            MousePosition = Float2::Zero;
         }
 
     public:
@@ -56,7 +56,7 @@ public:
     public:
 
         // [Mouse]
-        void SetMousePosition(const Vector2& newPosition) override;
+        void SetMousePosition(const Float2& newPosition) override;
     };
 
     class UWPKeyboard : public Keyboard
@@ -100,7 +100,7 @@ private:
 
     UWPWindowImpl* _impl;
 
-    Vector2 _logicalSize;
+    Float2 _logicalSize;
 
 public:
 
@@ -150,7 +150,7 @@ private:
 
 public:
 
-    // [Window]
+    // [WindowBase]
     void* GetNativePtr() const override
     {
         return _impl->GetHandle();
@@ -160,16 +160,15 @@ public:
     void Minimize() override;
     void Maximize() override;
     void Restore() override;
-    bool IsClosed() const override;
     void BringToFront(bool force = false) override;
     void SetClientBounds(const Rectangle& clientArea) override;
-    void SetPosition(const Vector2& position) override;
-    void SetClientPosition(const Vector2& position) override;
-    Vector2 GetPosition() const override;
-    Vector2 GetSize() const override;
-    Vector2 GetClientSize() const override;
-    Vector2 ScreenToClient(const Vector2& screenPos) const override;
-    Vector2 ClientToScreen(const Vector2& clientPos) const override;
+    void SetPosition(const Float2& position) override;
+    void SetClientPosition(const Float2& position) override;
+    Float2 GetPosition() const override;
+    Float2 GetSize() const override;
+    Float2 GetClientSize() const override;
+    Float2 ScreenToClient(const Float2& screenPos) const override;
+    Float2 ClientToScreen(const Float2& clientPos) const override;
     void FlashWindow() override
     {
     }
@@ -183,6 +182,7 @@ public:
     void Focus() override;
     void SetTitle(const StringView& title) override;
     DragDropEffect DoDragDrop(const StringView& data) override;
+    using WindowBase::DoDragDrop;
     void StartTrackingMouse(bool useMouseScreenOffset) override;
     void EndTrackingMouse() override;
     void SetCursor(CursorType type) override;

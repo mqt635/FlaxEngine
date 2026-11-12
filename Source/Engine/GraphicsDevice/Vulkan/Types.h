@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#if COMPILE_WITH_VK_SHADER_COMPILER || GRAPHICS_API_VULKAN
+#include "Engine/Graphics/PixelFormat.h"
 
 #if GRAPHICS_API_VULKAN
 #include "Engine/GraphicsDevice/Vulkan/IncludeVulkanHeaders.h"
@@ -41,6 +41,7 @@ enum class SpirvShaderResourceType
     TextureCube = 7,
     Texture1DArray = 8,
     Texture2DArray = 9,
+    MAX
 };
 
 enum class SpirvShaderResourceBindingType : byte
@@ -94,10 +95,21 @@ struct SpirvShaderDescriptorInfo
         /// The resource type.
         /// </summary>
         SpirvShaderResourceType ResourceType;
+
+        /// <summary>
+        /// The resource format.
+        /// </summary>
+        PixelFormat ResourceFormat;
+
+        /// <summary>
+        /// The amount of slots used by the descriptor (eg. array of textures size).
+        /// </summary>
+        uint32 Count;
     };
 
     uint16 ImageInfosCount;
     uint16 BufferInfosCount;
+    uint32 TexelBufferViewsCount;
     uint32 DescriptorTypesCount;
     Descriptor DescriptorTypes[MaxDescriptors];
 };
@@ -109,7 +121,22 @@ struct SpirvShaderHeader
         /// <summary>
         /// The raw SPIR-V byte code.
         /// </summary>
-        Raw = 0,
+        SPIRV = 0,
+
+        /// <summary>
+        /// The raw WGSL shader code.
+        /// </summary>
+        WGSL = 1,
+
+        /// <summary>
+        /// The WGSL shader code compressed with LZ4.
+        /// </summary>
+        WGSL_LZ4 = 2,
+
+        /// <summary>
+        /// The SPIR-V byte code compressed with LZ4.
+        /// </summary>
+        SPIRV_LZ4 = 3,
     };
 
     /// <summary>
@@ -121,8 +148,4 @@ struct SpirvShaderHeader
     /// The shader descriptors usage information.
     /// </summary>
     SpirvShaderDescriptorInfo DescriptorInfo;
-
-    // .. rest is just a actual data array
 };
-
-#endif

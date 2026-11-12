@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FontManager.h"
 #include "FontTextureAtlas.h"
@@ -9,6 +9,9 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Render2D/MSDFGenerator.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "IncludeFreeType.h"
 #include <ThirdParty/freetype/ftsynth.h>
 #include <ThirdParty/freetype/ftbitmap.h>
@@ -27,7 +30,6 @@ using namespace FontManagerImpl;
 class FontManagerService : public EngineService
 {
 public:
-
     FontManagerService()
         : EngineService(TEXT("Font Manager"), -700)
     {
@@ -50,11 +52,13 @@ FT_MemoryRec_ FreeTypeMemory;
 
 static void* FreeTypeAlloc(FT_Memory memory, long size)
 {
+    PROFILE_MEM(UIFonts);
     return Allocator::Allocate(size);
 }
 
 void* FreeTypeRealloc(FT_Memory memory, long oldSize, long newSize, void* ptr)
 {
+    PROFILE_MEM(UIFonts);
     return AllocatorExt::Realloc(ptr, oldSize, newSize);
 }
 
@@ -65,6 +69,7 @@ void FreeTypeFree(FT_Memory memory, void* ptr)
 
 bool FontManagerService::Init()
 {
+    PROFILE_MEM(UIFonts);
     ASSERT(Library == nullptr);
 
     // Scale UI fonts to match the monitor DPI
@@ -115,6 +120,8 @@ FontTextureAtlas* FontManager::GetAtlas(int32 index)
 
 bool FontManager::AddNewEntry(Font* font, Char c, FontCharacterEntry& entry)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(UIFonts);
     ScopeLock lock(Locker);
 
     const FontAsset* asset = font->GetAsset();
@@ -125,7 +132,12 @@ bool FontManager::AddNewEntry(Font* font, Char c, FontCharacterEntry& entry)
 
     // Set load flags
     uint32 glyphFlags = FT_LOAD_NO_BITMAP;
-    if (options.Flags & FontFlags::AntiAliasing)
+    const bool useAA = EnumHasAnyFlags(options.Flags, FontFlags::AntiAliasing);
+    if (options.RasterMode == FontRasterMode::MSDF)
+    {
+        glyphFlags |= FT_LOAD_NO_AUTOHINT | FT_LOAD_NO_HINTING;
+    }
+    else if (useAA)
     {
         switch (options.Hinting)
         {
@@ -154,6 +166,18 @@ bool FontManager::AddNewEntry(Font* font, Char c, FontCharacterEntry& entry)
 
     // Get the index to the glyph in the font face
     const FT_UInt glyphIndex = FT_Get_Char_Index(face, c);
+#if !BUILD_RELEASE
+    if (glyphIndex == 0 && c >= '!')
+    {
+        LOG(Warning, "Font `{}` doesn't contain character `\\u{:x}`, consider choosing another font.", String(face->family_name), c);
+    }
+#endif
+
+    // Init the character data
+    Platform::MemoryClear(&entry, sizeof(entry));
+    entry.Character = c;
+    entry.Font = font;
+    entry.IsValid = false;
 
     // Load the glyph
     const FT_Error error = FT_Load_Glyph(face, glyphIndex, glyphFlags);
@@ -164,103 +188,128 @@ bool FontManager::AddNewEntry(Font* font, Char c, FontCharacterEntry& entry)
     }
 
     // Handle special effects
-    if (options.Flags & FontFlags::Bold)
+    if (EnumHasAnyFlags(options.Flags, FontFlags::Bold))
     {
         FT_GlyphSlot_Embolden(face->glyph);
     }
-    if (options.Flags & FontFlags::Italic)
+    if (EnumHasAnyFlags(options.Flags, FontFlags::Italic))
     {
         FT_GlyphSlot_Oblique(face->glyph);
     }
 
-    // Render glyph to the bitmap
-    FT_GlyphSlot glyph = face->glyph;
-    FT_Render_Glyph(glyph, options.Flags & FontFlags::AntiAliasing ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_MONO);
-
-    FT_Bitmap* bitmap = &glyph->bitmap;
-    FT_Bitmap tmpBitmap;
-    if (bitmap->pixel_mode != FT_PIXEL_MODE_GRAY)
+    int32 glyphWidth = 0;
+    int32 glyphHeight = 0;
+    if (options.RasterMode == FontRasterMode::Bitmap)
     {
-        // Convert the bitmap to 8bpp grayscale
-        FT_Bitmap_New(&tmpBitmap);
-        FT_Bitmap_Convert(Library, bitmap, &tmpBitmap, 4);
-        bitmap = &tmpBitmap;
-    }
-    ASSERT(bitmap && bitmap->pixel_mode == FT_PIXEL_MODE_GRAY);
+        // Render glyph to the bitmap
+        FT_GlyphSlot glyph = face->glyph;
+        FT_Render_Glyph(glyph, useAA ? FT_RENDER_MODE_NORMAL : FT_RENDER_MODE_MONO);
 
-    // Fill the character data
-    Platform::MemoryClear(&entry, sizeof(entry));
-    entry.Character = c;
-    entry.AdvanceX = Convert26Dot6ToRoundedPixel<int16>(glyph->advance.x);
-    entry.OffsetY = glyph->bitmap_top;
-    entry.OffsetX = glyph->bitmap_left;
-    entry.IsValid = true;
-    entry.BearingY = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.horiBearingY);
-    entry.Height = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.height);
+        FT_Bitmap* bitmap = &glyph->bitmap;
+        FT_Bitmap tmpBitmap;
+        if (bitmap->pixel_mode != FT_PIXEL_MODE_GRAY)
+        {
+            // Convert the bitmap to 8bpp grayscale
+            FT_Bitmap_New(&tmpBitmap);
+            FT_Bitmap_Convert(Library, bitmap, &tmpBitmap, 4);
+            bitmap = &tmpBitmap;
+        }
+        ASSERT(bitmap && bitmap->pixel_mode == FT_PIXEL_MODE_GRAY);
 
-    // Allocate memory
-    const int32 glyphWidth = bitmap->width;
-    const int32 glyphHeight = bitmap->rows;
-    GlyphImageData.Clear();
-    GlyphImageData.Resize(glyphWidth * glyphHeight);
+        // Fill the character data
+        entry.AdvanceX = Convert26Dot6ToRoundedPixel<int16>(glyph->advance.x);
+        entry.OffsetY = glyph->bitmap_top;
+        entry.OffsetX = glyph->bitmap_left;
+        entry.IsValid = true;
+        entry.BearingY = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.horiBearingY);
+        entry.Height = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.height);
 
-    // End for empty glyphs
-    if (GlyphImageData.IsEmpty())
-    {
-        entry.TextureIndex = MAX_uint8;
+        // Allocate memory
+        glyphWidth = bitmap->width;
+        glyphHeight = bitmap->rows;
+        GlyphImageData.Clear();
+        GlyphImageData.Resize(glyphWidth * glyphHeight);
+
+        // End for empty glyphs
+        if (GlyphImageData.IsEmpty())
+        {
+            entry.TextureIndex = MAX_uint8;
+            if (bitmap == &tmpBitmap)
+            {
+                FT_Bitmap_Done(Library, bitmap);
+                bitmap = nullptr;
+            }
+            return false;
+        }
+
+        // Copy glyph data after rasterization (row by row)
+        for (int32 row = 0; row < glyphHeight; row++)
+        {
+            Platform::MemoryCopy(&GlyphImageData[row * glyphWidth], &bitmap->buffer[row * bitmap->pitch], glyphWidth);
+        }
+
+        // Normalize gray scale images not using 256 colors
+        if (bitmap->num_grays != 256)
+        {
+            const int32 scale = 255 / (bitmap->num_grays - 1);
+            for (byte& pixel : GlyphImageData)
+                pixel *= scale;
+        }
+
+        // Free temporary bitmap if used
         if (bitmap == &tmpBitmap)
         {
             FT_Bitmap_Done(Library, bitmap);
             bitmap = nullptr;
         }
-        return false;
     }
-
-    // Copy glyph data after rasterization (row by row)
-    for (int32 row = 0; row < glyphHeight; row++)
+    else
     {
-        Platform::MemoryCopy(&GlyphImageData[row * glyphWidth], &bitmap->buffer[row * bitmap->pitch], glyphWidth);
-    }
+        // Generate bitmap for MSDF
+        FT_GlyphSlot glyph = face->glyph;
 
-    // Normalize gray scale images not using 256 colors
-    if (bitmap->num_grays != 256)
-    {
-        const int32 scale = 255 / (bitmap->num_grays - 1);
-        for (byte& pixel : GlyphImageData)
+        // Set advance in advance
+        entry.AdvanceX = Convert26Dot6ToRoundedPixel<int16>(glyph->advance.x);
+
+        int16 msdf_top = 0;
+        int16 msdf_left = 0;
+        MSDFGenerator::GenerateMSDF(glyph, GlyphImageData, glyphWidth, glyphHeight, msdf_top, msdf_left);
+
+        // End for empty glyphs
+        if (GlyphImageData.IsEmpty())
         {
-            pixel *= scale;
+            entry.TextureIndex = MAX_uint8;
+            return false;
         }
-    }
 
-    // Free temporary bitmap if used
-    if (bitmap == &tmpBitmap)
-    {
-        FT_Bitmap_Done(Library, bitmap);
-        bitmap = nullptr;
+        // Fill the remaining character data
+        entry.OffsetY = msdf_top;
+        entry.OffsetX = msdf_left;
+        entry.IsValid = true;
+        entry.BearingY = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.horiBearingY);
+        entry.Height = Convert26Dot6ToRoundedPixel<int16>(glyph->metrics.height);
     }
 
     // Find atlas for the character texture
+    PixelFormat atlasFormat = options.RasterMode == FontRasterMode::MSDF ? PixelFormat::R8G8B8A8_UNorm : PixelFormat::R8_UNorm;
     int32 atlasIndex = 0;
-    const FontTextureAtlas::Slot* slot = nullptr;
-    for (; atlasIndex < Atlases.Count(); atlasIndex++)
+    const FontTextureAtlasSlot* slot = nullptr;
+    for (; atlasIndex < Atlases.Count() && slot == nullptr; atlasIndex++)
     {
-        // Add the character to the texture
+        if (Atlases[atlasIndex]->GetFormat() != atlasFormat)
+            continue;
         slot = Atlases[atlasIndex]->AddEntry(glyphWidth, glyphHeight, GlyphImageData);
-
-        // Check result, if not null char has been added
-        if (slot)
-        {
-            break;
-        }
     }
+    atlasIndex--;
 
     // Check if there is no atlas for this character
     if (!slot)
     {
         // Create new atlas
         auto atlas = Content::CreateVirtualAsset<FontTextureAtlas>();
-        atlas->Setup(PixelFormat::R8_UNorm, FontTextureAtlas::PaddingStyle::PadWithZero);
+        atlas->Setup(atlasFormat, FontTextureAtlas::PaddingStyle::PadWithZero);
         Atlases.Add(atlas);
+        atlasIndex++;
 
         // Init atlas
         const int32 fontAtlasSize = 512; // TODO: make it a configuration variable
@@ -276,12 +325,12 @@ bool FontManager::AddNewEntry(Font* font, Char c, FontCharacterEntry& entry)
     }
 
     // Fill with atlas dependant data
-    const uint32 padding = Atlases[atlasIndex]->GetPaddingAmount();
-    entry.TextureIndex = atlasIndex;
-    entry.UV.X = static_cast<float>(slot->X + padding);
-    entry.UV.Y = static_cast<float>(slot->Y + padding);
-    entry.UVSize.X = static_cast<float>(slot->Width - 2 * padding);
-    entry.UVSize.Y = static_cast<float>(slot->Height - 2 * padding);
+    entry.TextureIndex = (byte)atlasIndex;
+    entry.UV.X = (float)slot->X;
+    entry.UV.Y = (float)slot->Y;
+    entry.UVSize.X = (float)slot->Width;
+    entry.UVSize.Y = (float)slot->Height;
+    entry.Slot = slot;
 
     return false;
 }
@@ -291,12 +340,7 @@ void FontManager::Invalidate(FontCharacterEntry& entry)
     if (entry.TextureIndex == MAX_uint8)
         return;
     auto atlas = Atlases[entry.TextureIndex];
-    const uint32 padding = atlas->GetPaddingAmount();
-    const uint32 slotX = static_cast<uint32>(entry.UV.X - padding);
-    const uint32 slotY = static_cast<uint32>(entry.UV.Y - padding);
-    const uint32 slotSizeX = static_cast<uint32>(entry.UVSize.X + 2 * padding);
-    const uint32 slotSizeY = static_cast<uint32>(entry.UVSize.Y + 2 * padding);
-    atlas->Invalidate(slotX, slotY, slotSizeX, slotSizeY);
+    atlas->Invalidate(entry.Slot);
 }
 
 void FontManager::Flush()

@@ -1,13 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ForwardMaterialShader.h"
 #include "MaterialShaderFeatures.h"
 #include "MaterialParams.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPULimits.h"
 #include "Engine/Graphics/RenderView.h"
-#include "Engine/Graphics/RenderTask.h"
-#include "Engine/Graphics/Models/SkinnedMeshDrawData.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Renderer/DrawCall.h"
@@ -16,39 +16,16 @@
 #include "Engine/Renderer/Lightmaps.h"
 #endif
 
-#define MAX_LOCAL_LIGHTS 4
-
-PACK_STRUCT(struct ForwardMaterialShaderData {
-    Matrix ViewProjectionMatrix;
-    Matrix WorldMatrix;
-    Matrix ViewMatrix;
-    Matrix PrevViewProjectionMatrix;
-    Matrix PrevWorldMatrix;
-    Vector3 ViewPos;
-    float ViewFar;
-    Vector3 ViewDir;
-    float TimeParam;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector3 WorldInvScale;
-    float WorldDeterminantSign;
-    Vector2 Dummy0;
-    float LODDitherFactor;
-    float PerInstanceRandom;
-    Vector4 TemporalAAJitter;
-    Vector3 GeometrySize;
-    float Dummy1;
-    });
-
 DrawPass ForwardMaterialShader::GetDrawModes() const
 {
     return _drawModes;
 }
 
-bool ForwardMaterialShader::CanUseInstancing(InstancingHandler& handler) const
+bool ForwardMaterialShader::CanUseInstancing(const RenderContext& renderContext, InstancingHandler& handler) const
 {
-    handler = { SurfaceDrawCallHandler::GetHash, SurfaceDrawCallHandler::CanBatch, SurfaceDrawCallHandler::WriteDrawCall, };
-    return true;
+    handler = { SurfaceDrawCallHandler::GetHash, SurfaceDrawCallHandler::CanBatch, };
+    // TODO: support instancing when using ForwardShadingFeature
+    return renderContext.View.Pass == DrawPass::Depth;
 }
 
 void ForwardMaterialShader::Bind(BindParameters& params)
@@ -56,59 +33,35 @@ void ForwardMaterialShader::Bind(BindParameters& params)
     // Prepare
     auto context = params.GPUContext;
     auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
+    auto& drawCall = *params.DrawCall;
     Span<byte> cb(_cbData.Get(), _cbData.Count());
-    ASSERT_LOW_LAYER(cb.Length() >= sizeof(ForwardMaterialShaderData));
-    auto materialData = reinterpret_cast<ForwardMaterialShaderData*>(cb.Get());
-    cb = Span<byte>(cb.Get() + sizeof(ForwardMaterialShaderData), cb.Length() - sizeof(ForwardMaterialShaderData));
     int32 srv = 2;
 
     // Setup features
+    if ((_info.FeaturesFlags & MaterialFeaturesFlags::GlobalIllumination) != MaterialFeaturesFlags::None)
+    {
+        GlobalIlluminationFeature::Bind(params, cb, srv);
+        if ((_info.FeaturesFlags & MaterialFeaturesFlags::ScreenSpaceReflections) != MaterialFeaturesFlags::None)
+            SDFReflectionsFeature::Bind(params, cb, srv);
+    }
     ForwardShadingFeature::Bind(params, cb, srv);
 
     // Setup parameters
     MaterialParameter::BindMeta bindMeta;
     bindMeta.Context = context;
     bindMeta.Constants = cb;
-    bindMeta.Input = nullptr; // forward pass materials cannot sample scene color for now
+    bindMeta.Input = params.Input;
     bindMeta.Buffers = params.RenderContext.Buffers;
     bindMeta.CanSampleDepth = GPUDevice::Instance->Limits.HasReadOnlyDepth;
     bindMeta.CanSampleGBuffer = true;
     MaterialParams::Bind(params.ParamsLink, bindMeta);
+    context->BindSR(0, params.ObjectBuffer);
 
-    // Check if is using mesh skinning
-    const bool useSkinning = drawCall.Surface.Skinning != nullptr;
+    // Bind skinning buffer
+    const bool useSkinning = drawCall.Surface.Skinning != DrawCall::SkinningMode::None;
     if (useSkinning)
     {
-        // Bind skinning buffer
-        ASSERT(drawCall.Surface.Skinning->IsReady());
-        context->BindSR(0, drawCall.Surface.Skinning->BoneMatrices->View());
-    }
-
-    // Setup material constants
-    {
-        Matrix::Transpose(view.Frustum.GetMatrix(), materialData->ViewProjectionMatrix);
-        Matrix::Transpose(drawCall.World, materialData->WorldMatrix);
-        Matrix::Transpose(view.View, materialData->ViewMatrix);
-        Matrix::Transpose(drawCall.Surface.PrevWorld, materialData->PrevWorldMatrix);
-        Matrix::Transpose(view.PrevViewProjection, materialData->PrevViewProjectionMatrix);
-        materialData->ViewPos = view.Position;
-        materialData->ViewFar = view.Far;
-        materialData->ViewDir = view.Direction;
-        materialData->TimeParam = params.TimeParam;
-        materialData->ViewInfo = view.ViewInfo;
-        materialData->ScreenSize = view.ScreenSize;
-        const float scaleX = Vector3(drawCall.World.M11, drawCall.World.M12, drawCall.World.M13).Length();
-        const float scaleY = Vector3(drawCall.World.M21, drawCall.World.M22, drawCall.World.M23).Length();
-        const float scaleZ = Vector3(drawCall.World.M31, drawCall.World.M32, drawCall.World.M33).Length();
-        materialData->WorldInvScale = Vector3(
-            scaleX > 0.00001f ? 1.0f / scaleX : 0.0f,
-            scaleY > 0.00001f ? 1.0f / scaleY : 0.0f,
-            scaleZ > 0.00001f ? 1.0f / scaleZ : 0.0f);
-        materialData->WorldDeterminantSign = drawCall.WorldDeterminantSign;
-        materialData->LODDitherFactor = drawCall.Surface.LODDitherFactor;
-        materialData->PerInstanceRandom = drawCall.PerInstanceRandom;
-        materialData->GeometrySize = drawCall.Surface.GeometrySize;
+        context->BindSR(1, drawCall.Surface.SkinningBones->View());
     }
 
     // Bind constants
@@ -119,25 +72,20 @@ void ForwardMaterialShader::Bind(BindParameters& params)
     }
 
     // Select pipeline state based on current pass and render mode
-    const bool wireframe = (_info.FeaturesFlags & MaterialFeaturesFlags::Wireframe) != 0 || view.Mode == ViewMode::Wireframe;
     CullMode cullMode = view.Pass == DrawPass::Depth ? CullMode::TwoSided : _info.CullMode;
 #if USE_EDITOR
     if (IsRunningRadiancePass)
         cullMode = CullMode::TwoSided;
 #endif
-    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminantSign < 0)
+    if (cullMode != CullMode::TwoSided && drawCall.WorldDeterminant)
     {
         // Invert culling when scale is negative
-        if (cullMode == CullMode::Normal)
-            cullMode = CullMode::Inverted;
-        else
-            cullMode = CullMode::Normal;
+        cullMode = cullMode == CullMode::Normal ? CullMode::Inverted : CullMode::Normal;
     }
-    ASSERT_LOW_LAYER(!(useSkinning && params.DrawCallsCount > 1)); // No support for instancing skinned meshes
-    const auto cacheObj = params.DrawCallsCount == 1 ? &_cache : &_cacheInstanced;
+    const auto cacheObj = params.Instanced ? &_cacheInstanced : &_cache;
     PipelineStateCache* psCache = cacheObj->GetPS(view.Pass, useSkinning);
     ASSERT(psCache);
-    GPUPipelineState* state = psCache->GetPS(cullMode, wireframe);
+    GPUPipelineState* state = psCache->GetPS(this, cullMode);
 
     // Bind pipeline
     context->SetState(state);
@@ -154,12 +102,14 @@ void ForwardMaterialShader::Unload()
 
 bool ForwardMaterialShader::Load()
 {
-    _drawModes = DrawPass::Depth | DrawPass::Forward;
-
+    _drawModes = DrawPass::Depth | DrawPass::Forward | DrawPass::QuadOverdraw | DrawPass::Wireframe;
     auto psDesc = GPUPipelineState::Description::Default;
-    psDesc.DepthTestEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthTest) == 0;
-    psDesc.DepthWriteEnable = (_info.FeaturesFlags & MaterialFeaturesFlags::DisableDepthWrite) == 0;
+    psDesc.DepthEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthTest);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+    psDesc.CullMode = _info.CullMode;
 
+#if GPU_ALLOW_TESSELLATION_SHADERS
     // Check if use tessellation (both material and runtime supports it)
     const bool useTess = _info.TessellationMode != TessellationMethod::None && GPUDevice::Instance->Limits.HasTessellation;
     if (useTess)
@@ -167,6 +117,36 @@ bool ForwardMaterialShader::Load()
         psDesc.HS = _shader->GetHS("HS");
         psDesc.DS = _shader->GetDS("DS");
     }
+#endif
+
+#if GPU_ENABLE_DEVELOPMENT
+    if (_shader->HasShader("PS_QuadOverdraw"))
+    {
+        // Quad Overdraw
+        _drawModes |= DrawPass::QuadOverdraw;
+        psDesc.VS = _shader->GetVS("VS");
+        psDesc.PS = _shader->GetPS("PS_QuadOverdraw");
+        _cache.QuadOverdraw.Init(psDesc);
+        psDesc.VS = _shader->GetVS("VS", 1);
+        _cacheInstanced.QuadOverdraw.Init(psDesc);
+        psDesc.VS = _shader->GetVS("VS_Skinned");
+        _cache.QuadOverdrawSkinned.Init(psDesc);
+    }
+
+    // Wireframe
+    psDesc.Wireframe = true;
+    psDesc.DepthWriteEnable = false;
+    psDesc.BlendMode = BlendingMode::AlphaBlend;
+    psDesc.PS = GPUDevice::Instance->QuadShader->GetPS("PS_Wireframe");
+    psDesc.VS = _shader->GetVS("VS");
+    _cache.Wireframe.Init(psDesc);
+    psDesc.VS = _shader->GetVS("VS", 1);
+    _cacheInstanced.Wireframe.Init(psDesc);
+    psDesc.VS = _shader->GetVS("VS_Skinned");
+    _cache.WireframeSkinned.Init(psDesc);
+    psDesc.DepthWriteEnable = EnumHasNoneFlags(_info.FeaturesFlags, MaterialFeaturesFlags::DisableDepthWrite);
+    psDesc.Wireframe = EnumHasAnyFlags(_info.FeaturesFlags, MaterialFeaturesFlags::Wireframe);
+#endif
 
     // Check if use transparent distortion pass
     if (_shader->HasShader("PS_Distortion"))
@@ -187,6 +167,8 @@ bool ForwardMaterialShader::Load()
 
     // Forward Pass
     psDesc.VS = _shader->GetVS("VS");
+    if (psDesc.VS == nullptr)
+        return true;
     psDesc.PS = _shader->GetPS("PS_Forward");
     psDesc.DepthWriteEnable = false;
     psDesc.BlendMode = BlendingMode::AlphaBlend;
@@ -213,8 +195,9 @@ bool ForwardMaterialShader::Load()
     psDesc.CullMode = CullMode::TwoSided;
     psDesc.DepthClipEnable = false;
     psDesc.DepthWriteEnable = true;
-    psDesc.DepthTestEnable = true;
-    psDesc.DepthFunc = ComparisonFunc::Less;
+    psDesc.DepthEnable = true;
+    psDesc.DepthFunc = ComparisonFunc::Default;
+    psDesc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::None;
     psDesc.HS = nullptr;
     psDesc.DS = nullptr;
     psDesc.VS = _shader->GetVS("VS");
@@ -224,6 +207,13 @@ bool ForwardMaterialShader::Load()
     _cacheInstanced.Depth.Init(psDesc);
     psDesc.VS = _shader->GetVS("VS_Skinned");
     _cache.DepthSkinned.Init(psDesc);
+    psDesc.VS = _shader->GetVS("VS_Skinned", 2);
+    _cacheInstanced.DepthSkinned.Init(psDesc);
+
+#if PLATFORM_PS5
+    // Fix shader binding issues on forward shading materials on PS5
+    _drawModes = DrawPass::None;
+#endif
 
     return false;
 }

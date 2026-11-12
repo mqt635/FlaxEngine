@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -91,10 +91,12 @@ namespace FlaxEditor.SceneGraph
         private void OnActorSpawned(Actor actor)
         {
             // Skip actors from game
-            if (actor.Scene != null)
+            if (actor.HasScene)
                 return;
 
             // Check if it has parent
+            if (actor.Parent == null)
+                return;
             var parentNode = SceneGraphFactory.FindNode(actor.Parent.ID) as ActorNode;
             if (parentNode == null)
                 return;

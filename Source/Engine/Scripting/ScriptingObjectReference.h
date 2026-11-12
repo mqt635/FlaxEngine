@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,27 +14,30 @@ extern FLAXENGINE_API ScriptingObject* FindObject(const Guid& id, MClass* type);
 class FLAXENGINE_API ScriptingObjectReferenceBase
 {
 public:
-
     typedef Delegate<> EventType;
 
 protected:
-
     ScriptingObject* _object = nullptr;
 
 public:
-
     /// <summary>
     /// Action fired when reference gets changed.
     /// </summary>
     EventType Changed;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ScriptingObjectReferenceBase"/> class.
     /// </summary>
     ScriptingObjectReferenceBase()
     {
+    }
+
+    ScriptingObjectReferenceBase(ScriptingObjectReferenceBase&& other) noexcept
+        : _object(nullptr)
+    {
+        OnSet(other._object);
+        other.OnSet(nullptr);
     }
 
     /// <summary>
@@ -51,12 +54,15 @@ public:
     /// </summary>
     ~ScriptingObjectReferenceBase()
     {
-        if (_object)
-            _object->Deleted.Unbind<ScriptingObjectReferenceBase, &ScriptingObjectReferenceBase::OnDeleted>(this);
+        ScriptingObject* obj = _object;
+        if (obj)
+        {
+            _object = nullptr;
+            obj->Deleted.Unbind<ScriptingObjectReferenceBase, &ScriptingObjectReferenceBase::OnDeleted>(this);
+        }
     }
 
 public:
-
     /// <summary>
     /// Gets the object ID.
     /// </summary>
@@ -66,9 +72,9 @@ public:
     }
 
     /// <summary>
-    /// Gets managed instance object (or null if no object linked).
+    /// Gets managed instance object.
     /// </summary>
-    FORCE_INLINE MonoObject* GetManagedInstance() const
+    FORCE_INLINE MObject* GetManagedInstance() const
     {
         return _object ? _object->GetOrCreateManagedInstance() : nullptr;
     }
@@ -84,37 +90,28 @@ public:
     /// <summary>
     /// Gets the managed instance object or creates it if missing or null if not assigned.
     /// </summary>
-    FORCE_INLINE MonoObject* GetOrCreateManagedInstance() const
+    FORCE_INLINE MObject* GetOrCreateManagedInstance() const
     {
         return _object ? _object->GetOrCreateManagedInstance() : nullptr;
     }
 
 protected:
-
     /// <summary>
     /// Sets the object.
     /// </summary>
     /// <param name="object">The object.</param>
-    void OnSet(ScriptingObject* object)
-    {
-        auto e = _object;
-        if (e != object)
-        {
-            if (e)
-                e->Deleted.Unbind<ScriptingObjectReferenceBase, &ScriptingObjectReferenceBase::OnDeleted>(this);
-            _object = e = object;
-            if (e)
-                e->Deleted.Bind<ScriptingObjectReferenceBase, &ScriptingObjectReferenceBase::OnDeleted>(this);
-            Changed();
-        }
-    }
+    void OnSet(ScriptingObject* object);
 
-    void OnDeleted(ScriptingObject* obj)
+    void OnDeleted(ScriptingObject* obj);
+
+    ScriptingObjectReferenceBase& operator=(ScriptingObjectReferenceBase&& other) noexcept
     {
-        ASSERT(_object == obj);
-        _object->Deleted.Unbind<ScriptingObjectReferenceBase, &ScriptingObjectReferenceBase::OnDeleted>(this);
-        _object = nullptr;
-        Changed();
+        if (this != &other)
+        {
+            OnSet(other._object);
+            other.OnSet(nullptr);
+        }
+        return *this;
     }
 };
 
@@ -125,11 +122,9 @@ template<typename T>
 API_CLASS(InBuild) class ScriptingObjectReference : public ScriptingObjectReferenceBase
 {
 public:
-
     typedef ScriptingObjectReference<T> Type;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="ScriptingObjectReference"/> class.
     /// </summary>
@@ -151,7 +146,12 @@ public:
     /// </summary>
     /// <param name="other">The other property.</param>
     ScriptingObjectReference(const ScriptingObjectReference& other)
-        : ScriptingObjectReferenceBase(other.Get())
+        : ScriptingObjectReferenceBase(other._object)
+    {
+    }
+
+    ScriptingObjectReference(ScriptingObjectReference&& other) noexcept
+        : ScriptingObjectReferenceBase(MoveTemp(other))
     {
     }
 
@@ -163,20 +163,22 @@ public:
     }
 
 public:
-
-    FORCE_INLINE bool operator==(T* other)
+    FORCE_INLINE bool operator==(T* other) const
     {
         return _object == other;
     }
-    FORCE_INLINE bool operator!=(T* other)
+
+    FORCE_INLINE bool operator!=(T* other) const
     {
         return _object != other;
     }
-    FORCE_INLINE bool operator==(const ScriptingObjectReference& other)
+
+    FORCE_INLINE bool operator==(const ScriptingObjectReference& other) const
     {
         return _object == other._object;
     }
-    FORCE_INLINE bool operator!=(const ScriptingObjectReference& other)
+
+    FORCE_INLINE bool operator!=(const ScriptingObjectReference& other) const
     {
         return _object != other._object;
     }
@@ -186,14 +188,22 @@ public:
         OnSet(other);
         return *this;
     }
+
     ScriptingObjectReference& operator=(const ScriptingObjectReference& other)
     {
-        OnSet(other.Get());
+        OnSet(other._object);
         return *this;
     }
+
+    ScriptingObjectReference& operator=(ScriptingObjectReference&& other) noexcept
+    {
+        ScriptingObjectReferenceBase::operator=(MoveTemp(other));
+        return *this;
+    }
+
     FORCE_INLINE ScriptingObjectReference& operator=(const Guid& id)
     {
-        OnSet(static_cast<T*>(FindObject(id, T::GetStaticClass())));
+        OnSet(static_cast<ScriptingObject*>(FindObject(id, T::GetStaticClass())));
         return *this;
     }
 

@@ -1,18 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Collections.Generic;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.Gizmo;
 using FlaxEditor.GUI.Tabs;
 using FlaxEditor.Modules;
 using FlaxEditor.SceneGraph;
-using FlaxEditor.Viewport;
+using FlaxEditor.Utilities;
 using FlaxEditor.Viewport.Modes;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Tools
@@ -182,6 +182,7 @@ namespace FlaxEditor.Tools
         public VertexPaintingTab(SpriteHandle icon, Editor editor)
         : base(string.Empty, icon)
         {
+            TooltipText = "Vertex painting tool.";
             _editor = editor;
 
             _proxy = new ProxyObject(this);
@@ -244,9 +245,9 @@ namespace FlaxEditor.Tools
                 {
                     Tab = this,
                 };
-                _editor.Windows.EditWin.Viewport.AddMode(_gizmoMode);
+                _editor.Windows.EditWin.Viewport.Gizmos.AddMode(_gizmoMode);
             }
-            _editor.Windows.EditWin.Viewport.SetActiveMode(_gizmoMode);
+            _editor.Windows.EditWin.Viewport.Gizmos.ActiveMode = _gizmoMode;
         }
 
         /// <inheritdoc />
@@ -308,7 +309,7 @@ namespace FlaxEditor.Tools
         public VertexPaintingGizmo Gizmo;
 
         public VertexColorsPreviewMode PreviewMode = VertexColorsPreviewMode.RGB;
-        public float PreviewVertexSize = 6.0f;
+        public float PreviewVertexSize = 4.0f;
         public float BrushSize = 100.0f;
         public float BrushStrength = 1.0f;
         public float BrushFalloff = 1.0f;
@@ -317,7 +318,7 @@ namespace FlaxEditor.Tools
         public Color PaintColor = Color.White;
         public VertexColorsMask PaintMask = VertexColorsMask.RGB;
 
-        public override void Init(MainEditorGizmoViewport viewport)
+        public override void Init(IGizmoOwner viewport)
         {
             base.Init(viewport);
 
@@ -328,17 +329,12 @@ namespace FlaxEditor.Tools
         {
             base.OnActivated();
 
-            Viewport.Gizmos.Active = Gizmo;
+            Owner.Gizmos.Active = Gizmo;
         }
     }
 
     sealed class VertexPaintingGizmo : GizmoBase
     {
-        private struct MeshData
-        {
-            public Mesh.Vertex[] VertexBuffer;
-        }
-
         private MaterialInstance _vertexColorsPreviewMaterial;
         private Model _brushModel;
         private MaterialInstance _brushMaterial;
@@ -350,9 +346,7 @@ namespace FlaxEditor.Tools
         private Vector3 _hitLocation;
         private Vector3 _hitNormal;
         private StaticModel _selectedModel;
-        private MeshData[][] _meshDatas;
-        private bool _meshDatasInProgress;
-        private bool _meshDatasCancel;
+        private MeshDataCache _meshDatas;
         private EditModelVertexColorsAction _undoAction;
 
         public bool IsPainting => _isPainting;
@@ -368,74 +362,18 @@ namespace FlaxEditor.Tools
             if (_selectedModel == model)
                 return;
             PaintEnd();
-            WaitForMeshDataRequestEnd();
             _selectedModel = model;
-            _meshDatas = null;
-            _meshDatasInProgress = false;
-            _meshDatasCancel = false;
+            if (model && model.Model)
+            {
+                if (_meshDatas == null)
+                    _meshDatas = new MeshDataCache();
+                _meshDatas.RequestMeshData(_selectedModel.Model);
+            }
+            else
+            {
+                _meshDatas?.Dispose();
+            }
             _hasHit = false;
-            RequestMeshData();
-        }
-
-        private void RequestMeshData()
-        {
-            if (_meshDatasInProgress)
-                return;
-            if (_meshDatas != null)
-                return;
-            _meshDatasInProgress = true;
-            _meshDatasCancel = false;
-            Task.Run(DownloadMeshData);
-        }
-
-        private void WaitForMeshDataRequestEnd()
-        {
-            if (_meshDatasInProgress)
-            {
-                _meshDatasCancel = true;
-                for (int i = 0; i < 500 && _meshDatasInProgress; i++)
-                    Thread.Sleep(10);
-            }
-        }
-
-        private void DownloadMeshData()
-        {
-            try
-            {
-                if (!_selectedModel)
-                {
-                    _meshDatasInProgress = false;
-                    return;
-                }
-                var model = _selectedModel.Model;
-                var lods = model.LODs;
-                _meshDatas = new MeshData[lods.Length][];
-
-                for (int lodIndex = 0; lodIndex < lods.Length && !_meshDatasCancel; lodIndex++)
-                {
-                    var lod = lods[lodIndex];
-                    var meshes = lod.Meshes;
-                    _meshDatas[lodIndex] = new MeshData[meshes.Length];
-
-                    for (int meshIndex = 0; meshIndex < meshes.Length && !_meshDatasCancel; meshIndex++)
-                    {
-                        var mesh = meshes[meshIndex];
-                        _meshDatas[lodIndex][meshIndex] = new MeshData
-                        {
-                            VertexBuffer = mesh.DownloadVertexBuffer()
-                        };
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Editor.LogWarning("Failed to get mesh data. " + ex.Message);
-                Editor.LogWarning(ex);
-            }
-            finally
-            {
-                _meshDatasInProgress = false;
-            }
         }
 
         private void PaintStart()
@@ -459,14 +397,14 @@ namespace FlaxEditor.Tools
             Profiler.BeginEvent("Vertex Paint");
 
             // Ensure to have vertex data ready
-            WaitForMeshDataRequestEnd();
+            _meshDatas.WaitForMeshDataRequestEnd();
 
             // Edit the model vertex colors
-            var meshDatas = _meshDatas;
+            var meshDatas = _meshDatas.MeshDatas;
             if (meshDatas == null)
                 throw new Exception("Missing mesh data of the model to paint.");
             var instanceTransform = _selectedModel.Transform;
-            var brushSphere = new BoundingSphere(_hitLocation, _gizmoMode.BrushSize);
+            var brushSphere = new BoundingSphere(_hitLocation, _gizmoMode.BrushSize * 0.5f);
             if (_paintUpdateCount == 0 && !_selectedModel.HasVertexColors)
             {
                 // Initialize the instance vertex colors with originals from the asset
@@ -478,10 +416,13 @@ namespace FlaxEditor.Tools
                     for (int meshIndex = 0; meshIndex < lodData.Length; meshIndex++)
                     {
                         var meshData = lodData[meshIndex];
-                        for (int vertexIndex = 0; vertexIndex < meshData.VertexBuffer.Length; vertexIndex++)
+                        var colors = meshData.VertexAccessor.Colors;
+                        if (colors == null)
+                            continue;
+                        var vertexCount = colors.Length;
+                        for (int vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
                         {
-                            ref var v = ref meshData.VertexBuffer[vertexIndex];
-                            _selectedModel.SetVertexColor(lodIndex, meshIndex, vertexIndex, v.Color);
+                            _selectedModel.SetVertexColor(lodIndex, meshIndex, vertexIndex, colors[vertexIndex]);
                         }
                     }
                 }
@@ -494,14 +435,17 @@ namespace FlaxEditor.Tools
                 for (int meshIndex = 0; meshIndex < lodData.Length; meshIndex++)
                 {
                     var meshData = lodData[meshIndex];
-                    for (int vertexIndex = 0; vertexIndex < meshData.VertexBuffer.Length; vertexIndex++)
+                    var positionStream = meshData.VertexAccessor.Position();
+                    if (!positionStream.IsValid)
+                        continue;
+                    var vertexCount = positionStream.Count;
+                    for (int vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
                     {
-                        ref var v = ref meshData.VertexBuffer[vertexIndex];
-                        var pos = instanceTransform.LocalToWorld(v.Position);
+                        var pos = instanceTransform.LocalToWorld(positionStream.GetFloat3(vertexIndex));
                         var dst = Vector3.Distance(ref pos, ref brushSphere.Center);
                         if (dst > brushSphere.Radius)
                             continue;
-                        float strength = _gizmoMode.BrushStrength * Mathf.Lerp(1.0f, 1.0f - dst / brushSphere.Radius, _gizmoMode.BrushFalloff);
+                        float strength = _gizmoMode.BrushStrength * Mathf.Lerp(1.0f, 1.0f - (float)dst / (float)brushSphere.Radius, _gizmoMode.BrushFalloff);
                         if (strength > Mathf.Epsilon)
                         {
                             // Paint the vertex
@@ -544,7 +488,7 @@ namespace FlaxEditor.Tools
         public override bool IsControllingMouse => IsPainting;
 
         /// <inheritdoc />
-        public override BoundingSphere FocusBounds => _selectedModel?.Sphere ?? base.FocusBounds;
+        public override BoundingSphere FocusBounds => _selectedModel != null ? _selectedModel.BoundingSphere : base.FocusBounds;
 
         /// <inheritdoc />
         public override void Update(float dt)
@@ -565,6 +509,13 @@ namespace FlaxEditor.Tools
             if (!model)
             {
                 return;
+            }
+
+            // Increase or decrease brush size with scroll
+            if (Input.GetKey(KeyboardKeys.Shift) && !Input.GetMouseButton(MouseButton.Right))
+            {
+                _gizmoMode.BrushSize += dt * _gizmoMode.BrushSize * Input.Mouse.ScrollDelta * 5f;
+                _gizmoMode.BrushSize = Mathf.Clamp(_gizmoMode.BrushSize, 0.0001f, 100000.0f);
             }
 
             // Perform detailed tracing to find cursor location for the brush
@@ -596,18 +547,12 @@ namespace FlaxEditor.Tools
         /// <inheritdoc />
         public override void Pick()
         {
-            // Get mouse ray and try to hit any object
             var ray = Owner.MouseRay;
             var view = new Ray(Owner.ViewPosition, Owner.ViewDirection);
             var rayCastFlags = SceneGraphNode.RayCastData.FlagTypes.SkipColliders | SceneGraphNode.RayCastData.FlagTypes.SkipEditorPrimitives;
-            var hit = Editor.Instance.Scene.Root.RayCast(ref ray, ref view, out _, rayCastFlags);
-
-            // Update selection
-            var sceneEditing = Editor.Instance.SceneEditing;
+            var hit = Owner.SceneGraphRoot.RayCast(ref ray, ref view, out _, rayCastFlags);
             if (hit != null && hit is ActorNode actorNode && actorNode.Actor is StaticModel model)
-            {
-                sceneEditing.Select(hit);
-            }
+                Owner.Select(new List<SceneGraphNode> { hit });
         }
 
         /// <inheritdoc />
@@ -620,6 +565,8 @@ namespace FlaxEditor.Tools
 
             if (_hasHit)
             {
+                var viewOrigin = renderContext.View.Origin;
+
                 // Draw paint brush
                 if (!_brushModel)
                 {
@@ -632,19 +579,15 @@ namespace FlaxEditor.Tools
                 }
                 if (_brushModel && _brushMaterial)
                 {
-                    _brushMaterial.SetParameterValue("Color", new Color(1.0f, 0.85f, 0.0f)); // TODO: expose to editor options
+                    _brushMaterial.SetParameterValue("Color", new Color(1.0f, 0.85f, 0.0f));
                     _brushMaterial.SetParameterValue("DepthBuffer", Owner.RenderTask.Buffers.DepthBuffer);
-                    Quaternion rotation;
-                    if (_hitNormal == Vector3.Down)
-                        rotation = Quaternion.RotationZ(Mathf.Pi);
-                    else
-                        rotation = Quaternion.LookRotation(Vector3.Cross(Vector3.Cross(_hitNormal, Vector3.Forward), _hitNormal), _hitNormal);
-                    Matrix transform = Matrix.Scaling(_gizmoMode.BrushSize * 0.01f) * Matrix.RotationQuaternion(rotation) * Matrix.Translation(_hitLocation);
+                    Quaternion rotation = RootNode.RaycastNormalRotation(ref _hitNormal);
+                    Matrix transform = Matrix.Scaling(_gizmoMode.BrushSize * 0.01f) * Matrix.RotationQuaternion(rotation) * Matrix.Translation(_hitLocation - viewOrigin);
                     _brushModel.Draw(ref renderContext, _brushMaterial, ref transform);
                 }
 
                 // Draw intersecting vertices
-                var meshDatas = _meshDatas;
+                var meshDatas = _meshDatas?.MeshDatas;
                 if (meshDatas != null && _gizmoMode.PreviewVertexSize > Mathf.Epsilon)
                 {
                     if (!_verticesPreviewMaterial)
@@ -652,9 +595,11 @@ namespace FlaxEditor.Tools
                         _verticesPreviewMaterial = FlaxEngine.Content.LoadAsyncInternal<MaterialBase>(EditorAssets.WiresDebugMaterial);
                     }
                     var instanceTransform = _selectedModel.Transform;
-                    var modelScaleMatrix = Matrix.Scaling(_gizmoMode.PreviewVertexSize * 0.01f);
-                    var brushSphere = new BoundingSphere(_hitLocation, _gizmoMode.BrushSize);
-                    var lodIndex = _gizmoMode.ModelLOD == -1 ? RenderTools.ComputeModelLOD(_selectedModel.Model, ref renderContext.View.Position, _selectedModel.Sphere.Radius, ref renderContext) : _gizmoMode.ModelLOD;
+                    var distanceScale = (float)Vector3.Distance(instanceTransform.Translation, renderContext.View.Position) / (10.0f * Units.Meters2Units);
+                    var vertexScale = Mathf.Lerp(0.005f, 0.01f, Mathf.Saturate(distanceScale));
+                    var modelScaleMatrix = Matrix.Scaling(_gizmoMode.PreviewVertexSize * vertexScale);
+                    var brushSphere = new BoundingSphere(_hitLocation, _gizmoMode.BrushSize * 0.5f);
+                    var lodIndex = _gizmoMode.ModelLOD == -1 ? RenderTools.ComputeModelLOD(_selectedModel.Model, ref renderContext.View.Position, (float)_selectedModel.BoundingSphere.Radius, ref renderContext) : _gizmoMode.ModelLOD;
                     lodIndex = Mathf.Clamp(lodIndex, 0, meshDatas.Length - 1);
                     var lodData = meshDatas[lodIndex];
                     if (lodData != null)
@@ -662,15 +607,16 @@ namespace FlaxEditor.Tools
                         for (int meshIndex = 0; meshIndex < lodData.Length; meshIndex++)
                         {
                             var meshData = lodData[meshIndex];
-                            if (meshData.VertexBuffer == null)
+                            var positionStream = meshData.VertexAccessor.Position();
+                            if (!positionStream.IsValid)
                                 continue;
-                            for (int vertexIndex = 0; vertexIndex < meshData.VertexBuffer.Length; vertexIndex++)
+                            var vertexCount = positionStream.Count;
+                            for (int vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
                             {
-                                ref var v = ref meshData.VertexBuffer[vertexIndex];
-                                var pos = instanceTransform.LocalToWorld(v.Position);
+                                var pos = instanceTransform.LocalToWorld(positionStream.GetFloat3(vertexIndex));
                                 if (brushSphere.Contains(ref pos) == ContainmentType.Disjoint)
                                     continue;
-                                Matrix transform = modelScaleMatrix * Matrix.Translation(pos);
+                                Matrix transform = modelScaleMatrix * Matrix.Translation(pos - viewOrigin);
                                 _brushModel.Draw(ref renderContext, _verticesPreviewMaterial, ref transform);
                             }
                         }
@@ -693,11 +639,11 @@ namespace FlaxEditor.Tools
                 _vertexColorsPreviewMaterial = FlaxEngine.Content.LoadAsyncInternal<MaterialBase>(EditorAssets.VertexColorsPreviewMaterial).CreateVirtualInstance();
             if (!_vertexColorsPreviewMaterial)
                 return;
-            var channelMask = new Vector4();
+            var channelMask = new Float4();
             switch (previewMode)
             {
             case VertexPaintingGizmoMode.VertexColorsPreviewMode.RGB:
-                channelMask = new Vector4(1, 1, 1, 0);
+                channelMask = new Float4(1, 1, 1, 0);
                 break;
             case VertexPaintingGizmoMode.VertexColorsPreviewMode.Red:
                 channelMask.X = 1.0f;

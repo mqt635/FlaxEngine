@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_TOOLS_GDK
 
 #include "GDKPlatformTools.h"
 #include "Engine/Platform/File.h"
 #include "Engine/Platform/FileSystem.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Platform/GDK/GDKPlatformSettings.h"
 #include "Engine/Core/Types/StringBuilder.h"
 #include "Engine/Core/Collections/Sorting.h"
@@ -13,47 +14,39 @@
 #include "Editor/Editor.h"
 #include "Editor/ProjectInfo.h"
 #include "Editor/Utilities/EditorUtilities.h"
+#include "Engine/Localization/Localization.h"
 
-GDKPlatformTools::GDKPlatformTools()
+String GetGDK()
 {
-    // Find GDK
-    Platform::GetEnvironmentVariable(TEXT("GameDKLatest"), _gdkPath);
-    if (_gdkPath.IsEmpty() || !FileSystem::DirectoryExists(_gdkPath))
+    String gdk;
+    Platform::GetEnvironmentVariable(TEXT("GameDKLatest"), gdk);
+    if (gdk.IsEmpty() || !FileSystem::DirectoryExists(gdk))
     {
-        _gdkPath.Clear();
-        Platform::GetEnvironmentVariable(TEXT("GRDKLatest"), _gdkPath);
-        if (_gdkPath.IsEmpty() || !FileSystem::DirectoryExists(_gdkPath))
+        gdk.Clear();
+        Platform::GetEnvironmentVariable(TEXT("GRDKLatest"), gdk);
+        if (gdk.IsEmpty() || !FileSystem::DirectoryExists(gdk))
         {
-            _gdkPath.Clear();
+            gdk.Clear();
         }
         else
         {
-            if (_gdkPath.EndsWith(TEXT("GRDK\\")))
-                _gdkPath.Remove(_gdkPath.Length() - 6);
-            else if (_gdkPath.EndsWith(TEXT("GRDK")))
-                _gdkPath.Remove(_gdkPath.Length() - 5);
+            if (gdk.EndsWith(TEXT("GRDK\\")))
+                gdk.Remove(gdk.Length() - 6);
+            else if (gdk.EndsWith(TEXT("GRDK")))
+                gdk.Remove(gdk.Length() - 5);
         }
     }
+    return gdk;
 }
 
-bool GDKPlatformTools::UseAOT() const
+GDKPlatformTools::GDKPlatformTools()
 {
-    return true;
+    _gdkPath = GetGDK();
 }
 
-bool GDKPlatformTools::OnScriptsStepDone(CookingData& data)
+DotNetAOTModes GDKPlatformTools::UseAOT() const
 {
-    // Override Newtonsoft.Json.dll for some platforms (that don't support runtime code generation)
-    const String customBinPath = data.GetPlatformBinariesRoot() / TEXT("Newtonsoft.Json.dll");
-    const String assembliesPath = data.ManagedCodeOutputPath;
-    if (FileSystem::CopyFile(assembliesPath / TEXT("Newtonsoft.Json.dll"), customBinPath))
-    {
-        data.Error(TEXT("Failed to copy deloy custom assembly."));
-        return true;
-    }
-    FileSystem::DeleteFile(assembliesPath / TEXT("Newtonsoft.Json.pdb"));
-
-    return false;
+    return DotNetAOTModes::MonoAOTDynamic;
 }
 
 bool GDKPlatformTools::OnDeployBinaries(CookingData& data)
@@ -66,7 +59,7 @@ bool GDKPlatformTools::OnDeployBinaries(CookingData& data)
     files.Add(binPath / executableFilename);
     if (!FileSystem::FileExists(files[0]))
     {
-        data.Error(TEXT("Missing executable file ({0})."), files[0]);
+        data.Error(String::Format(TEXT("Missing executable file ({0})."), files[0]));
         return true;
     }
     FileSystem::DirectoryGetFiles(files, binPath, TEXT("*.dll"), DirectorySearchOption::TopDirectoryOnly);
@@ -74,88 +67,9 @@ bool GDKPlatformTools::OnDeployBinaries(CookingData& data)
     {
         if (FileSystem::CopyFile(data.NativeCodeOutputPath / StringUtils::GetFileName(files[i]), files[i]))
         {
-            data.Error(TEXT("Failed to setup output directory (file {0})."), files[i]);
+            data.Error(String::Format(TEXT("Failed to setup output directory (file {0})."), files[i]));
             return true;
         }
-    }
-
-    return false;
-}
-
-void GDKPlatformTools::OnConfigureAOT(CookingData& data, AotConfig& config)
-{
-    const auto platformDataPath = data.GetPlatformBinariesRoot();
-    const bool useInterpreter = true; // TODO: use Full AOT on GDK
-    const bool enableDebug = data.Configuration != BuildConfiguration::Release;
-    const Char* aotMode = useInterpreter ? TEXT("full,interp") : TEXT("full");
-    const Char* debugMode = enableDebug ? TEXT("soft-debug") : TEXT("nodebug");
-    config.AotCompilerArgs = String::Format(TEXT("--aot={0},verbose,stats,print-skipped,{1} -O=all"), aotMode, debugMode);
-    if (enableDebug)
-        config.AotCompilerArgs = TEXT("--debug ") + config.AotCompilerArgs;
-    config.AotCompilerPath = platformDataPath / TEXT("Tools/mono.exe");
-}
-
-bool GDKPlatformTools::OnPerformAOT(CookingData& data, AotConfig& config, const String& assemblyPath)
-{
-    // Skip .dll.dll which could be a false result from the previous AOT which could fail
-    if (assemblyPath.EndsWith(TEXT(".dll.dll")))
-    {
-        LOG(Warning, "Skip AOT for file '{0}' as it can be a result from the previous task", assemblyPath);
-        return false;
-    }
-
-    // Check if skip this assembly (could be already processed)
-    const String filename = StringUtils::GetFileName(assemblyPath);
-    const String outputPath = config.AotCachePath / filename + TEXT(".dll");
-    if (FileSystem::FileExists(outputPath) && FileSystem::GetFileLastEditTime(assemblyPath) < FileSystem::GetFileLastEditTime(outputPath))
-        return false;
-    LOG(Info, "Calling AOT tool for \"{0}\"", assemblyPath);
-
-    // Cleanup temporary results (fromm the previous AT that fail or sth)
-    const String resultPath = assemblyPath + TEXT(".dll");
-    const String resultPathExp = resultPath + TEXT(".exp");
-    const String resultPathLib = resultPath + TEXT(".lib");
-    const String resultPathPdb = resultPath + TEXT(".pdb");
-    if (FileSystem::FileExists(resultPath))
-        FileSystem::DeleteFile(resultPath);
-    if (FileSystem::FileExists(resultPathExp))
-        FileSystem::DeleteFile(resultPathExp);
-    if (FileSystem::FileExists(resultPathLib))
-        FileSystem::DeleteFile(resultPathLib);
-    if (FileSystem::FileExists(resultPathPdb))
-        FileSystem::DeleteFile(resultPathPdb);
-
-    // Call tool
-    const String workingDir = StringUtils::GetDirectoryName(config.AotCompilerPath);
-    const String command = String::Format(TEXT("\"{0}\" {1} \"{2}\""), config.AotCompilerPath, config.AotCompilerArgs, assemblyPath);
-    const int32 result = Platform::RunProcess(command, workingDir, config.EnvVars);
-    if (result != 0)
-    {
-        data.Error(TEXT("AOT tool execution failed with result code {1} for assembly \"{0}\". See log for more info."), assemblyPath, result);
-        return true;
-    }
-
-    // Copy result
-    if (FileSystem::CopyFile(outputPath, resultPath))
-    {
-        data.Error(TEXT("Failed to copy the AOT tool result file. It can be missing."));
-        return true;
-    }
-
-    // Copy pdb file if exists
-    if (data.Configuration != BuildConfiguration::Release && FileSystem::FileExists(resultPathPdb))
-    {
-        FileSystem::CopyFile(config.AotCachePath / StringUtils::GetFileName(resultPathPdb), resultPathPdb);
-    }
-
-    // Clean intermediate results
-    if (FileSystem::DeleteFile(resultPath)
-        || (FileSystem::FileExists(resultPathExp) && FileSystem::DeleteFile(resultPathExp))
-        || (FileSystem::FileExists(resultPathLib) && FileSystem::DeleteFile(resultPathLib))
-        || (FileSystem::FileExists(resultPathPdb) && FileSystem::DeleteFile(resultPathPdb))
-    )
-    {
-        LOG(Warning, "Failed to remove the AOT tool result file(s).");
     }
 
     return false;
@@ -167,7 +81,6 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
     const auto gameSettings = GameSettings::Get();
     const auto project = Editor::Project;
     const Char* executableFilename = TEXT("FlaxGame.exe");
-    const String name = gameSettings->ProductName;
     const String assetsFolder = data.DataOutputPath / TEXT("Assets");
     if (!FileSystem::DirectoryExists(assetsFolder))
         FileSystem::CreateDirectory(assetsFolder);
@@ -190,8 +103,10 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
     const String configFilePath = data.DataOutputPath / TEXT("MicrosoftGame.config");
     LOG(Info, "Generating config file to \"{0}\"", configFilePath);
     {
+        // Process name to be valid
         StringBuilder sb;
         Array<Char> validName;
+        const String& name = platformSettings->Name.HasChars() ? platformSettings->Name : gameSettings->ProductName;
         for (int32 i = 0; i < name.Length() && validName.Count() <= 50; i++)
         {
             auto c = name[i];
@@ -213,7 +128,7 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
         validName.Add('\0');
 
         sb.Append(TEXT("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"));
-        sb.Append(TEXT("<Game configVersion=\"0\">\n"));
+        sb.Append(TEXT("<Game configVersion=\"1\">\n"));
         sb.AppendFormat(TEXT("  <Identity Name=\"{0}\" Publisher=\"{1}\" Version=\"{2}\"/>\n"),
                         validName.Get(),
                         platformSettings->PublisherName.HasChars() ? platformSettings->PublisherName : TEXT("CN=") + gameSettings->CompanyName,
@@ -238,7 +153,7 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
         sb.Append(TEXT("  </ExecutableList>\n"));
         sb.AppendFormat(TEXT("  <ShellVisuals DefaultDisplayName=\"{0}\"\n"), gameSettings->ProductName);
         sb.AppendFormat(TEXT("                PublisherDisplayName=\"{0}\"\n"), platformSettings->PublisherDisplayName.HasChars() ? platformSettings->PublisherDisplayName : gameSettings->CompanyName);
-        sb.AppendFormat(TEXT("                BackgroundColor=\"#{0}\"\n"), platformSettings->BackgroundColor.ToHexString());
+        sb.AppendFormat(TEXT("                BackgroundColor=\"#{0}\"\n"), platformSettings->BackgroundColor.ToHexString().Left(6));
         sb.AppendFormat(TEXT("                ForegroundText=\"{0}\"\n"), platformSettings->ForegroundText);
         sb.Append(TEXT("                Square150x150Logo=\"Assets\\Square150x150Logo.png\"\n"));
         sb.Append(TEXT("                Square480x480Logo=\"Assets\\Square480x480Logo.png\"\n"));
@@ -256,6 +171,13 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
         sb.AppendFormat(TEXT("    <BlockBroadcast>{0}</BlockBroadcast>\n"), platformSettings->BlockBroadcast);
         sb.AppendFormat(TEXT("    <BlockGameDVR>{0}</BlockGameDVR>\n"), platformSettings->BlockGameDVR);
         sb.Append(TEXT("  </MediaCapture>\n"));
+        sb.Append(TEXT("  <Resources>\n"));
+        auto locales = Localization::GetLocales();
+        for (const String& locale : locales)
+            sb.AppendFormat(TEXT("    <Resource Language=\"{0}\"/>\n"), locale);
+        if (locales.IsEmpty()) // Default locale when none used
+            sb.AppendFormat(TEXT("    <Resource Language=\"{0}\"/>\n"), TEXT("en-US"));
+        sb.Append(TEXT("  </Resources>\n"));
         sb.Append(TEXT("</Game>\n"));
 
         if (File::WriteAllText(configFilePath, sb, Encoding::ANSI))
@@ -270,12 +192,40 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
     if (FileSystem::DirectoryExists(packageOutputPath))
         FileSystem::DeleteDirectory(packageOutputPath);
 
+    CreateProcessSettings procSettings;
+    const String gdkBinPath = _gdkPath / TEXT("../bin");
+    procSettings.WorkingDirectory = data.DataOutputPath;
+
+    // Fix 'MakePkg.exe localize' failing by adding Windows SDK bin folder to path
+    // "error 0x80070057: Failed to load MrmSupport.dll. Please ensure the Windows SDK is installed to generate a Resources.pri file."
+    String windowsSDKVer;
+    String windowsSDK = EditorUtilities::GetSDK(TEXT("Windows SDK"), StringView::Empty, StringView::Empty, &windowsSDKVer);
+    if (windowsSDK.HasChars())
+    {
+        // Put Windows SDK binaries folder into PATH so MakePkg.exe finds MrmSupport.dll
+        procSettings.Environment[TEXT("PATH")] = windowsSDK / TEXT("bin") / windowsSDKVer / TEXT("x64");
+    }
+    else
+    {
+        LOG(Warning, "Cannot find Windows SDK");
+    }
+
+    // Generate package resource index (PRI)
+    data.StepProgress(TEXT("Generating package resource index"), 0.25f);
+    procSettings.FileName = gdkBinPath / TEXT("MakePkg.exe");
+    procSettings.Arguments = String::Format(TEXT("localize /d \"{0}\""), data.DataOutputPath);
+    int32 result = Platform::CreateProcess(procSettings);
+    if (result != 0)
+    {
+        data.Error(TEXT("Failed to generate package resource index."));
+        return true;
+    }
+
     // Generate package layout
     data.StepProgress(TEXT("Generating package layout"), 0.3f);
-    const String gdkBinPath = _gdkPath / TEXT("../bin");
-    const String makePkgPath = gdkBinPath / TEXT("MakePkg.exe");
-    const String command = String::Format(TEXT("\"{0}\" genmap /f layout.xml /d \"{1}\""), makePkgPath, data.DataOutputPath);
-    const int32 result = Platform::RunProcess(command, data.DataOutputPath);
+    procSettings.FileName = gdkBinPath / TEXT("MakePkg.exe");
+    procSettings.Arguments = String::Format(TEXT("genmap /f layout.xml /d \"{0}\""), data.DataOutputPath);
+    result = Platform::CreateProcess(procSettings);
     if (result != 0)
     {
         data.Error(TEXT("Failed to generate package layout."));
@@ -283,6 +233,11 @@ bool GDKPlatformTools::OnPostProcess(CookingData& data, GDKPlatformSettings* pla
     }
 
     return false;
+}
+
+int32 GDKPlatformTools::GetDotnetVersion() const
+{
+    return GAME_BUILD_DOTNET_RUNTIME_MIN_VER;
 }
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,32 +8,39 @@
 /// <summary>
 /// GPU Resource container utility object.
 /// </summary>
-template<typename T = GPUResource>
-class GPUResourceProperty
+class FLAXENGINE_API GPUResourcePropertyBase
 {
-private:
-
-    T* _resource;
-
-private:
-
-    // Disable copy actions
-    GPUResourceProperty(const GPUResourceProperty& other) = delete;
+protected:
+    GPUResource* _resource = nullptr;
 
 public:
+    NON_COPYABLE(GPUResourcePropertyBase);
 
+    GPUResourcePropertyBase() = default;
+    ~GPUResourcePropertyBase();
+
+public:
     /// <summary>
-    /// Action fired when resource gets unloaded (reference gets cleared bu async tasks should stop execution).
+    /// Action fired when resource gets released (reference gets cleared bu async tasks should stop execution).
     /// </summary>
-    Delegate<GPUResourceProperty*> OnUnload;
+    Action Released;
 
+protected:
+    void OnSet(GPUResource* resource);
+    void OnReleased();
+};
+
+/// <summary>
+/// GPU Resource container utility object.
+/// </summary>
+template<typename T = GPUResource>
+class GPUResourceProperty : public GPUResourcePropertyBase
+{
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="GPUResourceProperty"/> class.
     /// </summary>
     GPUResourceProperty()
-        : _resource(nullptr)
     {
     }
 
@@ -42,9 +49,37 @@ public:
     /// </summary>
     /// <param name="resource">The resource.</param>
     GPUResourceProperty(T* resource)
-        : _resource(nullptr)
     {
-        Set(resource);
+        OnSet(resource);
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="GPUResourceProperty"/> class.
+    /// </summary>
+    /// <param name="other">The other value.</param>
+    GPUResourceProperty(const GPUResourceProperty& other)
+    {
+        OnSet(other.Get());
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="GPUResourceProperty"/> class.
+    /// </summary>
+    /// <param name="other">The other value.</param>
+    GPUResourceProperty(GPUResourceProperty&& other)
+    {
+        OnSet(other.Get());
+        other.OnSet(nullptr);
+    }
+
+    GPUResourceProperty& operator=(GPUResourceProperty&& other)
+    {
+        if (&other != this)
+        {
+            OnSet(other._resource);
+            other.OnSet(nullptr);
+        }
+        return *this;
     }
 
     /// <summary>
@@ -52,59 +87,42 @@ public:
     /// </summary>
     ~GPUResourceProperty()
     {
-        // Check if object has been binded
-        if (_resource)
-        {
-            // Unlink
-            _resource->Releasing.template Unbind<GPUResourceProperty, &GPUResourceProperty::onResourceUnload>(this);
-            _resource = nullptr;
-        }
     }
 
 public:
-
     FORCE_INLINE bool operator==(T* other) const
     {
         return Get() == other;
     }
 
-    FORCE_INLINE bool operator==(GPUResourceProperty& other) const
+    FORCE_INLINE bool operator==(const GPUResourceProperty& other) const
     {
         return Get() == other.Get();
     }
 
-    GPUResourceProperty& operator=(const GPUResourceProperty& other)
-    {
-        if (this != &other)
-            Set(other.Get());
-        return *this;
-    }
-
     FORCE_INLINE GPUResourceProperty& operator=(T& other)
     {
-        Set(&other);
+        OnSet(&other);
         return *this;
     }
 
     FORCE_INLINE GPUResourceProperty& operator=(T* other)
     {
-        Set(other);
+        OnSet(other);
         return *this;
     }
 
     /// <summary>
     /// Implicit conversion to GPU Resource
     /// </summary>
-    /// <returns>Resource</returns>
     FORCE_INLINE operator T*() const
     {
-        return _resource;
+        return (T*)_resource;
     }
 
     /// <summary>
     /// Implicit conversion to resource
     /// </summary>
-    /// <returns>True if resource has been binded, otherwise false</returns>
     FORCE_INLINE operator bool() const
     {
         return _resource != nullptr;
@@ -113,60 +131,27 @@ public:
     /// <summary>
     /// Implicit conversion to resource
     /// </summary>
-    /// <returns>Resource</returns>
     FORCE_INLINE T* operator->() const
     {
-        return _resource;
+        return (T*)_resource;
     }
 
     /// <summary>
     /// Gets linked resource
     /// </summary>
-    /// <returns>Resource</returns>
     FORCE_INLINE T* Get() const
     {
-        return _resource;
-    }
-
-    /// <summary>
-    /// Checks if resource has been binded
-    /// </summary>
-    /// <returns>True if resource has been binded, otherwise false</returns>
-    FORCE_INLINE bool IsBinded() const
-    {
-        return _resource != nullptr;
-    }
-
-    /// <summary>
-    /// Checks if resource is missing
-    /// </summary>
-    /// <returns>True if resource is missing, otherwise false</returns>
-    FORCE_INLINE bool IsMissing() const
-    {
-        return _resource == nullptr;
+        return (T*)_resource;
     }
 
 public:
-
     /// <summary>
     /// Set resource
     /// </summary>
     /// <param name="value">Value to assign</param>
     void Set(T* value)
     {
-        if (_resource != value)
-        {
-            // Remove reference from the old one
-            if (_resource)
-                _resource->Releasing.template Unbind<GPUResourceProperty, &GPUResourceProperty::onResourceUnload>(this);
-
-            // Change referenced object
-            _resource = value;
-
-            // Add reference to the new one
-            if (_resource)
-                _resource->Releasing.template Bind<GPUResourceProperty, &GPUResourceProperty::onResourceUnload>(this);
-        }
+        OnSet(value);
     }
 
     /// <summary>
@@ -174,23 +159,7 @@ public:
     /// </summary>
     void Unlink()
     {
-        if (_resource)
-        {
-            // Remove reference from the old one
-            _resource->Releasing.template Unbind<GPUResourceProperty, &GPUResourceProperty::onResourceUnload>(this);
-            _resource = nullptr;
-        }
-    }
-
-private:
-
-    void onResourceUnload()
-    {
-        if (_resource)
-        {
-            _resource = nullptr;
-            OnUnload(this);
-        }
+        OnSet(nullptr);
     }
 };
 

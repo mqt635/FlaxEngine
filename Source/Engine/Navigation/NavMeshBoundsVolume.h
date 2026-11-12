@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,11 +8,11 @@
 /// <summary>
 /// A special type of volume that defines the area of the scene in which navigation meshes are generated.
 /// </summary>
-API_CLASS() class FLAXENGINE_API NavMeshBoundsVolume : public BoxVolume
+API_CLASS(Attributes="ActorContextMenu(\"New/Navigation/Nav Mesh Bounds Volume\"), ActorToolbox(\"Other\")")
+class FLAXENGINE_API NavMeshBoundsVolume : public BoxVolume
 {
-DECLARE_SCENE_OBJECT(NavMeshBoundsVolume);
+    DECLARE_SCENE_OBJECT(NavMeshBoundsVolume);
 public:
-
     /// <summary>
     /// The agent types used by this navmesh bounds volume (from navigation settings). Can be used to generate navmesh for a certain set of agents.
     /// </summary>
@@ -20,18 +20,17 @@ public:
     NavAgentMask AgentsMask;
 
 public:
-
     // [BoxVolume]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 
 protected:
-
     // [BoxVolume]
     void OnEnable() override;
     void OnDisable() override;
 #if USE_EDITOR
     void OnBoundsChanged(const BoundingBox& prevBounds) override;
+    void OnActiveInTreeChanged() override;
     Color GetWiresColor() override;
 #endif
 };

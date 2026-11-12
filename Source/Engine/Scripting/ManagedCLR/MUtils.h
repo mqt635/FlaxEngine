@@ -1,75 +1,81 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "MTypes.h"
+#include "MClass.h"
+#include "MCore.h"
 #include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Types/DataContainer.h"
 #include "Engine/Core/Types/Variant.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingObject.h"
-#include <ThirdParty/mono-2.0/mono/metadata/object.h>
-#include <ThirdParty/mono-2.0/mono/metadata/appdomain.h>
+
+#if USE_CSHARP
+
+struct Version;
+class CultureInfo;
+template<typename AllocationType>
+class BitArray;
 
 namespace MUtils
 {
-    extern FLAXENGINE_API StringView ToString(MonoString* str);
-    extern FLAXENGINE_API StringAnsi ToStringAnsi(MonoString* str);
-    extern FLAXENGINE_API void ToString(MonoString* str, String& result);
-    extern FLAXENGINE_API void ToString(MonoString* str, StringView& result);
-    extern FLAXENGINE_API void ToString(MonoString* str, Variant& result);
-    extern FLAXENGINE_API void ToString(MonoString* str, MString& result);
+    extern FLAXENGINE_API StringView ToString(MString* str);
+    extern FLAXENGINE_API StringAnsi ToStringAnsi(MString* str);
+    extern FLAXENGINE_API void ToString(MString* str, String& result);
+    extern FLAXENGINE_API void ToString(MString* str, StringView& result);
+    extern FLAXENGINE_API void ToString(MString* str, Variant& result);
+    extern FLAXENGINE_API void ToString(MString* str, StringAnsi& result);
 
-    extern FLAXENGINE_API MonoString* ToString(const char* str);
-    extern FLAXENGINE_API MonoString* ToString(const StringAnsi& str);
-    extern FLAXENGINE_API MonoString* ToString(const String& str);
-    extern FLAXENGINE_API MonoString* ToString(const String& str, MonoDomain* domain);
-    extern FLAXENGINE_API MonoString* ToString(const StringAnsiView& str);
-    extern FLAXENGINE_API MonoString* ToString(const StringView& str);
-    extern FLAXENGINE_API MonoString* ToString(const StringView& str, MonoDomain* domain);
+    extern FLAXENGINE_API MString* ToString(const char* str);
+    extern FLAXENGINE_API MString* ToString(const StringAnsi& str);
+    extern FLAXENGINE_API MString* ToString(const String& str);
+    extern FLAXENGINE_API MString* ToString(const String& str, MDomain* domain);
+    extern FLAXENGINE_API MString* ToString(const StringAnsiView& str);
+    extern FLAXENGINE_API MString* ToString(const StringView& str);
+    extern FLAXENGINE_API MString* ToString(const StringView& str, MDomain* domain);
 
-    extern FLAXENGINE_API VariantType UnboxVariantType(MonoReflectionType* value);
-    extern FLAXENGINE_API VariantType UnboxVariantType(MonoType* monoType);
-    extern FLAXENGINE_API MonoReflectionType* BoxVariantType(const VariantType& value);
-    extern FLAXENGINE_API Variant UnboxVariant(MonoObject* value);
-    extern FLAXENGINE_API MonoObject* BoxVariant(const Variant& value);
+    extern FLAXENGINE_API ScriptingTypeHandle UnboxScriptingTypeHandle(MType* value);
+    extern FLAXENGINE_API MType* BoxScriptingTypeHandle(const ScriptingTypeHandle& value);
+    extern FLAXENGINE_API VariantType UnboxVariantType(MType* type);
+    extern FLAXENGINE_API MType* BoxVariantType(const VariantType& value);
+    extern FLAXENGINE_API Variant UnboxVariant(MObject* value);
+    extern FLAXENGINE_API MObject* BoxVariant(const Variant& value);
 }
 
 // Converter for data of type T between managed and unmanaged world
 template<typename T, typename Enable = void>
 struct MConverter
 {
-    MonoObject* Box(const T& data, MonoClass* klass);
-    void Unbox(T& result, MonoObject* data);
-    void ToManagedArray(MonoArray* result, const Span<T>& data);
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<T, AllocationType>& result, MonoArray* data, int32 length);
+    MObject* Box(const T& data, const MClass* klass);
+    void Unbox(T& result, MObject* data);
+    void ToManagedArray(MArray* result, const Span<T>& data);
+    void ToNativeArray(Span<T>& result, const MArray* data);
 };
 
 // Converter for POD types (that can use raw memory copy).
 template<typename T>
 struct MConverter<T, typename TEnableIf<TAnd<TIsPODType<T>, TNot<TIsBaseOf<class ScriptingObject, typename TRemovePointer<T>::Type>>>::Value>::Type>
 {
-    MonoObject* Box(const T& data, MonoClass* klass)
+    MObject* Box(const T& data, const MClass* klass)
     {
-        return mono_value_box(mono_domain_get(), klass, (void*)&data);
+        return MCore::Object::Box((void*)&data, klass);
     }
 
-    void Unbox(T& result, MonoObject* data)
+    void Unbox(T& result, MObject* data)
     {
-        CHECK(data);
-        Platform::MemoryCopy(&result, mono_object_unbox(data), sizeof(T));
+        if (data)
+            Platform::MemoryCopy(&result, MCore::Object::Unbox(data), sizeof(T));
     }
 
-    void ToManagedArray(MonoArray* result, const Span<T>& data)
+    void ToManagedArray(MArray* result, const Span<T>& data)
     {
-        Platform::MemoryCopy(mono_array_addr(result, T, 0), data.Get(), data.Length() * sizeof(T));
+        Platform::MemoryCopy(MCore::Array::GetAddress(result), data.Get(), data.Length() * sizeof(T));
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<T, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<T>& result, const MArray* data)
     {
-        result.Add(mono_array_addr(data, T, 0), length);
+        Platform::MemoryCopy(result.Get(), MCore::Array::GetAddress(data), result.Length() * sizeof(T));
     }
 };
 
@@ -77,28 +83,75 @@ struct MConverter<T, typename TEnableIf<TAnd<TIsPODType<T>, TNot<TIsBaseOf<class
 template<>
 struct MConverter<String>
 {
-    MonoObject* Box(const String& data, MonoClass* klass)
+    MObject* Box(const String& data, const MClass* klass)
     {
-        return (MonoObject*)MUtils::ToString(data);
+#if USE_NETCORE
+        MString* str = MUtils::ToString(data);
+        return MCore::Object::Box(str, klass);
+#else
+        return (MObject*)MUtils::ToString(data);
+#endif
     }
 
-    void Unbox(String& result, MonoObject* data)
+    void Unbox(String& result, MObject* data)
     {
-        result = MUtils::ToString((MonoString*)data);
+#if USE_NETCORE
+        MString* str = (MString*)MCore::Object::Unbox(data);
+        result = MUtils::ToString(str);
+#else
+        result = MUtils::ToString((MString*)data);
+#endif
     }
 
-    void ToManagedArray(MonoArray* result, const Span<String>& data)
+    void ToManagedArray(MArray* result, const Span<String>& data)
     {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-            mono_array_setref(result, i, MUtils::ToString(data[i]));
+            objects[i] = (MObject*)MUtils::ToString(data.Get()[i]);
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<String, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<String>& result, const MArray* data)
     {
-        result.Resize(length);
-        for (int32 i = 0; i < length; i++)
-            MUtils::ToString(mono_array_get(data, MonoString*, i), result[i]);
+        MString** dataPtr = MCore::Array::GetAddress<MString*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            MUtils::ToString(dataPtr[i], result.Get()[i]);
+    }
+};
+
+// Converter for StringAnsi.
+template<>
+struct MConverter<StringAnsi>
+{
+    MObject* Box(const StringAnsi& data, const MClass* klass)
+    {
+        return (MObject*)MUtils::ToString(data);
+    }
+
+    void Unbox(StringAnsi& result, MObject* data)
+    {
+        result = MUtils::ToStringAnsi((MString*)data);
+    }
+
+    void ToManagedArray(MArray* result, const Span<StringAnsi>& data)
+    {
+        if (data.Length() == 0)
+            return;
+        auto* objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
+        for (int32 i = 0; i < data.Length(); i++)
+            objects[i] = (MObject*)MUtils::ToString(data.Get()[i]);
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
+    }
+
+    void ToNativeArray(Span<StringAnsi>& result, const MArray* data)
+    {
+        MString** dataPtr = MCore::Array::GetAddress<MString*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            MUtils::ToString(dataPtr[i], result.Get()[i]);
     }
 };
 
@@ -106,28 +159,32 @@ struct MConverter<String>
 template<>
 struct MConverter<StringView>
 {
-    MonoObject* Box(const StringView& data, MonoClass* klass)
+    MObject* Box(const StringView& data, const MClass* klass)
     {
-        return (MonoObject*)MUtils::ToString(data);
+        return (MObject*)MUtils::ToString(data);
     }
 
-    void Unbox(StringView& result, MonoObject* data)
+    void Unbox(StringView& result, MObject* data)
     {
-        result = MUtils::ToString((MonoString*)data);
+        result = MUtils::ToString((MString*)data);
     }
 
-    void ToManagedArray(MonoArray* result, const Span<StringView>& data)
+    void ToManagedArray(MArray* result, const Span<StringView>& data)
     {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-            mono_array_setref(result, i, MUtils::ToString(data[i]));
+            objects[i] = (MObject*)MUtils::ToString(data.Get()[i]);
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<StringView, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<StringView>& result, const MArray* data)
     {
-        result.Resize(length);
-        for (int32 i = 0; i < length; i++)
-            MUtils::ToString(mono_array_get(data, MonoString*, i), result[i]);
+        MString** dataPtr = MCore::Array::GetAddress<MString*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            MUtils::ToString(dataPtr[i], result.Get()[i]);
     }
 };
 
@@ -135,28 +192,32 @@ struct MConverter<StringView>
 template<>
 struct MConverter<Variant>
 {
-    MonoObject* Box(const Variant& data, MonoClass* klass)
+    MObject* Box(const Variant& data, const MClass* klass)
     {
         return MUtils::BoxVariant(data);
     }
 
-    void Unbox(Variant& result, MonoObject* data)
+    void Unbox(Variant& result, MObject* data)
     {
         result = MUtils::UnboxVariant(data);
     }
 
-    void ToManagedArray(MonoArray* result, const Span<Variant>& data)
+    void ToManagedArray(MArray* result, const Span<Variant>& data)
     {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-            mono_array_setref(result, i, MUtils::BoxVariant(data[i]));
+            objects[i] = MUtils::BoxVariant(data[i]);
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<Variant, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<Variant>& result, const MArray* data)
     {
-        result.Resize(length);
-        for (int32 i = 0; i < length; i++)
-            result[i] = MUtils::UnboxVariant(mono_array_get(data, MonoObject*, i));
+        MObject** dataPtr = MCore::Array::GetAddress<MObject*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            result.Get()[i] = MUtils::UnboxVariant(dataPtr[i]);
     }
 };
 
@@ -164,92 +225,133 @@ struct MConverter<Variant>
 template<typename T>
 struct MConverter<T*, typename TEnableIf<TIsBaseOf<class ScriptingObject, T>::Value>::Type>
 {
-    MonoObject* Box(T* data, MonoClass* klass)
+    MObject* Box(T* data, const MClass* klass)
     {
         return data ? data->GetOrCreateManagedInstance() : nullptr;
     }
 
-    void Unbox(T*& result, MonoObject* data)
+    void Unbox(T*& result, MObject* data)
     {
         result = (T*)ScriptingObject::ToNative(data);
     }
 
-    void ToManagedArray(MonoArray* result, const Span<T*>& data)
+    void ToManagedArray(MArray* result, const Span<T*>& data)
     {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-        {
-            auto obj = data[i];
-            mono_array_setref(result, i, obj ? obj->GetOrCreateManagedInstance() : nullptr);
-        }
+            objects[i] = data.Get()[i] ? data.Get()[i]->GetOrCreateManagedInstance() : nullptr;
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<T*, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<T*>& result, const MArray* data)
     {
-        result.Resize(length);
-        for (int32 i = 0; i < length; i++)
-            result[i] = (T*)ScriptingObject::ToNative(mono_array_get(data, MonoObject*, i));
+        MObject** dataPtr = MCore::Array::GetAddress<MObject*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            result.Get()[i] = (T*)ScriptingObject::ToNative(dataPtr[i]);
     }
 };
 
 // Converter for Scripting Objects (collection of values).
 template<typename T>
-struct MConverter<T, typename TEnableIf<TIsBaseOf<class PersistentScriptingObject, T>::Value>::Type>
+struct MConverter<T, typename TEnableIf<TIsBaseOf<class ScriptingObject, T>::Value>::Type>
 {
-    MonoObject* Box(const T& data, MonoClass* klass)
+    MObject* Box(const T& data, const MClass* klass)
     {
         return data.GetOrCreateManagedInstance();
     }
 
-    void Unbox(T& result, MonoObject* data)
+    void ToManagedArray(MArray* result, const Span<T>& data)
     {
-        // Not Supported
-        CRASH;
-    }
-
-    void ToManagedArray(MonoArray* result, const Span<T>& data)
-    {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-            mono_array_setref(result, i, data[i].GetOrCreateManagedInstance());
-    }
-
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<T, AllocationType>& result, MonoArray* data, int32 length)
-    {
-        // Not Supported
-        CRASH;
+            objects[i] = data.Get()[i].GetOrCreateManagedInstance();
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 };
 
-// Converter for Asset References.
+// Converter for ScriptingObject References.
+template<typename T>
+class ScriptingObjectReference;
+template<typename T>
+class ScriptingObjectInterfaceReference;
 template<typename T>
 class AssetReference;
 
-template<typename T>
-struct MConverter<AssetReference<T>>
+template<typename Reference, typename Object>
+struct MObjectReferenceConverter
 {
-    MonoObject* Box(const AssetReference<T>& data, MonoClass* klass)
+    MObject* Box(const Reference& data, const MClass* klass)
     {
         return data.GetManagedInstance();
     }
 
-    void Unbox(AssetReference<T>& result, MonoObject* data)
+    void Unbox(Reference& result, MObject* data)
     {
-        result = (T*)ScriptingObject::ToNative(data);
+        result = (Object*)ScriptingObject::ToNative(data);
     }
 
-    void ToManagedArray(MonoArray* result, const Span<AssetReference<T>>& data)
+    void ToManagedArray(MArray* result, const Span<Reference>& data)
     {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
         for (int32 i = 0; i < data.Length(); i++)
-            mono_array_setref(result, i, data[i].GetManagedInstance());
+            objects[i] = data[i].GetManagedInstance();
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
     }
 
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<AssetReference<T>, AllocationType>& result, MonoArray* data, int32 length)
+    void ToNativeArray(Span<Reference>& result, const MArray* data)
     {
-        result.Resize(length);
-        for (int32 i = 0; i < length; i++)
-            result[i] = (T*)ScriptingObject::ToNative(mono_array_get(data, MonoObject*, i));
+        MObject** dataPtr = MCore::Array::GetAddress<MObject*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            result.Get()[i] = (Object*)ScriptingObject::ToNative(dataPtr[i]);
+    }
+};
+
+template<typename T>
+struct MConverter<ScriptingObjectReference<T>> : MObjectReferenceConverter<ScriptingObjectReference<T>, T>
+{
+};
+
+template<typename T>
+struct MConverter<ScriptingObjectInterfaceReference<T>> : MObjectReferenceConverter<ScriptingObjectInterfaceReference<T>, ScriptingObject>
+{
+};
+
+template<typename T>
+struct MConverter<AssetReference<T>> : MObjectReferenceConverter<AssetReference<T>, T>
+{
+};
+
+// TODO: use MarshalAs=Guid on SoftAssetReference to pass guid over bindings and not load asset in glue code
+template<typename T>
+class SoftAssetReference;
+template<typename T>
+struct MConverter<SoftAssetReference<T>>
+{
+    void ToManagedArray(MArray* result, const Span<SoftAssetReference<T>>& data)
+    {
+        if (data.Length() == 0)
+            return;
+        MObject** objects = (MObject**)Allocator::Allocate(data.Length() * sizeof(MObject*));
+        for (int32 i = 0; i < data.Length(); i++)
+            objects[i] = data[i].GetManagedInstance();
+        MCore::GC::WriteArrayRef(result, Span<MObject*>(objects, data.Length()));
+        Allocator::Free(objects);
+    }
+
+    void ToNativeArray(Span<SoftAssetReference<T>>& result, const MArray* data)
+    {
+        MObject** dataPtr = MCore::Array::GetAddress<MObject*>(data);
+        for (int32 i = 0; i < result.Length(); i++)
+            result.Get()[i] = (T*)ScriptingObject::ToNative(dataPtr[i]);
     }
 };
 
@@ -257,102 +359,67 @@ struct MConverter<AssetReference<T>>
 template<typename T>
 struct MConverter<Array<T>>
 {
-    MonoObject* Box(const Array<T>& data, MonoClass* klass)
+    MObject* Box(const Array<T>& data, const MClass* klass)
     {
         if (!klass)
             return nullptr;
-        // TODO: use shared empty arrays cache
-        auto result = mono_array_new(mono_domain_get(), klass, data.Count());
+        MArray* result = MCore::Array::New(klass->GetElementClass(), data.Count());
         MConverter<T> converter;
         converter.ToManagedArray(result, Span<T>(data.Get(), data.Count()));
-        return (MonoObject*)result;
+        return (MObject*)result;
     }
 
-    void Unbox(Array<T>& result, MonoObject* data)
+    void Unbox(Array<T>& result, MObject* data)
     {
-        auto length = data ? (int32)mono_array_length((MonoArray*)data) : 0;
-        result.EnsureCapacity(length);
+        MArray* array = MCore::Array::Unbox(data);
+        const int32 length = array ? MCore::Array::GetLength(array) : 0;
+        result.Resize(length);
         MConverter<T> converter;
-        converter.ToNativeArray(result, (MonoArray*)data, length);
-    }
-
-    void ToManagedArray(MonoArray* result, const Span<Array<T>>& data)
-    {
-        CRASH; // Not implemented
-    }
-
-    template<typename AllocationType = HeapAllocation>
-    void ToNativeArray(Array<Array<T>, AllocationType>& result, MonoArray* data, int32 length)
-    {
-        CRASH; // Not implemented
+        Span<T> resultSpan(result.Get(), length);
+        converter.ToNativeArray(resultSpan, array);
     }
 };
 
 namespace MUtils
 {
     // Outputs the full typename for the type of the specified object.
-    extern FLAXENGINE_API void GetClassFullname(MonoObject* obj, MString& fullname);
-
-    // Outputs the full typename for the specified type.
-    extern FLAXENGINE_API void GetClassFullname(MonoClass* monoClass, MString& fullname);
-
-    // Outputs the full typename for the specified type.
-    extern FLAXENGINE_API void GetClassFullname(MonoReflectionType* type, MString& fullname);
-
-    // Outputs the full typename for the type of the specified object.
-    inline MString GetClassFullname(MonoObject* obj)
-    {
-        MString fullname;
-        GetClassFullname(obj, fullname);
-        return fullname;
-    }
-
-    // Outputs the full typename for the type of the specified object.
-    inline MString GetClassFullname(MonoClass* monoClass)
-    {
-        MString fullname;
-        GetClassFullname(monoClass, fullname);
-        return fullname;
-    }
+    extern FLAXENGINE_API StringAnsiView GetClassFullname(MObject* obj);
 
     // Returns the class of the provided object.
-    extern FLAXENGINE_API MonoClass* GetClass(MonoObject* object);
+    extern FLAXENGINE_API MClass* GetClass(MObject* object);
 
     // Returns the class of the provided type.
-    extern FLAXENGINE_API MonoClass* GetClass(MonoReflectionType* type);
+    extern FLAXENGINE_API MClass* GetClass(MType* type);
 
     // Returns the class of the provided VariantType value.
-    extern FLAXENGINE_API MonoClass* GetClass(const VariantType& value);
+    extern FLAXENGINE_API MClass* GetClass(const VariantType& value);
 
     // Returns the class of the provided Variant value.
-    extern FLAXENGINE_API MonoClass* GetClass(const Variant& value);
+    extern FLAXENGINE_API MClass* GetClass(const Variant& value);
 
     // Returns the type of the provided object.
-    extern FLAXENGINE_API MonoReflectionType* GetType(MonoObject* object);
+    extern FLAXENGINE_API MType* GetType(MObject* object);
 
     // Returns the type of the provided class.
-    extern FLAXENGINE_API MonoReflectionType* GetType(MonoClass* klass);
-
-    // Returns the type of the provided class.
-    extern FLAXENGINE_API MonoReflectionType* GetType(MClass* mclass);
+    extern FLAXENGINE_API MType* GetType(MClass* klass);
 
     /// <summary>
-    /// Boxes the native value into the MonoObject.
+    /// Boxes the native value into the managed object.
     /// </summary>
     /// <param name="value">The value.</param>
     /// <param name="valueClass">The value type class.</param>
     template<class T>
-    MonoObject* Box(const T& value, MonoClass* valueClass)
+    MObject* Box(const T& value, const MClass* valueClass)
     {
         MConverter<T> converter;
         return converter.Box(value, valueClass);
     }
 
     /// <summary>
-    /// Unboxes MonoObject to the native value of the given type.
+    /// Unboxes MObject to the native value of the given type.
     /// </summary>
     template<class T>
-    T Unbox(MonoObject* object)
+    T Unbox(MObject* object)
     {
         MConverter<T> converter;
         T result;
@@ -365,7 +432,7 @@ namespace MUtils
     /// </summary>
     /// <param name="arrayObj">The array object.</param>
     /// <returns>The result data container with linked array data bytes (not copied).</returns>
-    extern FLAXENGINE_API BytesContainer LinkArray(MonoArray* arrayObj);
+    extern FLAXENGINE_API BytesContainer LinkArray(MArray* arrayObj);
 
     /// <summary>
     /// Allocates new managed array of data and copies contents from given native array.
@@ -374,12 +441,11 @@ namespace MUtils
     /// <param name="valueClass">The array values type class.</param>
     /// <returns>The output array.</returns>
     template<typename T>
-    MonoArray* ToArray(const Span<T>& data, MonoClass* valueClass)
+    MArray* ToArray(const Span<T>& data, const MClass* valueClass)
     {
         if (!valueClass)
             return nullptr;
-        // TODO: use shared empty arrays cache
-        auto result = mono_array_new(mono_domain_get(), valueClass, data.Length());
+        MArray* result = MCore::Array::New(valueClass, data.Length());
         MConverter<T> converter;
         converter.ToManagedArray(result, data);
         return result;
@@ -392,7 +458,7 @@ namespace MUtils
     /// <param name="valueClass">The array values type class.</param>
     /// <returns>The output array.</returns>
     template<typename T, typename AllocationType>
-    FORCE_INLINE MonoArray* ToArray(const Array<T, AllocationType>& data, MonoClass* valueClass)
+    FORCE_INLINE MArray* ToArray(const Array<T, AllocationType>& data, const MClass* valueClass)
     {
         return MUtils::ToArray(Span<T>(data.Get(), data.Count()), valueClass);
     }
@@ -403,13 +469,14 @@ namespace MUtils
     /// <param name="arrayObj">The managed array object.</param>
     /// <returns>The output array.</returns>
     template<typename T, typename AllocationType = HeapAllocation>
-    Array<T, AllocationType> ToArray(MonoArray* arrayObj)
+    Array<T, AllocationType> ToArray(MArray* arrayObj)
     {
         Array<T, AllocationType> result;
-        auto length = arrayObj ? (int32)mono_array_length(arrayObj) : 0;
-        result.EnsureCapacity(length);
+        const int32 length = arrayObj ? MCore::Array::GetLength(arrayObj) : 0;
+        result.Resize(length);
         MConverter<T> converter;
-        converter.ToNativeArray(result, arrayObj, length);
+        Span<T> resultSpan(result.Get(), length);
+        converter.ToNativeArray(resultSpan, arrayObj);
         return result;
     }
 
@@ -419,10 +486,10 @@ namespace MUtils
     /// <param name="arrayObj">The managed array object.</param>
     /// <returns>The output array pointer and size.</returns>
     template<typename T>
-    Span<T> ToSpan(MonoArray* arrayObj)
+    Span<T> ToSpan(MArray* arrayObj)
     {
-        auto ptr = (T*)(void*)mono_array_addr_with_size(arrayObj, sizeof(T), 0);
-        auto length = arrayObj ? (int32)mono_array_length(arrayObj) : 0;
+        T* ptr = (T*)MCore::Array::GetAddress(arrayObj);
+        const int32 length = arrayObj ? MCore::Array::GetLength(arrayObj) : 0;
         return Span<T>(ptr, length);
     }
 
@@ -431,8 +498,8 @@ namespace MUtils
     /// </summary>
     /// <param name="data">The native array object.</param>
     /// <returns>The output array pointer and size.</returns>
-    template<typename T>
-    FORCE_INLINE Span<T> ToSpan(const Array<T>& data)
+    template<typename T, typename AllocationType = HeapAllocation>
+    FORCE_INLINE Span<T> ToSpan(const Array<T, AllocationType>& data)
     {
         return Span<T>(data.Get(), data.Count());
     }
@@ -443,16 +510,15 @@ namespace MUtils
     /// <param name="arrayObj">The array object.</param>
     /// <param name="result">The result data (linked not copied).</param>
     template<typename T>
-    void ToArray(MonoArray* arrayObj, DataContainer<T>& result)
+    void ToArray(MArray* arrayObj, DataContainer<T>& result)
     {
-        auto length = arrayObj ? (int32)mono_array_length(arrayObj) : 0;
+        const int32 length = arrayObj ? MCore::Array::GetLength(arrayObj) : 0;
         if (length == 0)
         {
             result.Release();
             return;
         }
-
-        auto bytesRaw = (T*)(void*)mono_array_addr_with_size(arrayObj, sizeof(T), 0);
+        T* bytesRaw = (T*)MCore::Array::GetAddress(arrayObj);
         result.Link(bytesRaw, length);
     }
 
@@ -461,9 +527,9 @@ namespace MUtils
     /// </summary>
     /// <param name="data">The input data.</param>
     /// <returns>The output array.</returns>
-    FORCE_INLINE MonoArray* ToArray(const Span<byte>& data)
+    FORCE_INLINE MArray* ToArray(const Span<byte>& data)
     {
-        return ToArray(data, mono_get_byte_class());
+        return ToArray(data, MCore::TypeCache::Byte);
     }
 
     /// <summary>
@@ -471,9 +537,9 @@ namespace MUtils
     /// </summary>
     /// <param name="data">The input data.</param>
     /// <returns>The output array.</returns>
-    FORCE_INLINE MonoArray* ToArray(Array<byte>& data)
+    FORCE_INLINE MArray* ToArray(Array<byte>& data)
     {
-        return ToArray(Span<byte>(data.Get(), data.Count()), mono_get_byte_class());
+        return ToArray(Span<byte>(data.Get(), data.Count()), MCore::TypeCache::Byte);
     }
 
     /// <summary>
@@ -481,9 +547,9 @@ namespace MUtils
     /// </summary>
     /// <param name="data">The input data.</param>
     /// <returns>The output array.</returns>
-    FORCE_INLINE MonoArray* ToArray(const Span<String>& data)
+    FORCE_INLINE MArray* ToArray(const Span<String>& data)
     {
-        return ToArray(data, mono_get_string_class());
+        return ToArray(data, MCore::TypeCache::String);
     }
 
     /// <summary>
@@ -491,10 +557,44 @@ namespace MUtils
     /// </summary>
     /// <param name="data">The input data.</param>
     /// <returns>The output array.</returns>
-    FORCE_INLINE MonoArray* ToArray(const Array<String>& data)
+    FORCE_INLINE MArray* ToArray(const Array<String>& data)
     {
-        return ToArray(Span<String>(data.Get(), data.Count()), mono_get_string_class());
+        return ToArray(Span<String>(data.Get(), data.Count()), MCore::TypeCache::String);
     }
 
-    extern void* VariantToManagedArgPtr(Variant& value, const MType& type, bool& failed);
+    /// <summary>
+    /// Allocates new boolean array and copies data from the given unmanaged data container. The managed runtime is responsible for releasing the returned array data.
+    /// </summary>
+    /// <param name="data">The input data.</param>
+    /// <returns>The output array.</returns>
+    FORCE_INLINE bool* ToBoolArray(const Array<bool>& data)
+    {
+        // System.Runtime.InteropServices.Marshalling.ArrayMarshaller uses CoTask memory alloc to native data pointer
+        bool* arr = (bool*)MCore::GC::AllocateMemory(data.Count() * sizeof(bool), true);
+        memcpy(arr, data.Get(), data.Count() * sizeof(bool));
+        return arr;
+    }
+
+    /// <summary>
+    /// Allocates new boolean array and copies data from the given unmanaged data container. The managed runtime is responsible for releasing the returned array data.
+    /// </summary>
+    /// <param name="data">The input data.</param>
+    /// <returns>The output array.</returns>
+    template<typename AllocationType = HeapAllocation>
+    FORCE_INLINE bool* ToBoolArray(const BitArray<AllocationType>& data)
+    {
+        // System.Runtime.InteropServices.Marshalling.ArrayMarshaller uses CoTask memory alloc to native data pointer
+        bool* arr = (bool*)MCore::GC::AllocateMemory(data.Count() * sizeof(bool), true);
+        for (int i = 0; i < data.Count(); i++)
+            arr[i] = data[i];
+        return arr;
+    }
+
+    extern void* VariantToManagedArgPtr(Variant& value, MType* type, bool& failed);
+    extern bool VariantTypeEquals(const VariantType& type, MType* mType, bool isOut = false);
+
+    extern MObject* ToManaged(const Version& value);
+    extern Version ToNative(MObject* value);
 };
+
+#endif

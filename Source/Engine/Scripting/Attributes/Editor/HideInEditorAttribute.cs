@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -10,6 +10,11 @@ namespace FlaxEngine
     [Serializable]
     public sealed class HideInEditorAttribute : Attribute
     {
+        /// <summary>
+        /// Shows the variable only in play mode (when the game is running), otherwise it will be hidden. Useful for runtime fields or properties to remain invisible at edit time.
+        /// </summary>
+        public bool ShowInPlayMode;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="HideInEditorAttribute"/> class.
         /// </summary>

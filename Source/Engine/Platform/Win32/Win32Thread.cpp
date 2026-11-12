@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WIN32
 
@@ -88,10 +88,6 @@ bool Win32Thread::Start(uint32 stackSize)
     return false;
 }
 
-#if PLATFORM_WINDOWS
-extern LONG CALLBACK SehExceptionHandler(EXCEPTION_POINTERS* ep);
-#endif
-
 unsigned long Win32Thread::ThreadProc(void* pThis)
 {
     auto thread = (Win32Thread*)pThis;
@@ -103,7 +99,7 @@ unsigned long Win32Thread::ThreadProc(void* pThis)
         return static_cast<unsigned long>(exitCode);
     }
 #if PLATFORM_WINDOWS
-    __except (SehExceptionHandler(GetExceptionInformation()))
+    __except (Platform::SehExceptionHandler(GetExceptionInformation()))
     {
         return -1;
     }
@@ -113,6 +109,7 @@ unsigned long Win32Thread::ThreadProc(void* pThis)
 void Win32Thread::Join()
 {
     WaitForSingleObject((HANDLE)_thread, INFINITE);
+    ClearHandleInternal();
 }
 
 void Win32Thread::ClearHandleInternal()

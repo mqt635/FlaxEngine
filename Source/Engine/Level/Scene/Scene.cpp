@@ -1,19 +1,21 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Scene.h"
 #include "SceneAsset.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Content/AssetInfo.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Content/Factories/JsonAssetFactory.h"
+#include "Engine/Foliage/Foliage.h"
 #include "Engine/Physics/Colliders/MeshCollider.h"
 #include "Engine/Level/Actors/StaticModel.h"
-#include "Engine/Level/ActorsCache.h"
 #include "Engine/Navigation/NavigationSettings.h"
 #include "Engine/Navigation/NavMeshBoundsVolume.h"
 #include "Engine/Navigation/NavMesh.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Serialization/Serialization.h"
+#include "Engine/Terrain/Terrain.h"
 #if USE_EDITOR
 #include "Engine/Engine/Globals.h"
 #endif
@@ -30,14 +32,20 @@ bool SceneAsset::IsInternalType() const
     return true;
 }
 
+void SceneNavigation::Clear()
+{
+    Volumes.Clear();
+    Actors.Clear();
+}
+
 BoundingBox SceneNavigation::GetNavigationBounds()
 {
     if (Volumes.IsEmpty())
         return BoundingBox::Empty;
     PROFILE_CPU_NAMED("GetNavigationBounds");
-    auto box = Volumes[0]->GetBox();
+    auto box = Volumes[0]->GetBoundingBox();
     for (int32 i = 1; i < Volumes.Count(); i++)
-        BoundingBox::Merge(box, Volumes[i]->GetBox(), box);
+        BoundingBox::Merge(box, Volumes[i]->GetBoundingBox(), box);
     return box;
 }
 
@@ -46,7 +54,7 @@ NavMeshBoundsVolume* SceneNavigation::FindNavigationBoundsOverlap(const Bounding
     NavMeshBoundsVolume* result = nullptr;
     for (int32 i = 0; i < Volumes.Count(); i++)
     {
-        if (Volumes[i]->GetBox().Intersects(bounds))
+        if (Volumes[i]->GetBoundingBox().Intersects(bounds))
         {
             result = Volumes[i];
             break;
@@ -60,7 +68,6 @@ NavMeshBoundsVolume* SceneNavigation::FindNavigationBoundsOverlap(const Bounding
 
 Scene::Scene(const SpawnParams& params)
     : Actor(params)
-    , Rendering(this)
     , LightmapsData(this)
     , CSGData(this)
 {
@@ -92,14 +99,25 @@ void Scene::SetLightmapSettings(const LightmapSettings& value)
 void Scene::ClearLightmaps()
 {
     LightmapsData.ClearLightmaps();
+
+    // Unlink any actors from lightmap
+    Function<bool(Actor*)> function = [this](Actor* actor)
+    {
+        if (auto* staticModel = Cast<StaticModel>(actor))
+            staticModel->RemoveLightmap();
+        else if (auto* terrain = Cast<Terrain>(actor))
+            terrain->RemoveLightmap();
+        else if (auto* foliage = Cast<Foliage>(actor))
+            foliage->RemoveLightmap();
+        return true;
+    };
+    TreeExecute(function);
 }
 
 void Scene::BuildCSG(float timeoutMs)
 {
     CSGData.BuildCSG(timeoutMs);
 }
-
-#if USE_EDITOR
 
 String Scene::GetPath() const
 {
@@ -117,9 +135,27 @@ String Scene::GetFilename() const
     return StringUtils::GetFileNameWithoutExtension(GetPath());
 }
 
+#if USE_EDITOR
+
 String Scene::GetDataFolderPath() const
 {
     return Globals::ProjectContentFolder / TEXT("SceneData") / GetFilename();
+}
+
+Array<Guid> Scene::GetAssetReferences() const
+{
+    Array<Guid> result;
+    const auto asset = Content::Load<SceneAsset>(GetID());
+    if (asset)
+    {
+        Array<String> files;
+        asset->GetReferences(result, files);
+    }
+    else
+    {
+        // TODO: serialize scene to json and collect refs
+    }
+    return result;
 }
 
 #endif
@@ -159,7 +195,7 @@ void Scene::CreateCsgCollider()
     // Create collider
     auto result = New<MeshCollider>();
     result->SetStaticFlags(StaticFlags::FullyStatic);
-    result->SetName(CSG_COLLIDER_NAME);
+    result->SetName(String(CSG_COLLIDER_NAME));
     result->CollisionData = CSGData.CollisionData;
     result->HideFlags |= HideFlags::DontSelect;
 
@@ -182,7 +218,7 @@ void Scene::CreateCsgModel()
     // Create model
     auto result = New<StaticModel>();
     result->SetStaticFlags(StaticFlags::FullyStatic);
-    result->SetName(CSG_MODEL_NAME);
+    result->SetName(String(CSG_MODEL_NAME));
     result->Model = CSGData.Model;
     result->HideFlags |= HideFlags::DontSelect;
 
@@ -259,9 +295,6 @@ void Scene::Serialize(SerializeStream& stream, const void* otherObj)
 
     SERIALIZE_GET_OTHER_OBJ(Scene);
 
-    // Update scene info object
-    SaveTime = DateTime::NowUTC();
-
     LightmapsData.SaveLightmaps(Info.Lightmaps);
     Info.Serialize(stream, other ? &other->Info : nullptr);
 
@@ -288,6 +321,7 @@ void Scene::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
         if (e != stream.MemberEnd())
         {
             // Upgrade from old single hidden navmesh data into NavMesh actors on a scene
+            MARK_CONTENT_DEPRECATED();
             AssetReference<RawDataAsset> dataAsset;
             Serialization::Deserialize(e->value, dataAsset, modifier);
             const auto settings = NavigationSettings::Get();
@@ -325,24 +359,13 @@ void Scene::OnDeleteObject()
     Actor::OnDeleteObject();
 }
 
-void Scene::PostLoad()
+void Scene::Initialize()
 {
     // Initialize
     _parent = nullptr;
     _scene = this;
 
-    // Base
-    Actor::PostLoad();
-}
-
-void Scene::PostSpawn()
-{
-    // Initialize
-    _parent = nullptr;
-    _scene = this;
-
-    // Base
-    Actor::PostSpawn();
+    Actor::Initialize();
 }
 
 void Scene::BeginPlay(SceneBeginData* data)
@@ -365,13 +388,17 @@ void Scene::BeginPlay(SceneBeginData* data)
         if (model == nullptr)
             CreateCsgModel();
     }
+
+    Ticking.SetTicking(true);
 }
 
 void Scene::EndPlay()
 {
     // Improve scene cleanup performance by removing all data from scene rendering and ticking containers
+    Ticking.SetTicking(false);
     Ticking.Clear();
     Rendering.Clear();
+    Navigation.Clear();
 
     // Base
     Actor::EndPlay();

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -17,7 +17,20 @@ namespace FlaxEngine
         /// </summary>
         public string Text;
 
-        private HeaderAttribute()
+        /// <summary>
+        /// The custom header font size.
+        /// </summary>
+        public int FontSize;
+
+        /// <summary>
+        /// The custom header color (as 32-bit uint in RGB order, bottom bits contain Blue).
+        /// </summary>
+        public uint Color;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="HeaderAttribute"/> class.
+        /// </summary>
+        public HeaderAttribute()
         {
         }
 
@@ -25,9 +38,13 @@ namespace FlaxEngine
         /// Initializes a new instance of the <see cref="HeaderAttribute"/> class.
         /// </summary>
         /// <param name="text">The header text.</param>
-        public HeaderAttribute(string text)
+        /// <param name="fontSize">The header text font size (-1 to use default which is 14).</param>
+        /// <param name="color">The header color (as 32-bit uint, 0 to use default).</param>
+        public HeaderAttribute(string text, int fontSize = -1, uint color = 0)
         {
             Text = text;
+            FontSize = fontSize;
+            Color = color;
         }
     }
 }

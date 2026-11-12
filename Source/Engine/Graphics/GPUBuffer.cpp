@@ -1,18 +1,23 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "GPUBuffer.h"
 #include "GPUDevice.h"
+#include "GPUResourceProperty.h"
 #include "GPUBufferDescription.h"
 #include "PixelFormatExtensions.h"
+#include "RenderContext.h"
+#include "Shaders/GPUVertexLayout.h"
 #include "Async/Tasks/GPUCopyResourceTask.h"
 #include "Engine/Core/Utilities.h"
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Types/DataContainer.h"
 #include "Engine/Debug/Exceptions/InvalidOperationException.h"
 #include "Engine/Debug/Exceptions/ArgumentNullException.h"
-#include "Engine/Threading/ThreadPoolTask.h"
-#include "Engine/Graphics/GPUResourceProperty.h"
 #include "Engine/Debug/Exceptions/ArgumentOutOfRangeException.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#include "Engine/Scripting/Enums.h"
+#include "Engine/Threading/ThreadPoolTask.h"
 #include "Engine/Threading/Threading.h"
 
 GPUBufferDescription GPUBufferDescription::Buffer(uint32 size, GPUBufferFlags flags, PixelFormat format, const void* initData, uint32 stride, GPUResourceUsage usage)
@@ -24,6 +29,7 @@ GPUBufferDescription GPUBufferDescription::Buffer(uint32 size, GPUBufferFlags fl
     desc.Format = format;
     desc.InitData = initData;
     desc.Usage = usage;
+    desc.VertexLayout = nullptr;
     return desc;
 }
 
@@ -43,6 +49,46 @@ GPUBufferDescription GPUBufferDescription::Typed(const void* data, int32 count, 
         bufferFlags |= GPUBufferFlags::UnorderedAccess;
     const auto stride = PixelFormatExtensions::SizeInBytes(viewFormat);
     return Buffer(count * stride, bufferFlags, viewFormat, data, stride, usage);
+}
+
+GPUBufferDescription GPUBufferDescription::Vertex(GPUVertexLayout* layout, uint32 elementStride, uint32 elementsCount, const void* data)
+{
+    GPUBufferDescription desc;
+    desc.Size = elementsCount * elementStride;
+    desc.Stride = elementStride;
+    desc.Flags = GPUBufferFlags::VertexBuffer;
+    desc.Format = PixelFormat::Unknown;
+    desc.InitData = data;
+    desc.Usage = GPUResourceUsage::Default;
+    desc.VertexLayout = layout;
+    return desc;
+}
+
+GPUBufferDescription GPUBufferDescription::Vertex(GPUVertexLayout* layout, uint32 elementStride, uint32 elementsCount, GPUResourceUsage usage)
+{
+    GPUBufferDescription desc;
+    desc.Size = elementsCount * elementStride;
+    desc.Stride = elementStride;
+    desc.Flags = GPUBufferFlags::VertexBuffer;
+    desc.Format = PixelFormat::Unknown;
+    desc.InitData = nullptr;
+    desc.Usage = GPUResourceUsage::Default;
+    desc.VertexLayout = layout;
+    return desc;
+}
+
+GPUBufferDescription GPUBufferDescription::Vertex(GPUVertexLayout* layout, uint32 elementsCount, const void* data)
+{
+    const uint32 stride = layout ? layout->GetStride() : 0;
+    CHECK_RETURN_DEBUG(stride, GPUBufferDescription());
+    return Vertex(layout, stride, elementsCount, data);
+}
+
+GPUBufferDescription GPUBufferDescription::Vertex(GPUVertexLayout* layout, uint32 elementsCount, GPUResourceUsage usage)
+{
+    const uint32 stride = layout ? layout->GetStride() : 0;
+    CHECK_RETURN_DEBUG(stride, GPUBufferDescription());
+    return Vertex(layout, stride, elementsCount, usage);
 }
 
 void GPUBufferDescription::Clear()
@@ -68,6 +114,15 @@ GPUBufferDescription GPUBufferDescription::ToStagingReadback() const
     return desc;
 }
 
+GPUBufferDescription GPUBufferDescription::ToStaging() const
+{
+    auto desc = *this;
+    desc.Usage = GPUResourceUsage::Staging;
+    desc.Flags = GPUBufferFlags::None;
+    desc.InitData = nullptr;
+    return desc;
+}
+
 bool GPUBufferDescription::Equals(const GPUBufferDescription& other) const
 {
     return Size == other.Size
@@ -75,39 +130,17 @@ bool GPUBufferDescription::Equals(const GPUBufferDescription& other) const
             && Flags == other.Flags
             && Format == other.Format
             && Usage == other.Usage
-            && InitData == other.InitData;
+            && InitData == other.InitData
+            && VertexLayout == other.VertexLayout;
 }
 
 String GPUBufferDescription::ToString() const
 {
-    // TODO: add tool to Format to string
-
-    String flags;
-    if (Flags == GPUBufferFlags::None)
-    {
-        flags = TEXT("None");
-    }
-    else
-    {
-        // TODO: create tool to auto convert flag enums to string
-
-#define CONVERT_FLAGS_FLAGS_2_STR(value) if(Flags & GPUBufferFlags::value) { if (flags.HasChars()) flags += TEXT('|'); flags += TEXT(#value); }
-        CONVERT_FLAGS_FLAGS_2_STR(ShaderResource);
-        CONVERT_FLAGS_FLAGS_2_STR(VertexBuffer);
-        CONVERT_FLAGS_FLAGS_2_STR(IndexBuffer);
-        CONVERT_FLAGS_FLAGS_2_STR(UnorderedAccess);
-        CONVERT_FLAGS_FLAGS_2_STR(Append);
-        CONVERT_FLAGS_FLAGS_2_STR(Counter);
-        CONVERT_FLAGS_FLAGS_2_STR(Argument);
-        CONVERT_FLAGS_FLAGS_2_STR(Structured);
-#undef CONVERT_FLAGS_FLAGS_2_STR
-    }
-
     return String::Format(TEXT("Size: {0}, Stride: {1}, Flags: {2}, Format: {3}, Usage: {4}"),
                           Size,
                           Stride,
-                          flags,
-                          (int32)Format,
+                          ScriptingEnum::ToStringFlags(Flags),
+                          ScriptingEnum::ToString(Format),
                           (int32)Usage);
 }
 
@@ -118,6 +151,7 @@ uint32 GetHash(const GPUBufferDescription& key)
     hashCode = (hashCode * 397) ^ (uint32)key.Flags;
     hashCode = (hashCode * 397) ^ (uint32)key.Format;
     hashCode = (hashCode * 397) ^ (uint32)key.Usage;
+    hashCode = (hashCode * 397) ^ GetHash(key.VertexLayout);
     return hashCode;
 }
 
@@ -137,33 +171,68 @@ GPUBuffer* GPUBuffer::New()
 }
 
 GPUBuffer::GPUBuffer()
+    : GPUResource(SpawnParams(Guid::New(), TypeInitializer))
 {
     // Buffer with size 0 is considered to be invalid
-    _desc.Size = 0;
+    _desc.Clear();
+}
+
+bool GPUBuffer::IsStaging() const
+{
+    return _desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::StagingUpload || _desc.Usage == GPUResourceUsage::Staging;
+}
+
+bool GPUBuffer::IsDynamic() const
+{
+    return _desc.Usage == GPUResourceUsage::Dynamic;
 }
 
 bool GPUBuffer::Init(const GPUBufferDescription& desc)
 {
-    ASSERT(Math::IsInRange<uint32>(desc.Size, 1, MAX_int32)
-        && Math::IsInRange<uint32>(desc.Stride, 0, 1024));
+    PROFILE_CPU();
+    PROFILE_MEM(GraphicsBuffers);
 
     // Validate description
-    if (desc.Flags & GPUBufferFlags::Structured)
+#if !BUILD_RELEASE
+#define GET_NAME() GetName()
+#else
+#define GET_NAME() TEXT("")
+#endif
+    if (Math::IsNotInRange<uint32>(desc.Size, 1, MAX_int32))
+    {
+        LOG(Warning, "Cannot create buffer '{}'. Incorrect size {}.", GET_NAME(), desc.Size);
+        return true;
+    }
+    if (Math::IsNotInRange<uint32>(desc.Stride, 0, 1024))
+    {
+        LOG(Warning, "Cannot create buffer '{}'. Incorrect stride {}.", GET_NAME(), desc.Stride);
+        return true;
+    }
+    if (EnumHasAnyFlags(desc.Flags, GPUBufferFlags::Structured))
     {
         if (desc.Stride <= 0)
         {
-            LOG(Warning, "Cannot create buffer. Element size cannot be less or equal 0 for structured buffer.");
+            LOG(Warning, "Cannot create buffer '{}'. Element size cannot be less or equal 0 for structured buffer.", GET_NAME());
             return true;
         }
     }
-    if (desc.Flags & GPUBufferFlags::RawBuffer)
+    if (EnumHasAnyFlags(desc.Flags, GPUBufferFlags::RawBuffer))
     {
         if (desc.Format != PixelFormat::R32_Typeless)
         {
-            LOG(Warning, "Cannot create buffer. Raw buffers must use format R32_Typeless.");
+            LOG(Warning, "Cannot create buffer '{}'. Raw buffers must use format R32_Typeless.", GET_NAME());
             return true;
         }
     }
+    if (EnumHasAnyFlags(desc.Flags, GPUBufferFlags::VertexBuffer))
+    {
+        if (desc.VertexLayout == nullptr)
+        {
+            // [Deprecated in v1.10] Change this into an error as VertexLayout becomes a requirement when layout is no longer set in a vertex shader
+            LOG(Warning, "Missing Vertex Layout in buffer '{}'. Vertex Buffers should provide layout information about contained vertex elements.", GET_NAME());
+        }
+    }
+#undef GET_NAME
 
     // Release previous data
     ReleaseGPU();
@@ -176,6 +245,16 @@ bool GPUBuffer::Init(const GPUBufferDescription& desc)
         LOG(Warning, "Cannot initialize buffer. Description: {0}", desc.ToString());
         return true;
     }
+
+#if COMPILE_WITH_PROFILER
+    ZoneValue(_memoryUsage / 1024); // Memory size in kB
+    auto group = ProfilerMemory::Groups::GraphicsBuffers;
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::VertexBuffer))
+        group = ProfilerMemory::Groups::GraphicsVertexBuffers;
+    else if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::IndexBuffer))
+        group = ProfilerMemory::Groups::GraphicsIndexBuffers;
+    ProfilerMemory::IncrementGroup(group, _memoryUsage);
+#endif
 
     return false;
 }
@@ -210,7 +289,7 @@ GPUBuffer* GPUBuffer::ToStagingUpload() const
 
 bool GPUBuffer::Resize(uint32 newSize)
 {
-    // Validate input
+    PROFILE_CPU();
     if (!IsAllocated())
     {
         Log::InvalidOperationException(TEXT("Buffer.Resize"));
@@ -234,16 +313,17 @@ bool GPUBuffer::DownloadData(BytesContainer& result)
         LOG(Warning, "Cannot download GPU buffer data from an empty buffer.");
         return true;
     }
-
-    if (_desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::Dynamic)
+    if (_desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::Dynamic || _desc.Usage == GPUResourceUsage::Staging)
     {
         // Use faster path for staging resources
         return GetData(result);
     }
+    PROFILE_CPU();
 
     // Ensure not running on main thread
     if (IsInMainThread())
     {
+        // TODO: support mesh data download from GPU on a main thread during rendering
         LOG(Warning, "Cannot download GPU buffer data on a main thread. Use staging readback buffer or invoke this function from another thread.");
         return true;
     }
@@ -270,13 +350,11 @@ bool GPUBuffer::DownloadData(BytesContainer& result)
 class BufferDownloadDataTask : public ThreadPoolTask
 {
 private:
-
     BufferReference _buffer;
     GPUBuffer* _staging;
     BytesContainer& _data;
 
 public:
-
     BufferDownloadDataTask(GPUBuffer* buffer, GPUBuffer* staging, BytesContainer& data)
         : _buffer(buffer)
         , _staging(staging)
@@ -290,7 +368,6 @@ public:
     }
 
 public:
-
     // [ThreadPoolTask]
     bool HasReference(Object* resource) const override
     {
@@ -298,7 +375,6 @@ public:
     }
 
 protected:
-
     // [ThreadPoolTask]
     bool Run() override
     {
@@ -359,6 +435,7 @@ Task* GPUBuffer::DownloadDataAsync(BytesContainer& result)
 
 bool GPUBuffer::GetData(BytesContainer& output)
 {
+    PROFILE_CPU();
     void* mapped = Map(GPUResourceMapMode::Read);
     if (!mapped)
         return true;
@@ -369,6 +446,7 @@ bool GPUBuffer::GetData(BytesContainer& output)
 
 void GPUBuffer::SetData(const void* data, uint32 size)
 {
+    PROFILE_CPU();
     if (size == 0 || data == nullptr)
     {
         Log::ArgumentNullException(TEXT("Buffer.SetData"));
@@ -380,11 +458,18 @@ void GPUBuffer::SetData(const void* data, uint32 size)
         return;
     }
 
-    void* mapped = Map(GPUResourceMapMode::Write);
-    if (!mapped)
+    if (_desc.Usage == GPUResourceUsage::Default && GPUDevice::Instance->IsRendering())
     {
+        // Upload using the context (will use internal staging buffer inside command buffer)
+        RenderContext::GPULocker.Lock();
+        GPUDevice::Instance->GetMainContext()->UpdateBuffer(this, data, size);
+        RenderContext::GPULocker.Unlock();
         return;
     }
+
+    void* mapped = Map(GPUResourceMapMode::Write);
+    if (!mapped)
+        return;
     Platform::MemoryCopy(mapped, data, size);
     Unmap();
 }
@@ -398,18 +483,22 @@ String GPUBuffer::ToString() const
 #endif
 }
 
-GPUResource::ResourceType GPUBuffer::GetResourceType() const
+GPUResourceType GPUBuffer::GetResourceType() const
 {
-    return ResourceType::Buffer;
-}
-
-GPUResource::ObjectType GPUBuffer::GetObjectType() const
-{
-    return ObjectType::Buffer;
+    return GPUResourceType::Buffer;
 }
 
 void GPUBuffer::OnReleaseGPU()
 {
+#if COMPILE_WITH_PROFILER
+    auto group = ProfilerMemory::Groups::GraphicsBuffers;
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::VertexBuffer))
+        group = ProfilerMemory::Groups::GraphicsVertexBuffers;
+    else if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::IndexBuffer))
+        group = ProfilerMemory::Groups::GraphicsIndexBuffers;
+    ProfilerMemory::IncrementGroup(group, _memoryUsage);
+#endif
+
     _desc.Clear();
     _isLocked = false;
 }

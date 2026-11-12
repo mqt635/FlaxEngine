@@ -1,16 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "EnvironmentProbe.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Graphics/RenderView.h"
 #include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/GPUContext.h"
+#include "Engine/Graphics/Textures/GPUTexture.h"
 #include "Engine/Graphics/Textures/TextureData.h"
 #include "Engine/Renderer/RenderList.h"
-#include "Engine/Renderer/ProbesRenderer.h"
-#include "Engine/Renderer/ReflectionsPass.h"
+#include "Engine/Graphics/RenderContext.h"
+#include "Engine/Renderer/Reflections/ProbesRenderer.h"
+#include "Engine/Renderer/Reflections/ReflectionsPass.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/ContentExporters/AssetExporters.h"
 #include "Engine/ContentImporters/AssetsImportingManager.h"
+#include "Engine/Core/Math/OrientedBoundingBox.h"
+#include "Engine/Graphics/RenderTools.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Level/Scene/Scene.h"
 
@@ -18,10 +24,16 @@ EnvironmentProbe::EnvironmentProbe(const SpawnParams& params)
     : Actor(params)
     , _radius(3000.0f)
     , _isUsingCustomProbe(false)
-    , _probe(nullptr)
+    , BoxProjection(false)
 {
+    _drawCategory = SceneRendering::PreRender;
     _sphere = BoundingSphere(Vector3::Zero, _radius);
     BoundingBox::FromSphere(_sphere, _box);
+}
+
+EnvironmentProbe::~EnvironmentProbe()
+{
+    SAFE_DELETE_GPU_RESOURCE(_probeTexture);
 }
 
 float EnvironmentProbe::GetRadius() const
@@ -32,30 +44,31 @@ float EnvironmentProbe::GetRadius() const
 void EnvironmentProbe::SetRadius(float value)
 {
     value = Math::Max(0.0f, value);
-    if (Math::NearEqual(value, _radius))
+    if (value == _radius)
         return;
 
     _radius = value;
     UpdateBounds();
 }
 
-float EnvironmentProbe::GetScaledRadius() const
+GPUTexture* EnvironmentProbe::GetProbe() const
 {
-    return _radius * _transform.Scale.MaxValue();
+    return _probe ? _probe->GetTexture() : _probeTexture;
 }
 
-void EnvironmentProbe::SetupProbeData(ProbeData* data) const
+CubeTexture* EnvironmentProbe::GetProbeAsset() const
 {
-    const float radius = GetScaledRadius();
-    data->Data0 = Vector4(GetPosition(), 0);
-    data->Data1 = Vector4(radius, 1.0f / radius, Brightness, 0);
+    return _probe;
+}
+
+bool EnvironmentProbe::IsUsingCustomProbe() const
+{
+    return _isUsingCustomProbe;
 }
 
 CubeTexture* EnvironmentProbe::GetCustomProbe() const
 {
-    if (IsUsingCustomProbe())
-        return GetProbe();
-    return nullptr;
+    return _isUsingCustomProbe ? _probe : nullptr;
 }
 
 void EnvironmentProbe::SetCustomProbe(CubeTexture* probe)
@@ -71,32 +84,54 @@ void EnvironmentProbe::SetCustomProbe(CubeTexture* probe)
 
 void EnvironmentProbe::Bake(float timeout)
 {
-#if COMPILE_WITH_PROBES_BAKING
     ProbesRenderer::Bake(this, timeout);
-#else
-    LOG(Warning, "Baking probes is not supported.");
+}
+
+void EnvironmentProbe::SetProbeData(GPUContext* context, GPUTexture* data)
+{
+    // Remove probe asset (if used)
+    _isUsingCustomProbe = false;
+    _probe = nullptr;
+
+    // Allocate probe texture manually
+    if (!_probeTexture)
+    {
+        _probeTexture = GPUTexture::New();
+#if !BUILD_RELEASE
+        _probeTexture->SetName(GetNamePath());
 #endif
+    }
+    if (_probeTexture->Width() != data->Width() || _probeTexture->Format() != data->Format())
+    {
+        auto desc = data->GetDescription();
+        desc.Usage = GPUResourceUsage::Default;
+        desc.Flags = GPUTextureFlags::ShaderResource;
+        if (_probeTexture->Init(desc))
+            return;
+        _probeTexture->SetResidentMipLevels(_probeTexture->MipLevels());
+    }
+
+    // Copy probe texture data
+    context->CopyResource(_probeTexture, data);
 }
 
 void EnvironmentProbe::SetProbeData(TextureData& data)
 {
-    // Validate input data
-    ASSERT(data.GetArraySize() == 6 && data.Height == ENV_PROBES_RESOLUTION && data.Width == ENV_PROBES_RESOLUTION);
-
-    // Check if was using custom probe
+    // Remove custom probe (if used)
     if (_isUsingCustomProbe)
     {
-        // Set
         _isUsingCustomProbe = false;
         _probe = nullptr;
     }
 
-    Guid id = Guid::New();
+    // Remove probe texture (if used)
+    SAFE_DELETE_GPU_RESOURCE(_probeTexture);
 
 #if COMPILE_WITH_ASSETS_IMPORTER
     // Create asset file
     const String path = GetScene()->GetDataFolderPath() / TEXT("EnvProbes/") / GetID().ToString(Guid::FormatType::N) + ASSET_FILES_EXTENSION_WITH_DOT;
     AssetInfo info;
+    Guid id = Guid::New();
     if (FileSystem::FileExists(path) && Content::GetAssetInfo(path, info))
         id = info.ID;
     if (AssetsImportingManager::Create(AssetsImportingManager::CreateCubeTextureTag, path, id, &data))
@@ -104,11 +139,6 @@ void EnvironmentProbe::SetProbeData(TextureData& data)
         LOG(Error, "Cannot import generated env probe!");
         return;
     }
-#else
-    // TODO: create or reuse virtual texture and use it
-    LOG(Error, "Changing probes at runtime in game is not supported.");
-    return;
-#endif
 
     // Check if has loaded probe and it has different ID
     if (_probe && _probe->GetID() != id)
@@ -120,21 +150,76 @@ void EnvironmentProbe::SetProbeData(TextureData& data)
 
     // Link probe texture
     _probe = Content::LoadAsync<CubeTexture>(id);
+#else
+    // Create virtual asset
+    if (!_probe || !_probe->IsVirtual())
+        _probe = Content::CreateVirtualAsset<CubeTexture>();
+    auto initData = New<TextureBase::InitData>();
+    initData->FromTextureData(data);
+    if (_probe->Init(initData))
+    {
+        Delete(initData);
+        LOG(Error, "Cannot load generated env probe!");
+        return;
+    }
+#endif
 }
 
 void EnvironmentProbe::UpdateBounds()
 {
-    _sphere = BoundingSphere(GetPosition(), GetScaledRadius());
-    BoundingBox::FromSphere(_sphere, _box);
+    if (BoxProjection)
+    {
+        OrientedBoundingBox(_radius, _transform).GetBoundingBox(_box);
+        BoundingSphere::FromBox(_box, _sphere);
+    }
+    else
+    {
+        _sphere = BoundingSphere(_transform.Translation, _radius * _transform.Scale.MaxValue());
+        BoundingBox::FromSphere(_sphere, _box);
+    }
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateCommon(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Bounds);
 }
 
-void EnvironmentProbe::Draw(RenderContext& renderContext)
+void EnvironmentProbe::Draw(RenderContextBatch& renderContextBatch)
 {
-    if (Brightness > ZeroTolerance && (renderContext.View.Flags & ViewFlags::Reflections) != 0 && HasProbeLoaded())
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
+    if (Brightness > ZeroTolerance &&
+        EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::Reflections) &&
+        EnumHasAnyFlags(renderContext.View.Pass, DrawPass::GBuffer))
     {
-        renderContext.List->EnvironmentProbes.Add(this);
+        // Size culling
+        const Float3 position = _sphere.Center - renderContext.View.Origin;
+        const float radius = (float)_sphere.Radius;
+        const float drawMinScreenSize = 0.02f;
+        const auto lodView = (renderContext.LodProxyView ? renderContext.LodProxyView : &renderContext.View);
+        const float screenRadiusSquared = RenderTools::ComputeBoundsScreenRadiusSquared(position, radius, *lodView) * renderContext.View.ModelLODDistanceFactorSqrt;
+        if (Math::Square(drawMinScreenSize * 0.5f) > screenRadiusSquared)
+            return;
+
+        // Realtime probe update
+        if (UpdateMode == ProbeUpdateMode::Realtime)
+            ProbesRenderer::Bake(this, 0.0f);
+
+        GPUTexture* texture = GetProbe();
+        if (texture)
+        {
+            RenderEnvironmentProbeData data;
+            data.Texture = texture;
+            data.Position = position;
+            data.Radius = _radius;
+            data.Brightness = Brightness;
+            data.SortOrder = SortOrder;
+            data.HashID = GetHash(_id);
+            data.BlendDistance = Math::Clamp(BlendDistance, 0.001f, _radius * _transform.Scale.MinValue());
+            data.BoxProjection = BoxProjection;
+            if (data.BoxProjection)
+            {
+                data.Orientation = _transform.Orientation;
+                data.Scale = _transform.Scale;
+            }
+            renderContext.List->EnvironmentProbes.Add(data);
+        }
     }
 }
 
@@ -145,7 +230,27 @@ void EnvironmentProbe::Draw(RenderContext& renderContext)
 void EnvironmentProbe::OnDebugDrawSelected()
 {
     // Draw influence range
-    DEBUG_DRAW_WIRE_SPHERE(_sphere, Color::CornflowerBlue, 0, true);
+    auto rangeColor = Color::CornflowerBlue;
+    auto rangeColorAlpha = rangeColor.AlphaMultiplied(0.1f);
+    if (BoxProjection)
+    {
+        OrientedBoundingBox box(_radius, _transform);
+        DEBUG_DRAW_WIRE_BOX(box, rangeColorAlpha, 0, false);
+        DEBUG_DRAW_WIRE_BOX(box, rangeColor, 0, true);
+        DEBUG_DRAW_BOX(box, rangeColorAlpha, 0, true);
+    }
+    else
+    {
+        DEBUG_DRAW_WIRE_SPHERE(_sphere, rangeColorAlpha, 0, false);
+        DEBUG_DRAW_WIRE_SPHERE(_sphere, rangeColor, 0, true);
+        DEBUG_DRAW_SPHERE(_sphere, rangeColorAlpha, 0, true);
+    }
+
+    // Draw capture point (if offset)
+    if (!CaptureOffset.IsZero())
+    {
+        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(_transform.LocalToWorld(CaptureOffset), 10.0f), Color::Blue, 0, false);
+    }
 
     // Base
     Actor::OnDebugDrawSelected();
@@ -156,7 +261,7 @@ void EnvironmentProbe::OnDebugDrawSelected()
 void EnvironmentProbe::OnLayerChanged()
 {
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateCommon(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Layer);
 }
 
 void EnvironmentProbe::Serialize(SerializeStream& stream, const void* otherObj)
@@ -167,9 +272,14 @@ void EnvironmentProbe::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE_GET_OTHER_OBJ(EnvironmentProbe);
 
     SERIALIZE_MEMBER(Radius, _radius);
+    SERIALIZE(CubemapResolution);
+    SERIALIZE(BoxProjection);
     SERIALIZE(Brightness);
-    SERIALIZE(AutoUpdate);
+    SERIALIZE(BlendDistance);
+    SERIALIZE(SortOrder);
+    SERIALIZE(UpdateMode);
     SERIALIZE(CaptureNearPlane);
+    SERIALIZE(CaptureOffset);
     SERIALIZE_MEMBER(IsCustomProbe, _isUsingCustomProbe);
     SERIALIZE_MEMBER(ProbeID, _probe);
 }
@@ -180,11 +290,25 @@ void EnvironmentProbe::Deserialize(DeserializeStream& stream, ISerializeModifier
     Actor::Deserialize(stream, modifier);
 
     DESERIALIZE_MEMBER(Radius, _radius);
+    DESERIALIZE(CubemapResolution);
+    DESERIALIZE(BoxProjection);
     DESERIALIZE(Brightness);
-    DESERIALIZE(AutoUpdate);
+    DESERIALIZE(BlendDistance);
+    DESERIALIZE(SortOrder);
+    DESERIALIZE(UpdateMode);
     DESERIALIZE(CaptureNearPlane);
+    DESERIALIZE(CaptureOffset);
     DESERIALIZE_MEMBER(IsCustomProbe, _isUsingCustomProbe);
     DESERIALIZE_MEMBER(ProbeID, _probe);
+
+    // [Deprecated on 18.07.2022, expires on 18.07.2022]
+    if (modifier->EngineBuild <= 6332)
+    {
+        MARK_CONTENT_DEPRECATED();
+        const auto member = stream.FindMember("AutoUpdate");
+        if (member != stream.MemberEnd() && member->value.IsBool() && member->value.GetBool())
+            UpdateMode = ProbeUpdateMode::WhenMoved;
+    }
 }
 
 bool EnvironmentProbe::HasContentLoaded() const
@@ -192,14 +316,14 @@ bool EnvironmentProbe::HasContentLoaded() const
     return _probe == nullptr || _probe->IsLoaded();
 }
 
-bool EnvironmentProbe::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool EnvironmentProbe::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return CollisionsHelper::RayIntersectsSphere(ray, _sphere, distance, normal);
 }
 
 void EnvironmentProbe::OnEnable()
 {
-    _sceneRenderingKey = GetSceneRendering()->AddCommon(this);
+    GetSceneRendering()->AddActor(this, _sceneRenderingKey);
 #if USE_EDITOR
     GetSceneRendering()->AddViewportIcon(this);
 #endif
@@ -213,7 +337,7 @@ void EnvironmentProbe::OnDisable()
 #if USE_EDITOR
     GetSceneRendering()->RemoveViewportIcon(this);
 #endif
-    GetSceneRendering()->RemoveCommon(this, _sceneRenderingKey);
+    GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
 
     // Base
     Actor::OnDisable();
@@ -226,7 +350,7 @@ void EnvironmentProbe::OnTransformChanged()
 
     UpdateBounds();
 
-    if (AutoUpdate && IsDuringPlay())
+    if (IsActiveInHierarchy() && IsDuringPlay() && UpdateMode == ProbeUpdateMode::WhenMoved)
     {
         Bake(1.0f);
     }

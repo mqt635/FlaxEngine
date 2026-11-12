@@ -1,21 +1,24 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Navigation.h"
 #include "NavigationSettings.h"
 #include "NavMeshRuntime.h"
 #include "NavMeshBuilder.h"
+#include "NavMesh.h"
 #include "Engine/Core/Config/GameSettings.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Content/JsonAsset.h"
 #include "Engine/Threading/Threading.h"
 #if USE_EDITOR
+#include "Editor/Editor.h"
+#include "Editor/Managed/ManagedEditor.h"
 #include "Engine/Level/Level.h"
 #include "Engine/Level/Scene/Scene.h"
 #endif
-#include "NavMesh.h"
-
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Engine/EngineService.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Serialization/Serialization.h"
 #include <ThirdParty/recastnavigation/DetourNavMesh.h>
 #include <ThirdParty/recastnavigation/RecastAlloc.h>
@@ -23,6 +26,11 @@
 namespace
 {
     Array<NavMeshRuntime*, InlinedAllocation<16>> NavMeshes;
+}
+
+NavMeshRuntime* NavMeshRuntime::Get()
+{
+    return NavMeshes.Count() != 0 ? NavMeshes[0] : nullptr;
 }
 
 NavMeshRuntime* NavMeshRuntime::Get(const StringView& navMeshName)
@@ -86,6 +94,7 @@ NavMeshRuntime* NavMeshRuntime::Get(const NavMeshProperties& navMeshProperties, 
     if (!result && createIfMissing)
     {
         // Create a new navmesh
+        PROFILE_MEM(Navigation);
         result = New<NavMeshRuntime>(navMeshProperties);
         NavMeshes.Add(result);
     }
@@ -100,7 +109,7 @@ Color NavMeshRuntime::NavAreasColors[64];
 
 bool NavAgentProperties::operator==(const NavAgentProperties& other) const
 {
-    return Math::NearEqual(Radius, other.Radius) && Math::NearEqual(Height, other.Height) && Math::NearEqual(StepHeight, other.StepHeight) && Math::NearEqual(MaxSlopeAngle, other.MaxSlopeAngle);
+    return Radius == other.Radius && Height == other.Height && StepHeight == other.StepHeight && MaxSlopeAngle == other.MaxSlopeAngle && MaxSpeed == other.MaxSpeed && CrowdSeparationWeight == other.CrowdSeparationWeight;
 }
 
 bool NavAgentMask::IsAgentSupported(int32 agentIndex) const
@@ -141,24 +150,20 @@ bool NavAgentMask::operator==(const NavAgentMask& other) const
 
 bool NavAreaProperties::operator==(const NavAreaProperties& other) const
 {
-    return Name == other.Name && Id == other.Id && Math::NearEqual(Cost, other.Cost);
+    return Name == other.Name && Id == other.Id && Cost == other.Cost;
 }
 
 bool NavMeshProperties::operator==(const NavMeshProperties& other) const
 {
-    return Name == other.Name && Quaternion::NearEqual(Rotation, other.Rotation, 0.001f) && Agent == other.Agent && Vector3::NearEqual(DefaultQueryExtent, other.DefaultQueryExtent);
+    return Name == other.Name && Rotation == other.Rotation && Agent == other.Agent && DefaultQueryExtent == other.DefaultQueryExtent;
 }
 
 class NavigationService : public EngineService
 {
 public:
-
     NavigationService()
         : EngineService(TEXT("Navigation"), 60)
     {
-#if COMPILE_WITH_NAV_MESH_BUILDER
-        NavMeshBuilder::Init();
-#endif
     }
 
     bool Init() override;
@@ -172,16 +177,20 @@ NavigationService NavigationServiceInstance;
 
 void* dtAllocDefault(size_t size, dtAllocHint)
 {
+    PROFILE_MEM(NavigationMesh);
     return Allocator::Allocate(size);
 }
 
 void* rcAllocDefault(size_t size, rcAllocHint)
 {
+    PROFILE_MEM(Navigation);
     return Allocator::Allocate(size);
 }
 
 NavigationSettings::NavigationSettings()
 {
+    PROFILE_MEM(Navigation);
+
     // Init navmeshes
     NavMeshes.Resize(1);
     auto& navMesh = NavMeshes[0];
@@ -201,7 +210,7 @@ NavigationSettings::NavigationSettings()
     areaWalkable.Cost = 1;
 }
 
-IMPLEMENT_SETTINGS_GETTER(NavigationSettings, Navigation);
+IMPLEMENT_ENGINE_SETTINGS_GETTER(NavigationSettings, Navigation);
 
 void NavigationSettings::Apply()
 {
@@ -211,12 +220,45 @@ void NavigationSettings::Apply()
         if (area.Id < DT_MAX_AREAS)
         {
             NavMeshRuntime::NavAreasCosts[area.Id] = area.Cost;
-#if USE_EDITOR
+#if COMPILE_WITH_DEBUG_DRAW
             NavMeshRuntime::NavAreasColors[area.Id] = area.Color;
 #endif
         }
     }
+
+#if USE_EDITOR
+    if (!Editor::IsPlayMode && Editor::Managed && Editor::Managed->CanAutoBuildNavMesh())
+    {
+        // Rebuild all navmeshs after apply changes on navigation
+        for (auto scene : Level::Scenes)
+        {
+            Navigation::BuildNavMesh(scene);
+        }
+    }
+#endif
 }
+
+#if USE_EDITOR
+
+void NavigationSettings::Serialize(SerializeStream& stream, const void* otherObj)
+{
+    SERIALIZE_GET_OTHER_OBJ(NavigationSettings);
+    SERIALIZE(AutoAddMissingNavMeshes);
+    SERIALIZE(AutoRemoveMissingNavMeshes);
+    SERIALIZE(CellHeight);
+    SERIALIZE(CellSize);
+    SERIALIZE(TileSize);
+    SERIALIZE(MinRegionArea);
+    SERIALIZE(MergeRegionArea);
+    SERIALIZE(MaxEdgeLen);
+    SERIALIZE(MaxEdgeError);
+    SERIALIZE(DetailSamplingDist);
+    SERIALIZE(MaxDetailSamplingError);
+    SERIALIZE(NavMeshes);
+    SERIALIZE(NavAreas);
+}
+
+#endif
 
 void NavigationSettings::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
 {
@@ -238,6 +280,7 @@ void NavigationSettings::Deserialize(DeserializeStream& stream, ISerializeModifi
     else
     {
         // [Deprecated on 12.01.2021, expires on 12.01.2022]
+        MARK_CONTENT_DEPRECATED();
         float WalkableRadius = 34.0f;
         float WalkableHeight = 144.0f;
         float WalkableMaxClimb = 35.0f;
@@ -259,6 +302,11 @@ void NavigationSettings::Deserialize(DeserializeStream& stream, ISerializeModifi
 
 bool NavigationService::Init()
 {
+    PROFILE_MEM(Navigation);
+#if COMPILE_WITH_NAV_MESH_BUILDER
+    NavMeshBuilder::Init();
+#endif
+
     // Link memory allocation calls to use engine default allocator
     dtAllocSetCustom(dtAllocDefault, Allocator::Free);
     rcAllocSetCustom(rcAllocDefault, Allocator::Free);
@@ -308,11 +356,11 @@ bool Navigation::TestPath(const Vector3& startPosition, const Vector3& endPositi
     return NavMeshes.First()->TestPath(startPosition, endPosition);
 }
 
-bool Navigation::ProjectPoint(const Vector3& point, Vector3& result)
+bool Navigation::FindClosestPoint(const Vector3& point, Vector3& result)
 {
     if (NavMeshes.IsEmpty())
         return false;
-    return NavMeshes.First()->ProjectPoint(point, result);
+    return NavMeshes.First()->FindClosestPoint(point, result);
 }
 
 bool Navigation::FindRandomPoint(Vector3& result)
@@ -335,30 +383,6 @@ bool Navigation::RayCast(const Vector3& startPosition, const Vector3& endPositio
         return false;
     return NavMeshes.First()->RayCast(startPosition, endPosition, hitInfo);
 }
-
-#if COMPILE_WITH_NAV_MESH_BUILDER
-
-bool Navigation::IsBuildingNavMesh()
-{
-    return NavMeshBuilder::IsBuildingNavMesh();
-}
-
-float Navigation::GetNavMeshBuildingProgress()
-{
-    return NavMeshBuilder::GetNavMeshBuildingProgress();
-}
-
-void Navigation::BuildNavMesh(Scene* scene, float timeoutMs)
-{
-    NavMeshBuilder::Build(scene, timeoutMs);
-}
-
-void Navigation::BuildNavMesh(Scene* scene, const BoundingBox& dirtyBounds, float timeoutMs)
-{
-    NavMeshBuilder::Build(scene, dirtyBounds, timeoutMs);
-}
-
-#endif
 
 #if COMPILE_WITH_DEBUG_DRAW
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Scripting;
@@ -53,6 +53,16 @@ namespace FlaxEditor.Surface
         Enum = 16,
 
         /// <summary>
+        /// Allow any array types connections.
+        /// </summary>
+        Array = 32,
+
+        /// <summary>
+        /// Allow any dictionary types connections.
+        /// </summary>
+        Dictionary = 64,
+
+        /// <summary>
         /// Allow any scalar or vector numeric value types connections (bool, int, float, vector2, color..).
         /// </summary>
         Numeric = Scalar | Vector,
@@ -60,7 +70,7 @@ namespace FlaxEditor.Surface
         /// <summary>
         /// All flags.
         /// </summary>
-        All = Scalar | Vector | Enum | Anything | Value,
+        All = Scalar | Vector | Enum | Anything | Value | Array | Dictionary,
     }
 
     /// <summary>
@@ -80,6 +90,16 @@ namespace FlaxEditor.Surface
         public delegate SurfaceNode CreateCustomNodeFunc(uint id, VisjectSurfaceContext context, NodeArchetype nodeArch, GroupArchetype groupArch);
 
         /// <summary>
+        /// Checks if the given type is compatible with the given node archetype. Used for custom nodes.
+        /// </summary>
+        public delegate bool IsCompatible(NodeArchetype nodeArch, ScriptType portType, ConnectionsHint hint, VisjectSurfaceContext context);
+
+        /// <summary>
+        /// Gets description of inputs and outputs of the archetype. Used for special cases for the description panel.
+        /// </summary>
+        public delegate void GetElementsDescriptionFunc(NodeArchetype nodeArch, out (string Name, ScriptType Type)[] inputs, out (string Name, ScriptType Type)[] outputs);
+
+        /// <summary>
         /// Unique node type ID within a single group.
         /// </summary>
         public ushort TypeID;
@@ -90,9 +110,19 @@ namespace FlaxEditor.Surface
         public CreateCustomNodeFunc Create;
 
         /// <summary>
+        /// Function for asynchronously loaded nodes to check if input ports are compatible, for filtering.
+        /// </summary>
+        public IsCompatible IsInputCompatible;
+
+        /// <summary>
+        /// Function for asynchronously loaded nodes to check if output ports are compatible, for filtering.
+        /// </summary>
+        public IsCompatible IsOutputCompatible;
+
+        /// <summary>
         /// Default initial size of the node.
         /// </summary>
-        public Vector2 Size;
+        public Float2 Size;
 
         /// <summary>
         /// Custom set of flags.
@@ -110,9 +140,19 @@ namespace FlaxEditor.Surface
         public string SubTitle;
 
         /// <summary>
+        /// Node signature for tooltip and description purposes
+        /// </summary>
+        public string Signature;
+
+        /// <summary>
         /// Short node description.
         /// </summary>
         public string Description;
+
+        /// <summary>
+        /// Custom function to get descriptions of input and output elements. Used for description panel (optional).
+        /// </summary>
+        public GetElementsDescriptionFunc GetInputOutputDescription;
 
         /// <summary>
         /// Alternative node titles.
@@ -123,6 +163,11 @@ namespace FlaxEditor.Surface
         /// The custom tag.
         /// </summary>
         public object Tag;
+
+        /// <summary>
+        /// Custom score value to use when sorting node archetypes in Editor. If positive (eg. 1, 2) can be used to add more importance for a specific node type.
+        /// </summary>
+        public float SortScore;
 
         /// <summary>
         /// Default node values. This array supports types: bool, int, float, Vector2, Vector3, Vector4, Color, Rectangle, Guid, string, Matrix and byte[].
@@ -153,6 +198,11 @@ namespace FlaxEditor.Surface
         public int[] DependentBoxes;
 
         /// <summary>
+        /// Custom function to convert type for dependant box (optional).
+        /// </summary>
+        public Func<Elements.Box, ScriptType, ScriptType> DependentBoxFilter;
+
+        /// <summary>
         /// Array with default elements descriptions.
         /// </summary>
         public NodeElementArchetype[] Elements;
@@ -169,17 +219,24 @@ namespace FlaxEditor.Surface
             {
                 TypeID = TypeID,
                 Create = Create,
+                IsInputCompatible = IsInputCompatible,
+                IsOutputCompatible = IsOutputCompatible,
                 Size = Size,
                 Flags = Flags,
                 Title = Title,
-                Description = Title,
+                SubTitle = SubTitle,
+                Signature = Signature,
+                Description = Description,
+                GetInputOutputDescription = GetInputOutputDescription,
                 AlternativeTitles = (string[])AlternativeTitles?.Clone(),
                 Tag = Tag,
+                SortScore = SortScore,
                 DefaultValues = (object[])DefaultValues?.Clone(),
                 DefaultType = DefaultType,
                 ConnectionsHints = ConnectionsHints,
                 IndependentBoxes = (int[])IndependentBoxes?.Clone(),
                 DependentBoxes = (int[])DependentBoxes?.Clone(),
+                DependentBoxFilter = DependentBoxFilter,
                 Elements = (NodeElementArchetype[])Elements?.Clone(),
                 TryParseText = TryParseText,
             };

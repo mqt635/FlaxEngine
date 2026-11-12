@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.IO;
@@ -98,21 +98,6 @@ namespace FlaxEditor.GUI.Timeline.Tracks
             {
                 stream.Write(0);
                 stream.Write(track.Timeline.DurationFrames);
-            }
-        }
-
-        /// <summary>
-        /// Gets or sets the nested animation looping mode.
-        /// </summary>
-        public bool TrackLoop
-        {
-            get => Loop;
-            set
-            {
-                if (Loop == value)
-                    return;
-                Loop = value;
-                Timeline?.MarkAsEdited();
             }
         }
 

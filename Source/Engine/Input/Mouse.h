@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,9 +12,8 @@
 /// </remarks>
 API_CLASS(NoSpawn) class FLAXENGINE_API Mouse : public InputDevice
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Mouse);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Mouse);
 public:
-
     /// <summary>
     /// The mouse state.
     /// </summary>
@@ -23,7 +22,7 @@ public:
         /// <summary>
         /// The mouse position.
         /// </summary>
-        Vector2 MousePosition;
+        Float2 MousePosition;
 
         /// <summary>
         /// The mouse wheel delta.
@@ -45,33 +44,36 @@ public:
     };
 
 protected:
-
     State _state;
     State _prevState;
+    bool _relativeMode;
 
     explicit Mouse()
         : InputDevice(SpawnParams(Guid::New(), TypeInitializer), TEXT("Mouse"))
     {
         _state.Clear();
         _prevState.Clear();
+        _relativeMode = false;
     }
 
 public:
-
     /// <summary>
     /// Gets the position of the mouse in the screen-space coordinates.
     /// </summary>
-    /// <returns>The mouse position</returns>
-    API_PROPERTY() FORCE_INLINE Vector2 GetPosition() const
+    API_PROPERTY() FORCE_INLINE Float2 GetPosition() const
     {
         return _state.MousePosition;
     }
 
     /// <summary>
+    /// Checks if any mouse button is currently pressed.
+    /// </summary>
+    API_PROPERTY() bool IsAnyButtonDown() const;
+
+    /// <summary>
     /// Gets the delta position of the mouse in the screen-space coordinates.
     /// </summary>
-    /// <returns>The mouse position delta</returns>
-    API_PROPERTY() FORCE_INLINE Vector2 GetPositionDelta() const
+    API_PROPERTY() FORCE_INLINE Float2 GetPositionDelta() const
     {
         return _state.MousePosition - _prevState.MousePosition;
     }
@@ -79,7 +81,6 @@ public:
     /// <summary>
     /// Gets the mouse wheel change during the last frame.
     /// </summary>
-    /// <returns>Mouse wheel value delta</returns>
     API_PROPERTY() FORCE_INLINE float GetScrollDelta() const
     {
         return _state.MouseWheelDelta;
@@ -115,19 +116,39 @@ public:
         return !_state.MouseButtons[static_cast<int32>(button)] && _prevState.MouseButtons[static_cast<int32>(button)];
     }
 
-public:
+    /// <summary>
+    /// Gets the current state of mouse relative mode.
+    /// </summary>
+    /// <param name="window">The window to check against, or null to check for any window.</param>
+    /// <returns>True if mouse is in relative mode, otherwise false.</returns>
+    API_FUNCTION() virtual bool IsRelative(Window* window = nullptr) const
+    {
+        return _relativeMode;
+    }
 
+public:
     /// <summary>
     /// Sets the mouse position.
     /// </summary>
     /// <param name="newPosition">The new position.</param>
-    virtual void SetMousePosition(const Vector2& newPosition) = 0;
+    virtual void SetMousePosition(const Float2& newPosition) = 0;
+
+    /// <summary>
+    /// Sets the mouse relative mode state. While enabled, the mouse movement tracking becomes more accurate.
+    /// The cursor will be hidden while in relative mode.
+    /// </summary>
+    /// <param name="relativeMode">The new relative mode state.</param>
+    /// <param name="window">The window.</param>
+    virtual void SetRelativeMode(bool relativeMode, Window* window)
+    {
+        _relativeMode = relativeMode;
+    }
 
     /// <summary>
     /// Called when mouse cursor gets moved by the application. Invalidates the previous cached mouse position to prevent mouse jitter when locking the cursor programmatically.
     /// </summary>
     /// <param name="newPosition">The new mouse position.</param>
-    void OnMouseMoved(const Vector2& newPosition);
+    void OnMouseMoved(const Float2& newPosition);
 
     /// <summary>
     /// Called when mouse button goes down.
@@ -135,7 +156,7 @@ public:
     /// <param name="position">The mouse position.</param>
     /// <param name="button">The button.</param>
     /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
-    void OnMouseDown(const Vector2& position, const MouseButton button, Window* target = nullptr);
+    void OnMouseDown(const Float2& position, const MouseButton button, Window* target = nullptr);
 
     /// <summary>
     /// Called when mouse button goes up.
@@ -143,7 +164,7 @@ public:
     /// <param name="position">The mouse position.</param>
     /// <param name="button">The button.</param>
     /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
-    void OnMouseUp(const Vector2& position, const MouseButton button, Window* target = nullptr);
+    void OnMouseUp(const Float2& position, const MouseButton button, Window* target = nullptr);
 
     /// <summary>
     /// Called when mouse double clicks.
@@ -151,14 +172,21 @@ public:
     /// <param name="position">The mouse position.</param>
     /// <param name="button">The button.</param>
     /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
-    void OnMouseDoubleClick(const Vector2& position, const MouseButton button, Window* target = nullptr);
+    void OnMouseDoubleClick(const Float2& position, const MouseButton button, Window* target = nullptr);
 
     /// <summary>
     /// Called when mouse moves.
     /// </summary>
     /// <param name="position">The mouse position.</param>
     /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
-    void OnMouseMove(const Vector2& position, Window* target = nullptr);
+    void OnMouseMove(const Float2& position, Window* target = nullptr);
+
+    /// <summary>
+    /// Called when mouse moves in relative mode.
+    /// </summary>
+    /// <param name="positionRelative">The mouse position change.</param>
+    /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
+    void OnMouseMoveRelative(const Float2& positionRelative, Window* target = nullptr);
 
     /// <summary>
     /// Called when mouse leaves the input source area.
@@ -172,10 +200,9 @@ public:
     /// <param name="position">The mouse position.</param>
     /// <param name="delta">The normalized delta (range [-1;1]).</param>
     /// <param name="target">The target window to receive this event, otherwise input system will pick the window automatically.</param>
-    void OnMouseWheel(const Vector2& position, float delta, Window* target = nullptr);
+    void OnMouseWheel(const Float2& position, float delta, Window* target = nullptr);
 
 public:
-
     // [InputDevice]
     void ResetState() override;
     bool Update(EventQueue& queue) final override;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Threading.Tasks;
@@ -37,6 +37,7 @@ namespace FlaxEditor.Viewport.Previews
 
         private readonly object _locker = new object();
         private AudioClip _asset;
+        private int _pcmSequence = 0;
         private float[] _pcmData;
         private AudioDataInfo _pcmInfo;
 
@@ -80,6 +81,20 @@ namespace FlaxEditor.Viewport.Previews
         }
 
         /// <summary>
+        /// Gets the cached audio data info.
+        /// </summary>
+        public AudioDataInfo DataInfo
+        {
+            get
+            {
+                lock (_locker)
+                {
+                    return _pcmInfo;
+                }
+            }
+        }
+
+        /// <summary>
         /// The draw mode.
         /// </summary>
         public DrawModes DrawMode = DrawModes.Fill;
@@ -103,6 +118,28 @@ namespace FlaxEditor.Viewport.Previews
         /// The audio units per second (on time axis).
         /// </summary>
         public static readonly float UnitsPerSecond = 100.0f;
+
+        /// <summary>
+        /// Invalidates the cached audio PCM data and fetches it again from the asset.
+        /// </summary>
+        public void RefreshPreview()
+        {
+            lock (_locker)
+            {
+                if (_asset != null)
+                {
+                    // Release any cached data
+                    _pcmData = null;
+
+                    // Invalidate any in-flight data download to reject cached data due to refresh
+                    if (_pcmSequence != 0)
+                        _pcmSequence++;
+
+                    // Use async task to gather PCM data (engine loads it from the asset)
+                    Task.Run(DownloadData);
+                }
+            }
+        }
 
         /// <inheritdoc />
         public override void Draw()
@@ -134,7 +171,7 @@ namespace FlaxEditor.Viewport.Previews
                 case DrawModes.Fill:
                     clipsInView = 1.0f;
                     clipWidth = width;
-                    samplesPerIndex = (uint)(samplesPerChannel / width);
+                    samplesPerIndex = (uint)(samplesPerChannel / width) * info.NumChannels;
                     break;
                 case DrawModes.Single:
                     clipsInView = Mathf.Min(clipsInView, 1.0f);
@@ -147,6 +184,7 @@ namespace FlaxEditor.Viewport.Previews
                     break;
                 default: throw new ArgumentOutOfRangeException();
                 }
+                samplesPerIndex = Math.Max(samplesPerIndex, info.NumChannels);
                 const uint maxSamplesPerIndex = 64;
                 uint samplesPerIndexDiff = Math.Max(1, samplesPerIndex / Math.Min(samplesPerIndex, maxSamplesPerIndex));
 
@@ -194,7 +232,7 @@ namespace FlaxEditor.Viewport.Previews
                                 float sampleValueAvgScaled = sampleValueAvg * sampleValueScale;
                                 if (sampleValueAvgScaled > 0.1f)
                                 {
-                                    Render2D.DrawLine(new Vector2(pixelX, yCenter - sampleValueAvgScaled), new Vector2(pixelX, yCenter + sampleValueAvgScaled), color);
+                                    Render2D.DrawLine(new Float2(pixelX, yCenter - sampleValueAvgScaled), new Float2(pixelX, yCenter + sampleValueAvgScaled), color);
                                 }
                             }
                         }
@@ -220,7 +258,13 @@ namespace FlaxEditor.Viewport.Previews
         /// </summary>
         private void DownloadData()
         {
-            var asset = _asset;
+            AudioClip asset;
+            int sequence;
+            lock (_locker)
+            {
+                asset = _asset;
+                sequence = _pcmSequence;
+            }
             if (!asset)
                 return;
 
@@ -245,8 +289,9 @@ namespace FlaxEditor.Viewport.Previews
             lock (_locker)
             {
                 // If asset has been modified during data fetching, ignore it
-                if (_asset == asset)
+                if (_asset == asset && _pcmSequence == sequence)
                 {
+                    _pcmSequence++;
                     _pcmData = data;
                     _pcmInfo = dataInfo;
                 }

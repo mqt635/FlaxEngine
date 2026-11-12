@@ -1,6 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
 using FlaxEngine;
+using FlaxEngine.GUI;
 using Object = FlaxEngine.Object;
 
 namespace FlaxEditor.Viewport.Previews
@@ -11,14 +13,11 @@ namespace FlaxEditor.Viewport.Previews
     /// <seealso cref="AssetPreview" />
     public class PrefabPreview : AssetPreview
     {
-        /// <summary>
-        /// The preview that is during prefab instance spawning. Used to link some actors such as UIControl to preview scene and view.
-        /// </summary>
-        internal static PrefabPreview LoadingPreview;
-
         private Prefab _prefab;
         private Actor _instance;
-        internal UIControl customControlLinked;
+        private UIControl _uiControlLinked;
+        internal bool _hasUILinked;
+        internal ContainerControl _uiParentLink;
 
         /// <summary>
         /// Gets or sets the prefab asset to preview.
@@ -47,14 +46,11 @@ namespace FlaxEditor.Viewport.Previews
                     _prefab.WaitForLoaded();
 
                     // Spawn prefab
-                    var prevPreview = LoadingPreview;
-                    LoadingPreview = this;
                     var instance = PrefabManager.SpawnPrefab(_prefab, null);
-                    LoadingPreview = prevPreview;
                     if (instance == null)
                     {
                         _prefab = null;
-                        throw new FlaxException("Failed to spawn a prefab for the preview.");
+                        throw new Exception("Failed to spawn a prefab for the preview.");
                     }
 
                     // Set instance
@@ -77,11 +73,18 @@ namespace FlaxEditor.Viewport.Previews
                 if (_instance)
                 {
                     // Unlink UI control
-                    if (customControlLinked)
+                    if (_uiControlLinked)
                     {
-                        if (customControlLinked.Control?.Parent == this)
-                            customControlLinked.Control.Parent = null;
-                        customControlLinked = null;
+                        if (_uiControlLinked.Control?.Parent == _uiParentLink)
+                            _uiControlLinked.Control.Parent = null;
+                        _uiControlLinked = null;
+                    }
+                    foreach (var child in _uiParentLink.Children.ToArray())
+                    {
+                        if (child is CanvasRootControl canvasRoot)
+                        {
+                            canvasRoot.Canvas.EditorOverride(null, null);
+                        }
                     }
 
                     // Remove for the preview
@@ -89,27 +92,63 @@ namespace FlaxEditor.Viewport.Previews
                 }
 
                 _instance = value;
+                _hasUILinked = false;
 
                 if (_instance)
                 {
                     // Add to the preview
                     Task.AddCustomActor(_instance);
-
-                    // Link UI canvases to the preview
-                    LinkCanvas(_instance);
+                    UpdateLinkage();
                 }
+            }
+        }
+
+        private void UpdateLinkage()
+        {
+            // Clear flag
+            _hasUILinked = false;
+
+            // Link UI canvases to the preview (eg. after canvas added to the prefab)
+            LinkCanvas(_instance);
+
+            // Link UI control to the preview
+            var uiControl = _instance as UIControl;
+            if (_uiControlLinked == null &&
+                uiControl != null &&
+                uiControl.Control != null &&
+                uiControl.Control.Parent == null)
+            {
+                uiControl.Control.Parent = _uiParentLink;
+                _uiControlLinked = uiControl;
+                _hasUILinked = true;
+            }
+            else if (_uiControlLinked != null)
+            {
+                if (_uiControlLinked.Control != null && 
+                    _uiControlLinked.Control.Parent == null)
+                    _uiControlLinked.Control.Parent = _uiParentLink;
+                _hasUILinked = true;
+            }
+
+            // Use UI mode when root is empty UI Control
+            if (_uiControlLinked == null && uiControl != null && uiControl.Control == null)
+            {
+                _hasUILinked = true;
             }
         }
 
         private void LinkCanvas(Actor actor)
         {
             if (actor is UICanvas uiCanvas)
-                uiCanvas.EditorOverride(Task, this);
+            {
+                uiCanvas.EditorOverride(Task, _uiParentLink);
+                if (uiCanvas.GUI.Parent == _uiParentLink)
+                    _hasUILinked = true;
+            }
+
             var children = actor.ChildrenCount;
             for (int i = 0; i < children; i++)
-            {
                 LinkCanvas(actor.GetChild(i));
-            }
         }
 
         /// <summary>
@@ -119,6 +158,8 @@ namespace FlaxEditor.Viewport.Previews
         public PrefabPreview(bool useWidgets)
         : base(useWidgets)
         {
+            // Link to itself by default
+            _uiParentLink = this;
         }
 
         /// <inheritdoc />
@@ -128,8 +169,7 @@ namespace FlaxEditor.Viewport.Previews
 
             if (_instance != null)
             {
-                // Link UI canvases to the preview (eg. after canvas added to the prefab)
-                LinkCanvas(_instance);
+                UpdateLinkage();
             }
         }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -18,6 +18,8 @@ namespace Flax.Build.Bindings
             public string Attributes;
             public bool IsRef;
             public bool IsOut;
+            public bool IsThis;
+            public bool IsParams;
 
             public bool HasDefaultValue => !string.IsNullOrEmpty(DefaultValue);
 
@@ -35,6 +37,8 @@ namespace Flax.Build.Bindings
                 // TODO: convert into flags
                 writer.Write(IsRef);
                 writer.Write(IsOut);
+                writer.Write(IsThis);
+                writer.Write(IsParams);
             }
 
             public void Read(BinaryReader reader)
@@ -46,6 +50,8 @@ namespace Flax.Build.Bindings
                 // TODO: convert into flags
                 IsRef = reader.ReadBoolean();
                 IsOut = reader.ReadBoolean();
+                IsThis = reader.ReadBoolean();
+                IsParams = reader.ReadBoolean();
             }
 
             public override string ToString()
@@ -60,6 +66,7 @@ namespace Flax.Build.Bindings
         public struct GlueInfo
         {
             public bool UseReferenceForResult;
+            public string LibraryEntryPoint;
             public List<ParameterInfo> CustomParameters;
         }
 

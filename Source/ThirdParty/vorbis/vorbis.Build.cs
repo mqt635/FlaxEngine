@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -7,7 +7,7 @@ using Flax.Build.NativeCpp;
 /// <summary>
 /// https://github.com/xiph/vorbis
 /// </summary>
-public class vorbis : DepsModule
+public class vorbis : EngineDepsModule
 {
     /// <inheritdoc />
     public override void Init()
@@ -16,9 +16,6 @@ public class vorbis : DepsModule
 
         LicenseType = LicenseTypes.Custom;
         LicenseFilePath = "COPYING";
-
-        // Merge third-party modules into engine binary
-        BinaryModuleName = "FlaxEngine";
     }
 
     /// <inheritdoc />
@@ -41,12 +38,18 @@ public class vorbis : DepsModule
         case TargetPlatform.Linux:
         case TargetPlatform.Android:
         case TargetPlatform.Switch:
+        case TargetPlatform.Mac:
+        case TargetPlatform.iOS:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libvorbis.a"));
             options.OutputFiles.Add(Path.Combine(depsRoot, "libvorbisenc.a"));
             options.OutputFiles.Add(Path.Combine(depsRoot, "libvorbisfile.a"));
             break;
         case TargetPlatform.PS4:
+        case TargetPlatform.PS5:
             options.OutputFiles.Add(Path.Combine(depsRoot, "libvorbis.a"));
+            break;
+        case TargetPlatform.Web:
+            options.OutputFiles.Add("--use-port=vorbis");
             break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }

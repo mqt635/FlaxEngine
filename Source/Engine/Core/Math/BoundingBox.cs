@@ -1,4 +1,10 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 // -----------------------------------------------------------------------------
 // Original code from SharpDX project. https://github.com/sharpdx/SharpDX/
@@ -48,7 +54,6 @@
 * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 * THE SOFTWARE.
 */
-
 using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -71,9 +76,6 @@ namespace FlaxEngine
         /// <summary>
         /// Gets or sets the size.
         /// </summary>
-        /// <value>
-        /// The size.
-        /// </value>
         [NoSerialize]
         public Vector3 Size
         {
@@ -81,17 +83,15 @@ namespace FlaxEngine
             set
             {
                 var center = Center;
-                Minimum = center - value;
-                Maximum = center + value;
+                var sizeHalf = value * 0.5f;
+                Minimum = center - sizeHalf;
+                Maximum = center + sizeHalf;
             }
         }
 
         /// <summary>
         /// Gets or sets the center point location.
         /// </summary>
-        /// <value>
-        /// The center.
-        /// </value>
         [NoSerialize]
         public Vector3 Center
         {
@@ -149,31 +149,42 @@ namespace FlaxEngine
         /// <returns>Whether the two objects intersected.</returns>
         public bool Intersects(ref Ray ray)
         {
-            return CollisionsHelper.RayIntersectsBox(ref ray, ref this, out float _);
+            return CollisionsHelper.RayIntersectsBox(ref ray, ref this, out Real _);
         }
 
         /// <summary>
         /// Determines if there is an intersection between the current object and a <see cref="Ray" />.
         /// </summary>
         /// <param name="ray">The ray to test.</param>
-        /// <param name="distance">
-        /// When the method completes, contains the distance of the intersection,
-        /// or 0 if there was no intersection.
-        /// </param>
+        /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
         /// <returns>Whether the two objects intersected.</returns>
-        public bool Intersects(ref Ray ray, out float distance)
+        public bool Intersects(ref Ray ray, out Real distance)
         {
             return CollisionsHelper.RayIntersectsBox(ref ray, ref this, out distance);
         }
 
+#if USE_LARGE_WORLDS
+        /// <summary>
+        /// Determines if there is an intersection between the current object and a <see cref="Ray" />.
+        /// [Deprecated on 26.05.2022, expires on 26.05.2024]
+        /// </summary>
+        /// <param name="ray">The ray to test.</param>
+        /// <param name="distance">When the method completes, contains the distance of the intersection, or 0 if there was no intersection.</param>
+        /// <returns>Whether the two objects intersected.</returns>
+        [Obsolete("Use Intersects with 'out Real distance' parameter instead")]
+        public bool Intersects(ref Ray ray, out float distance)
+        {
+            var result = CollisionsHelper.RayIntersectsBox(ref ray, ref this, out Real dst);
+            distance = (float)dst;
+            return result;
+        }
+#endif
+
         /// <summary>
         /// Determines if there is an intersection between the current object and a <see cref="Ray" />.
         /// </summary>
         /// <param name="ray">The ray to test.</param>
-        /// <param name="point">
-        /// When the method completes, contains the point of intersection,
-        /// or <see cref="Vector3.Zero" /> if there was no intersection.
-        /// </param>
+        /// <param name="point">When the method completes, contains the point of intersection, or <see cref="Vector3.Zero" /> if there was no intersection.</param>
         /// <returns>Whether the two objects intersected.</returns>
         public bool Intersects(ref Ray ray, out Vector3 point)
         {
@@ -328,16 +339,13 @@ namespace FlaxEngine
         {
             if (points == null)
                 throw new ArgumentNullException(nameof(points));
-
-            var min = new Vector3(float.MaxValue);
-            var max = new Vector3(float.MinValue);
-
+            var min = Vector3.Maximum;
+            var max = Vector3.Minimum;
             for (var i = 0; i < points.Length; ++i)
             {
                 Vector3.Min(ref min, ref points[i], out min);
                 Vector3.Max(ref max, ref points[i], out max);
             }
-
             result = new BoundingBox(min, max);
         }
 
@@ -349,19 +357,28 @@ namespace FlaxEngine
         /// <exception cref="ArgumentNullException">Thrown when <paramref name="points" /> is <c>null</c>.</exception>
         public static BoundingBox FromPoints(Vector3[] points)
         {
+            FromPoints(points, out var result);
+            return result;
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="BoundingBox" /> that fully contains the given points.
+        /// </summary>
+        /// <param name="points">The points that will be contained by the box.</param>
+        /// <param name="result">When the method completes, contains the newly constructed bounding box.</param>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="points" /> is <c>null</c>.</exception>
+        public static void FromPoints(Span<Float3> points, out BoundingBox result)
+        {
             if (points == null)
                 throw new ArgumentNullException(nameof(points));
-
-            var min = new Vector3(float.MaxValue);
-            var max = new Vector3(float.MinValue);
-
+            var min = Float3.Maximum;
+            var max = Float3.Minimum;
             for (var i = 0; i < points.Length; ++i)
             {
-                Vector3.Min(ref min, ref points[i], out min);
-                Vector3.Max(ref max, ref points[i], out max);
+                Float3.Min(ref min, ref points[i], out min);
+                Float3.Max(ref max, ref points[i], out max);
             }
-
-            return new BoundingBox(min, max);
+            result = new BoundingBox(min, max);
         }
 
         /// <summary>
@@ -415,6 +432,31 @@ namespace FlaxEngine
         }
 
         /// <summary>
+        /// Constructs a <see cref="BoundingBox" /> that is as large as the box and point.
+        /// </summary>
+        /// <param name="value1">The box to merge.</param>
+        /// <param name="value2">The point to merge.</param>
+        /// <param name="result">When the method completes, contains the newly constructed bounding box.</param>
+        public static void Merge(ref BoundingBox value1, ref Vector3 value2, out BoundingBox result)
+        {
+            Vector3.Min(ref value1.Minimum, ref value2, out result.Minimum);
+            Vector3.Max(ref value1.Maximum, ref value2, out result.Maximum);
+        }
+
+        /// <summary>
+        /// Constructs a <see cref="BoundingBox" /> that is as large as the box and point.
+        /// </summary>
+        /// <param name="value2">The point to merge.</param>
+        /// <returns>The newly constructed bounding box.</returns>
+        public BoundingBox Merge(Vector3 value2)
+        {
+            BoundingBox result;
+            Vector3.Min(ref Minimum, ref value2, out result.Minimum);
+            Vector3.Max(ref Maximum, ref value2, out result.Maximum);
+            return result;
+        }
+
+        /// <summary>
         /// Transforms bounding box using the given transformation matrix.
         /// </summary>
         /// <param name="box">The bounding box to transform.</param>
@@ -436,37 +478,74 @@ namespace FlaxEngine
         {
             // Reference: http://dev.theomader.com/transform-bounding-boxes/
 
-            var right = transform.Right;
+            Double3 right = transform.Right;
             var xa = right * box.Minimum.X;
             var xb = right * box.Maximum.X;
 
-            var up = transform.Up;
+            Double3 up = transform.Up;
             var ya = up * box.Minimum.Y;
             var yb = up * box.Maximum.Y;
 
-            var backward = transform.Backward;
-            var za = backward * box.Minimum.Z;
-            var zb = backward * box.Maximum.Z;
+            Double3 forward = transform.Forward;
+            var za = forward * box.Minimum.Z;
+            var zb = forward * box.Maximum.Z;
 
             var translation = transform.TranslationVector;
-            result = new BoundingBox(
-                                     Vector3.Min(xa, xb) + Vector3.Min(ya, yb) + Vector3.Min(za, zb) + translation,
-                                     Vector3.Max(xa, xb) + Vector3.Max(ya, yb) + Vector3.Max(za, zb) + translation);
+            var min = Vector3.Min(xa, xb) + Vector3.Min(ya, yb) + Vector3.Min(za, zb) + translation;
+            var max = Vector3.Max(xa, xb) + Vector3.Max(ya, yb) + Vector3.Max(za, zb) + translation;
+            result = new BoundingBox(min, max);
+        }
 
-            /*
-            // Get box corners
-            var corners = new Vector3[8];
-            box.GetCorners(corners);
+        /// <summary>
+        /// Transforms bounding box using the given transformation matrix.
+        /// </summary>
+        /// <param name="box">The bounding box to transform.</param>
+        /// <param name="transform">The transformation matrix.</param>
+        /// <returns>The result of the transformation.</returns>
+        public static BoundingBox Transform(BoundingBox box, Transform transform)
+        {
+            Transform(ref box, ref transform, out BoundingBox result);
+            return result;
+        }
 
-            // Transform them
-            for (int i = 0; i < 8; i++)
-            {
-                Vector3.Transform(ref corners[i], ref transform, out corners[i]);
-            }
+        /// <summary>
+        /// Transforms bounding box using the given transformation.
+        /// </summary>
+        /// <param name="box">The bounding box to transform.</param>
+        /// <param name="transform">The transformation.</param>
+        /// <param name="result">The result of the transformation.</param>
+        public static void Transform(ref BoundingBox box, ref Transform transform, out BoundingBox result)
+        {
+            // Reference: http://dev.theomader.com/transform-bounding-boxes/
 
-            // Construct box from the points
-            FromPoints(corners, out result);
-            */
+            Double3 right = transform.Right;
+            var xa = right * box.Minimum.X;
+            var xb = right * box.Maximum.X;
+
+            Double3 up = transform.Up;
+            var ya = up * box.Minimum.Y;
+            var yb = up * box.Maximum.Y;
+
+            Double3 forward = transform.Forward;
+            var za = forward * box.Minimum.Z;
+            var zb = forward * box.Maximum.Z;
+
+            var min = Vector3.Min(xa, xb) + Vector3.Min(ya, yb) + Vector3.Min(za, zb) + transform.Translation;
+            var max = Vector3.Max(xa, xb) + Vector3.Max(ya, yb) + Vector3.Max(za, zb) + transform.Translation;
+            result = new BoundingBox(min, max);
+        }
+
+        /// <summary>
+        /// Creates the bounding box that is offseted by the given vector. Adds the offset value to minimum and maximum points.
+        /// </summary>
+        /// <param name="offset">The bounds offset.</param>
+        /// <returns>The offsetted bounds.</returns>
+        public BoundingBox MakeOffsetted(Vector3 offset)
+        {
+            BoundingBox result;
+            Vector3.Add(ref Minimum, ref offset, out result.Minimum);
+            Vector3.Add(ref Maximum, ref offset, out result.Maximum);
+            return result;
         }
 
         /// <summary>
@@ -489,12 +568,12 @@ namespace FlaxEngine
         /// <param name="box">The box.</param>
         /// <param name="scale">The bounds scale.</param>
         /// <returns>The scaled bounds.</returns>
-        public static BoundingBox MakeScaled(ref BoundingBox box, float scale)
+        public static BoundingBox MakeScaled(ref BoundingBox box, Real scale)
         {
             Vector3.Subtract(ref box.Maximum, ref box.Minimum, out var size);
             Vector3 sizeHalf = size * 0.5f;
             Vector3 center = box.Minimum + sizeHalf;
-            sizeHalf = sizeHalf * scale;
+            sizeHalf *= scale;
             return new BoundingBox(center - sizeHalf, center + sizeHalf);
         }
 
@@ -516,10 +595,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="left">The first value to compare.</param>
         /// <param name="right">The second value to compare.</param>
-        /// <returns>
-        /// <c>true</c> if <paramref name="left" /> has the same value as <paramref name="right" />; otherwise,
-        /// <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if <paramref name="left" /> has the same value as <paramref name="right" />; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool operator ==(BoundingBox left, BoundingBox right)
         {
@@ -531,10 +607,7 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="left">The first value to compare.</param>
         /// <param name="right">The second value to compare.</param>
-        /// <returns>
-        /// <c>true</c> if <paramref name="left" /> has a different value than <paramref name="right" />; otherwise,
-        /// <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if <paramref name="left" /> has a different value than <paramref name="right" />; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool operator !=(BoundingBox left, BoundingBox right)
         {
@@ -544,48 +617,32 @@ namespace FlaxEngine
         /// <summary>
         /// Returns a <see cref="System.String" /> that represents this instance.
         /// </summary>
-        /// <returns>
-        /// A <see cref="System.String" /> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
         public override string ToString()
         {
-            return string.Format(CultureInfo.CurrentCulture,
-                                 "Minimum:{0} Maximum:{1}",
-                                 Minimum.ToString(),
-                                 Maximum.ToString());
+            return string.Format(CultureInfo.CurrentCulture, "Minimum:{0} Maximum:{1}", Minimum.ToString(), Maximum.ToString());
         }
 
         /// <summary>
         /// Returns a <see cref="System.String" /> that represents this instance.
         /// </summary>
         /// <param name="format">The format.</param>
-        /// <returns>
-        /// A <see cref="System.String" /> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
         public string ToString(string format)
         {
             if (format == null)
                 return ToString();
-
-            return string.Format(CultureInfo.CurrentCulture,
-                                 "Minimum:{0} Maximum:{1}",
-                                 Minimum.ToString(format, CultureInfo.CurrentCulture),
-                                 Maximum.ToString(format, CultureInfo.CurrentCulture));
+            return string.Format(CultureInfo.CurrentCulture, "Minimum:{0} Maximum:{1}", Minimum.ToString(format, CultureInfo.CurrentCulture), Maximum.ToString(format, CultureInfo.CurrentCulture));
         }
 
         /// <summary>
         /// Returns a <see cref="System.String" /> that represents this instance.
         /// </summary>
         /// <param name="formatProvider">The format provider.</param>
-        /// <returns>
-        /// A <see cref="System.String" /> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
         public string ToString(IFormatProvider formatProvider)
         {
-            return string.Format(formatProvider,
-                                 "Minimum:{0} Maximum:{1}",
-                                 Minimum.ToString(),
-                                 Maximum.ToString());
+            return string.Format(formatProvider, "Minimum:{0} Maximum:{1}", Minimum.ToString(), Maximum.ToString());
         }
 
         /// <summary>
@@ -593,26 +650,18 @@ namespace FlaxEngine
         /// </summary>
         /// <param name="format">The format.</param>
         /// <param name="formatProvider">The format provider.</param>
-        /// <returns>
-        /// A <see cref="System.String" /> that represents this instance.
-        /// </returns>
+        /// <returns>A <see cref="System.String" /> that represents this instance.</returns>
         public string ToString(string format, IFormatProvider formatProvider)
         {
             if (format == null)
                 return ToString(formatProvider);
-
-            return string.Format(formatProvider,
-                                 "Minimum:{0} Maximum:{1}",
-                                 Minimum.ToString(format, formatProvider),
-                                 Maximum.ToString(format, formatProvider));
+            return string.Format(formatProvider, "Minimum:{0} Maximum:{1}", Minimum.ToString(format, formatProvider), Maximum.ToString(format, formatProvider));
         }
 
         /// <summary>
         /// Returns a hash code for this instance.
         /// </summary>
-        /// <returns>
-        /// A hash code for this instance, suitable for use in hashing algorithms and data structures like a hash table.
-        /// </returns>
+        /// <returns>A hash code for this instance, suitable for use in hashing algorithms and data structures like a hash table.</returns>
         public override int GetHashCode()
         {
             unchecked
@@ -624,43 +673,33 @@ namespace FlaxEngine
         /// <summary>
         /// Determines whether the specified <see cref="Vector4" /> is equal to this instance.
         /// </summary>
-        /// <param name="value">The <see cref="Vector4" /> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Vector4" /> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <param name="other">The <see cref="Vector4" /> to compare with this instance.</param>
+        /// <returns><c>true</c> if the specified <see cref="Vector4" /> is equal to this instance; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool Equals(ref BoundingBox value)
+        public bool Equals(ref BoundingBox other)
         {
-            return (Minimum == value.Minimum) && (Maximum == value.Maximum);
+            return Minimum == other.Minimum && Maximum == other.Maximum;
         }
 
         /// <summary>
         /// Determines whether the specified <see cref="Vector4" /> is equal to this instance.
         /// </summary>
-        /// <param name="value">The <see cref="Vector4" /> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="Vector4" /> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <param name="other">The <see cref="Vector4" /> to compare with this instance.</param>
+        /// <returns><c>true</c> if the specified <see cref="Vector4" /> is equal to this instance; otherwise, <c>false</c>.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool Equals(BoundingBox value)
+        public bool Equals(BoundingBox other)
         {
-            return Equals(ref value);
+            return Equals(ref other);
         }
 
         /// <summary>
         /// Determines whether the specified <see cref="System.Object" /> is equal to this instance.
         /// </summary>
         /// <param name="value">The <see cref="System.Object" /> to compare with this instance.</param>
-        /// <returns>
-        /// <c>true</c> if the specified <see cref="System.Object" /> is equal to this instance; otherwise, <c>false</c>.
-        /// </returns>
+        /// <returns><c>true</c> if the specified <see cref="System.Object" /> is equal to this instance; otherwise, <c>false</c>.</returns>
         public override bool Equals(object value)
         {
-            if (!(value is BoundingBox))
-                return false;
-
-            var strongValue = (BoundingBox)value;
-            return Equals(ref strongValue);
+            return value is BoundingBox other && Equals(ref other);
         }
     }
 }

@@ -1,6 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+#if USE_PROFILER
 using System;
+using System.Collections.Generic;
+using FlaxEditor.GUI;
 using FlaxEditor.GUI.Tabs;
 using FlaxEngine;
 
@@ -23,6 +26,11 @@ namespace FlaxEditor.Windows.Profiler
             /// The main stats. Gathered by auto by profiler before profiler mode update.
             /// </summary>
             public ProfilingTools.MainStats Stats;
+
+            /// <summary>
+            /// The additional managed memory allocation size during this update. Given value is in bytes.
+            /// </summary>
+            public int ManagedMemoryAllocation;
 
             /// <summary>
             /// Gets the collected CPU events by the profiler from local or remote session.
@@ -83,6 +91,14 @@ namespace FlaxEditor.Windows.Profiler
         {
         }
 
+        /// <inheritdoc />
+        public override void OnDestroy()
+        {
+            Clear();
+
+            base.OnDestroy();
+        }
+
         /// <summary>
         /// Initializes this instance.
         /// </summary>
@@ -106,6 +122,13 @@ namespace FlaxEditor.Windows.Profiler
         }
 
         /// <summary>
+        /// Tick called before updating any modes display. Can be used to update per-frame statistics data.
+        /// </summary>
+        public virtual void UpdateStats()
+        {
+        }
+
+        /// <summary>
         /// Updates the mode view. Called after init and on selected frame changed.
         /// </summary>
         /// <param name="selectedFrame">The selected frame index.</param>
@@ -122,5 +145,29 @@ namespace FlaxEditor.Windows.Profiler
         {
             SelectedSampleChanged?.Invoke(frameIndex);
         }
+
+        /// <summary>
+        /// Recycles all table rows to be reused.
+        /// </summary>
+        /// <param name="table">The table.</param>
+        /// <param name="rowsCache">The output cache.</param>
+        protected static void RecycleTableRows(Table table, List<Row> rowsCache)
+        {
+            int idx = 0;
+            while (table.Children.Count > idx)
+            {
+                var child = table.Children[idx];
+                if (child is Row row)
+                {
+                    rowsCache.Add(row);
+                    child.Parent = null;
+                }
+                else
+                {
+                    idx++;
+                }
+            }
+        }
     }
 }
+#endif

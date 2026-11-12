@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,7 +11,6 @@
 class FLAXENGINE_API DebugLog
 {
 public:
-
     /// <summary>
     /// Sends the log message to the Flax console and the log file.
     /// </summary>
@@ -20,7 +19,7 @@ public:
     static void Log(LogType type, const StringView& message);
 
     /// <summary>
-    /// A variant of Debug.Log that logs a warning message to the console.
+    /// A variant of Debug.Log that logs an info message to the console.
     /// </summary>
     /// <param name="message">The text message to display.</param>
     FORCE_INLINE static void Log(const StringView& message)
@@ -50,10 +49,9 @@ public:
     /// Logs a formatted exception message to the Flax Console.
     /// </summary>
     /// <param name="exceptionObject">Runtime Exception.</param>
-    static void LogException(MonoObject* exceptionObject);
+    static void LogException(MObject* exceptionObject);
 
 public:
-
     /// <summary>
     /// Gets the managed stack trace.
     /// </summary>

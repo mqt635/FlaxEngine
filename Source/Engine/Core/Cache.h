@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,11 +15,12 @@ public:
     static void ISerializeModifierClearCallback(ISerializeModifier* obj);
 
 public:
+    typedef CollectionPoolCache<ISerializeModifier, ISerializeModifierClearCallback> ISerializeModifierCache;
 
     /// <summary>
     /// Gets the ISerializeModifier lookup cache. Safe allocation, per thread, uses caching.
     /// </summary>
-    static CollectionPoolCache<ISerializeModifier, ISerializeModifierClearCallback> ISerializeModifier;
+    static ISerializeModifierCache ISerializeModifier;
 
 public:
 

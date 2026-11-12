@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine.Assertions;
@@ -77,7 +77,7 @@ namespace FlaxEngine.GUI
         /// </summary>
         public void Hide()
         {
-            _window.Show();
+            _window.Hide();
         }
 
         /// <summary>
@@ -119,7 +119,8 @@ namespace FlaxEngine.GUI
         /// <param name="force">True if move to the front by force, otherwise false.</param>
         public void BringToFront(bool force = false)
         {
-            _window.BringToFront(force);
+            if (_window && _window.IsVisible)
+                _window.BringToFront(force);
         }
 
         /// <summary>
@@ -151,13 +152,13 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 TrackingMouseOffset => _window.TrackingMouseOffset / _window.DpiScale;
+        public override Float2 TrackingMouseOffset => _window.TrackingMouseOffset / _window.DpiScale;
 
         /// <inheritdoc />
         public override WindowRootControl RootWindow => this;
 
         /// <inheritdoc />
-        public override Vector2 MousePosition
+        public override Float2 MousePosition
         {
             get => _window.MousePosition / _window.DpiScale;
             set => _window.MousePosition = value * _window.DpiScale;
@@ -193,6 +194,18 @@ namespace FlaxEngine.GUI
 
                 _window.EndTrackingMouse();
             }
+        }
+        
+        /// <inheritdoc />
+        public override void StartTextInput()
+        {
+            _window.StartTextInput();
+        }
+
+        /// <inheritdoc />
+        public override void EndTextInput()
+        {
+            _window.EndTextInput();
         }
 
         /// <inheritdoc />
@@ -232,13 +245,13 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 PointFromScreen(Vector2 location)
+        public override Float2 PointFromScreen(Float2 location)
         {
             return _window.ScreenToClient(location) / _window.DpiScale;
         }
 
         /// <inheritdoc />
-        public override Vector2 PointToScreen(Vector2 location)
+        public override Float2 PointToScreen(Float2 location)
         {
             return _window.ClientToScreen(location * _window.DpiScale);
         }
@@ -274,7 +287,7 @@ namespace FlaxEngine.GUI
             if (_focusedControl != null)
             {
                 _focusedControl.OnGotFocus();
-                Assert.IsTrue(_focusedControl.IsFocused);
+                Assert.IsTrue(_focusedControl == null || _focusedControl.IsFocused);
             }
 
             // Update flags
@@ -284,7 +297,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (_trackingControl != null)
             {
@@ -295,7 +308,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (_trackingControl != null)
             {
@@ -306,7 +319,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
             if (_trackingControl != null)
             {
@@ -317,7 +330,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseWheel(Vector2 location, float delta)
+        public override bool OnMouseWheel(Float2 location, float delta)
         {
             if (_trackingControl != null)
             {
@@ -328,7 +341,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             if (_trackingControl != null)
             {
@@ -337,6 +350,18 @@ namespace FlaxEngine.GUI
             }
 
             base.OnMouseMove(location);
+        }
+
+        /// <inheritdoc />
+        public override void OnMouseMoveRelative(Float2 motion)
+        {
+            if (_trackingControl != null)
+            {
+                _trackingControl.OnMouseMoveRelative(motion);
+                return;
+            }
+
+            base.OnMouseMoveRelative(motion);
         }
     }
 }

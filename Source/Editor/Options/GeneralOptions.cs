@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.ComponentModel;
 using FlaxEngine;
@@ -108,9 +108,16 @@ namespace FlaxEditor.Options
         public float EditorFPS { get; set; } = 60.0f;
 
         /// <summary>
+        /// Gets or sets The FPS of the editor when the editor window is not focused. Usually set to lower then the editor FPS.
+        /// </summary>
+        [DefaultValue(15.0f), Limit(0, 666)]
+        [EditorDisplay("General", "Editor FPS When Not Focused"), EditorOrder(111), Tooltip("The FPS of the editor when the editor window is not focused. Usually set to lower then the editor FPS.")]
+        public float EditorFPSWhenNotFocused { get; set; } = 15.0f;
+
+        /// <summary>
         /// Gets or sets the sequence of actions to perform when using Build Scenes button. Can be used to configure this as button (eg. compile code or just update navmesh).
         /// </summary>
-        [EditorDisplay("General"), EditorOrder(200), Tooltip("The sequence of actions to perform when using Build Scenes button. Can be used to configure this as button (eg. compile code or just update navmesh).")]
+        [EditorDisplay("General"), EditorOrder(200), ExpandGroups, Tooltip("The sequence of actions to perform when using Build Scenes button. Can be used to configure this as button (eg. compile code or just update navmesh).")]
         public BuildAction[] BuildActions { get; set; } =
         {
             BuildAction.CSG,
@@ -137,9 +144,9 @@ namespace FlaxEditor.Options
         /// <summary>
         /// Gets or sets an order of script properties/fields in properties panel.
         /// </summary>
-        [DefaultValue(MembersOrder.Alphabetical)]
+        [DefaultValue(MembersOrder.Declaration)]
         [EditorDisplay("Scripting", "Script Members Order"), EditorOrder(503), Tooltip("Order of script properties/fields in properties panel")]
-        public MembersOrder ScriptMembersOrder { get; set; } = MembersOrder.Alphabetical;
+        public MembersOrder ScriptMembersOrder { get; set; } = MembersOrder.Declaration;
 
         /// <summary>
         /// Gets or sets a value indicating whether automatically save the Visual Script asset editors when starting the play mode in editor.
@@ -147,6 +154,20 @@ namespace FlaxEditor.Options
         [DefaultValue(true)]
         [EditorDisplay("Scripting", "Auto Save Visual Script On Play Start"), EditorOrder(505), Tooltip("Determines whether automatically save the Visual Script asset editors when starting the play mode in editor.")]
         public bool AutoSaveVisualScriptOnPlayStart { get; set; } = true;
+
+        /// <summary>
+        /// If checked, imported file path will be stored relative to the project folder within imported asset metadata. Otherwise will use absolute path.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Content"), EditorOrder(550)]
+        public bool UseAssetImportPathRelative { get; set; } = true;
+
+        /// <summary>
+        /// If checked, editor windows will try to automatically attach to the first found valid actor for preview. For example, Animation Graph window will pick the first matching instance to preview.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Content"), EditorOrder(550)]
+        public bool AutoAttachDebugPreviewActor { get; set; } = false;
 
         /// <summary>
         /// Gets or sets a value indicating whether perform automatic CSG rebuild on brush change.
@@ -191,17 +212,24 @@ namespace FlaxEditor.Options
         public int AutoSaveFrequency { get; set; } = 5;
 
         /// <summary>
+        /// Gets or sets a value indicating the time before the auto save that the popup shows (in seconds).
+        /// </summary>
+        [DefaultValue(10), Limit(-1)]
+        [EditorDisplay("Auto Save", "Auto Save Reminder Time"), EditorOrder(802), Tooltip("The time before the auto save that the reminder popup shows (in seconds). Set to -1 to not show the reminder popup.")]
+        public int AutoSaveReminderTime { get; set; } = 10;
+
+        /// <summary>
         /// Gets or sets a value indicating whether enable auto saves for scenes.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Auto Save", "Auto Save Scenes"), EditorOrder(802), Tooltip("Enables or disables auto saving opened scenes")]
+        [EditorDisplay("Auto Save", "Auto Save Scenes"), EditorOrder(803), Tooltip("Enables or disables auto saving opened scenes")]
         public bool AutoSaveScenes { get; set; } = true;
 
         /// <summary>
         /// Gets or sets a value indicating whether enable auto saves for content.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Auto Save", "Auto Save Content"), EditorOrder(803), Tooltip("Enables or disables auto saving content")]
+        [EditorDisplay("Auto Save", "Auto Save Content"), EditorOrder(804), Tooltip("Enables or disables auto saving content")]
         public bool AutoSaveContent { get; set; } = true;
 
         /// <summary>

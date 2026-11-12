@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS
 
@@ -27,7 +27,7 @@ void WindowsClipboard::SetText(const StringView& text)
     const HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeWithoutNull + sizeof(Char));
 
     Char* pMem = static_cast<Char*>(GlobalLock(hMem));
-    Platform::MemoryCopy(pMem, text.GetNonTerminatedText(), sizeWithoutNull);
+    Platform::MemoryCopy(pMem, text.GetText(), sizeWithoutNull);
     Platform::MemorySet(pMem + text.Length(), sizeof(Char), 0);
     GlobalUnlock(hMem);
 

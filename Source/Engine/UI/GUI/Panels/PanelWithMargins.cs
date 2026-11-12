@@ -1,4 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System.ComponentModel;
 
 namespace FlaxEngine.GUI
 {
@@ -26,7 +28,15 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// The control offset.
         /// </summary>
-        protected Vector2 _offset;
+        protected Float2 _offset;
+
+        /// <summary>
+        /// The child controls alignment within layout area.
+        /// </summary>
+        protected TextAlignment _alignment = TextAlignment.Near;
+
+        private bool _controlChildSize = true;
+        private bool _expandChildSize = false;
 
         /// <summary>
         /// Gets or sets the left margin.
@@ -117,12 +127,12 @@ namespace FlaxEngine.GUI
         /// Gets or sets the child controls offset (additive).
         /// </summary>
         [EditorOrder(20), Tooltip("The child controls offset (additive).")]
-        public Vector2 Offset
+        public Float2 Offset
         {
             get => _offset;
             set
             {
-                if (!Vector2.NearEqual(ref _offset, ref value))
+                if (!Float2.NearEqual(ref _offset, ref value))
                 {
                     _offset = value;
                     PerformLayout();
@@ -133,7 +143,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the value indicating whenever the panel size will be based on a children dimensions.
         /// </summary>
-        [EditorOrder(30), Tooltip("If checked, the panel size will be based on a children dimensions.")]
+        [EditorOrder(30), DefaultValue(true), Tooltip("If checked, the panel size will be based on a children dimensions.")]
         public bool AutoSize
         {
             get => _autoSize;
@@ -142,6 +152,40 @@ namespace FlaxEngine.GUI
                 if (_autoSize != value)
                 {
                     _autoSize = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the value indicating whenever the panel can resize children controls (eg. auto-fit width/height).
+        /// </summary>
+        [EditorOrder(35), DefaultValue(true), Tooltip("If checked, the panel can resize children controls (eg. auto-fit width/height).")]
+        public bool ControlChildSize
+        {
+            get => _controlChildSize;
+            set
+            {
+                if (_controlChildSize != value)
+                {
+                    _controlChildSize = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
+        /// If checked, the panel will expand all children in the relevant direction with even spacing and size (horizontally for Horizontal Panel, vertically for Vertical Panel).
+        /// </summary>
+        [EditorOrder(36), DefaultValue(false), VisibleIf(nameof(AutoSize), true)]
+        public bool ExpandChildSize
+        {
+            get => _expandChildSize;
+            set
+            {
+                if (_expandChildSize != value)
+                {
+                    _expandChildSize = value;
                     PerformLayout();
                 }
             }
@@ -165,6 +209,23 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Gets or sets the child controls alignment within layout area.
+        /// </summary>
+        [EditorOrder(50), VisibleIf(nameof(AutoSize), true)]
+        public TextAlignment Alignment
+        {
+            get => _alignment;
+            set
+            {
+                if (_alignment != value)
+                {
+                    _alignment = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="PanelWithMargins"/> class.
         /// </summary>
         protected PanelWithMargins()
@@ -179,6 +240,14 @@ namespace FlaxEngine.GUI
             base.OnChildResized(control);
 
             PerformLayout();
+        }
+
+        /// <inheritdoc />
+        public override bool ContainsPoint(ref Float2 location, bool precise = false)
+        {
+            if (precise && BackgroundColor.A <= 0.0f) // Go through transparency
+                return false;
+            return base.ContainsPoint(ref location, precise);
         }
     }
 }

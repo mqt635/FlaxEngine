@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,10 +9,9 @@
 /// <summary>
 /// Assets Importing service allows to import or create new assets
 /// </summary>
-class AssetsImportingManager
+class FLAXENGINE_API AssetsImportingManager
 {
 public:
-
     /// <summary>
     /// The asset importers.
     /// </summary>
@@ -23,8 +22,12 @@ public:
     /// </summary>
     static Array<AssetCreator> Creators;
 
-public:
+    /// <summary>
+    /// If true store asset import path relative to the current workspace, otherwise will store absolute path.
+    /// </summary>
+    static bool UseImportPathRelative;
 
+public:
     /// <summary>
     /// The create texture tag (using internal import pipeline to crate texture asset from custom image source).
     /// </summary>
@@ -111,12 +114,21 @@ public:
     static const String CreateAnimationGraphFunctionTag;
 
     /// <summary>
+    /// The create animation asset tag.
+    /// </summary>
+    static const String CreateAnimationTag;
+
+    /// <summary>
+    /// The create Behavior Tree asset tag.
+    /// </summary>
+    static const String CreateBehaviorTreeTag;
+
+    /// <summary>
     /// The create visual script asset tag.
     /// </summary>
     static const String CreateVisualScriptTag;
 
 public:
-
     /// <summary>
     /// Gets the asset importer by file extension.
     /// </summary>
@@ -132,7 +144,6 @@ public:
     static const AssetCreator* GetCreator(const String& tag);
 
 public:
-
     /// <summary>
     /// Creates new asset.
     /// </summary>
@@ -225,8 +236,10 @@ public:
         return ImportIfEdited(inputPath, outputPath, id, arg);
     }
 
-private:
+    // Converts source files path into the relative format if enabled by the project settings. Result path can be stored in asset for reimports.
+    static String GetImportPath(const String& path);
 
+private:
     static bool Create(const CreateAssetFunction& callback, const StringView& inputPath, const StringView& outputPath, Guid& assetId, void* arg);
 };
 

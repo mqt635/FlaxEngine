@@ -1,12 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Skybox.h"
 #include "Engine/Core/Math/Color.h"
 #include "Engine/Core/Types/Variant.h"
-#include "Engine/Graphics/RenderView.h"
 #include "Engine/Renderer/RenderList.h"
 #include "Engine/Serialization/Serialization.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderView.h"
+#include "Engine/Graphics/RenderContext.h"
+#include "Engine/Graphics/RenderTools.h"
 #include "Engine/Level/Scene/SceneRendering.h"
 #include "Engine/Content/Assets/Material.h"
 #include "Engine/Content/Content.h"
@@ -14,6 +15,8 @@
 Skybox::Skybox(const SpawnParams& params)
     : Actor(params)
 {
+    _drawNoCulling = 1;
+    _drawCategory = SceneRendering::PreRender;
 }
 
 void Skybox::setupProxy()
@@ -26,19 +29,20 @@ void Skybox::setupProxy()
     }
 }
 
-void Skybox::Draw(RenderContext& renderContext)
+void Skybox::Draw(RenderContextBatch& renderContextBatch)
 {
     bool isReady;
     if (CustomMaterial)
     {
-        isReady = CustomMaterial->IsLoaded() && CustomMaterial->IsSurface() && CustomMaterial->GetDrawModes() & DrawPass::GBuffer;
+        isReady = CustomMaterial->IsLoaded() && CustomMaterial->IsSurface() && EnumHasAnyFlags(CustomMaterial->GetDrawModes(), DrawPass::GBuffer);
     }
     else
     {
         setupProxy();
         isReady = _proxyMaterial && _proxyMaterial->IsReady();
     }
-    if (isReady)
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
+    if (isReady && EnumHasAnyFlags(renderContext.View.Flags, ViewFlags::Sky))
     {
         renderContext.List->Sky = this;
     }
@@ -81,22 +85,33 @@ bool Skybox::HasContentLoaded() const
     return true;
 }
 
-bool Skybox::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool Skybox::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     return false;
+}
+
+bool Skybox::IsDynamicSky() const
+{
+    return !IsStatic();
+}
+
+float Skybox::GetIndirectLightingIntensity() const
+{
+    return 1.0f;
 }
 
 void Skybox::ApplySky(GPUContext* context, RenderContext& renderContext, const Matrix& world)
 {
     // Prepare mock draw call data
     DrawCall drawCall;
-    Platform::MemoryClear(&drawCall, sizeof(DrawCall));
     drawCall.World = world;
     drawCall.ObjectPosition = drawCall.World.GetTranslation();
+    drawCall.ObjectRadius = (float)_sphere.Radius;
     drawCall.Surface.GeometrySize = _box.GetSize();
-    drawCall.WorldDeterminantSign = Math::FloatSelect(world.RotDeterminant(), 1, -1);
     drawCall.PerInstanceRandom = GetPerInstanceRandom();
     MaterialBase::BindParameters bindParams(context, renderContext, drawCall);
+    bindParams.BindViewData();
+    bindParams.BindDrawData();
 
     // Check if use custom material
     if (CustomMaterial)
@@ -114,6 +129,7 @@ void Skybox::ApplySky(GPUContext* context, RenderContext& renderContext, const M
             material->SetParameterValue(TEXT("PanoramicTexture"), PanoramicTexture.Get(), false);
             material->SetParameterValue(TEXT("Color"), Color * Math::Exp2(Exposure), false);
             material->SetParameterValue(TEXT("IsPanoramic"), PanoramicTexture != nullptr, false);
+            material->SetParameterValue(TEXT("RotationEuler"), _rotationEuler, false);
             material->Bind(bindParams);
         }
     }
@@ -121,7 +137,7 @@ void Skybox::ApplySky(GPUContext* context, RenderContext& renderContext, const M
 
 void Skybox::OnEnable()
 {
-    GetSceneRendering()->AddCommonNoCulling(this);
+    GetSceneRendering()->AddActor(this, _sceneRenderingKey);
 #if USE_EDITOR
     GetSceneRendering()->AddViewportIcon(this);
 #endif
@@ -135,7 +151,7 @@ void Skybox::OnDisable()
 #if USE_EDITOR
     GetSceneRendering()->RemoveViewportIcon(this);
 #endif
-    GetSceneRendering()->RemoveCommonNoCulling(this);
+    GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
 
     // Base
     Actor::OnDisable();
@@ -148,4 +164,5 @@ void Skybox::OnTransformChanged()
 
     _box = BoundingBox(_transform.Translation);
     _sphere = BoundingSphere(_transform.Translation, 0.0f);
+    _rotationEuler = GetOrientation().GetEuler() * DegreesToRadians;
 }

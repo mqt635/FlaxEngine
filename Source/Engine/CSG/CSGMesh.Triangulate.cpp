@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "CSGMesh.h"
 
@@ -9,7 +9,7 @@
 #include "Engine/Core/Collections/Dictionary.h"
 #include "CSGData.h"
 
-bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
+bool CSG::Mesh::Triangulate(RawData& data, Array<MeshVertex>& cacheVB) const
 {
     // Reject empty meshes
     int32 verticesCount = _vertices.Count();
@@ -19,7 +19,7 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
     // Mesh triangles data
     cacheVB.Clear();
     cacheVB.EnsureCapacity(_polygons.Count() * 3);
-    Array<RawModelVertex> surfaceCacheVB(32);
+    Array<MeshVertex> surfaceCacheVB(32);
 
     // Cache submeshes by material to lay them down
     // key- brush index, value- direcotry for surfaces (key: surface index, value: list with start vertex per triangle)
@@ -29,7 +29,7 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
     int32 firstI, secondI, thirdI;
     int32 triangleIndices[3];
     Vector2 uvs[3];
-    RawModelVertex rawVertex;
+    MeshVertex rawVertex;
     for (int32 i = 0; i < _polygons.Count(); i++)
     {
         const Polygon& polygon = _polygons[i];
@@ -87,45 +87,44 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
                 Vector3 v0 = _vertices[triangleIndices[0]];
                 Vector3 v1 = _vertices[triangleIndices[1]];
                 Vector3 v2 = _vertices[triangleIndices[2]];
-                Vector3 vd0 = v1 - v0;
-                Vector3 vd1 = v2 - v0;
-                Vector3 normal = Vector3::Normalize(vd0 ^ vd1);
+                Float3 vd0 = v1 - v0;
+                Float3 vd1 = v2 - v0;
+                Float3 normal = Float3::Normalize(vd0 ^ vd1);
 
                 // Calculate texture uvs based on vertex position
                 for (int32 q = 0; q < 3; q++)
                 {
                     Vector3 pos = _vertices[triangleIndices[q]];
                     Vector3::Transform(pos, finalTrans, uvPos);
-
-                    Vector2 texCoord = Vector2(uvPos.X - centerPos.X, uvPos.Z - centerPos.Z);
+                    Float2 texCoord = Vector2(uvPos.X - centerPos.X, uvPos.Z - centerPos.Z);
 
                     // Apply surface uvs transformation
                     uvs[q] = (texCoord * (surface.TexCoordScale * CSG_MESH_UV_SCALE)) + surface.TexCoordOffset;
                 }
 
                 // Calculate tangent (it needs uvs)
-                Vector2 uvd0 = uvs[1] - uvs[0];
-                Vector2 uvd1 = uvs[2] - uvs[0];
+                Float2 uvd0 = uvs[1] - uvs[0];
+                Float2 uvd1 = uvs[2] - uvs[0];
                 float dR = (uvd0.X * uvd1.Y - uvd1.X * uvd0.Y);
                 if (Math::IsZero(dR))
                     dR = 1.0f;
                 float r = 1.0f / dR;
-                Vector3 tangent = (vd0 * uvd1.Y - vd1 * uvd0.Y) * r;
-                Vector3 bitangent = (vd1 * uvd0.X - vd0 * uvd1.X) * r;
+                Float3 tangent = (vd0 * uvd1.Y - vd1 * uvd0.Y) * r;
+                Float3 bitangent = (vd1 * uvd0.X - vd0 * uvd1.X) * r;
                 tangent.Normalize();
 
                 // Gram-Schmidt orthogonalize
-                Vector3 newTangentUnnormalized = tangent - normal * Vector3::Dot(normal, tangent);
+                Float3 newTangentUnnormalized = tangent - normal * Float3::Dot(normal, tangent);
                 const float length = newTangentUnnormalized.Length();
 
                 // Workaround to handle degenerated case
                 if (Math::IsZero(length))
                 {
-                    tangent = Vector3::Cross(normal, Vector3::UnitX);
+                    tangent = Float3::Cross(normal, Float3::UnitX);
                     if (Math::IsZero(tangent.Length()))
-                        tangent = Vector3::Cross(normal, Vector3::UnitY);
+                        tangent = Float3::Cross(normal, Float3::UnitY);
                     tangent.Normalize();
-                    bitangent = Vector3::Cross(normal, tangent);
+                    bitangent = Float3::Cross(normal, tangent);
                 }
                 else
                 {
@@ -143,7 +142,6 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
                     rawVertex.Tangent = tangent;
                     rawVertex.Bitangent = bitangent;
                     rawVertex.LightmapUVs = Vector2::Zero;
-                    rawVertex.Color = Color::Black;
 
                     cacheVB.Add(rawVertex);
                 }
@@ -186,8 +184,8 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
             int32 brushSurfaceIndex = surfaceIndex - brushMeta.StartSurfaceIndex;
             int32 triangleCount = iPerSurface->Value.Count();
             int32 vertexCount = triangleCount * 3;
-            Vector2 lightmapUVsMin = Vector2::Maximum;
-            Vector2 lightmapUVsMax = Vector2::Minimum;
+            Float2 lightmapUVsMin = Float2::Maximum;
+            Float2 lightmapUVsMax = Float2::Minimum;
             const Surface& surface = _surfaces[surfaceIndex];
 
             // Generate lightmap uvs per brush surface
@@ -227,7 +225,7 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
                 }
 
                 // Normalize projected positions to get lightmap uvs
-                float projectedSize = (max - min).MaxValue();
+                Real projectedSize = (max - min).MaxValue();
                 for (int32 triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++)
                 {
                     int32 triangleStartVertex = iPerSurface->Value[triangleIndex];
@@ -237,8 +235,8 @@ bool CSG::Mesh::Triangulate(RawData& data, Array<RawModelVertex>& cacheVB) const
 
                         vertex.LightmapUVs = (pointsCache[triangleIndex * 3 + k] - min) / projectedSize;
 
-                        lightmapUVsMin = Vector2::Min(lightmapUVsMin, vertex.LightmapUVs);
-                        lightmapUVsMax = Vector2::Max(lightmapUVsMax, vertex.LightmapUVs);
+                        lightmapUVsMin = Float2::Min(lightmapUVsMin, vertex.LightmapUVs);
+                        lightmapUVsMax = Float2::Max(lightmapUVsMax, vertex.LightmapUVs);
                     }
                 }
             }

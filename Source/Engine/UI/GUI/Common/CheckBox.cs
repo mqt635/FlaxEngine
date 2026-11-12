@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -29,12 +29,13 @@ namespace FlaxEngine.GUI
     /// Check box control.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.Control" />
+    [ActorToolbox("UI")]
     public class CheckBox : Control
     {
         /// <summary>
-        /// The mouse is down.
+        /// True if checked is being pressed (by mouse or touch).
         /// </summary>
-        protected bool _mouseDown;
+        protected bool _isPressed;
 
         /// <summary>
         /// The current state.
@@ -97,6 +98,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the size of the box.
         /// </summary>
+        [EditorOrder(20)]
         public float BoxSize
         {
             get => _boxSize;
@@ -106,35 +108,47 @@ namespace FlaxEngine.GUI
                 CacheBox();
             }
         }
-
+        
         /// <summary>
-        /// Gets or sets the color of the checkbox icon.
+        /// Gets or sets whether to have a border.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public Color ImageColor { get; set; }
+        [EditorDisplay("Border Style"), EditorOrder(2010), Tooltip("Whether to have a border."), ExpandGroups]
+        public bool HasBorder { get; set; } = true;
+        
+        /// <summary>
+        /// Gets or sets the border thickness.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2011), Tooltip("The thickness of the border."), Limit(0)]
+        public float BorderThickness { get; set; } = 1.0f;
 
         /// <summary>
         /// Gets or sets the color of the border.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Border Style"), EditorOrder(2012)]
         public Color BorderColor { get; set; }
 
         /// <summary>
         /// Gets or sets the border color when checkbox is hovered.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
+        [EditorDisplay("Border Style"), EditorOrder(2013)]
         public Color BorderColorHighlighted { get; set; }
+
+        /// <summary>
+        /// Gets or sets the color of the checkbox icon.
+        /// </summary>
+        [EditorDisplay("Image Style"), EditorOrder(2020), ExpandGroups]
+        public Color ImageColor { get; set; }
 
         /// <summary>
         /// Gets or sets the image used to render checkbox checked state.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The image used to render checkbox checked state.")]
+        [EditorDisplay("Image Style"), EditorOrder(2021), Tooltip("The image used to render checkbox checked state.")]
         public IBrush CheckedImage { get; set; }
 
         /// <summary>
         /// Gets or sets the image used to render checkbox intermediate state.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The image used to render checkbox intermediate state.")]
+        [EditorDisplay("Image Style"), EditorOrder(2022), Tooltip("The image used to render checkbox intermediate state.")]
         public IBrush IntermediateImage { get; set; }
 
         /// <summary>
@@ -161,14 +175,15 @@ namespace FlaxEngine.GUI
         : base(x, y, size, size)
         {
             _state = isChecked ? CheckBoxState.Checked : CheckBoxState.Default;
-            _boxSize = Mathf.Min(16.0f, size);
+            _boxSize = size;
 
             var style = Style.Current;
             ImageColor = style.BorderSelected * 1.2f;
             BorderColor = style.BorderNormal;
             BorderColorHighlighted = style.BorderSelected;
-            CheckedImage = new SpriteBrush(style.CheckBoxTick);
-            IntermediateImage = new SpriteBrush(style.CheckBoxIntermediate);
+            CheckedImage = style.CheckBoxTick.IsValid ? new SpriteBrush(style.CheckBoxTick) : new SolidColorBrush(style.Foreground);
+            IntermediateImage = style.CheckBoxIntermediate.IsValid ? new SpriteBrush(style.CheckBoxIntermediate) : new SolidColorBrush(style.ForegroundGrey);
+            BackgroundColor = style.TextBoxBackground;
 
             CacheBox();
         }
@@ -186,20 +201,56 @@ namespace FlaxEngine.GUI
             _box = new Rectangle(0, (Height - _boxSize) * 0.5f, _boxSize, _boxSize);
         }
 
+        /// <summary>
+        /// Called when mouse or touch clicks the checkbox.
+        /// </summary>
+        protected virtual void OnClick()
+        {
+            Toggle();
+        }
+
+        /// <summary>
+        /// Called when checkbox starts to be pressed by the used (via mouse or touch).
+        /// </summary>
+        protected virtual void OnPressBegin()
+        {
+            _isPressed = true;
+            if (AutoFocus)
+                Focus();
+        }
+
+        /// <summary>
+        /// Called when checkbox ends to be pressed by the used (via mouse or touch).
+        /// </summary>
+        protected virtual void OnPressEnd()
+        {
+            _isPressed = false;
+        }
+
         /// <inheritdoc />
         public override void Draw()
         {
-            base.Draw();
+            //base.Draw(); // Draw background under checkbox area only
 
             bool enabled = EnabledInHierarchy;
 
+            // Background
+            var backgroundColor = BackgroundColor;
+            if (BackgroundBrush != null)
+                BackgroundBrush.Draw(_box, backgroundColor);
+            else if (backgroundColor.A > 0.0f)
+                Render2D.FillRectangle(_box, backgroundColor);
+
             // Border
-            Color borderColor = BorderColor;
-            if (!enabled)
-                borderColor *= 0.5f;
-            else if (_mouseDown || _mouseOverBox)
-                borderColor = BorderColorHighlighted;
-            Render2D.DrawRectangle(_box.MakeExpanded(-2.0f), borderColor);
+            if (HasBorder)
+            {
+                Color borderColor = BorderColor;
+                if (!enabled)
+                    borderColor *= 0.5f;
+                else if (_isPressed || _mouseOverBox || IsNavFocused)
+                    borderColor = BorderColorHighlighted;
+                Render2D.DrawRectangle(_box.MakeExpanded(-2.0f), borderColor, BorderThickness);
+            }
 
             // Icon
             if (_state != CheckBoxState.Default)
@@ -216,7 +267,15 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override bool ContainsPoint(ref Float2 location, bool precise = false)
+        {
+            if (precise) // Precise check for checkbox element
+                return _box.Contains(ref location);
+            return base.ContainsPoint(ref location, precise);
+        }
+
+        /// <inheritdoc />
+        public override void OnMouseMove(Float2 location)
         {
             base.OnMouseMove(location);
 
@@ -224,13 +283,11 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
-            if (button == MouseButton.Left)
+            if (button == MouseButton.Left && !_isPressed)
             {
-                // Set flag
-                _mouseDown = true;
-                Focus();
+                OnPressBegin();
                 return true;
             }
 
@@ -238,18 +295,35 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
-            if (button == MouseButton.Left && _mouseDown)
+            if (button == MouseButton.Left && !_isPressed)
             {
-                // Clear flag
-                _mouseDown = false;
-
-                // Check if mouse is still over the box
-                if (_mouseOverBox)
+                OnPressBegin();
+                return true;
+            }
+            
+            if (button == MouseButton.Left && _isPressed)
+            {
+                OnPressEnd();
+                if (_box.Contains(ref location))
                 {
-                    Toggle();
-                    Focus();
+                    OnClick();
+                    return true;
+                }
+            }
+            return base.OnMouseDoubleClick(location, button);
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
+        {
+            if (button == MouseButton.Left && _isPressed)
+            {
+                OnPressEnd();
+                if (_box.Contains(ref location))
+                {
+                    OnClick();
                     return true;
                 }
             }
@@ -260,11 +334,57 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void OnMouseLeave()
         {
-            base.OnMouseLeave();
-
-            // Clear flags
+            if (_isPressed)
+                OnPressEnd();
             _mouseOverBox = false;
-            _mouseDown = false;
+
+            base.OnMouseLeave();
+        }
+
+        /// <inheritdoc />
+        public override bool OnTouchDown(Float2 location, int pointerId)
+        {
+            if (!_isPressed)
+            {
+                OnPressBegin();
+                return true;
+            }
+
+            return base.OnTouchDown(location, pointerId);
+        }
+
+        /// <inheritdoc />
+        public override bool OnTouchUp(Float2 location, int pointerId)
+        {
+            if (_isPressed)
+            {
+                OnPressEnd();
+                if (_box.Contains(ref location))
+                {
+                    OnClick();
+                    return true;
+                }
+            }
+
+            return base.OnTouchUp(location, pointerId);
+        }
+
+        /// <inheritdoc />
+        public override void OnTouchLeave()
+        {
+            if (_isPressed)
+                OnPressEnd();
+
+            base.OnTouchLeave();
+        }
+
+        /// <inheritdoc />
+        public override void OnLostFocus()
+        {
+            if (_isPressed)
+                OnPressEnd();
+
+            base.OnLostFocus();
         }
 
         /// <inheritdoc />
@@ -273,6 +393,14 @@ namespace FlaxEngine.GUI
             base.OnSizeChanged();
 
             CacheBox();
+        }
+
+        /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            OnClick();
+
+            base.OnSubmit();
         }
     }
 }

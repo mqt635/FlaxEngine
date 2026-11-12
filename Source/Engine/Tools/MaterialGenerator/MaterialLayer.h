@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -50,7 +50,7 @@ public:
     /// <summary>
     /// Root node
     /// </summary>
-    MaterialGraphNode* Root;
+    MaterialGraph::Node* Root;
 
     /// <summary>
     /// Material structure variable name (different for every layer sampling with different UVs, default UVs are a first index)

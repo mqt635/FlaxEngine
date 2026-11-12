@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -13,9 +13,8 @@
 /// </summary>
 API_CLASS(NoSpawn) class FLAXENGINE_API SceneAnimation final : public BinaryAsset
 {
-DECLARE_BINARY_ASSET_HEADER(SceneAnimation, 1);
+    DECLARE_BINARY_ASSET_HEADER(SceneAnimation, 1);
 public:
-
     /// <summary>
     /// The animation timeline track data.
     /// </summary>
@@ -42,6 +41,7 @@ public:
             CameraCut = 16,
             //AnimationChannel = 17,
             //AnimationChannelData = 18,
+            //AnimationEvent = 19,
         };
 
         enum class Flags
@@ -49,6 +49,7 @@ public:
             None = 0,
             Mute = 1,
             Loop = 2,
+            PrefabObject = 4,
         };
 
         /// <summary>
@@ -288,6 +289,7 @@ public:
             /// The keyframes array (items count is KeyframesCount). Each keyframe is represented by pair of time (of type float) and the value data (of size ValueSize).
             /// </summary>
             void* Keyframes;
+            int32 KeyframesSize;
         };
     };
 
@@ -298,9 +300,12 @@ public:
             Unknown,
             Float,
             Double,
-            Vector2,
-            Vector3,
-            Vector4,
+            Float2,
+            Float3,
+            Float4,
+            Double2,
+            Double3,
+            Double4,
             Quaternion,
             Color,
             Color32,
@@ -314,6 +319,7 @@ public:
         struct Runtime : PropertyTrack::Runtime
         {
             DataTypes DataType;
+            DataTypes ValueType;
             int32 KeyframesCount;
 
             /// <summary>
@@ -406,12 +412,14 @@ public:
     };
 
 private:
-
     BytesContainer _data;
     MemoryWriteStream _runtimeData;
 
-public:
+#if USE_EDITOR
+    void SaveData(MemoryWriteStream& stream) const;
+#endif
 
+public:
     /// <summary>
     /// The frames amount per second of the timeline animation.
     /// </summary>
@@ -433,14 +441,12 @@ public:
     int32 TrackStatesCount;
 
 public:
-
     /// <summary>
     /// Gets the animation duration (in seconds).
     /// </summary>
     API_PROPERTY() float GetDuration() const;
 
 public:
-
     /// <summary>
     /// Gets the serialized timeline data.
     /// </summary>
@@ -452,24 +458,25 @@ public:
     /// <summary>
     /// Saves the serialized timeline data to the asset.
     /// </summary>
-    /// <remarks>The cannot be used by virtual assets.</remarks>
+    /// <remarks>It cannot be used by virtual assets.</remarks>
     /// <param name="data">The timeline data container.</param>
     /// <returns><c>true</c> failed to save data; otherwise, <c>false</c>.</returns>
-    API_FUNCTION() bool SaveTimeline(BytesContainer& data);
+    API_FUNCTION() bool SaveTimeline(const BytesContainer& data) const;
 
 #endif
 
 public:
-
     // [BinaryAsset]
 #if USE_EDITOR
-    void GetReferences(Array<Guid>& output) const override;
+    void GetReferences(Array<Guid>& assets, Array<String>& files) const override;
+    bool Save(const StringView& path = StringView::Empty) override;
 #endif
 
 protected:
-
     // [SceneAnimationBase]
     LoadResult load() override;
     void unload(bool isReloading) override;
     AssetChunksFlag getChunksToPreload() const override;
 };
+
+DECLARE_ENUM_OPERATORS(SceneAnimation::Track::Flags);

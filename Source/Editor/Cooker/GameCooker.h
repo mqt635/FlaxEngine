@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,17 +10,15 @@
 /// </summary>
 API_CLASS(Static, Namespace="FlaxEditor") class FLAXENGINE_API GameCooker
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(GameCooker);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GameCooker);
     friend CookingData;
 public:
-
     /// <summary>
     /// Single build step.
     /// </summary>
     class FLAXENGINE_API BuildStep
     {
     public:
-
         /// <summary>
         /// Finalizes an instance of the <see cref="BuildStep"/> class.
         /// </summary>
@@ -52,7 +50,6 @@ public:
     };
 
 public:
-
     /// <summary>
     /// Gets the current build data. Valid only during active build process.
     /// </summary>
@@ -85,13 +82,19 @@ public:
     /// <param name="customDefines">The list of custom defines passed to the build tool when compiling project scripts. Can be used in build scripts for configuration (Configuration.CustomDefines).</param>
     /// <param name="preset">The name of build preset used for cooking (can be used by editor and game plugins).</param>
     /// <param name="presetTarget">The name of build preset target used for cooking (can be used by editor and game plugins).</param>
-    API_FUNCTION() static void Build(BuildPlatform platform, BuildConfiguration configuration, const StringView& outputPath, BuildOptions options, const Array<String>& customDefines, const StringView& preset = StringView::Empty, const StringView& presetTarget = StringView::Empty);
+    /// <returns>True if failed to start the build, otherwise false.</returns>
+    API_FUNCTION() static bool Build(BuildPlatform platform, BuildConfiguration configuration, const StringView& outputPath, BuildOptions options, const Array<String>& customDefines, const StringView& preset = StringView::Empty, const StringView& presetTarget = StringView::Empty);
 
     /// <summary>
     /// Sends a cancel event to the game building service.
     /// </summary>
     /// <param name="waitForEnd">If set to <c>true</c> wait for the stopped building end.</param>
     API_FUNCTION() static void Cancel(bool waitForEnd = false);
+
+    /// <summary>
+    /// Gets the current Editor build info (platform, configuration, etc).
+    /// </summary>
+    API_FUNCTION() static void GetCurrentPlatform(API_PARAM(Out) PlatformType& platform, API_PARAM(Out) BuildPlatform& buildPlatform, API_PARAM(Out) BuildConfiguration& buildConfiguration);
 
     /// <summary>
     /// Building event type.
@@ -123,6 +126,21 @@ public:
     /// Occurs when building game progress fires.
     /// </summary>
     static Delegate<const String&, float> OnProgress;
+
+    /// <summary>
+    /// Occurs when game files and data is deployed.
+    /// </summary>
+    API_EVENT() static Action DeployFiles;
+
+    /// <summary>
+    /// Occurs when game files and data are deployed and can be post-processed.
+    /// </summary>
+    API_EVENT() static Action PostProcessFiles;
+
+    /// <summary>
+    /// Occurs when game files and data are ready to be packaged. Called only if game is about to packaged, otherwise this step is skipped.
+    /// </summary>
+    API_EVENT() static Action PackageFiles;
 
     /// <summary>
     /// Occurs when building collects assets to cook.

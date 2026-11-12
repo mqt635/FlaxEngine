@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -16,6 +16,7 @@ namespace FlaxEditor.CustomEditors.Editors
         /// <inheritdoc />
         protected override OptionType[] Options => new[]
         {
+            new OptionType("null", null),
             new OptionType("Texture", typeof(TextureBrush)),
             new OptionType("Sprite", typeof(SpriteBrush)),
             new OptionType("GPU Texture", typeof(GPUTextureBrush)),
@@ -24,6 +25,8 @@ namespace FlaxEditor.CustomEditors.Editors
             new OptionType("Linear Gradient", typeof(LinearGradientBrush)),
             new OptionType("Texture 9-Slicing", typeof(Texture9SlicingBrush)),
             new OptionType("Sprite 9-Slicing", typeof(Sprite9SlicingBrush)),
+            new OptionType("Video", typeof(VideoBrush)),
+            new OptionType("UI Brush", typeof(UIBrush)),
         };
     }
 }

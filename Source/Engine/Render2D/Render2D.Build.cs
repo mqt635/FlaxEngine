@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using Flax.Build;
 using Flax.Build.NativeCpp;
@@ -14,6 +14,7 @@ public class Render2D : EngineModule
         base.Setup(options);
 
         options.PrivateDependencies.Add("freetype");
+        options.PrivateDependencies.Add("msdfgen");
 
         options.PrivateDefinitions.Add("RENDER2D_USE_LINE_AA");
     }

@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Scripting/ScriptingObject.h"
-#include "Engine/Serialization/ISerializable.h"
+#include "Engine/Core/ISerializable.h"
 #include "Engine/Core/Collections/Array.h"
 
 class SceneTicking;
@@ -24,7 +24,6 @@ class Level;
 class SceneBeginData
 {
 public:
-
     /// <summary>
     /// The joints to create after setup.
     /// </summary>
@@ -55,16 +54,17 @@ typedef Dictionary<Guid, Actor*, HeapAllocation> ActorsLookup;
 /// <summary>
 /// Base class for objects that are parts of the scene (actors and scripts).
 /// </summary>
-API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API SceneObject : public PersistentScriptingObject, public ISerializable
+API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API SceneObject : public ScriptingObject, public ISerializable
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(SceneObject);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(SceneObject);
     friend PrefabInstanceData;
+    friend PrefabManager;
     friend Actor;
     friend Level;
     friend ScriptsFactory;
     friend SceneTicking;
 public:
-    typedef PersistentScriptingObject Base;
+    typedef ScriptingObject Base;
 
     // Scene Object lifetime flow:
     // - Create
@@ -78,7 +78,6 @@ public:
     // - Destroy
 
 protected:
-
     Actor* _parent;
     Guid _prefabID;
     Guid _prefabObjectID;
@@ -90,27 +89,23 @@ protected:
     SceneObject(const SpawnParams& params);
 
 public:
-
     /// <summary>
     /// Finalizes an instance of the <see cref="SceneObject"/> class.
     /// </summary>
     ~SceneObject();
 
 public:
-
     /// <summary>
     /// Determines whether object is during play (spawned/loaded and fully initialized).
     /// </summary>
-    /// <returns><c>true</c> if object is during play; otherwise, <c>false</c>.</returns>
-    FORCE_INLINE bool IsDuringPlay() const
+    API_PROPERTY() FORCE_INLINE bool IsDuringPlay() const
     {
-        return (Flags & ObjectFlags::IsDuringPlay) != 0;
+        return (Flags & ObjectFlags::IsDuringPlay) == ObjectFlags::IsDuringPlay;
     }
 
     /// <summary>
     /// Returns true if object has a parent assigned.
     /// </summary>
-    /// <returns>True if has parent, otherwise false.</returns>
     API_PROPERTY() FORCE_INLINE bool HasParent() const
     {
         return _parent != nullptr;
@@ -119,7 +114,6 @@ public:
     /// <summary>
     /// Gets the parent actor (or null if object has no parent).
     /// </summary>
-    /// <returns>The parent actor.</returns>
     API_PROPERTY(Attributes="HideInEditor")
     FORCE_INLINE Actor* GetParent() const
     {
@@ -162,11 +156,9 @@ public:
     API_PROPERTY() virtual void SetOrderInParent(int32 index) = 0;
 
 public:
-
     /// <summary>
     /// Gets a value indicating whether this object has a valid linkage to the prefab asset.
     /// </summary>
-    /// <returns>True if actor has valid prefab link, otherwise false.</returns>
     API_PROPERTY() FORCE_INLINE bool HasPrefabLink() const
     {
         return _prefabID.IsValid();
@@ -175,7 +167,6 @@ public:
     /// <summary>
     /// Gets the prefab asset ID. Empty if no prefab link exists.
     /// </summary>
-    /// <returns>The prefab asset ID.</returns>
     API_PROPERTY() FORCE_INLINE Guid GetPrefabID() const
     {
         return _prefabID;
@@ -184,7 +175,6 @@ public:
     /// <summary>
     /// Gets the ID of the object within a prefab that is used for synchronization with this object. Empty if no prefab link exists.
     /// </summary>
-    /// <returns>The prefab object ID.</returns>
     API_PROPERTY() FORCE_INLINE Guid GetPrefabObjectID() const
     {
         return _prefabObjectID;
@@ -211,16 +201,10 @@ public:
     API_FUNCTION() String GetNamePath(Char separatorChar = '/') const;
 
 public:
-
     /// <summary>
-    /// Called after whole scene or local group of scene objects deserialization.
+    /// Called after object loading or spawning to initialize the object (eg. call OnAwake for scripts) but before BeginPlay. Initialization should be performed only within a single SceneObject (use BeginPlay to initialize with a scene).
     /// </summary>
-    virtual void PostLoad() = 0;
-
-    /// <summary>
-    /// Called after spawning scene object to the level (similar to the PostLoad but only for spawned objects at runtime).
-    /// </summary>
-    virtual void PostSpawn() = 0;
+    virtual void Initialize() = 0;
 
     /// <summary>
     /// Called when adding object to the game.
@@ -234,7 +218,6 @@ public:
     virtual void EndPlay() = 0;
 
 public:
-
     // [ISerializable]
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;

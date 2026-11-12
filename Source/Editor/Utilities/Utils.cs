@@ -1,16 +1,28 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using FlaxEditor.GUI.ContextMenu;
+using FlaxEditor.GUI.Input;
 using FlaxEditor.GUI.Tree;
 using FlaxEditor.SceneGraph;
-using FlaxEditor.Scripting;
 using FlaxEngine;
+using FlaxEngine.Json;
 using FlaxEngine.GUI;
+using FlaxEngine.Utilities;
+using FlaxEditor.Windows;
 
 namespace FlaxEngine
 {
@@ -27,6 +39,10 @@ namespace FlaxEditor.Utilities
     /// </summary>
     public static class Utils
     {
+        private static readonly StringBuilder CachedSb = new StringBuilder(256);
+        private static readonly Regex IncNameRegex1 = new Regex("(\\d+)$");
+        private static readonly Regex IncNameRegex2 = new Regex("\\((\\d+)\\)$");
+
         private static readonly string[] MemorySizePostfixes =
         {
             "B",
@@ -43,20 +59,101 @@ namespace FlaxEditor.Utilities
         public static readonly string FlaxEngineAssemblyName = "FlaxEngine.CSharp";
 
         /// <summary>
+        /// Tries to parse number in the name brackets at the end of the value and then increment it to create a new name.
+        /// Supports numbers at the end without brackets.
+        /// </summary>
+        /// <param name="name">The input name.</param>
+        /// <param name="isValid">Custom function to validate the created name.</param>
+        /// <returns>The new name.</returns>
+        public static string IncrementNameNumber(string name, Func<string, bool> isValid)
+        {
+            // Validate input name
+            if (isValid == null || isValid(name))
+                return name;
+
+            // Temporary data
+            int index;
+            int MaxChecks = 10000;
+            string result;
+
+            // Find '<name><num>' case
+            var match = IncNameRegex1.Match(name);
+            if (match.Success && match.Groups.Count == 2)
+            {
+                // Get result
+                string num = match.Groups[0].Value;
+
+                // Parse value
+                if (int.TryParse(num, out index))
+                {
+                    // Get prefix
+                    string prefix = name.Substring(0, name.Length - num.Length);
+
+                    // Generate name
+                    do
+                    {
+                        result = string.Format("{0}{1}", prefix, ++index);
+
+                        if (MaxChecks-- < 0)
+                            return name + Guid.NewGuid();
+                    } while (!isValid(result));
+
+                    if (result.Length > 0)
+                        return result;
+                }
+            }
+
+            // Find '<name> (<num>)' case
+            match = IncNameRegex2.Match(name);
+            if (match.Success && match.Groups.Count == 2)
+            {
+                // Get result
+                string num = match.Groups[0].Value;
+                num = num.Substring(1, num.Length - 2);
+
+                // Parse value
+                if (int.TryParse(num, out index))
+                {
+                    // Get prefix
+                    string prefix = name.Substring(0, name.Length - num.Length - 2);
+
+                    // Generate name
+                    do
+                    {
+                        result = string.Format("{0}({1})", prefix, ++index);
+
+                        if (MaxChecks-- < 0)
+                            return name + Guid.NewGuid();
+                    } while (!isValid(result));
+
+                    if (result.Length > 0)
+                        return result;
+                }
+            }
+
+            // Generate name
+            index = 0;
+            do
+            {
+                result = string.Format("{0} {1}", name, index++);
+
+                if (MaxChecks-- < 0)
+                    return name + Guid.NewGuid();
+            } while (!isValid(result));
+
+            return result;
+        }
+
+        /// <summary>
         /// Formats the amount of bytes to get a human-readable data size in bytes with abbreviation. Eg. 32 kB
+        /// [Deprecated in v1.9]
         /// </summary>
         /// <param name="bytes">The bytes.</param>
         /// <returns>The formatted amount of bytes.</returns>
+        [Obsolete("Use FormatBytesCount with ulong instead")]
         public static string FormatBytesCount(int bytes)
         {
-            int order = 0;
-            while (bytes >= 1024 && order < MemorySizePostfixes.Length - 1)
-            {
-                order++;
-                bytes /= 1024;
-            }
-
-            return string.Format("{0:0.##} {1}", bytes, MemorySizePostfixes[order]);
+            return FormatBytesCount((ulong)bytes);
         }
 
         /// <summary>
@@ -67,12 +164,15 @@ namespace FlaxEditor.Utilities
         public static string FormatBytesCount(ulong bytes)
         {
             int order = 0;
+            ulong bytesPrev = bytes;
             while (bytes >= 1024 && order < MemorySizePostfixes.Length - 1)
             {
+                bytesPrev = bytes;
                 order++;
                 bytes /= 1024;
             }
-
+            if (order >= 3) // GB or higher use up to 2 decimal places for more precision
+                return string.Format("{0:0.##} {1}", FlaxEngine.Utils.RoundTo2DecimalPlaces(bytesPrev / 1024.0f), MemorySizePostfixes[order]);
             return string.Format("{0:0.##} {1}", bytes, MemorySizePostfixes[order]);
         }
 
@@ -91,6 +191,41 @@ namespace FlaxEditor.Utilities
             return str;
         }
 
+        internal static void GetActorsTree(List<Actor> list, Actor a)
+        {
+            list.Add(a);
+            int cnt = a.ChildrenCount;
+            for (int i = 0; i < cnt; i++)
+            {
+                GetActorsTree(list, a.GetChild(i));
+            }
+        }
+
+        /// <summary>
+        /// Clones the value. handles non-value types (such as arrays) that need deep value cloning.
+        /// </summary>
+        /// <param name="value">The source value to clone.</param>
+        /// <returns>The duplicated value.</returns>
+        internal static object CloneValue(object value)
+        {
+            // For object references just clone it
+            if (value is FlaxEngine.Object)
+                return value;
+
+            // For custom types use interface
+            if (value is ICloneable clonable)
+                return clonable.Clone();
+
+            // For objects (eg. arrays) we need to clone them to prevent editing default/reference value within editor
+            if (value != null && (!value.GetType().IsValueType || !value.GetType().IsClass))
+            {
+                var json = JsonSerializer.Serialize(value);
+                value = JsonSerializer.Deserialize(json, value.GetType());
+            }
+
+            return value;
+        }
+
         /// <summary>
         /// The colors for the keyframes used by the curve editor.
         /// </summary>
@@ -105,15 +240,90 @@ namespace FlaxEditor.Utilities
         /// <summary>
         /// The time/value axes tick steps for editors with timeline.
         /// </summary>
-        internal static readonly float[] CurveTickSteps =
+        internal static readonly double[] CurveTickSteps =
         {
-            0.0000001f, 0.0000005f, 0.000001f, 0.000005f, 0.00001f,
-            0.00005f, 0.0001f, 0.0005f, 0.001f, 0.005f,
-            0.01f, 0.05f, 0.1f, 0.5f, 1,
+            0.0000001, 0.0000005, 0.000001, 0.000005, 0.00001,
+            0.00005, 0.0001, 0.0005, 0.001, 0.005,
+            0.01, 0.05, 0.1, 0.5, 1,
             5, 10, 50, 100, 500,
             1000, 5000, 10000, 50000, 100000,
             500000, 1000000, 5000000, 10000000, 100000000
         };
+
+        internal delegate void DrawCurveTick(decimal tick, double step, float strength);
+
+        internal static Int2 DrawCurveTicks(DrawCurveTick drawTick, double[] tickSteps, ref float[] tickStrengths, float min, float max, float pixelRange, float minDistanceBetweenTicks = 20, float maxDistanceBetweenTicks = 60)
+        {
+            if (pixelRange <= Mathf.Epsilon || maxDistanceBetweenTicks <= minDistanceBetweenTicks)
+                return Int2.Zero;
+            if (tickStrengths == null || tickStrengths.Length != tickSteps.Length)
+                tickStrengths = new float[tickSteps.Length];
+
+            // Find the strength for each modulo number tick marker
+            var pixelsInRange = pixelRange / (max - min);
+            var smallestTick = 0;
+            var biggestTick = tickSteps.Length - 1;
+            for (int i = tickSteps.Length - 1; i >= 0; i--)
+            {
+                // Calculate how far apart these modulo tick steps are spaced
+                var tickSpacing = tickSteps[i] * pixelsInRange;
+
+                // Calculate the strength of the tick markers based on the spacing
+                tickStrengths[i] = (float)Mathd.Saturate((tickSpacing - minDistanceBetweenTicks) / (maxDistanceBetweenTicks - minDistanceBetweenTicks));
+
+                // Beyond threshold the ticks don't get any bigger or fatter
+                if (tickStrengths[i] >= 1)
+                    biggestTick = i;
+
+                // Do not show small tick markers
+                if (tickSpacing <= minDistanceBetweenTicks)
+                {
+                    smallestTick = i;
+                    break;
+                }
+            }
+            var tickLevels = biggestTick - smallestTick + 1;
+
+            // Draw all tick levels
+            for (int level = 0; level < tickLevels; level++)
+            {
+                var strength = tickStrengths[smallestTick + level];
+                if (strength <= Mathf.Epsilon)
+                    continue;
+
+                // Draw all ticks
+                int l = Mathf.Clamp(smallestTick + level, 0, tickSteps.Length - 2);
+                var lStep = tickSteps[l];
+                var lNextStep = tickSteps[l + 1];
+                var startTick = Mathd.FloorToInt(min / lStep);
+                var endTick = Mathd.CeilToInt(max / lStep);
+                for (var i = startTick; i <= endTick; i++)
+                {
+                    if (l < biggestTick && (i % Mathd.RoundToInt(lNextStep / lStep) == 0))
+                        continue;
+                    var tick = (decimal)lStep * i;
+                    drawTick(tick, lStep, strength);
+                }
+            }
+
+            return new Int2(smallestTick, biggestTick);
+        }
+
+        internal static float GetCurveGridSnap(double[] tickSteps, ref float[] tickStrengths, float min, float max, float pixelRange, float minDistanceBetweenTicks = 20, float maxDistanceBetweenTicks = 60)
+        {
+            double gridStep = 0; // No grid
+            float gridWeight = 0.0f;
+            DrawCurveTicks((decimal tick, double step, float strength) =>
+            {
+                // Find the smallest grid step that has meaningful strength (it's the most visible to the user)
+                if (strength > gridWeight && (step < gridStep || gridStep <= 0.0) && strength > 0.5f)
+                {
+                    gridStep = Math.Abs(step);
+                    gridWeight = strength;
+                }
+            }, tickSteps, ref tickStrengths, min, max, pixelRange, minDistanceBetweenTicks, maxDistanceBetweenTicks);
+            return (float)gridStep;
+        }
 
         /// <summary>
         /// Determines whether the specified path string contains any invalid character.
@@ -177,7 +387,7 @@ namespace FlaxEditor.Utilities
                 transforms[i] = nodes[i].Transform;
                 if (nodes[i] is ActorNode actorNode)
                 {
-                    bounds = BoundingBox.Merge(bounds, actorNode.Actor.BoxWithChildren);
+                    bounds = BoundingBox.Merge(bounds, actorNode.Actor.BoundingBoxWithChildren);
                 }
             }
             return transforms;
@@ -191,6 +401,35 @@ namespace FlaxEditor.Utilities
         {
             if (File.Exists(file))
                 File.Delete(file);
+        }
+
+        /// <summary>
+        /// Creates an Import path ui that show the asset import path and adds a button to show the folder in the file system.
+        /// </summary>
+        /// <param name="parentLayout">The parent layout element.</param>
+        /// <param name="assetItem">The asset item to get the import path of.</param>
+        public static void CreateImportPathUI(CustomEditors.LayoutElementsContainer parentLayout, Content.BinaryAssetItem assetItem)
+        {
+            assetItem.GetImportPath(out var path);
+            CreateImportPathUI(parentLayout, path);
+        }
+
+        /// <summary>
+        /// Creates an Import path ui that show the import path and adds a button to show the folder in the file system.
+        /// </summary>
+        /// <param name="parentLayout">The parent layout element.</param>
+        /// <param name="path">The import path.</param>
+        public static void CreateImportPathUI(CustomEditors.LayoutElementsContainer parentLayout, string path)
+        {
+            if (!string.IsNullOrEmpty(path))
+            {
+                var textBox = parentLayout.TextBox().TextBox;
+                textBox.TooltipText = "Source asset path. Can be relative or absolute to the project. Path is not editable here.";
+                textBox.IsReadOnly = true;
+                textBox.Text = path;
+                var button = parentLayout.Button(Constants.ShowInExplorer).Button;
+                button.Clicked += () => FileSystem.ShowFileExplorer(Path.GetDirectoryName(path));
+            }
         }
 
         /// <summary>
@@ -313,6 +552,26 @@ namespace FlaxEditor.Utilities
             return arr;
         }
 
+        internal static void StructureToByteArray(object value, int valueSize, IntPtr tempBuffer, byte[] dataBuffer)
+        {
+            var valueType = value.GetType();
+            if (valueType.IsEnum)
+            {
+                var ptr = FlaxEngine.Interop.NativeInterop.ValueTypeUnboxer.GetPointer(value, valueType);
+                FlaxEngine.Utils.MemoryCopy(tempBuffer, ptr, (ulong)valueSize);
+            }
+            else
+                Marshal.StructureToPtr(value, tempBuffer, true);
+            Marshal.Copy(tempBuffer, dataBuffer, 0, valueSize);
+        }
+
+        internal static object ByteArrayToStructure(IntPtr valuePtr, Type valueType, int valueSize)
+        {
+            if (valueType.IsEnum)
+                return FlaxEngine.Interop.NativeInterop.MarshalToManaged(valuePtr, valueType);
+            return Marshal.PtrToStructure(valuePtr, valueType);
+        }
+
         internal static unsafe string ReadStr(this BinaryReader stream, int check)
         {
             int length = stream.ReadInt32();
@@ -408,311 +667,6 @@ namespace FlaxEditor.Utilities
             stream.Write(value.Size.Y);
         }
 
-        internal static void ReadCommonValue(this BinaryReader stream, ref object value)
-        {
-            byte type = stream.ReadByte();
-
-            switch (type)
-            {
-            case 0: // CommonType::Bool:
-                value = stream.ReadByte() != 0;
-                break;
-            case 1: // CommonType::Integer:
-            {
-                value = stream.ReadInt32();
-            }
-                break;
-            case 2: // CommonType::Float:
-            {
-                value = stream.ReadSingle();
-            }
-                break;
-            case 3: // CommonType::Vector2:
-            {
-                value = stream.ReadVector2();
-            }
-                break;
-            case 4: // CommonType::Vector3:
-            {
-                value = stream.ReadVector3();
-            }
-                break;
-            case 5: // CommonType::Vector4:
-            {
-                value = stream.ReadVector4();
-            }
-                break;
-            case 6: // CommonType::Color:
-            {
-                value = stream.ReadColor();
-            }
-                break;
-            case 7: // CommonType::Guid:
-            {
-                value = stream.ReadGuid();
-            }
-                break;
-            case 8: // CommonType::String:
-            {
-                int length = stream.ReadInt32();
-                if (length <= 0)
-                {
-                    value = string.Empty;
-                }
-                else
-                {
-                    var data = new char[length];
-                    for (int i = 0; i < length; i++)
-                    {
-                        var c = stream.ReadUInt16();
-                        data[i] = (char)(c ^ 953);
-                    }
-                    value = new string(data);
-                }
-                break;
-            }
-            case 9: // CommonType::Box:
-            {
-                value = new BoundingBox(new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()),
-                                        new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()));
-            }
-                break;
-            case 10: // CommonType::Rotation:
-            {
-                value = stream.ReadQuaternion();
-            }
-                break;
-            case 11: // CommonType::Transform:
-            {
-                value = new Transform(new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()),
-                                      new Quaternion(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()),
-                                      new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()));
-            }
-                break;
-            case 12: // CommonType::Sphere:
-            {
-                value = new BoundingSphere(new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()),
-                                           stream.ReadSingle());
-            }
-                break;
-            case 13: // CommonType::Rect:
-            {
-                value = new Rectangle(new Vector2(stream.ReadSingle(), stream.ReadSingle()),
-                                      new Vector2(stream.ReadSingle(), stream.ReadSingle()));
-            }
-                break;
-            case 15: // CommonType::Matrix
-            {
-                value = new Matrix(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(),
-                                   stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(),
-                                   stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(),
-                                   stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle());
-                break;
-            }
-            case 16: // CommonType::Blob
-            {
-                int length = stream.ReadInt32();
-                value = stream.ReadBytes(length);
-                break;
-            }
-            case 18: // CommonType::Ray
-            {
-                value = new Ray(new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()),
-                                new Vector3(stream.ReadSingle(), stream.ReadSingle(), stream.ReadSingle()));
-                break;
-            }
-            case 19: // CommonType::Int2
-            {
-                value = stream.ReadInt2();
-                break;
-            }
-            case 20: // CommonType::Int3
-            {
-                value = stream.ReadInt3();
-                break;
-            }
-            case 21: // CommonType::Int4
-            {
-                value = stream.ReadInt4();
-                break;
-            }
-            default: throw new SystemException();
-            }
-        }
-
-        internal static void WriteCommonValue(this BinaryWriter stream, object value)
-        {
-            if (value is bool asBool)
-            {
-                stream.Write((byte)0);
-                stream.Write((byte)(asBool ? 1 : 0));
-            }
-            else if (value is int asInt)
-            {
-                stream.Write((byte)1);
-                stream.Write(asInt);
-            }
-            else if (value is long asLong)
-            {
-                stream.Write((byte)1);
-                stream.Write((int)asLong);
-            }
-            else if (value is float asFloat)
-            {
-                stream.Write((byte)2);
-                stream.Write(asFloat);
-            }
-            else if (value is double asDouble)
-            {
-                stream.Write((byte)2);
-                stream.Write((float)asDouble);
-            }
-            else if (value is Vector2 asVector2)
-            {
-                stream.Write((byte)3);
-                stream.Write(asVector2.X);
-                stream.Write(asVector2.Y);
-            }
-            else if (value is Vector3 asVector3)
-            {
-                stream.Write((byte)4);
-                stream.Write(asVector3.X);
-                stream.Write(asVector3.Y);
-                stream.Write(asVector3.Z);
-            }
-            else if (value is Vector4 asVector4)
-            {
-                stream.Write((byte)5);
-                stream.Write(asVector4.X);
-                stream.Write(asVector4.Y);
-                stream.Write(asVector4.Z);
-                stream.Write(asVector4.W);
-            }
-            else if (value is Color asColor)
-            {
-                stream.Write((byte)6);
-                stream.Write(asColor.R);
-                stream.Write(asColor.G);
-                stream.Write(asColor.B);
-                stream.Write(asColor.A);
-            }
-            else if (value is Guid asGuid)
-            {
-                stream.Write((byte)7);
-                stream.WriteGuid(ref asGuid);
-            }
-            else if (value is string asString)
-            {
-                stream.Write((byte)8);
-                stream.Write(asString.Length);
-                for (int i = 0; i < asString.Length; i++)
-                    stream.Write((ushort)(asString[i] ^ -14));
-            }
-            else if (value is BoundingBox asBox)
-            {
-                stream.Write((byte)9);
-                stream.Write(asBox.Minimum.X);
-                stream.Write(asBox.Minimum.Y);
-                stream.Write(asBox.Minimum.Z);
-                stream.Write(asBox.Maximum.X);
-                stream.Write(asBox.Maximum.Y);
-                stream.Write(asBox.Maximum.Z);
-            }
-            else if (value is Quaternion asRotation)
-            {
-                stream.Write((byte)10);
-                stream.Write(asRotation.X);
-                stream.Write(asRotation.Y);
-                stream.Write(asRotation.Z);
-                stream.Write(asRotation.X);
-            }
-            else if (value is Transform asTransform)
-            {
-                stream.Write((byte)11);
-                stream.Write(asTransform.Translation.X);
-                stream.Write(asTransform.Translation.Y);
-                stream.Write(asTransform.Translation.Z);
-                stream.Write(asTransform.Orientation.X);
-                stream.Write(asTransform.Orientation.Y);
-                stream.Write(asTransform.Orientation.Z);
-                stream.Write(asTransform.Orientation.X);
-                stream.Write(asTransform.Scale.X);
-                stream.Write(asTransform.Scale.Y);
-                stream.Write(asTransform.Scale.Z);
-            }
-            else if (value is BoundingSphere asSphere)
-            {
-                stream.Write((byte)12);
-                stream.Write(asSphere.Center.X);
-                stream.Write(asSphere.Center.Y);
-                stream.Write(asSphere.Center.Z);
-                stream.Write(asSphere.Radius);
-            }
-            else if (value is Rectangle asRect)
-            {
-                stream.Write((byte)13);
-                stream.Write(asRect.Location.X);
-                stream.Write(asRect.Location.Y);
-                stream.Write(asRect.Size.X);
-                stream.Write(asRect.Size.Y);
-            }
-            else if (value is Matrix asMatrix)
-            {
-                stream.Write((byte)15);
-                stream.Write(asMatrix.M11);
-                stream.Write(asMatrix.M12);
-                stream.Write(asMatrix.M13);
-                stream.Write(asMatrix.M14);
-                stream.Write(asMatrix.M21);
-                stream.Write(asMatrix.M22);
-                stream.Write(asMatrix.M23);
-                stream.Write(asMatrix.M24);
-                stream.Write(asMatrix.M31);
-                stream.Write(asMatrix.M32);
-                stream.Write(asMatrix.M33);
-                stream.Write(asMatrix.M34);
-                stream.Write(asMatrix.M41);
-                stream.Write(asMatrix.M42);
-                stream.Write(asMatrix.M43);
-                stream.Write(asMatrix.M44);
-            }
-            else if (value is byte[] asBlob)
-            {
-                stream.Write((byte)16);
-                stream.Write(asBlob.Length);
-                stream.Write(asBlob);
-            }
-            else if (value is Ray asRay)
-            {
-                stream.Write((byte)18);
-                stream.Write(asRay.Position.X);
-                stream.Write(asRay.Position.Y);
-                stream.Write(asRay.Position.Z);
-                stream.Write(asRay.Direction.X);
-                stream.Write(asRay.Direction.Y);
-                stream.Write(asRay.Direction.Z);
-            }
-            else if (value is Int2 asInt2)
-            {
-                stream.Write((byte)19);
-                stream.Write(asInt2);
-            }
-            else if (value is Int3 asInt3)
-            {
-                stream.Write((byte)20);
-                stream.Write(asInt3);
-            }
-            else if (value is Int4 asInt4)
-            {
-                stream.Write((byte)21);
-                stream.Write(asInt4);
-            }
-            else
-            {
-                throw new NotSupportedException(string.Format("Invalid Common Value type {0}", value != null ? value.GetType().ToString() : "null"));
-            }
-        }
-
         /// <summary>
         /// Shows the source code window.
         /// </summary>
@@ -729,11 +683,12 @@ namespace FlaxEditor.Utilities
 
             var settings = CreateWindowSettings.Default;
             settings.ActivateWhenFirstShown = true;
-            settings.AllowMaximize = false;
+            settings.AllowMaximize = true;
             settings.AllowMinimize = false;
-            settings.HasSizingFrame = false;
+            settings.HasSizingFrame = true;
+            settings.HasBorder = true;
             settings.StartPosition = WindowStartPosition.CenterParent;
-            settings.Size = new Vector2(500, 600) * (parentWindow?.DpiScale ?? Platform.DpiScale);
+            settings.Size = new Float2(500, 600) * (parentWindow?.DpiScale ?? Platform.DpiScale);
             settings.Parent = parentWindow;
             settings.Title = title;
             var dialog = Platform.CreateWindow(ref settings);
@@ -745,16 +700,31 @@ namespace FlaxEditor.Utilities
             };
             copyButton.Clicked += () => Clipboard.Text = source;
 
-            var sourceTextBox = new TextBox(true, 2, copyButton.Bottom + 4, settings.Size.X - 4);
-            sourceTextBox.Height = settings.Size.Y - sourceTextBox.Top - 2;
+            var backPanel = new Panel
+            {
+                AnchorPreset = AnchorPresets.StretchAll,
+                Offsets = new Margin(0, 0, copyButton.Bottom + 4, 0),
+                ScrollBars = ScrollBars.Both,
+                IsScrollable = true,
+                Parent = dialog.GUI,
+            };
+
+            var sourceTextBox = new TextBox(true, 0, 0, 0);
+            sourceTextBox.Parent = backPanel;
+            sourceTextBox.AnchorPreset = AnchorPresets.HorizontalStretchTop;
             sourceTextBox.Text = source;
-            sourceTextBox.Parent = dialog.GUI;
+            sourceTextBox.Height = sourceTextBox.TextSize.Y;
+            sourceTextBox.IsReadOnly = true;
+            sourceTextBox.IsMultilineScrollable = false;
+            sourceTextBox.IsScrollable = true;
+
+            backPanel.SizeChanged += control => { sourceTextBox.Width = (control.Size.X >= sourceTextBox.TextSize.X) ? control.Width : sourceTextBox.TextSize.X + 30; };
 
             dialog.Show();
             dialog.Focus();
         }
 
-        private static OrientedBoundingBox GetWriteBox(ref Vector3 min, ref Vector3 max, float margin)
+        private static OrientedBoundingBox GetWriteBox(ref Vector3 min, ref Vector3 max, Real margin)
         {
             var box = new OrientedBoundingBox();
             Vector3 vec = max - min;
@@ -765,9 +735,10 @@ namespace FlaxEditor.Utilities
             else
                 orientation = Quaternion.LookRotation(dir, Vector3.Cross(Vector3.Cross(dir, Vector3.Up), dir));
             Vector3 up = Vector3.Up * orientation;
-            box.Transformation = Matrix.CreateWorld(min + vec * 0.5f, dir, up);
-            Matrix.Invert(ref box.Transformation, out Matrix inv);
-            Vector3 vecLocal = Vector3.TransformNormal(vec * 0.5f, inv);
+            Matrix world = Matrix.CreateWorld(min + vec * 0.5f, dir, up);
+            world.Decompose(out box.Transformation);
+            Matrix.Invert(ref world, out Matrix invWorld);
+            Vector3 vecLocal = Vector3.TransformNormal(vec * 0.5f, invWorld);
             box.Extents.X = margin;
             box.Extents.Y = margin;
             box.Extents.Z = vecLocal.Z;
@@ -782,7 +753,7 @@ namespace FlaxEditor.Utilities
         /// <param name="distance">The result intersection distance.</param>
         /// <param name="viewPosition">The view position used to scale the wires thickness depending on the wire distance from the view.</param>
         /// <returns>True ray hits bounds, otherwise false.</returns>
-        public static unsafe bool RayCastWire(ref OrientedBoundingBox box, ref Ray ray, out float distance, ref Vector3 viewPosition)
+        public static unsafe bool RayCastWire(ref OrientedBoundingBox box, ref Ray ray, out Real distance, ref Vector3 viewPosition)
         {
             var corners = stackalloc Vector3[8];
             box.GetCorners(corners);
@@ -829,7 +800,13 @@ namespace FlaxEditor.Utilities
                 var attr = field.GetAttribute<System.ComponentModel.DefaultValueAttribute>();
                 if (attr != null)
                 {
-                    field.SetValue(obj, attr.Value);
+                    // Prevent value type conflicts
+                    var value = attr.Value;
+                    var fieldType = field.ValueType.Type;
+                    if (value != null && value.GetType() != fieldType)
+                        value = Convert.ChangeType(value, fieldType);
+
+                    field.SetValue(obj, value);
                 }
                 else if (isStructure)
                 {
@@ -845,9 +822,98 @@ namespace FlaxEditor.Utilities
                 var attr = property.GetAttribute<System.ComponentModel.DefaultValueAttribute>();
                 if (attr != null)
                 {
-                    property.SetValue(obj, attr.Value);
+                    // Prevent value type conflicts
+                    var value = attr.Value;
+                    var propertyType = property.ValueType.Type;
+                    if (value != null && value.GetType() != propertyType)
+                        value = Convert.ChangeType(value, propertyType);
+
+                    property.SetValue(obj, value);
                 }
             }
+        }
+
+        /// <summary>
+        /// Gets the type name for UI. Removes unnecessary characters and filters text. Makes it more user-friendly.
+        /// </summary>
+        /// <param name="type">The type.</param>
+        /// <returns>The result.</returns>
+        public static string GetTypeNameUI(Scripting.ScriptType type)
+        {
+            var name = type.ToString();
+
+            // Don't format interfaces to maintain code-name (eg. prefix 'I')
+            if (type.IsInterface)
+                return name;
+            if (type.IsGenericType && name.StartsWith("ScriptingObjectInterfaceReference", StringComparison.Ordinal))
+                return type.GetGenericArguments()[0].GetTypeDisplayName();
+
+            return GetPropertyNameUI(name);
+        }
+
+        /// <summary>
+        /// Gets the property name for UI. Removes unnecessary characters and filters text. Makes it more user-friendly.
+        /// </summary>
+        /// <param name="name">The name.</param>
+        /// <returns>The result.</returns>
+        public static string GetPropertyNameUI(string name)
+        {
+            int length = name.Length;
+            StringBuilder sb = CachedSb;
+            sb.Clear();
+            sb.EnsureCapacity(length + 8);
+            int startIndex = 0;
+
+            // Skip some prefixes
+            if (name.StartsWith("g_") || name.StartsWith("m_"))
+                startIndex = 2;
+
+            if (name.StartsWith("_"))
+                startIndex = 1;
+
+            // Filter text
+            var lastChar = '\0';
+            for (int i = startIndex; i < length; i++)
+            {
+                var c = name[i];
+
+                if (i == startIndex)
+                {
+                    sb.Append(char.ToUpper(c));
+                    continue;
+                }
+
+                // Space before word starting with uppercase letter
+                if (char.IsUpper(c) && i > 0)
+                {
+                    if (lastChar != ' ' && (!char.IsUpper(name[i - 1]) || (i + 1 != length && !char.IsUpper(name[i + 1]))))
+                    {
+                        lastChar = ' ';
+                        sb.Append(lastChar);
+                    }
+                }
+                // Space instead of underscore
+                else if (c == '_')
+                {
+                    if (sb.Length > 0 && lastChar != ' ')
+                    {
+                        lastChar = ' ';
+                        sb.Append(lastChar);
+                    }
+                    continue;
+                }
+                // Space before digits sequence
+                else if (i > 1 && char.IsDigit(c) && !char.IsDigit(name[i - 1]) && lastChar != ' ')
+                {
+                    lastChar = ' ';
+                    sb.Append(lastChar);
+                }
+
+                lastChar = c;
+                sb.Append(lastChar);
+            }
+
+            return sb.ToString();
         }
 
         /// <summary>
@@ -855,17 +921,18 @@ namespace FlaxEditor.Utilities
         /// </summary>
         /// <param name="searchBox">The search box.</param>
         /// <param name="tree">The tree control.</param>
+        /// <param name="headerHeight">Amount of additional space above the search box to put custom UI.</param>
+        /// <param name="autoSearch">Plug automatic tree search delegate.</param>
         /// <returns>The created menu to setup and show.</returns>
-        public static ContextMenuBase CreateSearchPopup(out TextBox searchBox, out Tree tree)
+        public static ContextMenuBase CreateSearchPopup(out TextBox searchBox, out Tree tree, float headerHeight = 0, bool autoSearch = false)
         {
             var menu = new ContextMenuBase
             {
-                Size = new Vector2(320, 220),
+                Size = new Float2(320, 220 + headerHeight),
             };
-            searchBox = new TextBox(false, 1, 1)
+            searchBox = new SearchBox(false, 1, headerHeight + 1)
             {
                 Width = menu.Width - 3,
-                WatermarkText = "Search...",
                 Parent = menu,
             };
             var panel1 = new Panel(ScrollBars.Vertical)
@@ -877,13 +944,396 @@ namespace FlaxEditor.Utilities
             {
                 Parent = panel1,
                 AnchorPreset = AnchorPresets.HorizontalStretchTop,
+                Pivot = Float2.Zero,
                 IsScrollable = true,
             };
             tree = new Tree(false)
             {
                 Parent = panel2,
             };
+            if (autoSearch)
+            {
+                var s = searchBox;
+                var t = tree;
+                searchBox.TextChanged += delegate
+                {
+                    if (t.IsLayoutLocked)
+                        return;
+                    t.LockChildrenRecursive();
+                    UpdateSearchPopupFilter(t, s.Text);
+                    t.UnlockChildrenRecursive();
+                    menu.PerformLayout();
+                };
+            }
             return menu;
+        }
+
+        /// <summary>
+        /// Updates (recursively) search popup tree structures based on the filter text.
+        /// </summary>
+        public static void UpdateSearchPopupFilter(Tree tree, string filterText)
+        {
+            for (int i = 0; i < tree.Children.Count; i++)
+            {
+                if (tree.Children[i] is TreeNode child)
+                    UpdateSearchPopupFilter(child, filterText);
+            }
+        }
+
+        /// <summary>
+        /// Updates (recursively) search popup tree structures based on the filter text.
+        /// </summary>
+        public static void UpdateSearchPopupFilter(TreeNode node, string filterText)
+        {
+            // Update children
+            bool isAnyChildVisible = false;
+            for (int i = 0; i < node.Children.Count; i++)
+            {
+                if (node.Children[i] is TreeNode child)
+                {
+                    UpdateSearchPopupFilter(child, filterText);
+                    isAnyChildVisible |= child.Visible;
+                }
+            }
+
+            // Update itself
+            bool noFilter = string.IsNullOrWhiteSpace(filterText);
+            bool isThisVisible = noFilter || QueryFilterHelper.Match(filterText, node.Text);
+            bool isExpanded = isAnyChildVisible;
+            if (isExpanded)
+                node.Expand(true);
+            else
+                node.Collapse(true);
+            node.Visible = isThisVisible | isAnyChildVisible;
+        }
+
+        /// <summary>
+        /// Gets the asset name relative to the project root folder (with asset file extension)
+        /// </summary>
+        /// <param name="path">The asset path.</param>
+        /// <returns>The processed name path.</returns> 
+        public static string GetAssetNamePathWithExt(string path)
+        {
+            var projectFolder = Globals.ProjectFolder;
+            if (path == projectFolder)
+                path = string.Empty;
+            else if (path.StartsWith(projectFolder))
+                path = path.Substring(projectFolder.Length + 1);
+            return path;
+        }
+
+        /// <summary>
+        /// Gets the asset name relative to the project root folder (without asset file extension)
+        /// </summary>
+        /// <param name="path">The asset path.</param>
+        /// <returns>The processed name path.</returns>
+        public static string GetAssetNamePath(string path)
+        {
+            path = GetAssetNamePathWithExt(path);
+            return StringUtils.GetPathWithoutExtension(path);
+        }
+
+        private static string InternalFormat(double value, string format, FlaxEngine.Utils.ValueCategory category)
+        {
+            switch (category)
+            {
+            case FlaxEngine.Utils.ValueCategory.Distance:
+                if (!Units.AutomaticUnitsFormatting)
+                    return (value / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m");
+                var absValue = Mathf.Abs(value);
+                // in case a unit != cm this would be (value / Meters2Units * 100)
+                if (absValue < Units.Meters2Units)
+                    return value.ToString(format, CultureInfo.InvariantCulture) + Units.Unit("cm");
+                if (absValue < Units.Meters2Units * 1000)
+                    return (value / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m");
+                return (value / 1000 / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("km");
+            case FlaxEngine.Utils.ValueCategory.Angle: return value.ToString(format, CultureInfo.InvariantCulture) + "°";
+            case FlaxEngine.Utils.ValueCategory.Time: return value.ToString(format, CultureInfo.InvariantCulture) + Units.Unit("s");
+            // some fonts have a symbol for that: "\u33A7"
+            case FlaxEngine.Utils.ValueCategory.Speed: return (value / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m/s");
+            case FlaxEngine.Utils.ValueCategory.Acceleration: return (value / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m/s²");
+            case FlaxEngine.Utils.ValueCategory.Area: return (value / Units.Meters2Units / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m²");
+            case FlaxEngine.Utils.ValueCategory.Volume: return (value / Units.Meters2Units / Units.Meters2Units / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("m³");
+            case FlaxEngine.Utils.ValueCategory.Mass: return value.ToString(format, CultureInfo.InvariantCulture) + Units.Unit("kg");
+            case FlaxEngine.Utils.ValueCategory.Force: return (value / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("N");
+            case FlaxEngine.Utils.ValueCategory.Torque: return (value / Units.Meters2Units / Units.Meters2Units).ToString(format, CultureInfo.InvariantCulture) + Units.Unit("Nm");
+            case FlaxEngine.Utils.ValueCategory.None:
+            default: return FormatFloat(value);
+            }
+        }
+
+        /// <summary>
+        /// Format a float value either as-is, with a distance unit or with a degree sign.
+        /// </summary>
+        /// <param name="value">The value to format.</param>
+        /// <param name="category">The value type: none means just a number, distance will format in cm/m/km, angle with an appended degree sign.</param>
+        /// <returns>The formatted string.</returns>
+        public static string FormatFloat(float value, FlaxEngine.Utils.ValueCategory category)
+        {
+            if (float.IsPositiveInfinity(value) || value == float.MaxValue)
+                return "Infinity";
+            if (float.IsNegativeInfinity(value) || value == float.MinValue)
+                return "-Infinity";
+            if (!Units.UseUnitsFormatting || category == FlaxEngine.Utils.ValueCategory.None)
+                return FormatFloat(value);
+            const string format = "G7";
+            return InternalFormat(value, format, category);
+        }
+
+        /// <summary>
+        /// Format a double value either as-is, with a distance unit or with a degree sign
+        /// </summary>
+        /// <param name="value">The value to format.</param>
+        /// <param name="category">The value type: none means just a number, distance will format in cm/m/km, angle with an appended degree sign.</param>
+        /// <returns>The formatted string.</returns>
+        public static string FormatFloat(double value, FlaxEngine.Utils.ValueCategory category)
+        {
+            if (double.IsPositiveInfinity(value) || value == double.MaxValue)
+                return "Infinity";
+            if (double.IsNegativeInfinity(value) || value == double.MinValue)
+                return "-Infinity";
+            if (!Units.UseUnitsFormatting || category == FlaxEngine.Utils.ValueCategory.None)
+                return FormatFloat(value);
+            const string format = "G15";
+            return InternalFormat(value, format, category);
+        }
+
+        /// <summary>
+        /// Formats the floating point value (double precision) into the readable text representation.
+        /// </summary>
+        /// <param name="value">The value.</param>
+        /// <returns>The text representation.</returns>
+        public static string FormatFloat(float value)
+        {
+            if (float.IsPositiveInfinity(value) || value == float.MaxValue)
+                return "Infinity";
+            if (float.IsNegativeInfinity(value) || value == float.MinValue)
+                return "-Infinity";
+            string str = value.ToString("R", CultureInfo.InvariantCulture);
+            return FormatFloat(str, value < 0);
+        }
+
+        /// <summary>
+        /// Formats the floating point value (single precision) into the readable text representation.
+        /// </summary>
+        /// <param name="value">The value.</param>
+        /// <returns>The text representation.</returns>
+        public static string FormatFloat(double value)
+        {
+            if (double.IsPositiveInfinity(value) || value == double.MaxValue)
+                return "Infinity";
+            if (double.IsNegativeInfinity(value) || value == double.MinValue)
+                return "-Infinity";
+            string str = value.ToString("R", CultureInfo.InvariantCulture);
+            return FormatFloat(str, value < 0);
+        }
+
+        internal static string FormatFloat(string str, bool isNegative)
+        {
+            // Reference: https://stackoverflow.com/questions/1546113/double-to-string-conversion-without-scientific-notation
+            int x = str.IndexOf('E', StringComparison.OrdinalIgnoreCase);
+            if (x < 0)
+                return str;
+            int x1 = x + 1;
+            string s, exp = str.Substring(x1, str.Length - x1);
+            int e = int.Parse(exp);
+            int numDecimals = 0;
+            if (isNegative)
+            {
+                int len = x - 3;
+                if (e >= 0)
+                {
+                    if (len > 0)
+                    {
+                        s = str.Substring(0, 2) + str.Substring(3, len);
+                        numDecimals = len;
+                    }
+                    else
+                        s = str.Substring(0, 2);
+                }
+                else
+                {
+                    if (len > 0)
+                    {
+                        s = str.Substring(1, 1) + str.Substring(3, len);
+                        numDecimals = len;
+                    }
+                    else
+                        s = str.Substring(1, 1);
+                }
+            }
+            else
+            {
+                int len = x - 2;
+                if (len > 0)
+                {
+                    s = str[0] + str.Substring(2, len);
+                    numDecimals = len;
+                }
+                else
+                    s = str[0].ToString();
+            }
+            if (e >= 0)
+            {
+                e -= numDecimals;
+                string z = new string('0', e);
+                s = s + z;
+            }
+            else
+            {
+                e = -e - 1;
+                string z = new string('0', e);
+                if (isNegative)
+                    s = "-0." + z + s;
+                else
+                    s = "0." + z + s;
+            }
+            return s;
+        }
+
+        /// <summary>
+        /// Binds global input actions for the window.
+        /// </summary>
+        /// <param name="window">The editor window.</param>
+        public static void SetupCommonInputActions(EditorWindow window)
+        {
+            var inputActions = window.InputActions;
+
+            // Setup input actions
+            inputActions.Add(options => options.Save, Editor.Instance.SaveAll);
+            inputActions.Add(options => options.Undo, () =>
+            {
+                Editor.Instance.PerformUndo();
+                window.Focus();
+            });
+            inputActions.Add(options => options.Redo, () =>
+            {
+                Editor.Instance.PerformRedo();
+                window.Focus();
+            });
+            inputActions.Add(options => options.Cut, Editor.Instance.SceneEditing.Cut);
+            inputActions.Add(options => options.Copy, Editor.Instance.SceneEditing.Copy);
+            inputActions.Add(options => options.Paste, Editor.Instance.SceneEditing.Paste);
+            inputActions.Add(options => options.Duplicate, Editor.Instance.SceneEditing.Duplicate);
+            inputActions.Add(options => options.SelectAll, Editor.Instance.SceneEditing.SelectAllScenes);
+            inputActions.Add(options => options.DeselectAll, Editor.Instance.SceneEditing.DeselectAllScenes);
+            inputActions.Add(options => options.Delete, Editor.Instance.SceneEditing.Delete);
+            inputActions.Add(options => options.GroupSelectedActors, Editor.Instance.SceneEditing.CreateParentForSelectedActors);
+            inputActions.Add(options => options.Search, () => Editor.Instance.Windows.SceneWin.Search());
+            inputActions.Add(options => options.MoveActorToViewport, Editor.Instance.UI.MoveActorToViewport);
+            inputActions.Add(options => options.AlignActorWithViewport, Editor.Instance.UI.AlignActorWithViewport);
+            inputActions.Add(options => options.AlignViewportWithActor, Editor.Instance.UI.AlignViewportWithActor);
+            inputActions.Add(options => options.PilotActor, Editor.Instance.UI.PilotActor);
+            inputActions.Add(options => options.Play, Editor.Instance.Simulation.DelegatePlayOrStopPlayInEditor);
+            inputActions.Add(options => options.PlayCurrentScenes, Editor.Instance.Simulation.RequestPlayScenesOrStopPlay);
+            inputActions.Add(options => options.Pause, Editor.Instance.Simulation.RequestResumeOrPause);
+            inputActions.Add(options => options.StepFrame, Editor.Instance.Simulation.RequestPlayOneFrame);
+            inputActions.Add(options => options.CookAndRun, () => Editor.Instance.Windows.GameCookerWin.BuildAndRun());
+            inputActions.Add(options => options.RunCookedGame, () => Editor.Instance.Windows.GameCookerWin.RunCooked());
+            inputActions.Add(options => options.BuildScenesData, Editor.Instance.BuildScenesOrCancel);
+            inputActions.Add(options => options.BakeLightmaps, Editor.Instance.BakeLightmapsOrCancel);
+            inputActions.Add(options => options.ClearLightmaps, Editor.Instance.ClearLightmaps);
+            inputActions.Add(options => options.BakeEnvProbes, Editor.Instance.BakeAllEnvProbes);
+            inputActions.Add(options => options.BuildCSG, Editor.Instance.BuildCSG);
+            inputActions.Add(options => options.BuildNav, Editor.Instance.BuildNavMesh);
+            inputActions.Add(options => options.BuildSDF, Editor.Instance.BuildAllMeshesSDF);
+            inputActions.Add(options => options.TakeScreenshot, Editor.Instance.Windows.TakeScreenshot);
+#if USE_PROFILER
+            inputActions.Add(options => options.ProfilerStartStop, () =>
+            {
+                bool recording = !Editor.Instance.Windows.ProfilerWin.LiveRecording;
+                Editor.Instance.Windows.ProfilerWin.LiveRecording = recording;
+                Editor.Instance.UI.AddStatusMessage($"Profiling {(recording ? "started" : "stopped")}.");
+            });
+            inputActions.Add(options => options.ProfilerClear, () =>
+            {
+                Editor.Instance.Windows.ProfilerWin.Clear();
+                Editor.Instance.UI.AddStatusMessage("Profiling results cleared.");
+            });
+#endif
+            inputActions.Add(options => options.SaveScenes, () => Editor.Instance.Scene.SaveScenes());
+            inputActions.Add(options => options.CloseScenes, () => Editor.Instance.Scene.CloseAllScenes());
+            inputActions.Add(options => options.OpenScriptsProject, () => Editor.Instance.CodeEditing.OpenSolution());
+            inputActions.Add(options => options.GenerateScriptsProject, () => Editor.Instance.ProgressReporting.GenerateScriptsProjectFiles.RunAsync());
+            inputActions.Add(options => options.RecompileScripts, ScriptsBuilder.Compile);
+            inputActions.Add(options => options.FocusConsoleCommand, () => Editor.Instance.Windows.OutputLogWin.FocusCommand());
+        }
+
+        internal static string ToPathProject(string path)
+        {
+            if (path != null)
+            {
+                // Convert into path relative to the project (cross-platform)
+                var projectFolder = Globals.ProjectFolder;
+                if (path.StartsWith(projectFolder))
+                    path = path.Substring(projectFolder.Length + 1);
+            }
+            return path;
+        }
+
+        internal static string ToPathAbsolute(string path)
+        {
+            if (path != null)
+            {
+                // Convert into global path to if relative to the project
+                path = StringUtils.IsRelative(path) ? Path.Combine(Globals.ProjectFolder, path) : path;
+            }
+            return path;
+        }
+
+        internal static bool OnAssetProperties(CustomEditors.LayoutElementsContainer layout, Asset asset)
+        {
+            if (asset == null || !asset.IsLoaded)
+            {
+                layout.Label(asset != null && asset.LastLoadFailed ? "Failed to load" : "Loading...", TextAlignment.Center);
+                return true;
+            }
+            return false;
+        }
+
+        internal static ISceneEditingContext GetSceneContext(this Control c)
+        {
+            while (c != null && !(c is ISceneEditingContext))
+                c = c.Parent;
+            return c as ISceneEditingContext;
+        }
+
+        internal static bool UseCustomWindowDecorations(bool isMainWindow = false)
+        {
+#if PLATFORM_SDL
+            return Editor.Instance.Options.Options.Interface.WindowDecorations switch
+            {
+                Options.InterfaceOptions.WindowDecorationsType.Auto => !SDLPlatform.SupportsNativeDecorations,
+                Options.InterfaceOptions.WindowDecorationsType.AutoChildOnly => !isMainWindow ? !SDLPlatform.SupportsNativeDecorations : true,
+                Options.InterfaceOptions.WindowDecorationsType.Native => false,
+                Options.InterfaceOptions.WindowDecorationsType.ClientSide => true,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+#elif PLATFORM_WINDOWS
+            return !Editor.Instance.Options.Options.Interface.UseNativeWindowSystem;
+#elif PLATFORM_MAC
+            return Editor.Instance.Options.Options.Interface.WindowDecorations switch
+            {
+                Options.InterfaceOptions.WindowDecorationsType.ClientSide => true,
+                _ => false
+            };
+#else
+            return false;
+#endif
+        }
+
+        internal static bool HideSingleTabWindowTabBars()
+        {
+#if PLATFORM_SDL
+            // We should not hide the tab bars if tab handle is the only way to dock the window
+            bool clientSideDecorations = UseCustomWindowDecorations(false);
+            bool draggableDecorations = clientSideDecorations || SDLPlatform.SupportsNativeDecorationDragging;
+            return draggableDecorations && Editor.Instance.Options.Options.Interface.HideSingleTabWindowTabBars;
+#elif PLATFORM_WINDOWS
+            return Editor.Instance.Options.Options.Interface.HideSingleTabWindowTabBars;
+#else
+            return false;
+#endif
         }
     }
 }

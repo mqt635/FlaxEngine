@@ -1,23 +1,25 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_VULKAN
 
 #include "GPUBufferVulkan.h"
 #include "GPUContextVulkan.h"
 #include "RenderToolsVulkan.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Threading/Threading.h"
 #include "Engine/Graphics/Async/Tasks/GPUUploadBufferTask.h"
 
-void GPUBufferViewVulkan::Init(GPUDeviceVulkan* device, GPUBufferVulkan* owner, VkBuffer buffer, VkDeviceSize size, PixelFormat format)
+void GPUBufferViewVulkan::Init(GPUDeviceVulkan* device, GPUBufferVulkan* owner, VkBuffer buffer, VkDeviceSize size, VkBufferUsageFlags usage, PixelFormat format)
 {
     ASSERT(View == VK_NULL_HANDLE);
 
+    _parent = owner;
     Device = device;
     Owner = owner;
     Buffer = buffer;
     Size = size;
 
-    if (owner->IsShaderResource() && !(owner->GetDescription().Flags & GPUBufferFlags::Structured))
+    if ((EnumHasAnyFlags(owner->GetDescription().Flags, GPUBufferFlags::ShaderResource | GPUBufferFlags::UnorderedAccess) && !(owner->GetDescription().Flags & GPUBufferFlags::Structured)) || (usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) == VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)
     {
         VkBufferViewCreateInfo viewInfo;
         RenderToolsVulkan::ZeroStruct(viewInfo, VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO);
@@ -25,7 +27,8 @@ void GPUBufferViewVulkan::Init(GPUDeviceVulkan* device, GPUBufferVulkan* owner, 
         viewInfo.format = RenderToolsVulkan::ToVulkanFormat(format);
         viewInfo.offset = 0;
         viewInfo.range = Size;
-        ASSERT_LOW_LAYER(viewInfo.format != VK_FORMAT_UNDEFINED);
+        if (viewInfo.format == VK_FORMAT_UNDEFINED)
+            return; // Skip for structured buffers that use custom structure type and have unknown format
         VALIDATE_VULKAN_RESULT(vkCreateBufferView(device->Device, &viewInfo, nullptr, &View));
     }
 }
@@ -44,27 +47,30 @@ void GPUBufferViewVulkan::Release()
 #endif
 }
 
-void GPUBufferViewVulkan::DescriptorAsUniformTexelBuffer(GPUContextVulkan* context, const VkBufferView*& bufferView)
+void GPUBufferViewVulkan::DescriptorAsUniformTexelBuffer(GPUContextVulkan* context, VkBufferView& bufferView)
 {
+    // Buffer SRV
     ASSERT_LOW_LAYER(View != VK_NULL_HANDLE);
-    bufferView = &View;
+    bufferView = View;
     context->AddBufferBarrier(Owner, VK_ACCESS_SHADER_READ_BIT);
 }
 
 void GPUBufferViewVulkan::DescriptorAsStorageBuffer(GPUContextVulkan* context, VkBuffer& buffer, VkDeviceSize& offset, VkDeviceSize& range)
 {
+    // Buffer UAV
     ASSERT_LOW_LAYER(Buffer);
     buffer = Buffer;
     offset = 0;
     range = Size;
-    context->AddBufferBarrier(Owner, VK_ACCESS_SHADER_READ_BIT);
+    context->AddBufferBarrier(Owner, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 }
 
-void GPUBufferViewVulkan::DescriptorAsStorageTexelBuffer(GPUContextVulkan* context, const VkBufferView*& bufferView)
+void GPUBufferViewVulkan::DescriptorAsStorageTexelBuffer(GPUContextVulkan* context, VkBufferView& bufferView)
 {
+    // Buffer UAV
     ASSERT_LOW_LAYER(View != VK_NULL_HANDLE);
-    bufferView = &View;
-    context->AddBufferBarrier(Owner, VK_ACCESS_SHADER_READ_BIT);
+    bufferView = View;
+    context->AddBufferBarrier(Owner, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 }
 
 GPUBufferView* GPUBufferVulkan::View() const
@@ -98,17 +104,19 @@ bool GPUBufferVulkan::OnInit()
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (useSRV && !(_desc.Flags & GPUBufferFlags::Structured))
         bufferInfo.usage |= VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
-    if (useUAV || _desc.Flags & GPUBufferFlags::RawBuffer)
+    if (useUAV || EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::RawBuffer | GPUBufferFlags::Structured))
         bufferInfo.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    if (useUAV && useSRV)
+    if (useUAV)
         bufferInfo.usage |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
-    if (_desc.Flags & GPUBufferFlags::Argument)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Argument))
         bufferInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-    if (_desc.Flags & GPUBufferFlags::VertexBuffer)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Argument) && useUAV)
+        bufferInfo.usage |= VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT; // For some reason, glslang marks indirect uav buffers (UpdateProbesInitArgs, IndirectArgsBuffer) as Storage Texel Buffers
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::VertexBuffer))
         bufferInfo.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    if (_desc.Flags & GPUBufferFlags::IndexBuffer)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::IndexBuffer))
         bufferInfo.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    if (IsStaging() || _desc.Flags & GPUBufferFlags::UnorderedAccess)
+    if (IsStaging() || EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::UnorderedAccess))
         bufferInfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
     // Create buffer
@@ -124,11 +132,23 @@ bool GPUBufferVulkan::OnInit()
     case GPUResourceUsage::StagingReadback:
         allocInfo.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
         break;
+    case GPUResourceUsage::Staging:
+        allocInfo.usage = VMA_MEMORY_USAGE_CPU_COPY;
+        break;
     default:
         allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     }
     const VkResult result = vmaCreateBuffer(_device->Allocator, &bufferInfo, &allocInfo, &_buffer, &_allocation, nullptr);
-    LOG_VULKAN_RESULT_WITH_RETURN(result);
+    if (result != VK_SUCCESS)
+    {
+        LOG(Error, "vmaCreateBuffer failed");
+        LOG_STR(Error, _desc.ToString());
+#if GPU_ENABLE_RESOURCE_NAMING
+        LOG_STR(Error, GetName());
+#endif
+        RenderToolsVulkan::LogVkResult(result, __FILE__, __LINE__);
+        return true;
+    }
 #if GPU_ENABLE_RESOURCE_NAMING
     VK_SET_DEBUG_NAME(_device, _buffer, VK_OBJECT_TYPE_BUFFER, GetName());
 #endif
@@ -143,7 +163,7 @@ bool GPUBufferVulkan::OnInit()
             // Faster path using Map/Unmap sequence
             SetData(_desc.InitData, _desc.Size);
         }
-        else if (_device->IsRendering() && IsInMainThread())
+        else if (_device->IsRendering() && IsInRenderThread())
         {
             // Upload resource data now
             _device->GetMainContext()->UpdateBuffer(this, _desc.InitData, _desc.Size);
@@ -158,10 +178,10 @@ bool GPUBufferVulkan::OnInit()
     }
 
     // Check if need to use a counter
-    if (_desc.Flags & GPUBufferFlags::Counter || _desc.Flags & GPUBufferFlags::Append)
+    if (EnumHasAnyFlags(_desc.Flags, GPUBufferFlags::Counter | GPUBufferFlags::Append))
     {
 #if GPU_ENABLE_RESOURCE_NAMING
-        String name = GetName() + TEXT(".Counter");
+        String name = String(GetName()) + TEXT(".Counter");
         Counter = ::New<GPUBufferVulkan>(_device, name);
 #else
 		Counter = ::New<GPUBufferVulkan>(_device, StringView::Empty);
@@ -172,11 +192,11 @@ bool GPUBufferVulkan::OnInit()
             return true;
         }
     }
-        // Check if need to bind buffer to the shaders
+    // Check if need to bind buffer to the shaders
     else if (useSRV || useUAV)
     {
         // Create buffer view
-        _view.Init(_device, this, _buffer, _desc.Size, _desc.Format);
+        _view.Init(_device, this, _buffer, _desc.Size, bufferInfo.usage, _desc.Format);
     }
 
     return false;

@@ -1,8 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using System.Collections.Generic;
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
+
 using FlaxEditor.Gizmo;
-using FlaxEditor.SceneGraph;
 using FlaxEngine;
 
 namespace FlaxEditor.Viewport.Cameras
@@ -17,6 +21,7 @@ namespace FlaxEditor.Viewport.Cameras
         private Transform _startMove;
         private Transform _endMove;
         private float _moveStartTime = -1;
+        private float _additionalFOV;
 
         /// <summary>
         /// Gets a value indicating whether this viewport is animating movement.
@@ -27,6 +32,15 @@ namespace FlaxEditor.Viewport.Cameras
         /// The target point location. It's used to orbit around it when user clicks Alt+LMB.
         /// </summary>
         public Vector3 TargetPoint = new Vector3(-200);
+
+        /// <summary>
+        /// Additional field of view used for zooming the camera in and out.
+        /// </summary>
+        public float AdditionalZoomFOV
+        {
+            get => _additionalFOV;
+            private set => _additionalFOV = Mathf.Clamp(value, 5 - Viewport.FieldOfView, 160f - Viewport.FieldOfView);
+        }
 
         /// <summary>
         /// Sets view.
@@ -79,103 +93,28 @@ namespace FlaxEditor.Viewport.Cameras
             _moveStartTime = Time.UnscaledGameTime;
         }
 
-        /// <summary>
-        /// Moves the viewport to visualize the actor.
-        /// </summary>
-        /// <param name="actor">The actor to preview.</param>
-        public void ShowActor(Actor actor)
-        {
-            Editor.GetActorEditorSphere(actor, out BoundingSphere sphere);
-            ShowSphere(ref sphere);
-        }
-
-        /// <summary>
-        /// Moves the viewport to visualize selected actors.
-        /// </summary>
-        /// <param name="actor">The actors to show.</param>
-        /// <param name="orientation">The used orientation.</param>
-        public void ShowActor(Actor actor, ref Quaternion orientation)
-        {
-            Editor.GetActorEditorSphere(actor, out BoundingSphere sphere);
-            ShowSphere(ref sphere, ref orientation);
-        }
-
-        /// <summary>
-        /// Moves the viewport to visualize selected actors.
-        /// </summary>
-        /// <param name="selection">The actors to show.</param>
-        public void ShowActors(List<SceneGraphNode> selection)
-        {
-            if (selection.Count == 0)
-                return;
-
-            BoundingSphere mergesSphere = BoundingSphere.Empty;
-            for (int i = 0; i < selection.Count; i++)
-            {
-                selection[i].GetEditorSphere(out var sphere);
-                BoundingSphere.Merge(ref mergesSphere, ref sphere, out mergesSphere);
-            }
-
-            if (mergesSphere == BoundingSphere.Empty)
-                return;
-            ShowSphere(ref mergesSphere);
-        }
-
-        /// <summary>
-        /// Moves the viewport to visualize selected actors.
-        /// </summary>
-        /// <param name="selection">The actors to show.</param>
-        /// <param name="orientation">The used orientation.</param>
-        public void ShowActors(List<SceneGraphNode> selection, ref Quaternion orientation)
-        {
-            if (selection.Count == 0)
-                return;
-
-            BoundingSphere mergesSphere = BoundingSphere.Empty;
-            for (int i = 0; i < selection.Count; i++)
-            {
-                selection[i].GetEditorSphere(out var sphere);
-                BoundingSphere.Merge(ref mergesSphere, ref sphere, out mergesSphere);
-            }
-
-            if (mergesSphere == BoundingSphere.Empty)
-                return;
-            ShowSphere(ref mergesSphere, ref orientation);
-        }
-
-        /// <summary>
-        /// Moves the camera to visualize given world area defined by the sphere.
-        /// </summary>
-        /// <param name="sphere">The sphere.</param>
-        public void ShowSphere(ref BoundingSphere sphere)
-        {
-            var q = new Quaternion(0.424461186f, -0.0940724313f, 0.0443938486f, 0.899451137f);
-            ShowSphere(ref sphere, ref q);
-        }
-
-        /// <summary>
-        /// Moves the camera to visualize given world area defined by the sphere.
-        /// </summary>
-        /// <param name="sphere">The sphere.</param>
-        /// <param name="orientation">The camera orientation.</param>
-        public void ShowSphere(ref BoundingSphere sphere, ref Quaternion orientation)
+        /// <inheritdoc />
+        public override void ShowSphere(ref BoundingSphere sphere, ref Quaternion orientation)
         {
             Vector3 position;
             if (Viewport.UseOrthographicProjection)
             {
                 position = sphere.Center + Vector3.Backward * orientation * (sphere.Radius * 5.0f);
-                Viewport.OrthographicScale = Vector3.Distance(position, sphere.Center) / 1000;
+                Viewport.OrthographicScale = (float)Vector3.Distance(position, sphere.Center) / 1000;
             }
             else
             {
-                position = sphere.Center - Vector3.Forward * orientation * (sphere.Radius * 2.5f);
+                // calculate the min. distance so that the sphere fits roughly 70% in FOV
+                // clip to far plane as a disappearing big object might be confusing
+                var distance = Mathf.Min(1.4f * sphere.Radius / Mathf.Tan(Mathf.DegreesToRadians * Viewport.FieldOfView / 2), Viewport.FarPlane);
+                position = sphere.Center - Vector3.Forward * orientation * distance;
             }
             TargetPoint = sphere.Center;
             MoveViewport(position, orientation);
         }
 
         /// <inheritdoc />
-        public override void SetArcBallView(Quaternion orientation, Vector3 orbitCenter, float orbitRadius)
+        public override void SetArcBallView(Quaternion orientation, Vector3 orbitCenter, Real orbitRadius)
         {
             base.SetArcBallView(orientation, orbitCenter, orbitRadius);
 
@@ -201,17 +140,28 @@ namespace FlaxEditor.Viewport.Cameras
                 }
 
                 // Animate camera
-                float a = Mathf.Saturate(progress);
-                a = a * a * a;
-                Transform targetTransform = Transform.Lerp(_startMove, _endMove, a);
-                targetTransform.Scale = Vector3.Zero;
-                Viewport.ViewPosition = targetTransform.Translation;
-                Viewport.ViewOrientation = targetTransform.Orientation;
+                try
+                {
+                    float a = Mathf.Saturate(progress);
+                    a = a * a * a;
+                    var targetTransform = Transform.Lerp(_startMove, _endMove, a);
+                    if (progress >= 1.0f)
+                        targetTransform = _endMove; // Be precise
+                    targetTransform.Scale = Vector3.Zero;
+                    Viewport.ViewPosition = targetTransform.Translation;
+                    Viewport.ViewOrientation = targetTransform.Orientation;
+                }
+                catch
+                {
+                    // Fix camera if lerp failed (eg. large world with NaNs inside)
+                    Viewport.ViewPosition = Vector3.Zero;
+                    Viewport.ViewOrientation = Quaternion.Identity;
+                }
             }
         }
 
         /// <inheritdoc />
-        public override void UpdateView(float dt, ref Vector3 moveDelta, ref Vector2 mouseDelta, out bool centerMouse)
+        public override void UpdateView(float dt, ref Vector3 moveDelta, ref Float2 mouseDelta, out bool centerMouse)
         {
             centerMouse = true;
 
@@ -244,7 +194,10 @@ namespace FlaxEditor.Viewport.Cameras
             // Pan
             if (input.IsPanning)
             {
-                var panningSpeed = 0.8f;
+                var panningSpeed = (Viewport.RelativePanning)
+                    ? Mathf.Abs((position - TargetPoint).Length) * 0.005f
+                    : Viewport.PanningSpeed;
+
                 if (Viewport.InvertPanning)
                 {
                     position += up * (mouseDelta.Y * panningSpeed);
@@ -273,7 +226,7 @@ namespace FlaxEditor.Viewport.Cameras
                 pitch += mouseDelta.Y;
             }
 
-            // Zoom in/out
+            // Zoom in/out with mouse wheel
             if (input.IsZooming && !input.IsRotating)
             {
                 position += forward * (Viewport.MouseWheelZoomSpeedFactor * input.MouseWheelDelta * 25.0f);
@@ -281,6 +234,17 @@ namespace FlaxEditor.Viewport.Cameras
                 {
                     position += forward * (Viewport.MouseSpeed * 40 * Viewport.MousePositionDelta.ValuesSum);
                 }
+            }
+
+            // Zoom in and out by changing FOV
+            if (input.IsRotating && (input.ZoomInDown || input.ZoomOutDown))
+            {
+                float delta = (input.ZoomInDown ? -0.8f : 0.8f);
+                AdditionalZoomFOV += delta;
+            }
+            else if (!input.IsRotating)
+            {
+                AdditionalZoomFOV = 0f;
             }
 
             // Move camera with the gizmo
@@ -296,7 +260,7 @@ namespace FlaxEditor.Viewport.Cameras
             Viewport.Pitch = pitch;
             if (input.IsOrbiting)
             {
-                float orbitRadius = Mathf.Max(Vector3.Distance(ref position, ref TargetPoint), 0.0001f);
+                float orbitRadius = Mathf.Max((float)Vector3.Distance(ref position, ref TargetPoint), 0.0001f);
                 Vector3 localPosition = Viewport.ViewDirection * (-1 * orbitRadius);
                 Viewport.ViewPosition = TargetPoint + localPosition;
             }

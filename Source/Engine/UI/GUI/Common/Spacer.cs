@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
@@ -6,6 +6,7 @@ namespace FlaxEngine.GUI
     /// Helper control used to insert blank space into the layout.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public sealed class Spacer : ContainerControl
     {
         /// <summary>
@@ -25,6 +26,14 @@ namespace FlaxEngine.GUI
         : base(0, 0, width, height)
         {
             AutoFocus = false;
+        }
+
+        /// <inheritdoc />
+        public override bool ContainsPoint(ref Float2 location, bool precise = false)
+        {
+            if (precise) // Ignore as visual-only element
+                return false;
+            return base.ContainsPoint(ref location, precise);
         }
     }
 }

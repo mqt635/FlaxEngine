@@ -1,17 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "ShaderCompilationContext.h"
 #include "Engine/Graphics/Config.h"
 
-#if GPU_USE_SHADERS_DEBUG_LAYER && COMPILE_WITH_SHADER_COMPILER
+#if GPU_ENABLE_SHADERS_DEBUG_LAYER && COMPILE_WITH_SHADER_COMPILER
 
 #include "Engine/Platform/File.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Serialization/MemoryWriteStream.h"
 #include "Engine/Core/Types/StringBuilder.h"
 #include "Engine/Engine/Globals.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "Parser/ShaderMeta.h"
 
 /// <summary>
@@ -28,6 +29,7 @@ public:
     /// <returns>True if failed, otherwise false</returns>
     static bool Export(ShaderCompilationContext* context)
     {
+        PROFILE_CPU();
 #if USE_EDITOR
         static String ShadersDebugInfoFolder = Globals::ProjectCacheFolder / TEXT("Shaders/Debug");
 #else

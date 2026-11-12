@@ -1,6 +1,5 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-using FlaxEditor.GUI.Input;
 using FlaxEngine;
 using Object = FlaxEngine.Object;
 
@@ -56,30 +55,20 @@ namespace FlaxEditor.Viewport.Previews
             // Link actors for rendering
             Task.AddCustomActor(StaticModel);
             Task.AddCustomActor(AnimatedModel);
+        }
 
-            if (useWidgets)
-            {
-                // Preview LOD
-                {
-                    var previewLOD = ViewWidgetButtonMenu.AddButton("Preview LOD");
-                    var previewLODValue = new IntValueBox(-1, 90, 2, 70.0f, -1, 10, 0.02f)
-                    {
-                        Parent = previewLOD
-                    };
-                    previewLODValue.ValueChanged += () =>
-                    {
-                        StaticModel.ForcedLOD = previewLODValue.Value;
-                        AnimatedModel.ForcedLOD = previewLODValue.Value;
-                    };
-                    ViewWidgetButtonMenu.VisibleChanged += control => previewLODValue.Value = StaticModel.ForcedLOD;
-                }
-            }
+        /// <summary>
+        /// Resets the camera to focus on a object.
+        /// </summary>
+        public void ResetCamera()
+        {
+            ViewportCamera.SetArcBallView(StaticModel.Model != null ? StaticModel.BoundingBox : AnimatedModel.BoundingBox);
         }
 
         private void OnBegin(RenderTask task, GPUContext context)
         {
             var position = Vector3.Zero;
-            var scale = Vector3.One;
+            var scale = Float3.One;
 
             // Update preview model scale to fit the preview
             var model = Asset;
@@ -87,8 +76,8 @@ namespace FlaxEditor.Viewport.Previews
             {
                 float targetSize = 50.0f;
                 BoundingBox box = model is Model ? ((Model)model).GetBox() : ((SkinnedModel)model).GetBox();
-                float maxSize = Mathf.Max(0.001f, box.Size.MaxValue);
-                scale = new Vector3(targetSize / maxSize);
+                float maxSize = Mathf.Max(0.001f, (float)box.Size.MaxValue);
+                scale = new Float3(targetSize / maxSize);
                 position = box.Center * (-0.5f * scale.X) + new Vector3(0, -10, 0);
             }
 
@@ -102,8 +91,7 @@ namespace FlaxEditor.Viewport.Previews
             switch (key)
             {
             case KeyboardKeys.F:
-                // Pay respect..
-                ViewportCamera.SetArcBallView(StaticModel.Model != null ? StaticModel.Box : AnimatedModel.Box);
+                ResetCamera();
                 break;
             }
             return base.OnKeyDown(key);

@@ -1,4 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System;
+using System.Collections.Generic;
 
 namespace FlaxEngine.GUI
 {
@@ -10,7 +13,9 @@ namespace FlaxEngine.GUI
     public sealed class CanvasRootControl : RootControl
     {
         private UICanvas _canvas;
-        private Vector2 _mousePosition;
+        private Float2 _mousePosition;
+        private float _navigationHeldTimeUp, _navigationHeldTimeDown, _navigationHeldTimeLeft, _navigationHeldTimeRight, _navigationHeldTimeSubmit;
+        private float _navigationRateTimeUp, _navigationRateTimeDown, _navigationRateTimeLeft, _navigationRateTimeRight, _navigationRateTimeSubmit;
 
         /// <summary>
         /// Gets the owning canvas.
@@ -20,12 +25,12 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets a value indicating whether canvas is 2D (screen-space).
         /// </summary>
-        public bool Is2D => _canvas.RenderMode == CanvasRenderMode.ScreenSpace;
+        public bool Is2D => _canvas.Is2D;
 
         /// <summary>
         /// Gets a value indicating whether canvas is 3D (world-space or camera-space).
         /// </summary>
-        public bool Is3D => _canvas.RenderMode != CanvasRenderMode.ScreenSpace;
+        public bool Is3D => _canvas.Is3D;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CanvasRootControl"/> class.
@@ -35,6 +40,43 @@ namespace FlaxEngine.GUI
         {
             _canvas = canvas;
         }
+
+        /// <summary>
+        /// Checks if the 3D canvas intersects with a given 3D mouse ray.
+        /// </summary>
+        /// <param name="ray">The input ray to test (in world-space).</param>
+        /// <param name="canvasLocation">Output canvas-space local position.</param>
+        /// <param name="precise">True if perform precise intersection test against the control content (eg. with hit mask or transparency threshold). Otherwise, only simple bounds-check will be performed.</param>
+        /// <returns>True if canvas intersects with that point, otherwise false.</returns>
+        public bool Intersects3D(ref Ray ray, out Float2 canvasLocation, bool precise = false)
+        {
+            // Inline bounds calculations (it will reuse world matrix)
+            var bounds = new OrientedBoundingBox
+            {
+                Extents = new Vector3(Size * 0.5f, Mathf.Epsilon)
+            };
+
+            _canvas.GetWorldMatrix(out var world);
+            Matrix.Translation((float)bounds.Extents.X, (float)bounds.Extents.Y, 0, out var offset);
+            Matrix.Multiply(ref offset, ref world, out var boxWorld);
+            boxWorld.Decompose(out bounds.Transformation);
+
+            // Hit test
+            if (bounds.Intersects(ref ray, out Vector3 hitPoint))
+            {
+                // Transform world-space hit point to canvas local-space
+                world.Invert();
+                Vector3.Transform(ref hitPoint, ref world, out Vector3 localHitPoint);
+
+                canvasLocation = new Float2(localHitPoint);
+                return ContainsPoint(ref canvasLocation, precise);
+            }
+
+            canvasLocation = Float2.Zero;
+            return false;
+        }
+
+        private bool SkipEvents => !_canvas.ReceivesEvents || !_canvas.IsVisible();
 
         /// <inheritdoc />
         public override CursorType Cursor
@@ -55,10 +97,10 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 TrackingMouseOffset => Vector2.Zero;
+        public override Float2 TrackingMouseOffset => Float2.Zero;
 
         /// <inheritdoc />
-        public override Vector2 MousePosition
+        public override Float2 MousePosition
         {
             get => _mousePosition;
             set { }
@@ -67,13 +109,29 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void StartTrackingMouse(Control control, bool useMouseScreenOffset)
         {
-            // Not used in games (editor-only feature)
+            var parent = Parent?.Root;
+            parent?.StartTrackingMouse(control, useMouseScreenOffset);
         }
 
         /// <inheritdoc />
         public override void EndTrackingMouse()
         {
-            // Not used in games (editor-only feature)
+            var parent = Parent?.Root;
+            parent?.EndTrackingMouse();
+        }
+
+        /// <inheritdoc />
+        public override void StartTextInput()
+        {
+            var parent = Parent?.Root;
+            parent?.StartTextInput();
+        }
+
+        /// <inheritdoc />
+        public override void EndTextInput()
+        {
+            var parent = Parent?.Root;
+            parent?.EndTextInput();
         }
 
         /// <inheritdoc />
@@ -113,7 +171,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override Vector2 PointToParent(ref Vector2 location)
+        public override Float2 PointToParent(ref Float2 location)
         {
             if (Is2D)
                 return base.PointToParent(ref location);
@@ -131,34 +189,161 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool ContainsPoint(ref Vector2 location)
+        public override Float2 PointFromParent(ref Float2 locationParent)
         {
-            return base.ContainsPoint(ref location)
+            if (Is2D)
+                return base.PointFromParent(ref locationParent);
+
+            var camera = Camera.MainCamera;
+            if (!camera)
+                return locationParent;
+
+            // Use world-space ray to convert it to the local-space of the canvas
+            UICanvas.CalculateRay(ref locationParent, out Ray ray);
+            Intersects3D(ref ray, out var location);
+            return location;
+        }
+
+        /// <inheritdoc />
+        public override bool ContainsPoint(ref Float2 location, bool precise)
+        {
+            return base.ContainsPoint(ref location, precise)
                    && (_canvas.TestCanvasIntersection == null || _canvas.TestCanvasIntersection(ref location));
+        }
+
+        /// <inheritdoc />
+        public override void GetDesireClientArea(out Rectangle rect)
+        {
+            var size = Size;
+            var viewportRect = _canvas.ViewportRect;
+            rect = new Rectangle(size * new Float2(viewportRect.X, viewportRect.Y), size * new Float2(viewportRect.Z, viewportRect.W));
+        }
+
+        /// <inheritdoc />
+        public override void Update(float deltaTime)
+        {
+            base.Update(deltaTime);
+
+            // Update navigation
+            if (SkipEvents)
+            {
+                _navigationHeldTimeUp = _navigationHeldTimeDown = _navigationHeldTimeLeft = _navigationHeldTimeRight = 0;
+                _navigationRateTimeUp = _navigationRateTimeDown = _navigationRateTimeLeft = _navigationRateTimeRight = 0;
+                return;
+            }
+            if (ContainsFocus || IndexInParent == 0)
+            {
+                UpdateNavigation(deltaTime, _canvas.NavigateUp.Name, NavDirection.Up, ref _navigationHeldTimeUp, ref _navigationRateTimeUp);
+                UpdateNavigation(deltaTime, _canvas.NavigateDown.Name, NavDirection.Down, ref _navigationHeldTimeDown, ref _navigationRateTimeDown);
+                UpdateNavigation(deltaTime, _canvas.NavigateLeft.Name, NavDirection.Left, ref _navigationHeldTimeLeft, ref _navigationRateTimeLeft);
+                UpdateNavigation(deltaTime, _canvas.NavigateRight.Name, NavDirection.Right, ref _navigationHeldTimeRight, ref _navigationRateTimeRight);
+                UpdateNavigation(deltaTime, _canvas.NavigateSubmit.Name, ref _navigationHeldTimeSubmit, ref _navigationRateTimeSubmit, SubmitFocused);
+            }
+        }
+
+        private void ConditionalNavigate(NavDirection direction)
+        {
+            // Only currently focused canvas updates its navigation
+            if (!ContainsFocus)
+            {
+                // Special case when no canvas nor game UI is focused so let the first canvas to start the navigation into the UI
+                if (IndexInParent == 0 && Parent is CanvasContainer canvasContainer && !canvasContainer.ContainsFocus && GameRoot.ContainsFocus)
+                {
+                    // Nothing is focused so go to the first control
+                    var focused = OnNavigate(direction, Float2.Zero, this, new List<Control>());
+                    focused?.NavigationFocus();
+                    return;
+                }
+            }
+            Navigate(direction);
+        }
+
+        private void UpdateNavigation(float deltaTime, string actionName, NavDirection direction, ref float heldTime, ref float rateTime)
+        {
+            if (Input.GetAction(actionName))
+            {
+                if (heldTime <= Mathf.Epsilon)
+                {
+                    ConditionalNavigate(direction);
+                }
+                if (heldTime > _canvas.NavigationInputRepeatDelay)
+                {
+                    rateTime += deltaTime;
+                }
+                if (rateTime > _canvas.NavigationInputRepeatRate)
+                {
+                    ConditionalNavigate(direction);
+                    rateTime = 0;
+                }
+                heldTime += deltaTime;
+            }
+            else
+            {
+                heldTime = rateTime = 0;
+            }
+        }
+
+        private void UpdateNavigation(float deltaTime, string actionName, ref float heldTime, ref float rateTime, Action action)
+        {
+            if (Input.GetAction(actionName))
+            {
+                if (heldTime <= Mathf.Epsilon)
+                {
+                    action();
+                }
+                if (heldTime > _canvas.NavigationInputRepeatDelay)
+                {
+                    rateTime += deltaTime;
+                }
+                if (rateTime > _canvas.NavigationInputRepeatRate)
+                {
+                    action();
+                    rateTime = 0;
+                }
+                heldTime += deltaTime;
+            }
+            else
+            {
+                heldTime = rateTime = 0;
+            }
+        }
+        
+        /// <inheritdoc />
+        public override void OnGotFocus()
+        {
+            StartTextInput();
+            base.OnGotFocus();
+        }
+
+        /// <inheritdoc />
+        public override void OnLostFocus()
+        {
+            EndTextInput();
+            base.OnLostFocus();
         }
 
         /// <inheritdoc />
         public override bool OnCharInput(char c)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnCharInput(c);
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragDrop(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragDrop(ref Float2 location, DragData data)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return DragDropEffect.None;
 
             return base.OnDragDrop(ref location, data);
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragEnter(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragEnter(ref Float2 location, DragData data)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return DragDropEffect.None;
 
             return base.OnDragEnter(ref location, data);
@@ -167,16 +352,16 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void OnDragLeave()
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             base.OnDragLeave();
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragMove(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragMove(ref Float2 location, DragData data)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return DragDropEffect.None;
 
             return base.OnDragMove(ref location, data);
@@ -185,7 +370,7 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override bool OnKeyDown(KeyboardKeys key)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnKeyDown(key);
@@ -194,34 +379,34 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void OnKeyUp(KeyboardKeys key)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             base.OnKeyUp(key);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDoubleClick(Vector2 location, MouseButton button)
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnMouseDoubleClick(location, button);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnMouseDown(location, button);
         }
 
         /// <inheritdoc />
-        public override void OnMouseEnter(Vector2 location)
+        public override void OnMouseEnter(Float2 location)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             _mousePosition = location;
@@ -231,18 +416,17 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void OnMouseLeave()
         {
-            _mousePosition = Vector2.Zero;
-
-            if (!_canvas.ReceivesEvents)
+            _mousePosition = Float2.Zero;
+            if (SkipEvents)
                 return;
 
             base.OnMouseLeave();
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             _mousePosition = location;
@@ -250,54 +434,54 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnMouseUp(location, button);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseWheel(Vector2 location, float delta)
+        public override bool OnMouseWheel(Float2 location, float delta)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnMouseWheel(location, delta);
         }
 
         /// <inheritdoc />
-        public override void OnTouchEnter(Vector2 location, int pointerId)
+        public override void OnTouchEnter(Float2 location, int pointerId)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             base.OnTouchEnter(location, pointerId);
         }
 
         /// <inheritdoc />
-        public override bool OnTouchDown(Vector2 location, int pointerId)
+        public override bool OnTouchDown(Float2 location, int pointerId)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnTouchDown(location, pointerId);
         }
 
         /// <inheritdoc />
-        public override void OnTouchMove(Vector2 location, int pointerId)
+        public override void OnTouchMove(Float2 location, int pointerId)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             base.OnTouchMove(location, pointerId);
         }
 
         /// <inheritdoc />
-        public override bool OnTouchUp(Vector2 location, int pointerId)
+        public override bool OnTouchUp(Float2 location, int pointerId)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return false;
 
             return base.OnTouchUp(location, pointerId);
@@ -306,7 +490,7 @@ namespace FlaxEngine.GUI
         /// <inheritdoc />
         public override void OnTouchLeave(int pointerId)
         {
-            if (!_canvas.ReceivesEvents)
+            if (SkipEvents)
                 return;
 
             base.OnTouchLeave(pointerId);

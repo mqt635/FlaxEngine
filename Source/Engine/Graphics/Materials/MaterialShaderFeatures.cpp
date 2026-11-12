@@ -1,136 +1,144 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MaterialShaderFeatures.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
+#include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
 #include "Engine/Renderer/RenderList.h"
-#include "Engine/Renderer/ShadowsPass.h"
+#include "Engine/Renderer/Lighting/ShadowsPass.h"
+#include "Engine/Renderer/Utils/GlobalSignDistanceFieldPass.h"
 #if USE_EDITOR
 #include "Engine/Renderer/Lightmaps.h"
 #endif
+#include "Engine/Content/Content.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Level/Scene/Lightmap.h"
 #include "Engine/Level/Actors/EnvironmentProbe.h"
+#include "Engine/Renderer/Reflections/ReflectionsPass.h"
 
 void ForwardShadingFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv)
 {
-    auto context = params.GPUContext;
     auto cache = params.RenderContext.List;
     auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
+    auto& drawCall = *params.DrawCall;
     auto& data = *(Data*)cb.Get();
     ASSERT_LOW_LAYER(cb.Length() >= sizeof(Data));
     const int32 envProbeShaderRegisterIndex = srv + 0;
     const int32 skyLightShaderRegisterIndex = srv + 1;
-    const int32 dirLightShaderRegisterIndex = srv + 2;
+    const int32 shadowsBufferRegisterIndex = srv + 2;
+    const int32 shadowMapShaderRegisterIndex = srv + 3;
+    const int32 volumetricFogTextureRegisterIndex = srv + 4;
+    const int32 preIntegratedGFRegisterIndex = srv + 5;
+    const bool canUseShadow = view.Pass != DrawPass::Depth;
 
     // Set fog input
-    if (cache->Fog)
-    {
-        cache->Fog->GetExponentialHeightFogData(view, data.ExponentialHeightFog);
-    }
-    else
-    {
-        data.ExponentialHeightFog.FogMinOpacity = 1.0f;
-        data.ExponentialHeightFog.ApplyDirectionalInscattering = 0.0f;
-    }
+    data.ExponentialHeightFog = cache->Fog.ExponentialHeightFogData;
+    data.VolumetricFogData = cache->Fog.VolumetricFogData;
+    params.GPUContext->BindSR(volumetricFogTextureRegisterIndex, cache->Fog.VolumetricFogTexture);
 
     // Set directional light input
+    GPUTexture* shadowMapAtlas = nullptr;
     if (cache->DirectionalLights.HasItems())
     {
         const auto& dirLight = cache->DirectionalLights.First();
-        const auto shadowPass = ShadowsPass::Instance();
-        const bool useShadow = shadowPass->LastDirLightIndex == 0;
-        if (useShadow)
-        {
-            data.DirectionalLightShadow = shadowPass->LastDirLight;
-            context->BindSR(dirLightShaderRegisterIndex, shadowPass->LastDirLightShadowMap);
-        }
-        else
-        {
-            context->UnBindSR(dirLightShaderRegisterIndex);
-        }
-        dirLight.SetupLightData(&data.DirectionalLight, view, useShadow);
+        GPUBufferView* shadowsBuffer;
+        ShadowsPass::GetShadowAtlas(params.RenderContext.Buffers, shadowMapAtlas, shadowsBuffer);
+        const bool useShadow = shadowMapAtlas && canUseShadow && dirLight.HasShadow;
+        dirLight.SetShaderData(data.DirectionalLight, useShadow);
+        params.GPUContext->BindSR(shadowsBufferRegisterIndex, shadowsBuffer);
     }
     else
     {
-        data.DirectionalLight.Color = Vector3::Zero;
-        data.DirectionalLight.CastShadows = 0.0f;
-        context->UnBindSR(dirLightShaderRegisterIndex);
+        Platform::MemoryClear(&data.DirectionalLight, sizeof(data.DirectionalLight));
+        params.GPUContext->UnBindSR(shadowsBufferRegisterIndex);
     }
+#if PLATFORM_WEB
+    // WebGPU expects the TextureSampleType::Depth but it will be default TextureSampleType::Float if shadow map atlas texture is missing so bind a dummy one
+    if (!shadowMapAtlas)
+    {
+        static GPUTexture* DummyShadowMap = nullptr;
+        if (!DummyShadowMap)
+        {
+            DummyShadowMap = GPUDevice::Instance->CreateTexture(TEXT("Dummy Shadow Map"));
+            DummyShadowMap->Init(GPUTextureDescription::New2D(1, 1, PixelFormat::D32_Float, GPUTextureFlags::ShaderResource | GPUTextureFlags::DepthStencil));
+            SetWebGPUTextureViewSampler(DummyShadowMap->View(), GPU_WEBGPU_SAMPLER_TYPE_DEPTH);
+        }
+        shadowMapAtlas = DummyShadowMap;
+    }
+#endif
+    params.GPUContext->BindSR(shadowMapShaderRegisterIndex, shadowMapAtlas);
 
     // Set sky light
     if (cache->SkyLights.HasItems())
     {
         auto& skyLight = cache->SkyLights.First();
-        skyLight.SetupLightData(&data.SkyLight, view, false);
-        const auto texture = skyLight.Image ? skyLight.Image->GetTexture() : nullptr;
-        context->BindSR(skyLightShaderRegisterIndex, GET_TEXTURE_VIEW_SAFE(texture));
+        skyLight.SetShaderData(data.SkyLight, false);
+        params.GPUContext->BindSR(skyLightShaderRegisterIndex, skyLight.CubemapImageView);
     }
     else
     {
         Platform::MemoryClear(&data.SkyLight, sizeof(data.SkyLight));
-        context->UnBindSR(skyLightShaderRegisterIndex);
+        params.GPUContext->UnBindSR(skyLightShaderRegisterIndex);
     }
 
     // Set reflection probe data
-    EnvironmentProbe* probe = nullptr;
+    bool noEnvProbe = true;
     // TODO: optimize env probe searching for a transparent material - use spatial cache for renderer to find it
+    const BoundingSphere objectBounds(drawCall.ObjectPosition, drawCall.ObjectRadius);
+    float minDistanceSq = MAX_float;
+    GPUTexture* envProbeTexture = nullptr;
     for (int32 i = 0; i < cache->EnvironmentProbes.Count(); i++)
     {
-        const auto p = cache->EnvironmentProbes[i];
-        if (p->GetSphere().Contains(drawCall.World.GetTranslation()) != ContainmentType::Disjoint)
+        const RenderEnvironmentProbeData& probe = cache->EnvironmentProbes.Get()[i];
+        const float sphereCullDistance = (float)objectBounds.Radius + probe.Radius;
+        const float distanceSq = Float3::DistanceSquared(probe.Position, objectBounds.Center);
+        if (distanceSq <= sphereCullDistance * sphereCullDistance && distanceSq < minDistanceSq)
         {
-            probe = p;
-            break;
+            noEnvProbe = false;
+            minDistanceSq = distanceSq;
+            envProbeTexture = probe.Texture;
+            probe.SetShaderData(data.EnvironmentProbe);
         }
     }
-    if (probe && probe->GetProbe())
-    {
-        probe->SetupProbeData(&data.EnvironmentProbe);
-        const auto texture = probe->GetProbe()->GetTexture();
-        context->BindSR(envProbeShaderRegisterIndex, GET_TEXTURE_VIEW_SAFE(texture));
-    }
-    else
-    {
-        data.EnvironmentProbe.Data1 = Vector4::Zero;
-        context->UnBindSR(envProbeShaderRegisterIndex);
-    }
+    if (noEnvProbe)
+        Platform::MemoryClear(&data.EnvironmentProbe, sizeof(data.EnvironmentProbe));
+    params.GPUContext->BindSR(envProbeShaderRegisterIndex, envProbeTexture);
+    // TODO: find a better way to find this texture (eg. cache GPUTextureView* handle within ForwardShading cache for a whole frame)
+    static AssetReference<Texture> PreIntegratedGF = Content::LoadAsyncInternal<Texture>(PRE_INTEGRATED_GF_ASSET_NAME);
+    params.GPUContext->BindSR(preIntegratedGFRegisterIndex, PreIntegratedGF->GetTexture());
 
     // Set local lights
     data.LocalLightsCount = 0;
+    // TODO: optimize lights searching for a transparent material - use spatial cache for renderer to find it
     for (int32 i = 0; i < cache->PointLights.Count() && data.LocalLightsCount < MaxLocalLights; i++)
     {
         const auto& light = cache->PointLights[i];
-        if (BoundingSphere(light.Position, light.Radius).Contains(drawCall.World.GetTranslation()) != ContainmentType::Disjoint)
+        if (objectBounds.Intersects(BoundingSphere(light.Position, light.Radius)))
         {
-            light.SetupLightData(&data.LocalLights[data.LocalLightsCount], view, false);
+            light.SetShaderData(data.LocalLights[data.LocalLightsCount], false);
             data.LocalLightsCount++;
         }
     }
     for (int32 i = 0; i < cache->SpotLights.Count() && data.LocalLightsCount < MaxLocalLights; i++)
     {
         const auto& light = cache->SpotLights[i];
-        if (BoundingSphere(light.Position, light.Radius).Contains(drawCall.World.GetTranslation()) != ContainmentType::Disjoint)
+        if (objectBounds.Intersects(BoundingSphere(light.Position, light.Radius)))
         {
-            light.SetupLightData(&data.LocalLights[data.LocalLightsCount], view, false);
+            light.SetShaderData(data.LocalLights[data.LocalLightsCount], false);
             data.LocalLightsCount++;
         }
     }
 
-    cb = Span<byte>(cb.Get() + sizeof(Data), cb.Length() - sizeof(Data));
+    cb = cb.Slice(sizeof(Data));
     srv += SRVs;
 }
 
 bool LightmapFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv)
 {
-    auto context = params.GPUContext;
-    auto& view = params.RenderContext.View;
-    auto& drawCall = *params.FirstDrawCall;
-    auto& data = *(Data*)cb.Get();
-    ASSERT_LOW_LAYER(cb.Length() >= sizeof(Data));
+    auto& drawCall = *params.DrawCall;
 
-    const bool useLightmap = view.Flags & ViewFlags::GI
-#if USE_EDITOR
+    const bool useLightmap = EnumHasAnyFlags(params.RenderContext.View.Flags, ViewFlags::GI)
+#if GPU_ENABLE_DEVELOPMENT
             && EnableLightmapsUsage
 #endif
             && drawCall.Surface.Lightmap != nullptr;
@@ -139,17 +147,116 @@ bool LightmapFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& c
         // Bind lightmap textures
         GPUTexture *lightmap0, *lightmap1, *lightmap2;
         drawCall.Features.Lightmap->GetTextures(&lightmap0, &lightmap1, &lightmap2);
-        context->BindSR(srv + 0, lightmap0);
-        context->BindSR(srv + 1, lightmap1);
-        context->BindSR(srv + 2, lightmap2);
-
-        // Set lightmap data
-        data.LightmapArea = drawCall.Features.LightmapUVsArea;
+        params.GPUContext->BindSR(srv + 0, lightmap0);
+        params.GPUContext->BindSR(srv + 1, lightmap1);
+        params.GPUContext->BindSR(srv + 2, lightmap2);
+    }
+    else
+    {
+        // Free texture slots
+        params.GPUContext->UnBindSR(srv + 0);
+        params.GPUContext->UnBindSR(srv + 1);
+        params.GPUContext->UnBindSR(srv + 2);
     }
 
-    cb = Span<byte>(cb.Get() + sizeof(Data), cb.Length() - sizeof(Data));
     srv += SRVs;
     return useLightmap;
+}
+
+bool GlobalIlluminationFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv)
+{
+    auto& data = *(Data*)cb.Get();
+    ASSERT_LOW_LAYER(cb.Length() >= sizeof(Data));
+
+    bool useGI = false;
+    if (EnumHasAnyFlags(params.RenderContext.View.Flags, ViewFlags::GI))
+    {
+        switch (params.RenderContext.List->Settings.GlobalIllumination.Mode)
+        {
+        case GlobalIlluminationMode::DDGI:
+        {
+            DynamicDiffuseGlobalIlluminationPass::BindingData bindingDataDDGI;
+            if (!DynamicDiffuseGlobalIlluminationPass::Instance()->Get(params.RenderContext.Buffers, bindingDataDDGI))
+            {
+                useGI = true;
+
+                // Bind DDGI data
+                data.DDGI = bindingDataDDGI.Constants;
+                params.GPUContext->BindSR(srv + 0, bindingDataDDGI.ProbesData);
+                params.GPUContext->BindSR(srv + 1, bindingDataDDGI.ProbesDistance);
+                params.GPUContext->BindSR(srv + 2, bindingDataDDGI.ProbesIrradiance);
+                params.GPUContext->BindSR(srv + 3, bindingDataDDGI.ProbesRadiance);
+            }
+            break;
+        }
+        }
+    }
+    if (!useGI)
+    {
+        // Unbind SRVs to prevent issues
+        data.DDGI.CascadesCount = 0;
+        data.DDGI.FallbackIrradiance = Float4::Zero;
+        params.GPUContext->UnBindSR(srv + 0);
+        params.GPUContext->UnBindSR(srv + 1);
+        params.GPUContext->UnBindSR(srv + 2);
+        params.GPUContext->UnBindSR(srv + 3);
+    }
+
+    cb = cb.Slice(sizeof(Data));
+    srv += SRVs;
+    return useGI;
+}
+
+bool SDFReflectionsFeature::Bind(MaterialShader::BindParameters& params, Span<byte>& cb, int32& srv)
+{
+    auto& data = *(Data*)cb.Get();
+    ASSERT_LOW_LAYER(cb.Length() >= sizeof(Data));
+
+    bool useSDFReflections = false;
+    if (EnumHasAnyFlags(params.RenderContext.View.Flags, ViewFlags::Reflections))
+    {
+        switch (params.RenderContext.List->Settings.ScreenSpaceReflections.TraceMode)
+        {
+        case ReflectionsTraceMode::SoftwareTracing:
+        {
+            GlobalSignDistanceFieldPass::BindingData bindingDataSDF;
+            GlobalSurfaceAtlasPass::BindingData bindingDataSurfaceAtlas;
+            if (!GlobalSignDistanceFieldPass::Instance()->Get(params.RenderContext.Buffers, bindingDataSDF) &&
+                !GlobalSurfaceAtlasPass::Instance()->Get(params.RenderContext.Buffers, bindingDataSurfaceAtlas))
+            {
+                useSDFReflections = true;
+
+                // Bind SDF and Surface Atlas data
+                data.GlobalSDF = bindingDataSDF.Constants;
+                data.GlobalSurfaceAtlas = bindingDataSurfaceAtlas.Constants;
+                params.GPUContext->BindSR(srv + 0, bindingDataSDF.Texture ? bindingDataSDF.Texture->ViewVolume() : nullptr);
+                params.GPUContext->BindSR(srv + 1, bindingDataSDF.TextureMip ? bindingDataSDF.TextureMip->ViewVolume() : nullptr);
+                params.GPUContext->BindSR(srv + 2, bindingDataSurfaceAtlas.Chunks ? bindingDataSurfaceAtlas.Chunks->View() : nullptr);
+                params.GPUContext->BindSR(srv + 3, bindingDataSurfaceAtlas.CulledObjects ? bindingDataSurfaceAtlas.CulledObjects->View() : nullptr);
+                params.GPUContext->BindSR(srv + 4, bindingDataSurfaceAtlas.Objects ? bindingDataSurfaceAtlas.Objects->View() : nullptr);
+                params.GPUContext->BindSR(srv + 5, bindingDataSurfaceAtlas.AtlasDepth->View());
+                params.GPUContext->BindSR(srv + 6, bindingDataSurfaceAtlas.AtlasLighting->View());
+            }
+            break;
+        }
+        }
+    }
+    if (!useSDFReflections)
+    {
+        // Unbind SRVs to prevent issues
+        data.GlobalSDF.CascadesCount = 0;
+        params.GPUContext->UnBindSR(srv + 0);
+        params.GPUContext->UnBindSR(srv + 1);
+        params.GPUContext->UnBindSR(srv + 2);
+        params.GPUContext->UnBindSR(srv + 3);
+        params.GPUContext->UnBindSR(srv + 4);
+        params.GPUContext->UnBindSR(srv + 5);
+        params.GPUContext->UnBindSR(srv + 6);
+    }
+
+    cb = cb.Slice(sizeof(Data));
+    srv += SRVs;
+    return useSDFReflections;
 }
 
 #if USE_EDITOR
@@ -172,6 +279,16 @@ void TessellationFeature::Generate(GeneratorData& data)
 void LightmapFeature::Generate(GeneratorData& data)
 {
     data.Template = TEXT("Features/Lightmap.hlsl");
+}
+
+void GlobalIlluminationFeature::Generate(GeneratorData& data)
+{
+    data.Template = TEXT("Features/GlobalIllumination.hlsl");
+}
+
+void SDFReflectionsFeature::Generate(GeneratorData& data)
+{
+    data.Template = TEXT("Features/SDFReflections.hlsl");
 }
 
 void DistortionFeature::Generate(GeneratorData& data)

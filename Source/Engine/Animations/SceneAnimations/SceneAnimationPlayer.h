@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,9 +11,10 @@
 /// <summary>
 /// The scene animation playback actor.
 /// </summary>
-API_CLASS() class FLAXENGINE_API SceneAnimationPlayer : public Actor, public IPostFxSettingsProvider
+API_CLASS(Attributes="ActorContextMenu(\"New/Animation/Scene Animation\"), ActorToolbox(\"Other\", \"Scene Animation\")")
+class FLAXENGINE_API SceneAnimationPlayer : public Actor, public IPostFxSettingsProvider
 {
-DECLARE_SCENE_OBJECT(SceneAnimationPlayer);
+    DECLARE_SCENE_OBJECT(SceneAnimationPlayer);
 
     /// <summary>
     /// Describes the scene animation updates frequency.
@@ -32,7 +33,6 @@ DECLARE_SCENE_OBJECT(SceneAnimationPlayer);
     };
 
 private:
-
     enum class PlayState
     {
         Stopped,
@@ -43,11 +43,12 @@ private:
     struct TrackInstance
     {
         ScriptingObjectReference<ScriptingObject> Object;
-        MonoObject* ManagedObject = nullptr;
+        MObject* ManagedObject = nullptr;
         MProperty* Property = nullptr;
         MField* Field = nullptr;
-        void* Method = nullptr;
+        MMethod* Method = nullptr;
         int32 RestoreStateIndex = -1;
+        bool Warn = true;
 
         TrackInstance()
         {
@@ -73,7 +74,6 @@ private:
     } _postFxSettings;
 
 public:
-
     /// <summary>
     /// The scene animation to play.
     /// </summary>
@@ -128,8 +128,13 @@ public:
     API_FIELD(Attributes="EditorDisplay(\"Scene Animation\"), EditorOrder(80), DefaultValue(UpdateModes.EveryUpdate)")
     UpdateModes UpdateMode = UpdateModes::EveryUpdate;
 
-public:
+    /// <summary>
+    /// Determines whether the scene animation should automatically map prefab objects from scene animation into prefab instances. Useful for reusable animations to automatically link prefab objects.
+    /// </summary>
+    API_FIELD(Attributes="EditorDisplay(\"Scene Animation\"), EditorOrder(100)")
+    bool UsePrefabObjects = false;
 
+public:
     /// <summary>
     /// Gets the value that determines whether the scene animation is playing.
     /// </summary>
@@ -202,7 +207,6 @@ public:
     API_FUNCTION() void MapTrack(const StringView& from, const Guid& to);
 
 private:
-
     void Restore(SceneAnimation* anim, int32 stateIndexOffset);
     bool TickPropertyTrack(int32 trackIndex, int32 stateIndexOffset, SceneAnimation* anim, float time, const SceneAnimation::Track& track, TrackInstance& state, void* target);
     typedef Array<SceneAnimation*, FixedAllocation<8>> CallStack;
@@ -212,13 +216,12 @@ private:
     void ResetState();
 
 public:
-
     // [Actor]
     bool HasContentLoaded() const override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 #if USE_EDITOR
-    BoundingBox GetEditorBox() const override
+    BoundingBox GetEditorBoundingBox() const override
     {
         const Vector3 size(50);
         return BoundingBox(_transform.Translation - size, _transform.Translation + size);
@@ -230,7 +233,6 @@ public:
     void Blend(PostProcessSettings& other, float weight) override;
 
 protected:
-
     // [Actor]
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;

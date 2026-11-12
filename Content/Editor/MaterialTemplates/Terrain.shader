@@ -2,6 +2,8 @@
 // Version: @0
 
 #define MATERIAL 1
+#define USE_PER_VIEW_CONSTANTS 1
+#define LoadObjectFromCB(var) var = GetObject()
 @3
 // Enables/disables smooth terrain chunks LOD transitions (with morphing higher LOD near edges to the lower LOD in the neighbour)
 #define USE_SMOOTH_LOD_TRANSITION 1
@@ -13,18 +15,11 @@
 #include "./Flax/Common.hlsl"
 #include "./Flax/MaterialCommon.hlsl"
 #include "./Flax/GBufferCommon.hlsl"
+#include "./Flax/TerrainCommon.hlsl"
 @7
 // Primary constant buffer (with additional material parameters)
 META_CB_BEGIN(0, Data)
-float4x4 ViewProjectionMatrix;
-float4x4 WorldMatrix;
-float4x4 ViewMatrix;
-float3 ViewPos;
-float ViewFar;
-float3 ViewDir;
-float TimeParam;
-float4 ViewInfo;
-float4 ScreenSize;
+float4x3 WorldMatrix;
 float3 WorldInvScale;
 float WorldDeterminantSign;
 float PerInstanceRandom;
@@ -35,6 +30,7 @@ float4 HeightmapUVScaleBias;
 float4 NeighborLOD;
 float2 OffsetUV;
 float2 Dummy0;
+float4 LightmapArea;
 @1META_CB_END
 
 // Terrain data
@@ -95,6 +91,7 @@ struct MaterialInput
 	float3 PreSkinnedPosition;
 	float3 PreSkinnedNormal;
 	float HolesMask;
+	ObjectData Object;
 #if USE_TERRAIN_LAYERS
 	float4 Layers[TERRAIN_LAYERS_DATA_SIZE];
 #endif
@@ -154,9 +151,23 @@ GeometryData InterpolateGeometry(GeometryData p0, float w0, GeometryData p1, flo
 
 #endif
 
+ObjectData GetObject()
+{
+    ObjectData object = (ObjectData)0;
+    object.WorldMatrix = ToMatrix4x4(WorldMatrix);
+    object.PrevWorldMatrix = object.WorldMatrix;
+    object.GeometrySize = float3(1, 1, 1);
+    object.PerInstanceRandom = PerInstanceRandom;
+    object.WorldDeterminantSign = WorldDeterminantSign;
+    object.LODDitherFactor = 0.0f;
+    object.LightmapArea = LightmapArea;
+    return object;
+}
+
 MaterialInput GetMaterialInput(PixelInput input)
 {
 	MaterialInput output = GetGeometryMaterialInput(input.Geometry);
+	output.Object = GetObject();
 	output.TwoSidedSign = WorldDeterminantSign * (input.IsFrontFace ? 1.0 : -1.0);
 	output.SvPosition = input.Position;
 #if USE_CUSTOM_VERTEX_INTERPOLATORS
@@ -201,7 +212,7 @@ float3 TransformViewVectorToWorld(MaterialInput input, float3 viewVector)
 // Transforms a vector from local space to world space
 float3 TransformLocalVectorToWorld(MaterialInput input, float3 localVector)
 {
-	float3x3 localToWorld = (float3x3)WorldMatrix;
+	float3x3 localToWorld = (float3x3)ToMatrix4x4(WorldMatrix);
 	//localToWorld = RemoveScaleFromLocalToWorld(localToWorld);
 	return mul(localVector, localToWorld);
 }
@@ -209,7 +220,7 @@ float3 TransformLocalVectorToWorld(MaterialInput input, float3 localVector)
 // Transforms a vector from local space to world space
 float3 TransformWorldVectorToLocal(MaterialInput input, float3 worldVector)
 {
-	float3x3 localToWorld = (float3x3)WorldMatrix;
+	float3x3 localToWorld = (float3x3)ToMatrix4x4(WorldMatrix);
 	//localToWorld = RemoveScaleFromLocalToWorld(localToWorld);
 	return mul(localToWorld, worldVector);
 }
@@ -217,11 +228,17 @@ float3 TransformWorldVectorToLocal(MaterialInput input, float3 worldVector)
 // Gets the current object position
 float3 GetObjectPosition(MaterialInput input)
 {
-	return WorldMatrix[3].xyz;
+	return ToMatrix4x4(WorldMatrix)[3].xyz;
 }
 
 // Gets the current object size
 float3 GetObjectSize(MaterialInput input)
+{
+	return float3(1, 1, 1);
+}
+
+// Gets the current object scale (supports instancing)
+float3 GetObjectScale(MaterialInput input)
 {
 	return float3(1, 1, 1);
 }
@@ -276,24 +293,16 @@ float CalcLOD(float2 xy, float4 morph)
 	if ((xy.x + xy.y) > 1)
 	{
 		if (xy.x < xy.y)
-		{
 			lod = lodCalculated.w;
-		}
 		else
-		{
 			lod = lodCalculated.z;
-		}
 	}
 	else
 	{
 		if (xy.x < xy.y)
-		{
 			lod = lodCalculated.y;
-		}
 		else
-		{
 			lod = lodCalculated.x;
-		}
 	}
 
 	return lod;
@@ -317,8 +326,6 @@ struct TerrainVertexInput
 
 // Vertex Shader function for terrain rendering
 META_VS(true, FEATURE_LEVEL_ES2)
-META_VS_IN_ELEMENT(TEXCOORD, 0, R32G32_FLOAT,   0, ALIGN, PER_VERTEX, 0, true)
-META_VS_IN_ELEMENT(TEXCOORD, 1, R8G8B8A8_UNORM, 0, ALIGN, PER_VERTEX, 0, true)
 VertexOutput VS(TerrainVertexInput input)
 {
 	VertexOutput output;
@@ -328,7 +335,7 @@ VertexOutput VS(TerrainVertexInput input)
 	float lodValue = CurrentLOD;
 	float morphAlpha = lodCalculated - CurrentLOD;
 
-	// Sample heightmap
+	// Sample heightmap and splatmaps
 	float2 heightmapUVs = input.TexCoord * HeightmapUVScaleBias.xy + HeightmapUVScaleBias.zw;
 #if USE_SMOOTH_LOD_TRANSITION
 	float4 heightmapValueThisLOD = Heightmap.SampleLevel(SamplerPointClamp, heightmapUVs, lodValue);
@@ -336,7 +343,6 @@ VertexOutput VS(TerrainVertexInput input)
 	float2 heightmapUVsNextLOD = nextLODPos * HeightmapUVScaleBias.xy + HeightmapUVScaleBias.zw;
 	float4 heightmapValueNextLOD = Heightmap.SampleLevel(SamplerPointClamp, heightmapUVsNextLOD, lodValue + 1);
 	float4 heightmapValue = lerp(heightmapValueThisLOD, heightmapValueNextLOD, morphAlpha);
-	bool isHole = max(heightmapValueThisLOD.b + heightmapValueThisLOD.a, heightmapValueNextLOD.b + heightmapValueNextLOD.a) >= 1.9f;
 #if USE_TERRAIN_LAYERS
 	float4 splatmapValueThisLOD = Splatmap0.SampleLevel(SamplerPointClamp, heightmapUVs, lodValue);
 	float4 splatmapValueNextLOD = Splatmap0.SampleLevel(SamplerPointClamp, heightmapUVsNextLOD, lodValue + 1);
@@ -349,7 +355,6 @@ VertexOutput VS(TerrainVertexInput input)
 #endif
 #else
 	float4 heightmapValue = Heightmap.SampleLevel(SamplerPointClamp, heightmapUVs, lodValue);
-	bool isHole = (heightmapValue.b + heightmapValue.a) >= 1.9f;
 #if USE_TERRAIN_LAYERS
 	float4 splatmap0Value = Splatmap0.SampleLevel(SamplerPointClamp, heightmapUVs, lodValue);
 #if TERRAIN_LAYERS_DATA_SIZE > 1
@@ -357,12 +362,11 @@ VertexOutput VS(TerrainVertexInput input)
 #endif
 #endif
 #endif
-	float height = (float)((int)(heightmapValue.x * 255.0) + ((int)(heightmapValue.y * 255) << 8)) / 65535.0;
+	float height = DecodeHeightmapHeight(heightmapValue);
 
 	// Extract normal and the holes mask
-	float2 normalTemp = float2(heightmapValue.b, heightmapValue.a) * 2.0f - 1.0f;
-	float3 normal = float3(normalTemp.x, sqrt(1.0 - saturate(dot(normalTemp, normalTemp))), normalTemp.y);
-	normal = normalize(normal);
+	bool isHole;
+	float3 normal = DecodeHeightmapNormal(heightmapValue, isHole);
 	output.Geometry.HolesMask = isHole ? 0 : 1;
 	if (isHole)
 	{
@@ -380,10 +384,11 @@ VertexOutput VS(TerrainVertexInput input)
 	float3 position = float3(positionXZ.x, height, positionXZ.y);
 
 	// Compute world space vertex position
-	output.Geometry.WorldPosition = mul(float4(position, 1), WorldMatrix).xyz;
+	float4x4 worldMatrix = ToMatrix4x4(WorldMatrix);
+	output.Geometry.WorldPosition = mul(float4(position, 1), worldMatrix).xyz;
 
 	// Compute clip space position
-	output.Position = mul(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
 
 	// Pass vertex attributes
 #if USE_SMOOTH_LOD_TRANSITION
@@ -404,12 +409,13 @@ VertexOutput VS(TerrainVertexInput input)
 
 	// Compute world space normal vector
 	float3x3 tangentToLocal = CalcTangentBasisFromWorldNormal(normal);
-	float3x3 tangentToWorld = CalcTangentToWorld(WorldMatrix, tangentToLocal);
+	float3x3 tangentToWorld = CalcTangentToWorld(worldMatrix, tangentToLocal);
 	output.Geometry.WorldNormal = tangentToWorld[2];
 
 	// Get material input params if need to evaluate any material property
 #if USE_POSITION_OFFSET || USE_TESSELLATION || USE_CUSTOM_VERTEX_INTERPOLATORS
 	MaterialInput materialInput = (MaterialInput)0;
+	materialInput.Object = GetObject();
 	materialInput.WorldPosition = output.Geometry.WorldPosition;
 	materialInput.TexCoord = output.Geometry.TexCoord;
 #if USE_LIGHTMAP
@@ -430,7 +436,7 @@ VertexOutput VS(TerrainVertexInput input)
 	// Apply world position offset per-vertex
 #if USE_POSITION_OFFSET
 	output.Geometry.WorldPosition += material.PositionOffset;
-	output.Position = mul(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(output.Geometry.WorldPosition, 1), ViewProjectionMatrix);
 #endif
 
 	// Get tessalation multiplier (per vertex)
@@ -457,5 +463,20 @@ void PS_Depth(PixelInput input)
 	clip(material.Mask - MATERIAL_MASK_THRESHOLD);
 #endif
 }
+
+#if _PS_QuadOverdraw
+
+#include "./Flax/Editor/QuadOverdraw.hlsl"
+
+// Pixel Shader function for Quad Overdraw Pass (development-only)
+[earlydepthstencil]
+META_PS(true, FEATURE_LEVEL_SM5)
+META_FLAG(DevelopmentOnly)
+void PS_QuadOverdraw(float4 svPos : SV_Position, uint primId : SV_PrimitiveID)
+{
+	DoQuadOverdraw(svPos, primId);
+}
+
+#endif
 
 @9

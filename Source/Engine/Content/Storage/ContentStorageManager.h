@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,14 +14,17 @@ class FlaxPackage;
 class FLAXENGINE_API ContentStorageManager
 {
 public:
+    /// <summary>
+    /// Auto-release timeout for unused asset files.
+    /// </summary>
+    static TimeSpan UnusedStorageLifetime;
 
     /// <summary>
-    /// Auto-release timeout for unused asset chunks.
+    /// Auto-release timeout for unused asset data chunks.
     /// </summary>
     static TimeSpan UnusedDataChunksLifetime;
 
 public:
-
     /// <summary>
     /// Gets the assets data storage container.
     /// </summary>
@@ -77,8 +80,10 @@ public:
     /// </summary>
     static void EnsureUnlocked();
 
-public:
+    // Formats path into valid format used by the storage system (normalized and absolute).
+    static void FormatPath(String& path);
 
+public:
     /// <summary>
     /// Determines whether the specified path can be a binary asset file (based on it's extension).
     /// </summary>
@@ -94,7 +99,6 @@ public:
     static bool IsFlaxStorageExtension(const String& extension);
 
 public:
-
     /// <summary>
     /// Gets the packages.
     /// </summary>

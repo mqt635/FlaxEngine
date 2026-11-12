@@ -1,10 +1,11 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Linq;
 using FlaxEditor.CustomEditors.Elements;
 using FlaxEditor.Scripting;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {

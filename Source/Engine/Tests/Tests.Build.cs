@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using Flax.Build;
+using Flax.Build.NativeCpp;
 
 /// <summary>
 /// Engine tests module.
@@ -12,6 +13,15 @@ public class Tests : EngineModule
     public Tests()
     {
         Deploy = false;
+    }
+
+    /// <inheritdoc />
+    public override void Setup(BuildOptions options)
+    {
+        base.Setup(options);
+
+        options.PrivateDependencies.Add("ModelTool");
+        options.PrivateDependencies.Add("ShadersCompilation");
     }
 
     /// <inheritdoc />

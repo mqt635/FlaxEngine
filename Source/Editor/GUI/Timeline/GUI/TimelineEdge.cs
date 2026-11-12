@@ -1,5 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System;
+using System.Globalization;
 using FlaxEditor.GUI.Timeline.Undo;
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -14,7 +16,7 @@ namespace FlaxEditor.GUI.Timeline.GUI
     {
         private Timeline _timeline;
         private bool _isMoving;
-        private Vector2 _startMoveLocation;
+        private Float2 _startMoveLocation;
         private int _startMoveDuration;
         private bool _isStart;
         private bool _canEdit;
@@ -40,14 +42,33 @@ namespace FlaxEditor.GUI.Timeline.GUI
             var timeAxisOverlap = Timeline.HeaderTopAreaHeight * 0.5f;
             var timeAxisHeaderOffset = -_timeline.MediaBackground.ViewOffset.Y - timeAxisOverlap;
 
-            var moveColor = style.ProgressNormal;
+            var moveColor = style.SelectionBorder;
             var thickness = 2.0f;
             var borderColor = _isMoving ? moveColor : (IsMouseOver && _canEdit ? Color.Yellow : style.BorderNormal);
             Render2D.FillRectangle(new Rectangle((Width - thickness) * 0.5f, timeAxisHeaderOffset, thickness, Height - timeAxisHeaderOffset), borderColor);
+            if (_canEdit && _isMoving)
+            {
+                // TODO: handle start
+                string labelText;
+                switch (_timeline.TimeShowMode)
+                {
+                case Timeline.TimeShowModes.Frames:
+                    labelText = _timeline.DurationFrames.ToString("###0", CultureInfo.InvariantCulture);
+                    break;
+                case Timeline.TimeShowModes.Seconds:
+                    labelText = _timeline.Duration.ToString("###0.##'s'", CultureInfo.InvariantCulture);
+                    break;
+                case Timeline.TimeShowModes.Time:
+                    labelText = TimeSpan.FromSeconds(_timeline.DurationFrames / _timeline.FramesPerSecond).ToString("g");
+                    break;
+                default: throw new ArgumentOutOfRangeException();
+                }
+                Render2D.DrawText(style.FontSmall, labelText, style.Foreground, new Float2((Width - thickness) * 0.5f + 4, timeAxisHeaderOffset));
+            }
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (base.OnMouseDown(location, button))
                 return true;
@@ -67,12 +88,12 @@ namespace FlaxEditor.GUI.Timeline.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
-            if (_isMoving)
+            if (_isMoving && !_timeline.RootWindow.Window.IsMouseFlippingHorizontally)
             {
                 var moveLocation = Root.MousePosition;
-                var moveLocationDelta = moveLocation - _startMoveLocation;
+                var moveLocationDelta = moveLocation - _startMoveLocation + _timeline.Root.TrackingMouseOffset.X;
                 var moveDelta = (int)(moveLocationDelta.X / (Timeline.UnitsPerSecond * _timeline.Zoom) * _timeline.FramesPerSecond);
                 var durationFrames = _timeline.DurationFrames;
 
@@ -83,21 +104,35 @@ namespace FlaxEditor.GUI.Timeline.GUI
                 else
                 {
                     _timeline.DurationFrames = _startMoveDuration + moveDelta;
+                    _timeline.MediaBackground.HScrollBar.Value = _timeline.MediaBackground.HScrollBar.Maximum;
                 }
 
                 if (_timeline.DurationFrames != durationFrames)
                 {
                     _timeline.MarkAsEdited();
                 }
+                Cursor = CursorType.SizeWE;
+            }
+            else if (IsMouseOver && _canEdit)
+            {
+                Cursor = CursorType.SizeWE;
             }
             else
             {
+                Cursor = CursorType.Default;
                 base.OnMouseMove(location);
             }
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override void OnMouseLeave()
+        {
+            Cursor = CursorType.Default;
+            base.OnMouseLeave();
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left && _isMoving)
             {
@@ -126,6 +161,7 @@ namespace FlaxEditor.GUI.Timeline.GUI
             {
                 EndMoving();
             }
+            Cursor = CursorType.Default;
 
             base.OnLostFocus();
         }
@@ -140,6 +176,7 @@ namespace FlaxEditor.GUI.Timeline.GUI
                     _timeline.DurationFrames = duration;
             }
             _isMoving = false;
+            _timeline.MediaBackground.HScrollBar.Value = _timeline.MediaBackground.HScrollBar.Maximum;
 
             EndMouseCapture();
         }

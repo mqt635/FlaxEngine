@@ -1,5 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.Collections.Generic;
+using System.IO;
 using Flax.Build;
 using Flax.Build.NativeCpp;
 
@@ -8,6 +10,8 @@ using Flax.Build.NativeCpp;
 /// </summary>
 public class volk : ThirdPartyModule
 {
+    private bool _missingSDKError;
+
     /// <inheritdoc />
     public override void Init()
     {
@@ -32,21 +36,38 @@ public class volk : ThirdPartyModule
             break;
         case TargetPlatform.Linux:
             options.PrivateDefinitions.Add("VK_USE_PLATFORM_XLIB_KHR");
+            options.PrivateDefinitions.Add("VK_USE_PLATFORM_WAYLAND_KHR");
             break;
         case TargetPlatform.Android:
             options.PublicDefinitions.Add("VK_USE_PLATFORM_ANDROID_KHR");
             break;
+        case TargetPlatform.Mac:
+            options.PublicDefinitions.Add("VK_USE_PLATFORM_MACOS_MVK");
+            options.PublicDefinitions.Add("VK_USE_PLATFORM_METAL_EXT");
+            break;
+        case TargetPlatform.iOS:
+            options.PublicDefinitions.Add("VK_USE_PLATFORM_IOS_MVK");
+            break;
         default: throw new InvalidPlatformException(options.Platform.Target);
         }
+        VulkanSdk.Instance.AddDependencyFiles(options);
 
         string includesFolderPath;
-        if (VulkanSdk.Instance.TryGetIncludePath(out includesFolderPath))
+        if (VulkanSdk.Instance.TryGetIncludePath(options.Platform.Target, out includesFolderPath))
         {
             options.PublicIncludePaths.Add(includesFolderPath);
         }
         else
         {
-            Log.Error("Missing VulkanSDK.");
+            Log.ErrorOnce("Missing VulkanSDK.", ref _missingSDKError);
         }
+    }
+
+    /// <inheritdoc />
+    public override void GetFilesToDeploy(List<string> files)
+    {
+        base.GetFilesToDeploy(files);
+
+        files.Add(Path.Combine(FolderPath, "volk.h"));
     }
 }

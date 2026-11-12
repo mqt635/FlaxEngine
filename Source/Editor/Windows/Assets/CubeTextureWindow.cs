@@ -1,5 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+using System.IO;
 using System.Xml;
 using FlaxEditor.Content;
 using FlaxEditor.Content.Import;
@@ -27,7 +28,7 @@ namespace FlaxEditor.Windows.Assets
             private CubeTextureWindow _window;
 
             [EditorOrder(1000), EditorDisplay("Import Settings", EditorDisplayAttribute.InlineStyle)]
-            public TextureImportSettings ImportSettings = new TextureImportSettings();
+            public FlaxEngine.Tools.TextureTool.Options ImportSettings = new();
 
             public sealed class ProxyEditor : GenericEditor
             {
@@ -45,16 +46,22 @@ namespace FlaxEditor.Windows.Assets
                         var texture = window.Asset;
 
                         var group = layout.Group("General");
-                        group.Label("Format: " + texture.Format);
-                        group.Label(string.Format("Size: {0}x{1}", texture.Width, texture.Height));
+                        var textureFormat = texture.Format;
+                        var gpuFormat = texture.Texture?.Format ?? textureFormat;
+                        group.Label(textureFormat != gpuFormat && gpuFormat != PixelFormat.Unknown ? $"Format: {textureFormat} ({gpuFormat})" : $"Format: {textureFormat}");
+                        group.Label(string.Format("Size: {0}x{1}", texture.Width, texture.Height)).AddCopyContextMenu();
                         group.Label("Mip levels: " + texture.MipLevels);
                         group.Label("Memory usage: " + Utilities.Utils.FormatBytesCount(texture.TotalMemoryUsage));
                     }
 
                     base.Initialize(layout);
 
-                    layout.Space(10);
-                    var reimportButton = layout.Button("Reimport");
+                    // Creates the import path UI
+                    var pathGroup = layout.Group("Import Path");
+                    Utilities.Utils.CreateImportPathUI(pathGroup, window.Item as BinaryAssetItem);
+
+                    pathGroup.Space(5);
+                    var reimportButton = pathGroup.Button("Reimport");
                     reimportButton.Button.Clicked += () => ((PropertiesProxy)Values[0]).Reimport();
                 }
             }
@@ -69,7 +76,7 @@ namespace FlaxEditor.Windows.Assets
                 _window = window;
 
                 // Try to restore target asset texture import options (useful for fast reimport)
-                TextureImportSettings.TryRestore(ref ImportSettings, window.Item.Path);
+                Editor.TryRestoreImportOptions(ref ImportSettings, window.Item.Path);
 
                 // Prepare restore data
                 PeekState();
@@ -112,7 +119,7 @@ namespace FlaxEditor.Windows.Assets
         private readonly CustomEditorPresenter _propertiesEditor;
 
         private readonly PropertiesProxy _properties;
-        private bool _isWaitingForLoad;
+        private bool _isWaitingForLoad, _isWaitingForTexture;
 
         /// <inheritdoc />
         public CubeTextureWindow(Editor editor, AssetItem item)
@@ -188,8 +195,8 @@ namespace FlaxEditor.Windows.Assets
             // Check if need to load
             if (_isWaitingForLoad && _asset.IsLoaded)
             {
-                // Clear flag
                 _isWaitingForLoad = false;
+                _isWaitingForTexture = true;
 
                 // Init properties and parameters proxy
                 _properties.OnLoad(this);
@@ -197,6 +204,12 @@ namespace FlaxEditor.Windows.Assets
 
                 // Setup
                 ClearEditedFlag();
+            }
+            if (_isWaitingForTexture && _asset.Texture.IsAllocated)
+            {
+                // Refresh properties to display GPU texture info
+                _isWaitingForTexture = false;
+                _propertiesEditor.BuildLayout();
             }
         }
 
@@ -206,14 +219,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

@@ -1,12 +1,14 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ShaderProcessing.h"
 
 #if COMPILE_WITH_SHADER_COMPILER
 
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Utilities/TextProcessing.h"
-#include "Engine/Core/Log.h"
+#include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Graphics/RenderTools.h"
 #include "ShaderFunctionReader.CB.h"
 #include "ShaderFunctionReader.VS.h"
 #include "ShaderFunctionReader.HS.h"
@@ -16,12 +18,13 @@
 #include "ShaderFunctionReader.CS.h"
 #include "Config.h"
 
-ShaderProcessing::Parser::Parser(const String& targetName, const char* source, int32 sourceLength, ParserMacros macros, FeatureLevel featureLevel)
+ShaderProcessing::Parser::Parser(const String& targetName, const char* source, int32 sourceLength, ParserMacros macros, ShaderProfile profile, ShaderProfileFeatures features)
     : failed(false)
     , targetName(targetName)
     , text(source, sourceLength)
     , _macros(macros)
-    , _featureLevel(featureLevel)
+    , _featureLevel(RenderTools::GetFeatureLevel(profile))
+    , _features(features)
 {
 }
 
@@ -29,9 +32,10 @@ ShaderProcessing::Parser::~Parser()
 {
 }
 
-bool ShaderProcessing::Parser::Process(const String& targetName, const char* source, int32 sourceLength, ParserMacros macros, FeatureLevel featureLevel, ShaderMeta* result)
+bool ShaderProcessing::Parser::Process(const String& targetName, const char* source, int32 sourceLength, ParserMacros macros, ShaderProfile profile, ShaderProfileFeatures features, ShaderMeta* result)
 {
-    Parser parser(targetName, source, sourceLength, macros, featureLevel);
+    PROFILE_CPU_NAMED("Shader.Parse");
+    Parser parser(targetName, source, sourceLength, macros, profile, features);
     parser.Process(result);
     return parser.Failed();
 }
@@ -64,10 +68,6 @@ void ShaderProcessing::Parser::init()
 bool ShaderProcessing::Parser::process()
 {
     const Token defineToken("#define");
-    const Separator singleLineCommentSeparator('/', '/');
-    const Separator multiLineCommentSeparator('/', '*');
-
-    // TODO: split parsing into two phrases: comments preprocessing and parsing
 
     // Read whole source code
     Token token;
@@ -75,36 +75,8 @@ bool ShaderProcessing::Parser::process()
     {
         text.ReadToken(&token);
 
-        // Single line comment
-        if (token.Separator == singleLineCommentSeparator)
-        {
-            // Read whole line
-            text.ReadLine();
-        }
-            // Multi line comment
-        else if (token.Separator == multiLineCommentSeparator)
-        {
-            // Read tokens until end sequence
-            char prev = ' ';
-            char c;
-            while (text.CanRead())
-            {
-                c = text.ReadChar();
-                if (prev == '*' && c == '/')
-                {
-                    break;
-                }
-                prev = c;
-            }
-
-            // Check if comment is valid (has end before file end)
-            if (!text.CanRead())
-            {
-                OnWarning(TEXT("Missing multiline comment ending"));
-            }
-        }
-            // Preprocessor definition
-        else if (token == defineToken)
+        // Preprocessor definition
+        if (token == defineToken)
         {
             // Skip
             text.ReadLine();

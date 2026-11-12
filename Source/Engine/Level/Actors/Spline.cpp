@@ -1,10 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Spline.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Animations/CurveSerialization.h"
+#include "Engine/Core/Math/BoundingFrustum.h"
 #include "Engine/Core/Math/Matrix.h"
-#include <ThirdParty/mono-2.0/mono/metadata/object.h>
+#include "Engine/Scripting/ManagedCLR/MCore.h"
+#include "Engine/Engine/Units.h"
 
 Spline::Spline(const SpawnParams& params)
     : Actor(params)
@@ -149,31 +151,62 @@ float Spline::GetSplineDuration() const
 float Spline::GetSplineLength() const
 {
     float sum = 0.0f;
-    const int32 slices = 20;
-    const float step = 1.0f / (float)slices;
-    Vector3 prevPoint = Vector3::Zero;
+    constexpr int32 slices = 20;
+    constexpr float step = 1.0f / (float)(slices - 1);
+    const Vector3 scale = _transform.Scale;
     for (int32 i = 1; i < Curve.GetKeyframes().Count(); i++)
     {
-        const auto& a = Curve[i = 1];
+        const auto& a = Curve[i - 1];
         const auto& b = Curve[i];
+        Vector3 prevPoint = a.Value.Translation * scale;
 
-        const float length = Math::Abs(b.Time - a.Time);
+        const float tangentScale = Math::Abs(b.Time - a.Time) / 3.0f;
         Vector3 leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, length, rightTangent);
+        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, tangentScale, rightTangent);
 
-        // TODO: implement sth more analytical than brute-force solution
-        for (int32 slice = 0; slice < slices; slice++)
+        for (int32 slice = 1; slice < slices; slice++)
         {
             const float t = (float)slice * step;
             Vector3 pos;
             AnimationUtils::Bezier(a.Value.Translation, leftTangent, rightTangent, b.Value.Translation, t, pos);
-            pos *= _transform.Scale;
-            sum += Vector3::DistanceSquared(pos, prevPoint);
+            pos *= scale;
+            sum += (float)Vector3::Distance(pos, prevPoint);
             prevPoint = pos;
         }
     }
-    return Math::Sqrt(sum);
+    return sum;
+}
+
+float Spline::GetSplineSegmentLength(int32 index) const
+{
+    if (index == 0)
+        return 0.0f;
+    CHECK_RETURN(index > 0 && index < GetSplinePointsCount(), 0.0f);
+    float sum = 0.0f;
+    constexpr int32 slices = 20;
+    constexpr float step = 1.0f / (float)(slices - 1);
+    const auto& a = Curve[index - 1];
+    const auto& b = Curve[index];
+    const Vector3 scale = _transform.Scale;
+    Vector3 prevPoint = a.Value.Translation * scale;
+    {
+        const float tangentScale = Math::Abs(b.Time - a.Time) / 3.0f;
+        Vector3 leftTangent, rightTangent;
+        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, tangentScale, rightTangent);
+
+        for (int32 slice = 1; slice < slices; slice++)
+        {
+            const float t = (float)slice * step;
+            Vector3 pos;
+            AnimationUtils::Bezier(a.Value.Translation, leftTangent, rightTangent, b.Value.Translation, t, pos);
+            pos *= scale;
+            sum += (float)Vector3::Distance(pos, prevPoint);
+            prevPoint = pos;
+        }
+    }
+    return sum;
 }
 
 float Spline::GetSplineTime(int32 index) const
@@ -195,7 +228,7 @@ namespace
             const float t = (float)i * step;
             Transform result;
             Spline::Keyframe::Interpolate(start, end, t, length, result);
-            const float distanceSquared = Vector3::DistanceSquared(point, result.Translation);
+            const float distanceSquared = (float)Vector3::DistanceSquared(point, result.Translation);
             if (distanceSquared < bestDistanceSquared)
             {
                 bestDistanceSquared = distanceSquared;
@@ -431,24 +464,28 @@ void Spline::UpdateSpline()
     for (int32 i = 1; i < count; i++)
         _localBounds.Merge(keyframes[i].Value.Translation);
     Matrix world;
-    _transform.GetWorld(world);
+    GetLocalToWorldMatrix(world);
     BoundingBox::Transform(_localBounds, world, _box);
+    BoundingSphere::FromBox(_box, _sphere);
 
     SplineUpdated();
 }
 
-void Spline::GetKeyframes(MonoArray* data)
+#if !COMPILE_WITHOUT_CSHARP
+
+void Spline::GetKeyframes(MArray* data)
 {
-    Platform::MemoryCopy(mono_array_addr_with_size(data, sizeof(Keyframe), 0), Curve.GetKeyframes().Get(), sizeof(Keyframe) * Curve.GetKeyframes().Count());
+    ASSERT(MCore::Array::GetLength(data) >= Curve.GetKeyframes().Count());
+    Platform::MemoryCopy(MCore::Array::GetAddress(data), Curve.GetKeyframes().Get(), sizeof(Keyframe) * Curve.GetKeyframes().Count());
 }
 
-void Spline::SetKeyframes(MonoArray* data)
+void Spline::SetKeyframes(MArray* data, int32 keySize)
 {
-    const auto count = (int32)mono_array_length(data);
-    Curve.GetKeyframes().Resize(count, false);
-    Platform::MemoryCopy(Curve.GetKeyframes().Get(), mono_array_addr_with_size(data, sizeof(Keyframe), 0), sizeof(Keyframe) * count);
+    Curve = Span<byte>(MCore::Array::GetAddress<byte>(data), keySize * MCore::Array::GetLength(data));
     UpdateSpline();
 }
+
+#endif
 
 #if USE_EDITOR
 
@@ -456,31 +493,57 @@ void Spline::SetKeyframes(MonoArray* data)
 
 namespace
 {
-    void DrawSpline(Spline* spline, const Color& color, const Transform& transform, bool depthTest)
+    FORCE_INLINE float NodeSizeByDistance(const Vector3& nodePosition, bool scaleByDistance)
+    {
+        if (scaleByDistance)
+            return (float)(Vector3::Distance(DebugDraw::GetViewPosition(), nodePosition) / 100);
+        return 5.0f;
+    }
+
+    void DrawSpline(Spline* spline, const Color& color, const Transform& transform, bool depthTest, bool scaleByDistance = false)
     {
         const int32 count = spline->Curve.GetKeyframes().Count();
         if (count == 0)
             return;
         Spline::Keyframe* prev = spline->Curve.GetKeyframes().Get();
         Vector3 prevPos = transform.LocalToWorld(prev->Value.Translation);
-        DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(prevPos, 5.0f), color, 0.0f, depthTest);
-        for (int32 i = 1; i < count; i++)
+        Real distance = Vector3::Distance(prevPos, DebugDraw::GetViewPosition());
+        if (distance < METERS_TO_UNITS(800)) // 800m
         {
-            Spline::Keyframe* next = prev + 1;
-            Vector3 nextPos = transform.LocalToWorld(next->Value.Translation);
-            DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(nextPos, 5.0f), color, 0.0f, depthTest);
-            const float d = (next->Time - prev->Time) / 3.0f;
-            DEBUG_DRAW_BEZIER(prevPos, prevPos + prev->TangentOut.Translation * d, nextPos + next->TangentIn.Translation * d, nextPos, color, 0.0f, depthTest);
-            prev = next;
-            prevPos = nextPos;
+            // Bezier curve
+            DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(prevPos, NodeSizeByDistance(prevPos, scaleByDistance)), color, 0.0f, depthTest);
+            for (int32 i = 1; i < count; i++)
+            {
+                Spline::Keyframe* next = prev + 1;
+                Vector3 nextPos = transform.LocalToWorld(next->Value.Translation);
+                DEBUG_DRAW_WIRE_SPHERE(BoundingSphere(nextPos, NodeSizeByDistance(nextPos, scaleByDistance)), color, 0.0f, depthTest);
+                const float d = (next->Time - prev->Time) / 3.0f;
+                DEBUG_DRAW_BEZIER(prevPos, transform.LocalToWorld(prev->Value.Translation + prev->TangentOut.Translation * d), transform.LocalToWorld(next->Value.Translation + next->TangentIn.Translation * d), nextPos, color, 0.0f, depthTest);
+                prev = next;
+                prevPos = nextPos;
+            }
+        }
+        else
+        {
+            // Simplified
+            for (int32 i = 1; i < count; i++)
+            {
+                Spline::Keyframe* next = prev + 1;
+                Vector3 nextPos = transform.LocalToWorld(next->Value.Translation);
+                DEBUG_DRAW_LINE(prevPos, nextPos, color, 0.0f, depthTest);
+                prev = next;
+                prevPos = nextPos;
+            }
         }
     }
 }
 
 void Spline::OnDebugDraw()
 {
-    const Color color = GetSplineColor();
-    DrawSpline(this, color.AlphaMultiplied(0.7f), _transform, true);
+    BoundingSphere sphere(_sphere);
+    sphere.Center -= DebugDraw::GetViewOrigin();
+    if (DebugDraw::GetViewFrustum().Intersects(sphere))
+        DrawSpline(this, GetSplineColor().AlphaMultiplied(0.7f), _transform, true);
 
     // Base
     Actor::OnDebugDraw();
@@ -488,8 +551,7 @@ void Spline::OnDebugDraw()
 
 void Spline::OnDebugDrawSelected()
 {
-    const Color color = GetSplineColor();
-    DrawSpline(this, color.AlphaMultiplied(0.3f), _transform, false);
+    DrawSpline(this, Color::White, _transform, false, true);
 
     // Base
     Actor::OnDebugDrawSelected();
@@ -503,15 +565,15 @@ void Spline::OnTransformChanged()
     Actor::OnTransformChanged();
 
     Matrix world;
-    _transform.GetWorld(world);
+    GetLocalToWorldMatrix(world);
     BoundingBox::Transform(_localBounds, world, _box);
     BoundingSphere::FromBox(_box, _sphere);
 }
 
-void Spline::PostLoad()
+void Spline::Initialize()
 {
     // Base
-    Actor::PostLoad();
+    Actor::Initialize();
 
     auto& keyframes = Curve.GetKeyframes();
     const int32 count = keyframes.Count();
@@ -521,8 +583,9 @@ void Spline::PostLoad()
     for (int32 i = 1; i < count; i++)
         _localBounds.Merge(keyframes[i].Value.Translation);
     Matrix world;
-    _transform.GetWorld(world);
+    GetLocalToWorldMatrix(world);
     BoundingBox::Transform(_localBounds, world, _box);
+    BoundingSphere::FromBox(_box, _sphere);
 }
 
 void Spline::Serialize(SerializeStream& stream, const void* otherObj)

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections.Generic;
 using System.IO;
@@ -21,6 +21,7 @@ public class TextureTool : EngineModule
 
         bool useDirectXTex = false;
         bool useStb = false;
+        bool useExr = options.Target.IsEditor;
 
         switch (options.Platform.Target)
         {
@@ -32,8 +33,12 @@ public class TextureTool : EngineModule
             break;
         case TargetPlatform.Linux:
         case TargetPlatform.PS4:
+        case TargetPlatform.PS5:
         case TargetPlatform.Android:
         case TargetPlatform.Switch:
+        case TargetPlatform.Mac:
+        case TargetPlatform.iOS:
+        case TargetPlatform.Web:
             useStb = true;
             break;
         default: throw new InvalidPlatformException(options.Platform.Target);
@@ -51,8 +56,27 @@ public class TextureTool : EngineModule
             if (options.Target.IsEditor)
             {
                 // Use helper lib for decompression
+                options.PrivateDependencies.Add("ddspp");
                 options.PrivateDependencies.Add("detex");
+                options.PrivateDependencies.Add("bc6h_enc");
+                options.PrivateDependencies.Add("bc7enc16");
             }
+        }
+        if (useExr)
+        {
+            options.PrivateDependencies.Add("tinyexr");
+        }
+        if (options.Target.IsEditor && astc.Use(options))
+        {
+            // ASTC for mobile (iOS and Android)
+            options.SourceFiles.Add(Path.Combine(FolderPath, "TextureTool.astc.cpp"));
+            options.PrivateDependencies.Add("astc");
+        }
+        if ((options.Target.IsEditor || options.Platform.Target == TargetPlatform.Web) && basis_universal.Use(options))
+        {
+            // Universal texture compression for Web
+            options.SourceFiles.Add(Path.Combine(FolderPath, "TextureTool.basis_universal.cpp"));
+            options.PrivateDependencies.Add("basis_universal");
         }
 
         options.PublicDefinitions.Add("COMPILE_WITH_TEXTURE_TOOL");

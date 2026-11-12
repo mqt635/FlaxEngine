@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_NULL
 
@@ -11,7 +11,11 @@
 #include "GPUTimerQueryNull.h"
 #include "GPUBufferNull.h"
 #include "GPUSamplerNull.h"
+#include "GPUVertexLayoutNull.h"
 #include "GPUSwapChainNull.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#include "Engine/Graphics/Async/GPUTasksManager.h"
 
 GPUDeviceNull::GPUDeviceNull()
     : GPUDevice(RendererType::Null, ShaderProfile::Unknown)
@@ -48,18 +52,7 @@ bool GPUDeviceNull::Init()
     // Init device limits
     {
         auto& limits = Limits;
-        limits.HasCompute = false;
-        limits.HasTessellation = false;
-        limits.HasGeometryShaders = false;
-        limits.HasInstancing = false;
-        limits.HasVolumeTextureRendering = false;
-        limits.HasDrawIndirect = false;
-        limits.HasAppendConsumeBuffers = false;
-        limits.HasSeparateRenderTargetBlendState = false;
-        limits.HasDepthAsSRV = false;
-        limits.HasReadOnlyDepth = false;
-        limits.HasMultisampleDepthAsSRV = false;
-        limits.HasTypedUAVLoad = false;
+        Platform::MemoryClear(&limits, sizeof(limits));
         limits.MaximumMipLevelsCount = 14;
         limits.MaximumTexture1DSize = 8192;
         limits.MaximumTexture1DArraySize = 512;
@@ -68,11 +61,8 @@ bool GPUDeviceNull::Init()
         limits.MaximumTexture3DSize = 2048;
         limits.MaximumTextureCubeSize = 16384;
         limits.MaximumSamplerAnisotropy = 1;
-
         for (int32 i = 0; i < static_cast<int32>(PixelFormat::MAX); i++)
-        {
-            FeaturesPerFormat[i] = FormatFeatures(static_cast<PixelFormat>(i), MSAALevel::None, FormatSupport::None);
-        }
+            FeaturesPerFormat[i] = FormatFeatures(MSAALevel::None, FormatSupport::None);
     }
 
     // Create main context
@@ -89,13 +79,13 @@ void GPUDeviceNull::Draw()
     auto context = GetMainContext();
 
     RenderBegin();
-    TasksManager.FrameBegin();
+    GetTasksManager()->FrameBegin();
     context->FrameBegin();
 
     // don't render anything
 
     context->FrameEnd();
-    TasksManager.FrameEnd();
+    GetTasksManager()->FrameEnd();
     RenderEnd();
 
     DrawEnd();
@@ -154,18 +144,26 @@ void GPUDeviceNull::WaitForGPU()
 {
 }
 
+bool GPUDeviceNull::GetQueryResult(uint64 queryID, uint64& result, bool wait)
+{
+    return false;
+}
+
 GPUTexture* GPUDeviceNull::CreateTexture(const StringView& name)
 {
+    PROFILE_MEM(GraphicsTextures);
     return New<GPUTextureNull>();
 }
 
 GPUShader* GPUDeviceNull::CreateShader(const StringView& name)
 {
+    PROFILE_MEM(GraphicsShaders);
     return New<GPUShaderNull>();
 }
 
 GPUPipelineState* GPUDeviceNull::CreatePipelineState()
 {
+    PROFILE_MEM(GraphicsCommands);
     return New<GPUPipelineStateNull>();
 }
 
@@ -176,6 +174,7 @@ GPUTimerQuery* GPUDeviceNull::CreateTimerQuery()
 
 GPUBuffer* GPUDeviceNull::CreateBuffer(const StringView& name)
 {
+    PROFILE_MEM(GraphicsBuffers);
     return New<GPUBufferNull>();
 }
 
@@ -184,9 +183,19 @@ GPUSampler* GPUDeviceNull::CreateSampler()
     return New<GPUSamplerNull>();
 }
 
+GPUVertexLayout* GPUDeviceNull::CreateVertexLayout(const VertexElements& elements, bool explicitOffsets)
+{
+    return New<GPUVertexLayoutNull>(elements);
+}
+
 GPUSwapChain* GPUDeviceNull::CreateSwapChain(Window* window)
 {
     return New<GPUSwapChainNull>(window);
+}
+
+GPUConstantBuffer* GPUDeviceNull::CreateConstantBuffer(uint32 size, const StringView& name)
+{
+    return nullptr;
 }
 
 GPUDevice* CreateGPUDeviceNull()

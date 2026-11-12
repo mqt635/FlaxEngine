@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2019 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -7,12 +7,12 @@
 #include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Collections/Array.h"
 
-API_INJECT_CPP_CODE("#include \"Engine/Platform/Clipboard.h\"");
+API_INJECT_CODE(cpp, "#include \"Engine/Platform/Clipboard.h\"");
 
 /// <summary>
 /// Native platform clipboard service.
 /// </summary>
-API_CLASS(Static, Name="Clipboard")
+API_CLASS(Static, Name="Clipboard", Tag="NativeInvokeUseName")
 class FLAXENGINE_API ClipboardBase
 {
 public:

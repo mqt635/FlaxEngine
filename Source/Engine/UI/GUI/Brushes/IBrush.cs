@@ -1,4 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System;
 
 namespace FlaxEngine.GUI
 {
@@ -23,12 +25,12 @@ namespace FlaxEngine.GUI
     /// <summary>
     /// Interface that unifies input source textures, sprites, render targets, and any other brushes to be used in a more generic way.
     /// </summary>
-    public interface IBrush
+    public interface IBrush : IComparable
     {
         /// <summary>
         /// Gets the size of the image brush in pixels (if relevant).
         /// </summary>
-        Vector2 Size { get; }
+        Float2 Size { get; }
 
         /// <summary>
         /// Draws the specified image using <see cref="Render2D"/> graphics backend.

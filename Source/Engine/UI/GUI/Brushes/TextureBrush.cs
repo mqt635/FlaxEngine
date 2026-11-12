@@ -1,4 +1,6 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
+
+using System;
 
 namespace FlaxEngine.GUI
 {
@@ -6,7 +8,7 @@ namespace FlaxEngine.GUI
     /// Implementation of <see cref="IBrush"/> for <see cref="FlaxEngine.Texture"/>.
     /// </summary>
     /// <seealso cref="IBrush" />
-    public sealed class TextureBrush : IBrush
+    public sealed class TextureBrush : IBrush, IEquatable<TextureBrush>
     {
         /// <summary>
         /// The texture.
@@ -37,7 +39,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public Vector2 Size => Texture?.Size ?? Vector2.Zero;
+        public Float2 Size => Texture != null && !Texture.WaitForLoaded() ? Texture.Size : Float2.Zero;
 
         /// <inheritdoc />
         public void Draw(Rectangle rect, Color color)
@@ -47,13 +49,37 @@ namespace FlaxEngine.GUI
             else
                 Render2D.DrawTexture(Texture, rect, color);
         }
+
+        /// <inheritdoc />
+        public bool Equals(TextureBrush other)
+        {
+            return other != null && Texture == other.Texture && Filter == other.Filter;
+        }
+
+        /// <inheritdoc />
+        public override bool Equals(object obj)
+        {
+            return obj is TextureBrush other && Equals(other);
+        }
+
+        /// <inheritdoc />
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Texture, (int)Filter);
+        }
+
+        /// <inheritdoc />
+        public int CompareTo(object obj)
+        {
+            return Equals(obj) ? 1 : 0;
+        }
     }
 
     /// <summary>
     /// Implementation of <see cref="IBrush"/> for <see cref="FlaxEngine.Texture"/> using 9-slicing.
     /// </summary>
     /// <seealso cref="IBrush" />
-    public sealed class Texture9SlicingBrush : IBrush
+    public sealed class Texture9SlicingBrush : IBrush, IEquatable<Texture9SlicingBrush>
     {
         /// <summary>
         /// The texture.
@@ -104,7 +130,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
-        public Vector2 Size => Texture?.Size ?? Vector2.Zero;
+        public Float2 Size => Texture != null ? Texture.Size : Float2.Zero;
 
         /// <inheritdoc />
         public unsafe void Draw(Rectangle rect, Color color)
@@ -112,8 +138,8 @@ namespace FlaxEngine.GUI
             if (Texture == null)
                 return;
             var border = Border;
-            var borderUV = *(Vector4*)&border;
-            var borderSize = borderUV * new Vector4(BorderSize, BorderSize, BorderSize, BorderSize);
+            var borderUV = *(Float4*)&border;
+            var borderSize = new Float4(BorderSize, BorderSize, BorderSize, BorderSize);
             if (Filter == BrushFilter.Point)
                 Render2D.Draw9SlicingTexturePoint(Texture, rect, borderSize, borderUV, color);
             else
@@ -129,6 +155,30 @@ namespace FlaxEngine.GUI
                 Render2D.DrawRectangle(bordersRect, Color.YellowGreen, 2.0f);
             }
 #endif
+        }
+
+        /// <inheritdoc />
+        public bool Equals(Texture9SlicingBrush other)
+        {
+            return other != null && Texture == other.Texture && Filter == other.Filter && BorderSize == other.BorderSize && Border == other.Border;
+        }
+
+        /// <inheritdoc />
+        public override bool Equals(object obj)
+        {
+            return obj is Texture9SlicingBrush other && Equals(other);
+        }
+
+        /// <inheritdoc />
+        public override int GetHashCode()
+        {
+            return HashCode.Combine(Texture, (int)Filter, BorderSize, Border.GetHashCode());
+        }
+
+        /// <inheritdoc />
+        public int CompareTo(object obj)
+        {
+            return Equals(obj) ? 1 : 0;
         }
     }
 }

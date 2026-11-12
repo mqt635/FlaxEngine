@@ -1,20 +1,20 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using FlaxEditor.Content;
 using FlaxEditor.Gizmo;
 using FlaxEditor.GUI.ContextMenu;
-using FlaxEditor.GUI.Drag;
+using FlaxEditor.Modules;
 using FlaxEditor.SceneGraph;
-using FlaxEditor.SceneGraph.Actors;
 using FlaxEditor.Scripting;
 using FlaxEditor.Viewport.Cameras;
 using FlaxEditor.Viewport.Previews;
-using FlaxEditor.Viewport.Widgets;
 using FlaxEditor.Windows.Assets;
 using FlaxEngine;
 using FlaxEngine.GUI;
+using Utils = FlaxEditor.Utilities.Utils;
 
 namespace FlaxEditor.Viewport
 {
@@ -31,7 +31,10 @@ namespace FlaxEditor.Viewport
         {
             public PrefabWindowViewport Viewport;
 
-            public override bool CanRender => (Task.View.Flags & ViewFlags.EditorSprites) == ViewFlags.EditorSprites && Enabled;
+            public override bool CanRender()
+            {
+                return (Task.View.Flags & ViewFlags.EditorSprites) == ViewFlags.EditorSprites && Enabled;
+            }
 
             protected override void Draw(ref RenderContext renderContext)
             {
@@ -39,22 +42,115 @@ namespace FlaxEditor.Viewport
             }
         }
 
+        [HideInEditor]
+        private sealed class PrefabUIEditorRoot : UIEditorRoot
+        {
+            private readonly PrefabWindowViewport _viewport;
+            private bool UI => _viewport.ShowUI;
+
+            public PrefabUIEditorRoot(PrefabWindowViewport viewport)
+            : base(true)
+            {
+                _viewport = viewport;
+                Parent = viewport;
+            }
+
+            public override bool EnableInputs => !UI;
+            public override bool EnableSelecting => UI;
+            public override bool EnableBackground => UI;
+            public override TransformGizmo TransformGizmo => _viewport.TransformGizmo;
+        }
+
         private readonly PrefabWindow _window;
         private UpdateDelegate _update;
 
-        private readonly ViewportWidgetButton _gizmoModeTranslate;
-        private readonly ViewportWidgetButton _gizmoModeRotate;
-        private readonly ViewportWidgetButton _gizmoModeScale;
-
-        private ViewportWidgetButton _translateSnappng;
-        private ViewportWidgetButton _rotateSnapping;
-        private ViewportWidgetButton _scaleSnapping;
-
         private readonly ViewportDebugDrawData _debugDrawData = new ViewportDebugDrawData(32);
+        private readonly List<Actor> _debugDrawActors = new List<Actor>();
         private PrefabSpritesRenderer _spritesRenderer;
-        private readonly DragAssets _dragAssets;
-        private readonly DragActorType _dragActorType = new DragActorType(ValidateDragActorType);
-        private readonly DragHandlers _dragHandlers = new DragHandlers();
+        private IntPtr _tempDebugDrawContext;
+
+        private PrefabUIEditorRoot _uiRoot;
+        private bool _showUI = false;
+
+        private int _defaultScaleActiveIndex = -1;
+        private int _customScaleActiveIndex = -1;
+        private ContextMenuButton _uiModeButton;
+        private ContextMenuChildMenu _uiViewOptions;
+
+        /// <summary>
+        /// Event fired when the UI Mode is toggled.
+        /// </summary>
+        public event Action<bool> UIModeToggled;
+
+        /// <summary>
+        /// set the initial UI mod
+        /// </summary>
+        /// <param name="value">the initial ShowUI value</param>
+        public void SetInitialUIMode(bool value)
+        {
+            ShowUI = value;
+            _uiModeButton.Checked = value;
+        }
+
+        /// <summary>
+        /// Whether to show the UI mode or not.
+        /// </summary>
+        public bool ShowUI
+        {
+            get => _showUI;
+            set
+            {
+                _showUI = value;
+                if (_showUI)
+                {
+                    // UI widget
+                    Gizmos.Active = null;
+                    ViewportCamera = new UIEditorCamera { UIEditor = _uiRoot };
+
+                    // Hide 3D visuals
+                    ShowEditorPrimitives = false;
+                    ShowDefaultSceneActors = false;
+                    ShowDebugDraw = false;
+
+                    // Show whole UI on startup
+                    var canvas = (CanvasRootControl)_uiParentLink.Children.FirstOrDefault(x => x is CanvasRootControl);
+                    if (canvas != null)
+                        ViewportCamera.ShowActor(canvas.Canvas);
+                    else if (Instance is UIControl)
+                        ViewportCamera.ShowActor(Instance);
+                    _uiRoot.Visible = true;
+                }
+                else
+                {
+                    // Generic prefab
+                    Gizmos.Active = TransformGizmo;
+                    ViewportCamera = new FPSCamera();
+                    _uiRoot.Visible = false;
+                }
+
+                // Update default components usage
+                bool defaultFeatures = !_showUI;
+                _disableInputUpdate = _showUI;
+                _spritesRenderer.Enabled = defaultFeatures;
+                SelectionOutline.Enabled = defaultFeatures;
+                _showDefaultSceneButton.Visible = defaultFeatures;
+                _cameraWidget.Visible = defaultFeatures;
+                _cameraButton.Visible = defaultFeatures;
+                _orthographicModeButton.Visible = defaultFeatures;
+                Task.Enabled = defaultFeatures;
+                UseAutomaticTaskManagement = defaultFeatures;
+                ShowDefaultSceneActors = defaultFeatures;
+                TintColor = defaultFeatures ? Color.White : Color.Transparent;
+                if (_uiViewOptions != null)
+                    _uiViewOptions.Visible = _showUI;
+                UIModeToggled?.Invoke(_showUI);
+            }
+        }
+
+        /// <summary>
+        /// Drag and drop handlers
+        /// </summary>
+        public readonly ViewportDragHandlers DragHandlers;
 
         /// <summary>
         /// The transform gizmo.
@@ -77,9 +173,21 @@ namespace FlaxEditor.Viewport
             _window.SelectionChanged += OnSelectionChanged;
             Undo = window.Undo;
             ViewportCamera = new FPSCamera();
-            _dragAssets = new DragAssets(ValidateDragItem);
+            DragHandlers = new ViewportDragHandlers(this, this, ValidateDragItem, ValidateDragActorType, ValidateDragScriptItem);
             ShowDebugDraw = true;
             ShowEditorPrimitives = true;
+            Gizmos = new GizmosCollection(this);
+
+            _gridGizmo = new GridGizmo(this);
+            var showGridButton = ViewWidgetShowMenu.AddButton("Grid");
+            showGridButton.Clicked += () =>
+            {
+                _gridGizmo.Enabled = !_gridGizmo.Enabled;
+                _uiRoot.ShowGrid = _gridGizmo.Enabled;
+                showGridButton.Checked = _gridGizmo.Enabled;
+            };
+            showGridButton.Checked = true;
+            showGridButton.CloseMenuOnClick = false;
 
             // Prepare rendering task
             Task.ActorsSource = ActorsSources.CustomActors;
@@ -91,147 +199,119 @@ namespace FlaxEditor.Viewport
             // Create post effects
             SelectionOutline = FlaxEngine.Object.New<SelectionOutline>();
             SelectionOutline.SelectionGetter = () => TransformGizmo.SelectedParents;
-            Task.CustomPostFx.Add(SelectionOutline);
+            Task.AddCustomPostFx(SelectionOutline);
             _spritesRenderer = FlaxEngine.Object.New<PrefabSpritesRenderer>();
             _spritesRenderer.Task = Task;
             _spritesRenderer.Viewport = this;
-            Task.CustomPostFx.Add(_spritesRenderer);
+            Task.AddCustomPostFx(_spritesRenderer);
 
             // Add transformation gizmo
             TransformGizmo = new TransformGizmo(this);
             TransformGizmo.ApplyTransformation += ApplyTransform;
-            TransformGizmo.ModeChanged += OnGizmoModeChanged;
             TransformGizmo.Duplicate += _window.Duplicate;
             Gizmos.Active = TransformGizmo;
 
-            // Transform space widget
-            var transformSpaceWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
-            var transformSpaceToggle = new ViewportWidgetButton(string.Empty, window.Editor.Icons.Globe32, null, true)
-            {
-                Checked = TransformGizmo.ActiveTransformSpace == TransformGizmoBase.TransformSpace.World,
-                TooltipText = "Gizmo transform space (world or local)",
-                Parent = transformSpaceWidget
-            };
-            transformSpaceToggle.Toggled += OnTransformSpaceToggle;
-            transformSpaceWidget.Parent = this;
+            // Use custom root for UI controls
+            _uiRoot = new PrefabUIEditorRoot(this);
+            _uiRoot.IndexInParent = 0; // Move viewport down below other widgets in the viewport
+            _uiParentLink = _uiRoot.UIRoot;
 
-            // Scale snapping widget
-            var scaleSnappingWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
-            var enableScaleSnapping = new ViewportWidgetButton(string.Empty, window.Editor.Icons.ScaleSnap32, null, true)
-            {
-                Checked = TransformGizmo.ScaleSnapEnabled,
-                TooltipText = "Enable scale snapping",
-                Parent = scaleSnappingWidget
-            };
-            enableScaleSnapping.Toggled += OnScaleSnappingToggle;
+            // UI mode buton
+            _uiModeButton = ViewWidgetShowMenu.AddButton("UI Mode", button => ShowUI = button.Checked);
+            _uiModeButton.AutoCheck = true;
+            _uiModeButton.VisibleChanged += control => (control as ContextMenuButton).Checked = ShowUI;
 
-            var scaleSnappingCM = new ContextMenu();
-            _scaleSnapping = new ViewportWidgetButton(TransformGizmo.ScaleSnapValue.ToString(), SpriteHandle.Invalid, scaleSnappingCM)
-            {
-                TooltipText = "Scale snapping values"
-            };
-
-            for (int i = 0; i < EditorViewportScaleSnapValues.Length; i++)
-            {
-                var v = EditorViewportScaleSnapValues[i];
-                var button = scaleSnappingCM.AddButton(v.ToString());
-                button.Tag = v;
-            }
-            scaleSnappingCM.ButtonClicked += OnWidgetScaleSnapClick;
-            scaleSnappingCM.VisibleChanged += OnWidgetScaleSnapShowHide;
-            _scaleSnapping.Parent = scaleSnappingWidget;
-            scaleSnappingWidget.Parent = this;
-
-            // Rotation snapping widget
-            var rotateSnappingWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
-            var enableRotateSnapping = new ViewportWidgetButton(string.Empty, window.Editor.Icons.RotateSnap32, null, true)
-            {
-                Checked = TransformGizmo.RotationSnapEnabled,
-                TooltipText = "Enable rotation snapping",
-                Parent = rotateSnappingWidget
-            };
-            enableRotateSnapping.Toggled += OnRotateSnappingToggle;
-
-            var rotateSnappingCM = new ContextMenu();
-            _rotateSnapping = new ViewportWidgetButton(TransformGizmo.RotationSnapValue.ToString(), SpriteHandle.Invalid, rotateSnappingCM)
-            {
-                TooltipText = "Rotation snapping values"
-            };
-
-            for (int i = 0; i < EditorViewportRotateSnapValues.Length; i++)
-            {
-                var v = EditorViewportRotateSnapValues[i];
-                var button = rotateSnappingCM.AddButton(v.ToString());
-                button.Tag = v;
-            }
-            rotateSnappingCM.ButtonClicked += OnWidgetRotateSnapClick;
-            rotateSnappingCM.VisibleChanged += OnWidgetRotateSnapShowHide;
-            _rotateSnapping.Parent = rotateSnappingWidget;
-            rotateSnappingWidget.Parent = this;
-
-            // Translation snapping widget
-            var translateSnappingWidget = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
-            var enableTranslateSnapping = new ViewportWidgetButton(string.Empty, window.Editor.Icons.Grid32, null, true)
-            {
-                Checked = TransformGizmo.TranslationSnapEnable,
-                TooltipText = "Enable position snapping",
-                Parent = translateSnappingWidget
-            };
-            enableTranslateSnapping.Toggled += OnTranslateSnappingToggle;
-
-            var translateSnappingCM = new ContextMenu();
-            _translateSnappng = new ViewportWidgetButton(TransformGizmo.TranslationSnapValue.ToString(), SpriteHandle.Invalid, translateSnappingCM)
-            {
-                TooltipText = "Position snapping values"
-            };
-
-            for (int i = 0; i < EditorViewportTranslateSnapValues.Length; i++)
-            {
-                var v = EditorViewportTranslateSnapValues[i];
-                var button = translateSnappingCM.AddButton(v.ToString());
-                button.Tag = v;
-            }
-            translateSnappingCM.ButtonClicked += OnWidgetTranslateSnapClick;
-            translateSnappingCM.VisibleChanged += OnWidgetTranslateSnapShowHide;
-            _translateSnappng.Parent = translateSnappingWidget;
-            translateSnappingWidget.Parent = this;
-
-            // Gizmo mode widget
-            var gizmoMode = new ViewportWidgetsContainer(ViewportWidgetLocation.UpperRight);
-            _gizmoModeTranslate = new ViewportWidgetButton(string.Empty, window.Editor.Icons.Translate32, null, true)
-            {
-                Tag = TransformGizmoBase.Mode.Translate,
-                TooltipText = "Translate gizmo mode",
-                Checked = true,
-                Parent = gizmoMode
-            };
-            _gizmoModeTranslate.Toggled += OnGizmoModeToggle;
-            _gizmoModeRotate = new ViewportWidgetButton(string.Empty, window.Editor.Icons.Rotate32, null, true)
-            {
-                Tag = TransformGizmoBase.Mode.Rotate,
-                TooltipText = "Rotate gizmo mode",
-                Parent = gizmoMode
-            };
-            _gizmoModeRotate.Toggled += OnGizmoModeToggle;
-            _gizmoModeScale = new ViewportWidgetButton(string.Empty, window.Editor.Icons.Scale32, null, true)
-            {
-                Tag = TransformGizmoBase.Mode.Scale,
-                TooltipText = "Scale gizmo mode",
-                Parent = gizmoMode
-            };
-            _gizmoModeScale.Toggled += OnGizmoModeToggle;
-            gizmoMode.Parent = this;
-
-            _dragHandlers.Add(_dragActorType);
-            _dragHandlers.Add(_dragAssets);
+            EditorGizmoViewport.AddGizmoViewportWidgets(this, TransformGizmo);
 
             // Setup input actions
-            InputActions.Add(options => options.TranslateMode, () => TransformGizmo.ActiveMode = TransformGizmoBase.Mode.Translate);
-            InputActions.Add(options => options.RotateMode, () => TransformGizmo.ActiveMode = TransformGizmoBase.Mode.Rotate);
-            InputActions.Add(options => options.ScaleMode, () => TransformGizmo.ActiveMode = TransformGizmoBase.Mode.Scale);
             InputActions.Add(options => options.FocusSelection, ShowSelectedActors);
 
             SetUpdate(ref _update, OnUpdate);
+        }
+
+        /// <summary>
+        /// Creates the view scaling options. Needs to be called after a Prefab is valid and loaded.
+        /// </summary>
+        public void CreateViewScalingOptions()
+        {
+            if (_uiViewOptions != null)
+                return;
+            _uiViewOptions = ViewWidgetButtonMenu.AddChildMenu("UI View Scaling");
+            _uiViewOptions.Visible = _showUI;
+            LoadCustomUIScalingOption();
+            Editor.Instance.UI.CreateViewportSizingContextMenu(_uiViewOptions.ContextMenu, _defaultScaleActiveIndex, _customScaleActiveIndex, true, ChangeUIView, (a, b) =>
+            {
+                _defaultScaleActiveIndex = a;
+                _customScaleActiveIndex = b;
+            });
+        }
+
+        private void ChangeUIView(UIModule.ViewportScaleOption uiViewScaleOption)
+        {
+            _uiRoot.SetViewSize((Float2)uiViewScaleOption.Size);
+        }
+
+        /// <summary>
+        /// Saves the active ui scaling option.
+        /// </summary>
+        public void SaveActiveUIScalingOption()
+        {
+            if (!Prefab)
+                return;
+            var id = Prefab.ID;
+            var defaultKey = $"{id}:DefaultViewportScalingIndex";
+            Editor.Instance.ProjectCache.SetCustomData(defaultKey, _defaultScaleActiveIndex.ToString());
+            var customKey = $"{id}:CustomViewportScalingIndex";
+            Editor.Instance.ProjectCache.SetCustomData(customKey, _customScaleActiveIndex.ToString());
+        }
+
+        private void LoadCustomUIScalingOption()
+        {
+            if (!Prefab)
+                return;
+            var id = Prefab.ID;
+            Prefab.WaitForLoaded();
+
+            var defaultKey = $"{id}:DefaultViewportScalingIndex";
+            if (Editor.Instance.ProjectCache.TryGetCustomData(defaultKey, out string defaultData))
+            {
+                if (int.TryParse(defaultData, out var index))
+                {
+                    var options = Editor.Instance.UI.DefaultViewportScaleOptions;
+                    if (options.Count > index)
+                    {
+                        _defaultScaleActiveIndex = index;
+                        if (index != -1)
+                            ChangeUIView(Editor.Instance.UI.DefaultViewportScaleOptions[index]);
+                    }
+                    // Assume option does not exist anymore so move to default.
+                    else if (index != -1)
+                    {
+                        _defaultScaleActiveIndex = 0;
+                    }
+                }
+            }
+
+            var customKey = $"{id}:CustomViewportScalingIndex";
+            if (Editor.Instance.ProjectCache.TryGetCustomData(customKey, out string data))
+            {
+                if (int.TryParse(data, out var index))
+                {
+                    var options = Editor.Instance.UI.CustomViewportScaleOptions;
+                    if (options.Count > index)
+                    {
+                        _customScaleActiveIndex = index;
+                        if (index != -1)
+                            ChangeUIView(options[index]);
+                    }
+                    // Assume option does not exist anymore so move to default.
+                    else if (index != -1)
+                    {
+                        _defaultScaleActiveIndex = 0;
+                        _customScaleActiveIndex = -1;
+                    }
+                }
+            }
         }
 
         private void OnUpdate(float deltaTime)
@@ -250,33 +330,49 @@ namespace FlaxEditor.Viewport
             var selectedParents = TransformGizmo.SelectedParents;
             if (selectedParents.Count > 0)
             {
+                // Use temporary Debug Draw context to pull any debug shapes drawing in Scene Graph Nodes - those are used in OnDebugDraw down below
+                if (_tempDebugDrawContext == IntPtr.Zero)
+                    _tempDebugDrawContext = DebugDraw.AllocateContext();
+                DebugDraw.SetContext(_tempDebugDrawContext);
+                DebugDraw.UpdateContext(_tempDebugDrawContext, 1.0f);
+                if (task is SceneRenderTask sceneRenderTask)
+                {
+                    // Sync debug view to avoid lag on culling/LODing
+                    var view = sceneRenderTask.View;
+                    DebugDraw.SetView(ref view);
+                }
                 for (int i = 0; i < selectedParents.Count; i++)
                 {
                     if (selectedParents[i].IsActiveInHierarchy)
                         selectedParents[i].OnDebugDraw(_debugDrawData);
                 }
+
+                DebugDraw.SetContext(IntPtr.Zero);
             }
         }
 
-        private void OnCollectDrawCalls(RenderContext renderContext)
+        private void OnCollectDrawCalls(ref RenderContext renderContext)
         {
+            if (renderContext.View.Pass == DrawPass.Depth)
+                return;
+            DragHandlers.CollectDrawCalls(_debugDrawData, ref renderContext);
             _debugDrawData.OnDraw(ref renderContext);
         }
 
-        private void OnPostRender(GPUContext context, RenderContext renderContext)
+        private void OnPostRender(GPUContext context, ref RenderContext renderContext)
         {
             if (renderContext.View.Mode != ViewMode.Default)
             {
                 var task = renderContext.Task;
 
                 // Render editor sprites
-                if (_spritesRenderer && _spritesRenderer.CanRender)
+                if (_spritesRenderer && _spritesRenderer.CanRender())
                 {
                     _spritesRenderer.Render(context, ref renderContext, task.Output, task.Output);
                 }
 
                 // Render selection outline
-                if (SelectionOutline && SelectionOutline.CanRender)
+                if (SelectionOutline && SelectionOutline.CanRender())
                 {
                     // Use temporary intermediate buffer
                     var desc = task.Output.Description;
@@ -296,12 +392,33 @@ namespace FlaxEditor.Viewport
         /// </summary>
         public void ShowSelectedActors()
         {
-            var orient = Viewport.ViewOrientation;
-            ((FPSCamera)ViewportCamera).ShowActors(TransformGizmo.SelectedParents, ref orient);
+            var orient = ViewOrientation;
+            ViewportCamera.ShowActors(TransformGizmo.SelectedParents, ref orient);
+        }
+
+        private static bool ActorHasContentLoaded(Actor a)
+        {
+            if (!a.HasContentLoaded)
+                return false;
+            var children = a.ChildrenCount;
+            for (int i = 0; i < children; i++)
+            {
+                if (!ActorHasContentLoaded(a.GetChild(i)))
+                    return false;
+            }
+            return true;
         }
 
         /// <inheritdoc />
-        public GizmosCollection Gizmos { get; } = new GizmosCollection();
+        public override bool HasContentLoaded => base.HasContentLoaded && (Instance == null || ActorHasContentLoaded(Instance));
+
+        /// <inheritdoc />
+        public EditorViewport Viewport => this;
+
+        /// <inheritdoc />
+        public GizmosCollection Gizmos { get; }
+
+        private GridGizmo _gridGizmo;
 
         /// <inheritdoc />
         public SceneRenderTask RenderTask => Task;
@@ -325,7 +442,10 @@ namespace FlaxEditor.Viewport
         public bool SnapToGround => false;
 
         /// <inheritdoc />
-        public Vector2 MouseDelta => _mouseDelta * 1000;
+        public bool SnapToVertex => ContainsFocus && Editor.Instance.Options.Options.Input.SnapToVertex.Process(Root);
+
+        /// <inheritdoc />
+        public Float2 MouseDelta => _mouseDelta;
 
         /// <inheritdoc />
         public bool UseSnapping => Root.GetKey(KeyboardKeys.Control);
@@ -340,7 +460,23 @@ namespace FlaxEditor.Viewport
         public RootNode SceneGraphRoot => _window.Graph.Root;
 
         /// <inheritdoc />
-        public EditorViewport Viewport => this;
+        public void Select(List<SceneGraphNode> nodes)
+        {
+            _window.Select(nodes);
+        }
+
+        /// <inheritdoc />
+        public void Spawn(Actor actor)
+        {
+            _window.Spawn(actor);
+        }
+
+        /// <inheritdoc />
+        public void OpenContextMenu()
+        {
+            var mouse = PointFromWindow(Root.MousePosition);
+            _window.ShowContextMenu(this, ref mouse);
+        }
 
         /// <inheritdoc />
         protected override bool IsControllingMouse => Gizmos.Active?.IsControllingMouse ?? false;
@@ -359,151 +495,6 @@ namespace FlaxEditor.Viewport
             base.RemoveUpdateCallbacks(root);
 
             root.UpdateCallbacksToRemove.Add(_update);
-        }
-
-        private void OnGizmoModeToggle(ViewportWidgetButton button)
-        {
-            TransformGizmo.ActiveMode = (TransformGizmoBase.Mode)(int)button.Tag;
-        }
-
-        private void OnTranslateSnappingToggle(ViewportWidgetButton button)
-        {
-            TransformGizmo.TranslationSnapEnable = !TransformGizmo.TranslationSnapEnable;
-        }
-
-        private void OnRotateSnappingToggle(ViewportWidgetButton button)
-        {
-            TransformGizmo.RotationSnapEnabled = !TransformGizmo.RotationSnapEnabled;
-        }
-
-        private void OnScaleSnappingToggle(ViewportWidgetButton button)
-        {
-            TransformGizmo.ScaleSnapEnabled = !TransformGizmo.ScaleSnapEnabled;
-        }
-
-        private void OnTransformSpaceToggle(ViewportWidgetButton button)
-        {
-            TransformGizmo.ToggleTransformSpace();
-        }
-
-        private void OnGizmoModeChanged()
-        {
-            // Update all viewport widgets status
-            var mode = TransformGizmo.ActiveMode;
-            _gizmoModeTranslate.Checked = mode == TransformGizmoBase.Mode.Translate;
-            _gizmoModeRotate.Checked = mode == TransformGizmoBase.Mode.Rotate;
-            _gizmoModeScale.Checked = mode == TransformGizmoBase.Mode.Scale;
-        }
-
-        private static readonly float[] EditorViewportScaleSnapValues =
-        {
-            0.05f,
-            0.1f,
-            0.25f,
-            0.5f,
-            1.0f,
-            2.0f,
-            4.0f,
-            6.0f,
-            8.0f,
-        };
-
-        private void OnWidgetScaleSnapClick(ContextMenuButton button)
-        {
-            var v = (float)button.Tag;
-            TransformGizmo.ScaleSnapValue = v;
-            _scaleSnapping.Text = v.ToString();
-        }
-
-        private void OnWidgetScaleSnapShowHide(Control control)
-        {
-            if (control.Visible == false)
-                return;
-
-            var ccm = (ContextMenu)control;
-            foreach (var e in ccm.Items)
-            {
-                if (e is ContextMenuButton b)
-                {
-                    var v = (float)b.Tag;
-                    b.Icon = Mathf.Abs(TransformGizmo.ScaleSnapValue - v) < 0.001f
-                             ? Style.Current.CheckBoxTick
-                             : SpriteHandle.Invalid;
-                }
-            }
-        }
-
-        private static readonly float[] EditorViewportRotateSnapValues =
-        {
-            1.0f,
-            5.0f,
-            10.0f,
-            15.0f,
-            30.0f,
-            45.0f,
-            60.0f,
-            90.0f,
-        };
-
-        private void OnWidgetRotateSnapClick(ContextMenuButton button)
-        {
-            var v = (float)button.Tag;
-            TransformGizmo.RotationSnapValue = v;
-            _rotateSnapping.Text = v.ToString();
-        }
-
-        private void OnWidgetRotateSnapShowHide(Control control)
-        {
-            if (control.Visible == false)
-                return;
-
-            var ccm = (ContextMenu)control;
-            foreach (var e in ccm.Items)
-            {
-                if (e is ContextMenuButton b)
-                {
-                    var v = (float)b.Tag;
-                    b.Icon = Mathf.Abs(TransformGizmo.RotationSnapValue - v) < 0.001f
-                             ? Style.Current.CheckBoxTick
-                             : SpriteHandle.Invalid;
-                }
-            }
-        }
-
-        private static readonly float[] EditorViewportTranslateSnapValues =
-        {
-            0.1f,
-            0.5f,
-            1.0f,
-            5.0f,
-            10.0f,
-            100.0f,
-            1000.0f,
-        };
-
-        private void OnWidgetTranslateSnapClick(ContextMenuButton button)
-        {
-            var v = (float)button.Tag;
-            TransformGizmo.TranslationSnapValue = v;
-            _translateSnappng.Text = v.ToString();
-        }
-
-        private void OnWidgetTranslateSnapShowHide(Control control)
-        {
-            if (control.Visible == false)
-                return;
-
-            var ccm = (ContextMenu)control;
-            foreach (var e in ccm.Items)
-            {
-                if (e is ContextMenuButton b)
-                {
-                    var v = (float)b.Tag;
-                    b.Icon = Mathf.Abs(TransformGizmo.TranslationSnapValue - v) < 0.001f
-                             ? Style.Current.CheckBoxTick
-                             : SpriteHandle.Invalid;
-                }
-            }
         }
 
         private void OnSelectionChanged()
@@ -551,29 +542,12 @@ namespace FlaxEditor.Viewport
 
                 // Apply scale
                 const float scaleLimit = 99_999_999.0f;
-                trans.Scale = Vector3.Clamp(trans.Scale + scaleDelta, new Vector3(-scaleLimit), new Vector3(scaleLimit));
+                trans.Scale = Float3.Clamp(trans.Scale + scaleDelta, new Float3(-scaleLimit), new Float3(scaleLimit));
 
                 // Apply translation
                 trans.Translation += translationDelta;
 
                 obj.Transform = trans;
-            }
-        }
-
-        /// <inheritdoc />
-        public override void Draw()
-        {
-            base.Draw();
-
-            // Selected UI controls outline
-            for (var i = 0; i < _window.Selection.Count; i++)
-            {
-                if (_window.Selection[i].EditableObject is UIControl controlActor && controlActor && controlActor.Control != null)
-                {
-                    var control = controlActor.Control;
-                    var bounds = Rectangle.FromPoints(control.PointToParent(this, Vector2.Zero), control.PointToParent(this, control.Size));
-                    Render2D.DrawRectangle(bounds, Editor.Instance.Options.Options.Visual.SelectionOutlineColor0, Editor.Instance.Options.Options.Visual.UISelectionOutlineSize);
-                }
             }
         }
 
@@ -655,13 +629,13 @@ namespace FlaxEditor.Viewport
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragEnter(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragEnter(ref Float2 location, DragData data)
         {
+            DragHandlers.ClearDragEffects();
             var result = base.OnDragEnter(ref location, data);
             if (result != DragDropEffect.None)
                 return result;
-
-            return _dragHandlers.OnDragEnter(data);
+            return DragHandlers.DragEnter(ref location, data);
         }
 
         private bool ValidateDragItem(ContentItem contentItem)
@@ -673,97 +647,37 @@ namespace FlaxEditor.Viewport
                 if (assetItem.IsOfType<MaterialBase>())
                     return true;
             }
-
             return false;
         }
 
         private static bool ValidateDragActorType(ScriptType actorType)
         {
-            return true;
+            return Editor.Instance.CodeEditing.Actors.Get().Contains(actorType);
+        }
+
+        private static bool ValidateDragScriptItem(ScriptItem script)
+        {
+            return Editor.Instance.CodeEditing.Actors.Get(script) != ScriptType.Null;
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragMove(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragMove(ref Float2 location, DragData data)
         {
             var result = base.OnDragMove(ref location, data);
             if (result != DragDropEffect.None)
+            {
+                DragHandlers.ClearDragEffects();
                 return result;
-
-            return _dragHandlers.Effect;
+            }
+            return DragHandlers.DragEnter(ref location, data);
         }
 
         /// <inheritdoc />
         public override void OnDragLeave()
         {
-            _dragHandlers.OnDragLeave();
-
+            DragHandlers.ClearDragEffects();
+            DragHandlers.OnDragLeave();
             base.OnDragLeave();
-        }
-
-        private Vector3 PostProcessSpawnedActorLocation(Actor actor, ref Vector3 hitLocation)
-        {
-            Editor.GetActorEditorBox(actor, out BoundingBox box);
-
-            // Place the object
-            var location = hitLocation - (box.Size.Length * 0.5f) * ViewDirection;
-
-            // Apply grid snapping if enabled
-            if (UseSnapping || TransformGizmo.TranslationSnapEnable)
-            {
-                float snapValue = TransformGizmo.TranslationSnapValue;
-                location = new Vector3(
-                                       (int)(location.X / snapValue) * snapValue,
-                                       (int)(location.Y / snapValue) * snapValue,
-                                       (int)(location.Z / snapValue) * snapValue);
-            }
-
-            return location;
-        }
-
-        private void Spawn(AssetItem item, SceneGraphNode hit, ref Vector2 location, ref Vector3 hitLocation)
-        {
-            if (item is BinaryAssetItem binaryAssetItem)
-            {
-                if (typeof(MaterialBase).IsAssignableFrom(binaryAssetItem.Type))
-                {
-                    if (hit is StaticModelNode staticModelNode)
-                    {
-                        var staticModel = (StaticModel)staticModelNode.Actor;
-                        var ray = ConvertMouseToRay(ref location);
-                        if (staticModel.IntersectsEntry(ref ray, out _, out _, out var entryIndex))
-                        {
-                            var material = FlaxEngine.Content.LoadAsync<MaterialBase>(item.ID);
-                            using (new UndoBlock(Undo, staticModel, "Change material"))
-                                staticModel.SetMaterial(entryIndex, material);
-                        }
-                    }
-                    return;
-                }
-            }
-            {
-                var actor = item.OnEditorDrop(this);
-                actor.Name = item.ShortName;
-                Spawn(actor, ref hitLocation);
-            }
-        }
-
-        private void Spawn(Actor actor, ref Vector3 hitLocation)
-        {
-            actor.Position = PostProcessSpawnedActorLocation(actor, ref hitLocation);
-            _window.Spawn(actor);
-            Focus();
-        }
-
-        private void Spawn(ScriptType item, SceneGraphNode hit, ref Vector3 hitLocation)
-        {
-            var actor = item.CreateInstance() as Actor;
-            if (actor == null)
-            {
-                Editor.LogWarning("Failed to spawn actor of type " + item.TypeName);
-                return;
-            }
-            actor.Name = item.Name;
-            Spawn(actor, ref hitLocation);
         }
 
         /// <summary>
@@ -781,18 +695,11 @@ namespace FlaxEditor.Viewport
         /// <param name="orientation">The target view orientation.</param>
         public void FocusSelection(ref Quaternion orientation)
         {
-            if (TransformGizmo.SelectedParents.Count == 0)
-                return;
-
-            var gizmoBounds = Gizmos.Active.FocusBounds;
-            if (gizmoBounds != BoundingSphere.Empty)
-                ((FPSCamera)ViewportCamera).ShowSphere(ref gizmoBounds, ref orientation);
-            else
-                ((FPSCamera)ViewportCamera).ShowActors(TransformGizmo.SelectedParents, ref orientation);
+            ViewportCamera.FocusSelection(Gizmos, ref orientation);
         }
 
         /// <inheritdoc />
-        protected override void OrientViewport(ref Quaternion orientation)
+        public override void OrientViewport(ref Quaternion orientation)
         {
             if (TransformGizmo.SelectedParents.Count != 0)
                 FocusSelection(ref orientation);
@@ -801,64 +708,25 @@ namespace FlaxEditor.Viewport
         }
 
         /// <inheritdoc />
-        public override DragDropEffect OnDragDrop(ref Vector2 location, DragData data)
+        public override DragDropEffect OnDragDrop(ref Float2 location, DragData data)
         {
+            DragHandlers.ClearDragEffects();
             var result = base.OnDragDrop(ref location, data);
             if (result != DragDropEffect.None)
                 return result;
-
-            // Check if drag sth
-            Vector3 hitLocation = ViewPosition;
-            SceneGraphNode hit = null;
-            if (_dragHandlers.HasValidDrag)
-            {
-                // Get mouse ray and try to hit any object
-                var ray = ConvertMouseToRay(ref location);
-                var view = new Ray(ViewPosition, ViewDirection);
-                hit = _window.Graph.Root.RayCast(ref ray, ref view, out var closest, SceneGraphNode.RayCastData.FlagTypes.SkipColliders);
-                if (hit != null)
-                {
-                    // Use hit location
-                    hitLocation = ray.Position + ray.Direction * closest;
-                }
-                else
-                {
-                    // Use area in front of the viewport
-                    hitLocation = ViewPosition + ViewDirection * 100;
-                }
-            }
-
-            // Drag assets
-            if (_dragAssets.HasValidDrag)
-            {
-                result = _dragAssets.Effect;
-
-                // Process items
-                for (int i = 0; i < _dragAssets.Objects.Count; i++)
-                {
-                    var item = _dragAssets.Objects[i];
-                    Spawn(item, hit, ref location, ref hitLocation);
-                }
-            }
-            // Drag actor type
-            else if (_dragActorType.HasValidDrag)
-            {
-                result = _dragActorType.Effect;
-
-                // Process items
-                for (int i = 0; i < _dragActorType.Objects.Count; i++)
-                {
-                    var item = _dragActorType.Objects[i];
-                    Spawn(item, hit, ref hitLocation);
-                }
-            }
-
-            return result;
+            return DragHandlers.DragDrop(ref location, data);
         }
 
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            if (IsDisposing)
+                return;
+            if (_tempDebugDrawContext != IntPtr.Zero)
+            {
+                DebugDraw.FreeContext(_tempDebugDrawContext);
+                _tempDebugDrawContext = IntPtr.Zero;
+            }
             FlaxEngine.Object.Destroy(ref SelectionOutline);
             FlaxEngine.Object.Destroy(ref _spritesRenderer);
 
@@ -869,9 +737,12 @@ namespace FlaxEditor.Viewport
         public override void DrawEditorPrimitives(GPUContext context, ref RenderContext renderContext, GPUTexture target, GPUTexture targetDepth)
         {
             // Draw gizmos
-            for (int i = 0; i < Gizmos.Count; i++)
+            foreach (var gizmo in Gizmos)
             {
-                Gizmos[i].Draw(ref renderContext);
+                if (gizmo.Visible)
+                {
+                    gizmo.Draw(ref renderContext);
+                }
             }
 
             base.DrawEditorPrimitives(context, ref renderContext, target, targetDepth);
@@ -882,13 +753,48 @@ namespace FlaxEditor.Viewport
         {
             base.OnDebugDraw(context, ref renderContext);
 
-            unsafe
+            // Collect selected objects debug shapes again when DebugDraw is active with a custom context
+            _debugDrawData.Clear();
+            var selectedParents = TransformGizmo.SelectedParents;
+            for (int i = 0; i < selectedParents.Count; i++)
             {
-                fixed (IntPtr* actors = _debugDrawData.ActorsPtrs)
+                if (selectedParents[i].IsActiveInHierarchy)
+                    selectedParents[i].OnDebugDraw(_debugDrawData);
+            }
+            _debugDrawData.DrawActors();
+
+            // Debug draw all actors in prefab and collect actors
+            var view = Task.View;
+            var collectActors = (view.Flags & ViewFlags.PhysicsDebug) != 0 || view.Mode == ViewMode.PhysicsColliders || (view.Flags & ViewFlags.LightsDebug) != 0;
+            _debugDrawActors.Clear();
+            foreach (var child in SceneGraphRoot.ChildNodes)
+            {
+                if (child is not ActorNode actorNode || !actorNode.Actor)
+                    continue;
+                var actor = actorNode.Actor;
+                if (collectActors)
+                    Utils.GetActorsTree(_debugDrawActors, actor);
+                DebugDraw.DrawActorsTree(actor);
+            }
+
+            // Draw physics debug
+            if ((view.Flags & ViewFlags.PhysicsDebug) != 0 || view.Mode == ViewMode.PhysicsColliders)
+            {
+                foreach (var actor in _debugDrawActors)
+                    DebugDraw.DrawDebugPhysics(actor, renderContext.View);
+            }
+
+            // Draw lights debug
+            if ((view.Flags & ViewFlags.LightsDebug) != 0)
+            {
+                foreach (var actor in _debugDrawActors)
                 {
-                    DebugDraw.DrawActors(new IntPtr(actors), _debugDrawData.ActorsCount, false);
+                    if (actor is Light l && l.IsActiveInHierarchy)
+                        DebugDraw.DrawLightDebug(l, renderContext.View);
                 }
             }
+
+            _debugDrawActors.Clear();
         }
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -29,7 +29,12 @@ namespace Flax.Build.Platforms
         public UWPToolchain(UWPPlatform platform, TargetArchitecture architecture, WindowsPlatformToolset toolsetVer = WindowsPlatformToolset.Latest, WindowsPlatformSDK sdkVer = WindowsPlatformSDK.Latest)
         : base(platform, architecture, toolsetVer, sdkVer)
         {
-            var visualStudio = VisualStudioInstance.GetInstances().FirstOrDefault(x => x.Version == VisualStudioVersion.VisualStudio2017 || x.Version == VisualStudioVersion.VisualStudio2019);
+            var visualStudio = VisualStudioInstance.GetInstances().FirstOrDefault(x =>
+                x.Version == VisualStudioVersion.VisualStudio2017 ||
+                x.Version == VisualStudioVersion.VisualStudio2019 ||
+                x.Version == VisualStudioVersion.VisualStudio2022 ||
+                x.Version == VisualStudioVersion.VisualStudio2026
+                );
             if (visualStudio == null)
                 throw new Exception("Missing Visual Studio 2017 or newer. It's required to build for UWP.");
             _usingDirs.Add(Path.Combine(visualStudio.Path, "VC", "vcpackages"));
@@ -43,6 +48,14 @@ namespace Flax.Build.Platforms
             _usingDirs.Add(Path.Combine(sdk10, "References", sdk10Ver));
             _usingDirs.Add(Path.Combine(sdk10, "References", "CommonConfiguration", "Neutral"));
             _usingDirs.Add(Path.Combine(sdk10, "UnionMetadata", sdk10Ver));
+        }
+
+        /// <inheritdoc />
+        public override void LogInfo()
+        {
+            base.LogInfo();
+
+            Log.Error("UWP (Windows Store) platform has been deprecated and is no longer supported!");
         }
 
         /// <inheritdoc />
@@ -69,6 +82,7 @@ namespace Flax.Build.Platforms
             options.CompileEnv.PreprocessorDefinitions.Add("_WINRT_DLL");
             options.CompileEnv.PreprocessorDefinitions.Add("_WINDLL");
             options.CompileEnv.PreprocessorDefinitions.Add("__WRL_NO_DEFAULT_LIB__");
+            options.CompileEnv.PreprocessorDefinitions.Add("WINVER=0x0A00");
 
             options.LinkEnv.InputLibraries.Add("WindowsApp.lib");
         }

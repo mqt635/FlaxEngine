@@ -1,37 +1,79 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "StaticModel.h"
+#include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Engine/Engine.h"
+#include "Engine/Content/Deprecated.h"
 #include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUBufferDescription.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderBuffers.h"
+#include "Engine/Graphics/RenderContext.h"
+#include "Engine/Graphics/Models/MeshDeformation.h"
+#include "Engine/Graphics/Shaders/GPUVertexLayout.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Level/Prefabs/PrefabManager.h"
 #include "Engine/Level/Scene/Scene.h"
+#include "Engine/Renderer/DrawCall.h"
+#include "Engine/Renderer/Utils/GlobalSignDistanceFieldPass.h"
+#include "Engine/Renderer/Culling/IOcclusionCulling.h"
+#include "Engine/Renderer/GI/GlobalSurfaceAtlasPass.h"
 #include "Engine/Utilities/Encryption.h"
 #if USE_EDITOR
 #include "Editor/Editor.h"
 #endif
 
+void LightmapEntry::Serialize(ISerializable::SerializeStream& stream) const
+{
+    stream.JKEY("LightmapIndex");
+    stream.Int(TextureIndex);
+
+    stream.JKEY("LightmapArea");
+    stream.Rectangle(UVsArea.ToFloat4());
+}
+
+void LightmapEntry::Deserialize(ISerializable::DeserializeStream& stream)
+{
+    ISerializeModifier* modifier = nullptr;
+
+    DESERIALIZE_MEMBER(LightmapIndex, TextureIndex);
+    {
+        const auto e = SERIALIZE_FIND_MEMBER(stream, "LightmapArea");
+        if (e != stream.MemberEnd())
+        {
+            Rectangle rect;
+            Serialization::Deserialize(e->value, rect, nullptr);
+            UVsArea = Half4(rect);
+        }
+    }
+}
+
 StaticModel::StaticModel(const SpawnParams& params)
     : ModelInstanceActor(params)
-    , _world(Matrix::Identity)
     , _scaleInLightmap(1.0f)
     , _boundsScale(1.0f)
     , _lodBias(0)
     , _forcedLod(-1)
     , _vertexColorsDirty(false)
     , _vertexColorsCount(0)
+    , _sortOrder(0)
+    , Model(this)
 {
-    Model.Changed.Bind<StaticModel, &StaticModel::OnModelChanged>(this);
-    Model.Loaded.Bind<StaticModel, &StaticModel::OnModelLoaded>(this);
+    _drawCategory = SceneRendering::SceneDrawAsync;
 }
 
 StaticModel::~StaticModel()
 {
     for (int32 lodIndex = 0; lodIndex < _vertexColorsCount; lodIndex++)
         SAFE_DELETE_GPU_RESOURCE(_vertexColorsBuffer[lodIndex]);
+    if (_deformation)
+        Delete(_deformation);
+}
+
+float StaticModel::GetScaleInLightmap() const
+{
+    return _scaleInLightmap;
 }
 
 void StaticModel::SetScaleInLightmap(float value)
@@ -39,13 +81,72 @@ void StaticModel::SetScaleInLightmap(float value)
     _scaleInLightmap = value;
 }
 
+float StaticModel::GetBoundsScale() const
+{
+    return _boundsScale;
+}
+
 void StaticModel::SetBoundsScale(float value)
 {
-    if (Math::NearEqual(_boundsScale, value))
+    if (_boundsScale == value)
         return;
 
     _boundsScale = value;
     UpdateBounds();
+}
+
+DrawPass StaticModel::GetDrawModes() const
+{
+    return _drawModes;
+}
+
+void StaticModel::SetDrawModes(DrawPass value)
+{
+    if (_drawModes == value)
+        return;
+    _drawModes = value;
+    if (_sceneRenderingKey != -1)
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::DrawModes);
+}
+
+int32 StaticModel::GetLODBias() const
+{
+    return _lodBias;
+}
+
+void StaticModel::SetLODBias(int32 value)
+{
+    _lodBias = static_cast<char>(Math::Clamp(value, -100, 100));
+}
+
+int32 StaticModel::GetForcedLOD() const
+{
+    return _forcedLod;
+}
+
+void StaticModel::SetForcedLOD(int32 value)
+{
+    _forcedLod = static_cast<char>(Math::Clamp(value, -1, 100));
+}
+
+int32 StaticModel::GetSortOrder() const
+{
+    return _sortOrder;
+}
+
+void StaticModel::SetSortOrder(int32 value)
+{
+    _sortOrder = (int8)Math::Clamp<int32>(value, MIN_int8, MAX_int8);
+}
+
+bool StaticModel::HasLightmap() const
+{
+    return Lightmap.TextureIndex != INVALID_INDEX;
+}
+
+void StaticModel::RemoveLightmap()
+{
+    Lightmap.TextureIndex = INVALID_INDEX;
 }
 
 MaterialBase* StaticModel::GetMaterial(int32 meshIndex, int32 lodIndex) const
@@ -56,7 +157,7 @@ MaterialBase* StaticModel::GetMaterial(int32 meshIndex, int32 lodIndex) const
         Math::IsInRange(meshIndex, 0, model->LODs[lodIndex].Meshes.Count()));
     const auto& mesh = model->LODs[lodIndex].Meshes[meshIndex];
     const auto materialSlotIndex = mesh.GetMaterialSlotIndex();
-    MaterialBase* material = Entries[materialSlotIndex].Material.Get();
+    MaterialBase* material = materialSlotIndex < Entries.Count() ? Entries[materialSlotIndex].Material.Get() : nullptr;
     return material ? material : model->MaterialSlots[materialSlotIndex].Material.Get();
 }
 
@@ -150,6 +251,11 @@ void StaticModel::SetVertexColor(int32 lodIndex, int32 meshIndex, int32 vertexIn
     LOG(Warning, "Specified model mesh index was out of range. LOD{0} mesh {1}.", lodIndex, meshIndex);
 }
 
+bool StaticModel::HasVertexColors() const
+{
+    return _vertexColorsCount != 0;
+}
+
 void StaticModel::RemoveVertexColors()
 {
     for (int32 lodIndex = 0; lodIndex < _vertexColorsCount; lodIndex++)
@@ -160,38 +266,60 @@ void StaticModel::RemoveVertexColors()
     _vertexColorsDirty = false;
 }
 
-void StaticModel::OnModelChanged()
+void StaticModel::OnAssetChanged(Asset* asset, void* caller)
 {
+    if (_residencyChangedModel)
+    {
+        _residencyChangedModel = nullptr;
+        Model->ResidencyChanged.Unbind<StaticModel, &StaticModel::OnModelResidencyChanged>(this);
+    }
     RemoveVertexColors();
     Entries.Release();
-
     if (Model && !Model->IsLoaded())
-    {
         UpdateBounds();
+    if (_deformation)
+        _deformation->Clear();
+    else if (!Model && _sceneRenderingKey != -1)
+        GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
+}
+
+void StaticModel::OnAssetLoaded(Asset* asset, void* caller)
+{
+    Entries.SetupIfInvalid(Model);
+    UpdateBounds();
+    if (_sceneRenderingKey == -1 && _scene && _isActiveInHierarchy && _isEnabled && !_residencyChangedModel)
+    {
+        // Register for rendering but once the model has any LOD loaded
+        if (Model->GetLoadedLODs() == 0)
+        {
+            _residencyChangedModel = Model;
+            _residencyChangedModel->ResidencyChanged.Bind<StaticModel, &StaticModel::OnModelResidencyChanged>(this);
+        }
+        else
+        {
+            GetSceneRendering()->AddActor(this, _sceneRenderingKey);
+        }
     }
 }
 
-void StaticModel::OnModelLoaded()
+void StaticModel::OnModelResidencyChanged()
 {
-    Entries.SetupIfInvalid(Model);
-
-    UpdateBounds();
+    if (_sceneRenderingKey == -1 && _scene && Model && Model->GetLoadedLODs() > 0 && _residencyChangedModel)
+    {
+        GetSceneRendering()->AddActor(this, _sceneRenderingKey);
+        _residencyChangedModel->ResidencyChanged.Unbind<StaticModel, &StaticModel::OnModelResidencyChanged>(this);
+        _residencyChangedModel = nullptr;
+    }
 }
 
 void StaticModel::UpdateBounds()
 {
-    if (Model && Model->IsLoaded())
+    const auto model = Model.Get();
+    if (model && model->IsLoaded() && model->LODs.Count() != 0)
     {
-        Matrix world;
-        if (Math::IsOne(_boundsScale))
-            world = _world;
-        else
-        {
-            Transform t = _transform;
-            t.Scale *= _boundsScale;
-            t.GetWorld(world);
-        }
-        _box = Model->GetBox(world);
+        Transform transform = _transform;
+        transform.Scale *= _boundsScale;
+        _box = model->LODs[0].GetBox(transform, _deformation);
     }
     else
     {
@@ -199,7 +327,39 @@ void StaticModel::UpdateBounds()
     }
     BoundingSphere::FromBox(_box, _sphere);
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateGeometry(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Bounds);
+}
+
+void StaticModel::FlushVertexColors()
+{
+    RenderContext::GPULocker.Lock();
+    for (int32 lodIndex = 0; lodIndex < _vertexColorsCount; lodIndex++)
+    {
+        auto& vertexColorsData = _vertexColorsData[lodIndex];
+        auto& vertexColorsBuffer = _vertexColorsBuffer[lodIndex];
+        if (vertexColorsData.HasItems())
+        {
+            const uint32 size = vertexColorsData.Count() * sizeof(Color32);
+            if (!vertexColorsBuffer)
+                vertexColorsBuffer = GPUDevice::Instance->CreateBuffer(TEXT("VertexColors"));
+            if (vertexColorsBuffer->GetSize() != size)
+            {
+                auto layout = GPUVertexLayout::Get({{ VertexElement::Types::Color, 2, 0, 0, PixelFormat::R8G8B8A8_UNorm }});
+                if (vertexColorsBuffer->Init(GPUBufferDescription::Vertex(layout, sizeof(Color32), vertexColorsData.Count(), nullptr)))
+                    break;
+            }
+            GPUDevice::Instance->GetMainContext()->UpdateBuffer(vertexColorsBuffer, vertexColorsData.Get(), size);
+        }
+        else
+        {
+            SAFE_DELETE_GPU_RESOURCE(vertexColorsBuffer);
+        }
+    }
+    RenderContext::GPULocker.Unlock();
+}
+
+void StaticModel::OnAssetUnloaded(Asset* asset, void* caller)
+{
 }
 
 bool StaticModel::HasContentLoaded() const
@@ -207,83 +367,74 @@ bool StaticModel::HasContentLoaded() const
     return (Model == nullptr || Model->IsLoaded()) && Entries.HasContentLoaded();
 }
 
-void StaticModel::Draw(RenderContext& renderContext)
+void StaticModel::Draw(RenderContextBatch& renderContextBatch)
 {
-    GEOMETRY_DRAW_STATE_EVENT_BEGIN(_drawState, _world);
-
-    const DrawPass drawModes = (DrawPass)(DrawModes & renderContext.View.Pass);
-    if (Model && Model->IsLoaded() && drawModes != DrawPass::None)
+    auto model = Model.Get();
+    if (!model || !model->IsLoaded())
+        return;
+    const RenderContext& renderContext = renderContextBatch.GetMainContext();
+    if (renderContext.View.Pass == DrawPass::GlobalSDF)
     {
-        // Flush vertex colors if need to
-        if (_vertexColorsDirty)
-        {
-            for (int32 lodIndex = 0; lodIndex < _vertexColorsCount; lodIndex++)
-            {
-                auto& vertexColorsData = _vertexColorsData[lodIndex];
-                auto& vertexColorsBuffer = _vertexColorsBuffer[lodIndex];
-                if (vertexColorsData.HasItems())
-                {
-                    const uint32 size = vertexColorsData.Count() * sizeof(Color32);
-                    if (!vertexColorsBuffer)
-                        vertexColorsBuffer = GPUDevice::Instance->CreateBuffer(TEXT("VertexColors"));
-                    if (vertexColorsBuffer->GetSize() != size)
-                    {
-                        if (vertexColorsBuffer->Init(GPUBufferDescription::Vertex(sizeof(Color32), vertexColorsData.Count())))
-                            return;
-                    }
-                    GPUDevice::Instance->GetMainContext()->UpdateBuffer(vertexColorsBuffer, vertexColorsData.Get(), size);
-                }
-                else
-                {
-                    SAFE_DELETE_GPU_RESOURCE(vertexColorsBuffer);
-                }
-            }
-        }
+        if (EnumHasAnyFlags(_drawModes, DrawPass::GlobalSDF) && model->SDF.Texture)
+            GlobalSignDistanceFieldPass::Instance()->RasterizeModelSDF(this, model->SDF, _transform, _box);
+        return;
+    }
+    if (renderContext.View.Pass == DrawPass::GlobalSurfaceAtlas)
+    {
+        if (EnumHasAnyFlags(_drawModes, DrawPass::GlobalSurfaceAtlas) && model->SDF.Texture)
+            GlobalSurfaceAtlasPass::Instance()->RasterizeActor(this, this, _sphere, _transform, model->LODs.Last().GetBox());
+        return;
+    }
+    auto drawState = renderContext.Buffers->GetGeometryDrawState(&GetScene()->Rendering, _sceneRenderingKey, this);
+    ACTOR_GET_WORLD_MATRIX(this, view, world);
+    Mesh::DrawInfo draw;
+    draw.DrawModes = _drawModes;
+    if (drawState && EnumHasAllFlags(renderContext.View.Flags, ViewFlags::OcclusionCulling) && renderContextBatch.Buffers->OcclusionCulling && !renderContextBatch.Buffers->OcclusionCulling->IsVisible(_box, *drawState))
+    {
+        // Draw shadows-only (or cull)
+        draw.DrawModes &= DrawPass::Depth;
+        if (renderContextBatch.Contexts.Count() == 1 || draw.DrawModes == DrawPass::None)
+            return;
+    }
+    GEOMETRY_DRAW_STATE_EVENT_BEGIN(drawState, world);
+    if (_vertexColorsDirty)
+        FlushVertexColors();
 
-#if USE_EDITOR
-        // Disable motion blur effects in editor without play mode enabled to hide minor artifacts on objects moving
-        if (!Editor::IsPlayMode)
-            _drawState.PrevWorld = _world;
+    draw.Buffer = &Entries;
+    draw.World = &world;
+    draw.DrawState = drawState;
+    draw.Deformation = _deformation;
+    draw.Lightmap = _scene && Lightmap.TextureIndex != -1 ? _scene->LightmapsData.GetReadyLightmap(Lightmap.TextureIndex) : nullptr;
+    draw.LightmapUVs = &Lightmap.UVsArea;
+    draw.Flags = _staticFlags;
+    draw.Bounds = _sphere;
+    draw.Bounds.Center -= renderContext.View.Origin;
+    draw.PerInstanceRandom = GetPerInstanceRandom();
+    draw.LODBias = _lodBias;
+    draw.ForcedLOD = _forcedLod;
+    draw.SortOrder = _sortOrder;
+    draw.VertexColors = _vertexColorsCount ? _vertexColorsBuffer : nullptr;
+    draw.SetStencilValue(_layer);
+#if GPU_ENABLE_DEVELOPMENT
+    if (HasStaticFlag(StaticFlags::Lightmap))
+        draw.LightmapScale = _scaleInLightmap;
 #endif
 
-        Mesh::DrawInfo draw;
-        draw.Buffer = &Entries;
-        draw.World = &_world;
-        draw.DrawState = &_drawState;
-        draw.Lightmap = _scene->LightmapsData.GetReadyLightmap(Lightmap.TextureIndex);
-        draw.LightmapUVs = &Lightmap.UVsArea;
-        draw.Flags = _staticFlags;
-        draw.DrawModes = drawModes;
-        draw.Bounds = _sphere;
-        draw.PerInstanceRandom = GetPerInstanceRandom();
-        draw.LODBias = _lodBias;
-        draw.ForcedLOD = _forcedLod;
-        draw.VertexColors = _vertexColorsCount ? _vertexColorsBuffer : nullptr;
+    model->Draw(renderContextBatch, draw);
 
-        Model->Draw(renderContext, draw);
-    }
-
-    GEOMETRY_DRAW_STATE_EVENT_END(_drawState, _world);
+    GEOMETRY_DRAW_STATE_EVENT_END(drawState, world);
 }
 
-void StaticModel::DrawGeneric(RenderContext& renderContext)
-{
-    if (renderContext.View.RenderLayersMask.Mask & GetLayerMask() && renderContext.View.CullingFrustum.Intersects(_box))
-    {
-        Draw(renderContext);
-    }
-}
-
-bool StaticModel::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool StaticModel::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     bool result = false;
-
     if (Model != nullptr && Model->IsLoaded())
     {
         Mesh* mesh;
-        result = Model->Intersects(ray, _world, distance, normal, &mesh);
+        Matrix world;
+        GetLocalToWorldMatrix(world);
+        result = Model->Intersects(ray, world, distance, normal, &mesh);
     }
-
     return result;
 }
 
@@ -299,23 +450,19 @@ void StaticModel::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE(Model);
     SERIALIZE_MEMBER(LODBias, _lodBias);
     SERIALIZE_MEMBER(ForcedLOD, _forcedLod);
-    SERIALIZE(DrawModes);
+    SERIALIZE_MEMBER(SortOrder, _sortOrder);
+    SERIALIZE_MEMBER(DrawModes, _drawModes);
 
     if (HasLightmap()
 #if USE_EDITOR
-        && PrefabManager::IsNotCreatingPrefab
+        && !PrefabManager::IsCreatingPrefab
 #endif
     )
     {
-        stream.JKEY("LightmapIndex");
-        stream.Int(Lightmap.TextureIndex);
-
-        stream.JKEY("LightmapArea");
-        stream.Rectangle(Lightmap.UVsArea);
+        Lightmap.Serialize(stream);
     }
 
-    stream.JKEY("Buffer");
-    stream.Object(&Entries, other ? &other->Entries : nullptr);
+    SERIALIZE_MEMBER(Buffer, Entries);
 
     if (_vertexColorsCount)
     {
@@ -348,27 +495,12 @@ void StaticModel::Deserialize(DeserializeStream& stream, ISerializeModifier* mod
     DESERIALIZE_MEMBER(ScaleInLightmap, _scaleInLightmap);
     DESERIALIZE_MEMBER(BoundsScale, _boundsScale);
     DESERIALIZE(Model);
-
-    {
-        const auto member = stream.FindMember("LODBias");
-        if (member != stream.MemberEnd() && member->value.IsInt())
-        {
-            SetLODBias(member->value.GetInt());
-        }
-    }
-    {
-        const auto member = stream.FindMember("ForcedLOD");
-        if (member != stream.MemberEnd() && member->value.IsInt())
-        {
-            SetForcedLOD(member->value.GetInt());
-        }
-    }
-
-    DESERIALIZE(DrawModes);
-    DESERIALIZE_MEMBER(LightmapIndex, Lightmap.TextureIndex);
-    DESERIALIZE_MEMBER(LightmapArea, Lightmap.UVsArea);
-
-    Entries.DeserializeIfExists(stream, "Buffer", modifier);
+    DESERIALIZE_MEMBER(LODBias, _lodBias);
+    DESERIALIZE_MEMBER(ForcedLOD, _forcedLod);
+    DESERIALIZE_MEMBER(SortOrder, _sortOrder);
+    DESERIALIZE_MEMBER(DrawModes, _drawModes);
+    Lightmap.Deserialize(stream);
+    DESERIALIZE_MEMBER(Buffer, Entries);
 
     {
         const auto member = stream.FindMember("VertexColors");
@@ -413,20 +545,61 @@ void StaticModel::Deserialize(DeserializeStream& stream, ISerializeModifier* mod
         const auto member = stream.FindMember("HiddenShadow");
         if (member != stream.MemberEnd() && member->value.IsBool() && member->value.GetBool())
         {
-            DrawModes = DrawPass::Depth;
+            MARK_CONTENT_DEPRECATED();
+            _drawModes = DrawPass::Depth;
         }
+    }
+    // [Deprecated on 07.02.2022, expires on 07.02.2024]
+    if (modifier->EngineBuild <= 6330)
+    {
+        MARK_CONTENT_DEPRECATED();
+        _drawModes |= DrawPass::GlobalSDF;
+    }
+    // [Deprecated on 27.04.2022, expires on 27.04.2024]
+    if (modifier->EngineBuild <= 6331)
+    {
+        MARK_CONTENT_DEPRECATED();
+        _drawModes |= DrawPass::GlobalSurfaceAtlas;
     }
 
     {
         const auto member = stream.FindMember("RenderPasses");
         if (member != stream.MemberEnd() && member->value.IsInt())
         {
-            DrawModes = (DrawPass)member->value.GetInt();
+            _drawModes = (DrawPass)member->value.GetInt();
         }
     }
 }
 
-bool StaticModel::IntersectsEntry(int32 entryIndex, const Ray& ray, float& distance, Vector3& normal)
+const Span<MaterialSlot> StaticModel::GetMaterialSlots() const
+{
+    const auto model = Model.Get();
+    if (model && !model->WaitForLoaded())
+        return ToSpan(model->MaterialSlots);
+    return Span<MaterialSlot>();
+}
+
+MaterialBase* StaticModel::GetMaterial(int32 entryIndex)
+{
+    if (!Model || Model->WaitForLoaded())
+        return nullptr;
+    CHECK_RETURN(entryIndex >= 0 && entryIndex < Model->MaterialSlots.Count(), nullptr);
+    MaterialBase* material = entryIndex < Entries.Count() ? Entries[entryIndex].Material.Get() : nullptr;
+    if (!material)
+    {
+        material = Model->MaterialSlots[entryIndex].Material.Get();
+        if (!material)
+            material = GPUDevice::Instance->GetDefaultMaterial();
+    }
+    return material;
+}
+
+ModelBase* StaticModel::GetModel()
+{
+    return Model.Get();
+}
+
+bool StaticModel::IntersectsEntry(int32 entryIndex, const Ray& ray, Real& distance, Vector3& normal)
 {
     auto model = Model.Get();
     if (!model || !model->IsInitialized() || model->GetLoadedLODs() == 0)
@@ -437,7 +610,7 @@ bool StaticModel::IntersectsEntry(int32 entryIndex, const Ray& ray, float& dista
     for (int32 i = 0; i < meshes.Count(); i++)
     {
         const auto& mesh = meshes[i];
-        if (mesh.GetMaterialSlotIndex() == entryIndex && mesh.Intersects(ray, _world, distance, normal))
+        if (mesh.GetMaterialSlotIndex() == entryIndex && mesh.Intersects(ray, _transform, distance, normal))
             return true;
     }
 
@@ -446,7 +619,7 @@ bool StaticModel::IntersectsEntry(int32 entryIndex, const Ray& ray, float& dista
     return false;
 }
 
-bool StaticModel::IntersectsEntry(const Ray& ray, float& distance, Vector3& normal, int32& entryIndex)
+bool StaticModel::IntersectsEntry(const Ray& ray, Real& distance, Vector3& normal, int32& entryIndex)
 {
     auto model = Model.Get();
     if (!model || !model->IsInitialized() || model->GetLoadedLODs() == 0)
@@ -454,7 +627,7 @@ bool StaticModel::IntersectsEntry(const Ray& ray, float& distance, Vector3& norm
 
     // Find mesh in the highest loaded LOD that is using the given material slot index and ray hits it
     bool result = false;
-    float closest = MAX_float;
+    Real closest = MAX_Real;
     Vector3 closestNormal = Vector3::Up;
     int32 closestEntry = -1;
     auto& meshes = model->LODs[model->HighestResidentLODIndex()].Meshes;
@@ -462,9 +635,9 @@ bool StaticModel::IntersectsEntry(const Ray& ray, float& distance, Vector3& norm
     {
         // Test intersection with mesh and check if is closer than previous
         const auto& mesh = meshes[i];
-        float dst;
+        Real dst;
         Vector3 nrm;
-        if (mesh.Intersects(ray, _world, dst, nrm) && dst < closest)
+        if (mesh.Intersects(ray, _transform, dst, nrm) && dst < closest)
         {
             result = true;
             closest = dst;
@@ -479,11 +652,75 @@ bool StaticModel::IntersectsEntry(const Ray& ray, float& distance, Vector3& norm
     return result;
 }
 
-void StaticModel::OnTransformChanged()
+bool StaticModel::GetMeshData(const MeshReference& ref, MeshBufferType type, BytesContainer& result, int32& count, GPUVertexLayout** layout) const
 {
-    // Base
-    ModelInstanceActor::OnTransformChanged();
+    count = 0;
+    if (ref.LODIndex < 0 || ref.MeshIndex < 0)
+        return true;
+    const auto model = Model.Get();
+    if (!model || model->WaitForLoaded())
+        return true;
+    auto& lod = model->LODs[Math::Min(ref.LODIndex, model->LODs.Count() - 1)];
+    auto& mesh = lod.Meshes[Math::Min(ref.MeshIndex, lod.Meshes.Count() - 1)];
+    return mesh.DownloadDataCPU(type, result, count, layout);
+}
 
-    _transform.GetWorld(_world);
-    UpdateBounds();
+MeshBase* StaticModel::GetMesh(const MeshReference& ref) const
+{
+    const auto model = Model.Get();
+    if (!model || model->WaitForLoaded())
+        return nullptr;
+    auto& lod = model->LODs[Math::Min(ref.LODIndex, model->LODs.Count() - 1)];
+    auto& mesh = lod.Meshes[Math::Min(ref.MeshIndex, lod.Meshes.Count() - 1)];
+    return &mesh;
+}
+
+MeshDeformation* StaticModel::GetMeshDeformation() const
+{
+    if (!_deformation)
+        _deformation = New<MeshDeformation>();
+    return _deformation;
+}
+
+void StaticModel::OnEnable()
+{
+    // If model is set and loaded but we still don't have residency registered do it here (eg. model is streaming LODs right now)
+    if (_scene && _sceneRenderingKey == -1 && !_residencyChangedModel && Model && Model->IsLoaded())
+    {
+        // Register for rendering but once the model has any LOD loaded
+        if (Model->GetLoadedLODs() == 0)
+        {
+            _residencyChangedModel = Model;
+            _residencyChangedModel->ResidencyChanged.Bind<StaticModel, &StaticModel::OnModelResidencyChanged>(this);
+        }
+        else
+        {
+            GetSceneRendering()->AddActor(this, _sceneRenderingKey);
+        }
+    }
+
+    // Skip ModelInstanceActor (add to SceneRendering manually)
+    Actor::OnEnable();
+}
+
+void StaticModel::OnDisable()
+{
+    // Skip ModelInstanceActor (add to SceneRendering manually)
+    Actor::OnDisable();
+
+    if (_sceneRenderingKey != -1)
+    {
+        GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
+    }
+    if (_residencyChangedModel)
+    {
+        _residencyChangedModel->ResidencyChanged.Unbind<StaticModel, &StaticModel::OnModelResidencyChanged>(this);
+        _residencyChangedModel = nullptr;
+    }
+}
+
+void StaticModel::WaitForModelLoad()
+{
+    if (Model)
+        Model->WaitForLoaded();
 }

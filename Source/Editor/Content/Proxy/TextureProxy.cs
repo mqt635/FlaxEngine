@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content.Thumbnails;
@@ -50,18 +50,12 @@ namespace FlaxEditor.Content
                     Offsets = Margin.Zero,
                 };
             }
-
-            // TODO: disable streaming for asset during thumbnail rendering (and restore it after)
         }
 
         /// <inheritdoc />
         public override bool CanDrawThumbnail(ThumbnailRequest request)
         {
-            // Check if asset is streamed enough
-            var asset = (Texture)request.Asset;
-            var mipLevels = asset.MipLevels;
-            var minMipLevels = Mathf.Min(mipLevels, 7);
-            return asset.ResidentMipLevels >= Mathf.Max(minMipLevels, (int)(mipLevels * ThumbnailsModule.MinimumRequiredResourcesQuality));
+            return ThumbnailsModule.HasMinimumQuality((Texture)request.Asset);
         }
 
         /// <inheritdoc />

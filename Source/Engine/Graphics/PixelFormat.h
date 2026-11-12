@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -512,6 +512,61 @@ API_ENUM() enum class PixelFormat : uint32
     /// A four-component, HDR floating point format for color channels format that supports RGBA channels.
     /// </summary>
     BC7_UNorm_sRGB = 99,
+
+    /// <summary>
+    /// A four-component ASTC (4x4 pixel block in 128 bits) block-compression format that supports RGBA channels.
+    /// </summary>
+    ASTC_4x4_UNorm = 100,
+
+    /// <summary>
+    /// A four-component ASTC (4x4 pixel block in 128 bits) block-compression format that supports RGBA channels. Data in sRGB color space.
+    /// </summary>
+    ASTC_4x4_UNorm_sRGB = 101,
+
+    /// <summary>
+    /// A four-component ASTC (6x6 pixel block in 128 bits) block-compression format that supports RGBA channels.
+    /// </summary>
+    ASTC_6x6_UNorm = 102,
+
+    /// <summary>
+    /// A four-component ASTC (6x6 pixel block in 128 bits) block-compression format that supports RGBA channels. Data in sRGB color space.
+    /// </summary>
+    ASTC_6x6_UNorm_sRGB = 103,
+
+    /// <summary>
+    /// A four-component ASTC (8x8 pixel block in 128 bits) block-compression format that supports RGBA channels.
+    /// </summary>
+    ASTC_8x8_UNorm = 104,
+
+    /// <summary>
+    /// A four-component ASTC (8x8 pixel block in 128 bits) block-compression format that supports RGBA channels. Data in sRGB color space.
+    /// </summary>
+    ASTC_8x8_UNorm_sRGB = 105,
+
+    /// <summary>
+    /// A four-component ASTC (10x10 pixel block in 128 bits) block-compression format that supports RGBA channels.
+    /// </summary>
+    ASTC_10x10_UNorm = 106,
+
+    /// <summary>
+    /// A four-component ASTC (10x10 pixel block in 128 bits) block-compression format that supports RGBA channels. Data in sRGB color space.
+    /// </summary>
+    ASTC_10x10_UNorm_sRGB = 107,
+
+    /// <summary>
+    /// Packed YUV 4:2:2 video texture format. The mapping to the view channel in shader is Y0->R8, U0->G8, Y1->B8, and V0->A8.
+    /// </summary>
+    YUY2 = 108,
+
+    /// <summary>
+    /// Packed YUV 4:2:0 video texture format. Texture uses separate views to access the luma (Y) plane separately from the chroma (UV) planes. For luminance data view, the mapping to the view channel is Y->R8. For chrominance data view, the mapping to the view channel is U->R8 and V->G8.
+    /// </summary>
+    NV12 = 109,
+
+    /// <summary>
+    /// Basis Universal format (.basis file data). Uses supercompressed texture transcoding system.
+    /// </summary>
+    Basis = 110,
 
     /// <summary>
     /// The maximum format value (for internal use only).

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -29,16 +29,15 @@ DECLARE_ENUM_OPERATORS(SphericalJointFlag);
 /// rotate around the anchor points, and their rotation can be limited by an elliptical cone.
 /// </summary>
 /// <seealso cref="Joint" />
-API_CLASS() class FLAXENGINE_API SphericalJoint : public Joint
+API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Joints/Spherical Joint\"), ActorToolbox(\"Physics\")")
+class FLAXENGINE_API SphericalJoint : public Joint
 {
-DECLARE_SCENE_OBJECT(SphericalJoint);
+    DECLARE_SCENE_OBJECT(SphericalJoint);
 private:
-
     SphericalJointFlag _flags;
     LimitConeRange _limit;
 
 public:
-
     /// <summary>
     /// Gets the joint mode flags. Controls joint behaviour.
     /// </summary>
@@ -56,9 +55,7 @@ public:
     /// <summary>
     /// Gets the joint limit properties.
     /// </summary>
-    /// <remarks>
-    /// Determines the limit of the joint. Limit constrains the motion to the specified angle range. You must enable the limit flag on the joint in order for this to be recognized.
-    /// </remarks>
+    /// <remarks>Determines the limit of the joint. Limit constrains the motion to the specified angle range. You must enable the limit flag on the joint in order for this to be recognized.</remarks>
     API_PROPERTY(Attributes="EditorOrder(110), EditorDisplay(\"Joint\")")
     FORCE_INLINE LimitConeRange GetLimit() const
     {
@@ -68,13 +65,10 @@ public:
     /// <summary>
     /// Sets the joint limit properties.
     /// </summary>
-    /// <remarks>
-    /// Determines a limit that constrains the movement of the joint to a specific minimum and maximum distance. You must enable the limit flag on the joint in order for this to be recognized.
-    /// </remarks>
+    /// <remarks>Determines a limit that constrains the movement of the joint to a specific minimum and maximum distance. You must enable the limit flag on the joint in order for this to be recognized.</remarks>
     API_PROPERTY() void SetLimit(const LimitConeRange& value);
 
 public:
-
     // [Joint]
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
@@ -83,7 +77,6 @@ public:
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
 
 protected:
-
     // [Joint]
-    PxJoint* CreateJoint(JointData& data) override;
+    void* CreateJoint(const PhysicsJointDesc& desc) override;
 };

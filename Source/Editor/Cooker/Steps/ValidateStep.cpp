@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ValidateStep.h"
 #include "Engine/Core/Config/GameSettings.h"
@@ -51,6 +51,11 @@ bool ValidateStep::Perform(CookingData& data)
 
     // Validate game settings
     auto gameSettings = GameSettings::Get();
+    if (gameSettings == nullptr)
+    {
+        data.Error(TEXT("Missing game settings."));
+        return true;
+    }
     {
         if (gameSettings->ProductName.IsEmpty())
         {
@@ -64,8 +69,6 @@ bool ValidateStep::Perform(CookingData& data)
             return true;
         }
 
-        // TODO: validate version
-
         AssetInfo info;
         if (!Content::GetAssetInfo(gameSettings->FirstScene, info))
         {
@@ -73,10 +76,6 @@ bool ValidateStep::Perform(CookingData& data)
             return true;
         }
     }
-
-    // TODO: validate more game config
-
-    // TODO: validate all input scenes?
 
     return false;
 }

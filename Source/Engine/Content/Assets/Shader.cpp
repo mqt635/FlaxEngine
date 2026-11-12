@@ -1,9 +1,13 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Shader.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
+#if GPU_ENABLE_RESOURCE_NAMING && !USE_EDITOR
+#include "Engine/Content/Content.h"
+#include "Engine/Content/Cache/AssetsCache.h"
+#endif
 #include "Engine/Content/Upgraders/ShaderAssetUpgrader.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/Serialization/MemoryReadStream.h"
@@ -14,7 +18,7 @@ Shader::Shader(const SpawnParams& params, const AssetInfo* info)
     : ShaderAssetTypeBase<BinaryAsset>(params, info)
 {
     ASSERT(GPUDevice::Instance);
-    _shader = GPUDevice::Instance->CreateShader(info->Path);
+    _shader = GPUDevice::Instance->CreateShader(GPU_GET_RESOURCE_NAME_FROM_ASSET(info));
     ASSERT(_shader);
     GPU = _shader;
 }

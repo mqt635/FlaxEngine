@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS && !PLATFORM_SDL
 
 #include "Engine/Platform/Base/WindowBase.h"
 #include "Engine/Platform/Platform.h"
@@ -11,7 +11,7 @@
 /// <summary>
 /// Implementation of the window class for Windows platform
 /// </summary>
-class WindowsWindow : public WindowBase
+class FLAXENGINE_API WindowsWindow : public WindowBase
 #if USE_EDITOR
                       , public Windows::IDropTarget
 #endif
@@ -19,21 +19,25 @@ class WindowsWindow : public WindowBase
     friend WindowsPlatform;
 
 private:
-
     Windows::HWND _handle;
 #if USE_EDITOR
     Windows::ULONG _refCount;
 #endif
     bool _isResizing = false;
+    bool _forceRedrawOnPaint = false;
     bool _isSwitchingFullScreen = false;
     bool _trackingMouse = false;
+    bool _clipCursorSet = false;
+    bool _lastCursorHidden = false;
     bool _isDuringMaximize = false;
+    int32 _cursorHiddenSafetyCount = 0;
+    float _opacity = 1.0f;
     Windows::HANDLE _monitor = nullptr;
-    Vector2 _clientSize;
+    Windows::LONG _clipCursorRect[4];
     int32 _regionWidth = 0, _regionHeight = 0;
+    Float2 _minimizedScreenPosition = Float2::Zero;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="WindowsWindow"/> class.
     /// </summary>
@@ -46,7 +50,6 @@ public:
     ~WindowsWindow();
 
 public:
-
     /// <summary>
     /// Gets the window handle.
     /// </summary>
@@ -75,7 +78,6 @@ public:
     void GetScreenInfo(int32& x, int32& y, int32& width, int32& height) const;
 
 public:
-
     /// <summary>
     /// The Windows messages procedure.
     /// </summary>
@@ -86,55 +88,59 @@ public:
     Windows::LRESULT WndProc(Windows::UINT msg, Windows::WPARAM wParam, Windows::LPARAM lParam);
 
 private:
-
-    void CheckForWindowResize();
-    void UpdateCursor() const;
+    void CheckForWindowResize(bool force = false);
+    void UpdateCursor();
     void UpdateRegion();
 
 public:
-
-    // [Window]
+    // [WindowBase]
     void* GetNativePtr() const override;
     void Show() override;
     void Hide() override;
     void Minimize() override;
     void Maximize() override;
+    void SetBorderless(bool isBorderless, bool maximized = false) override;
     void Restore() override;
     bool IsClosed() const override;
     bool IsForegroundWindow() const override;
     void BringToFront(bool force = false) override;
     void SetClientBounds(const Rectangle& clientArea) override;
-    void SetPosition(const Vector2& position) override;
-    void SetClientPosition(const Vector2& position) override;
+    void SetPosition(const Float2& position) override;
+    void SetClientPosition(const Float2& position) override;
     void SetIsFullscreen(bool isFullscreen) override;
-    Vector2 GetPosition() const override;
-    Vector2 GetSize() const override;
-    Vector2 GetClientSize() const override;
-    Vector2 ScreenToClient(const Vector2& screenPos) const override;
-    Vector2 ClientToScreen(const Vector2& clientPos) const override;
+    Float2 GetPosition() const override;
+    Float2 GetSize() const override;
+    Float2 GetClientSize() const override;
+    Float2 ScreenToClient(const Float2& screenPos) const override;
+    Float2 ClientToScreen(const Float2& clientPos) const override;
     void FlashWindow() override;
     float GetOpacity() const override;
     void SetOpacity(float opacity) override;
     void Focus() override;
     void SetTitle(const StringView& title) override;
     DragDropEffect DoDragDrop(const StringView& data) override;
+    using WindowBase::DoDragDrop;
     void StartTrackingMouse(bool useMouseScreenOffset) override;
     void EndTrackingMouse() override;
+    void StartClippingCursor(const Rectangle& bounds) override;
+    void EndClippingCursor() override;
     void SetCursor(CursorType type) override;
+    void SetCursorImage(void* image) override;
+    static void* LoadCursorImage(const StringView& path);
+    static void* LoadCursorImage(const TextureData& image, const Int2& hotSpot = Int2::Zero);
+    static void DestroyCursorImage(void* image);
 
 #if USE_EDITOR
-
     // [IUnknown]
     Windows::HRESULT __stdcall QueryInterface(const Windows::IID& id, void** ppvObject) override;
     Windows::ULONG __stdcall AddRef() override;
     Windows::ULONG __stdcall Release() override;
 
-    // [IDropTarget]
+    // [Windows::IDropTarget]
     Windows::HRESULT __stdcall DragEnter(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect) override;
     Windows::HRESULT __stdcall DragOver(Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect) override;
     Windows::HRESULT __stdcall DragLeave() override;
     Windows::HRESULT __stdcall Drop(Windows::IDataObject* pDataObj, Windows::DWORD grfKeyState, Windows::POINTL pt, Windows::DWORD* pdwEffect) override;
-
 #endif
 };
 

@@ -1,9 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Graphics/RenderView.h"
-#include "RendererPass.h"
+#include "Engine/Renderer/RendererPass.h"
 #include "Engine/Content/Assets/Shader.h"
 
 /// <summary>
@@ -31,7 +30,7 @@ public:
     /// <param name="renderContext">The rendering context.</param>
     /// <param name="input">Target with renderer frame ready for further processing.</param>
     /// <param name="output">The output frame.</param>
-    void Render(RenderContext& renderContext, GPUTexture* input, GPUTexture* output);
+    void Render(RenderContext& renderContext, GPUTexture*& input, GPUTexture*& output);
 
 private:
 

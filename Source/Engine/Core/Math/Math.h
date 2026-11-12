@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -17,6 +17,7 @@
 
 // The value for which all absolute numbers smaller than are considered equal to zero.
 #define ZeroTolerance 1e-6f
+#define ZeroToleranceDouble 1e-16
 
 // Converts radians to degrees.
 #define RadiansToDegrees (180.0f / PI)
@@ -156,6 +157,11 @@ namespace Math
         return value < 0 ? -value : value;
     }
 
+    static FORCE_INLINE int32 Mod(const int32 a, const int32 b)
+    {
+        return (int32)fmodf((float)a, (float)b);
+    }
+
     static FORCE_INLINE float Mod(const float a, const float b)
     {
         return fmodf(a, b);
@@ -164,6 +170,11 @@ namespace Math
     static FORCE_INLINE float ModF(const float a, float* b)
     {
         return modff(a, b);
+    }
+
+    static FORCE_INLINE float Frac(float value)
+    {
+        return value - Floor(value);
     }
 
     /// <summary>
@@ -203,11 +214,8 @@ namespace Math
     /// <returns>The power of 2.</returns>
     static int32 RoundUpToPowerOf2(int32 value)
     {
-        // Source:
-        // http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-        if (value < 0)
-            return 0;
-        value++;
+        // Source: http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+        value--;
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
@@ -223,9 +231,8 @@ namespace Math
     /// <returns>The power of 2.</returns>
     static uint32 RoundUpToPowerOf2(uint32 value)
     {
-        // Source:
-        // http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-        value++;
+        // Source: http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+        value--;
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
@@ -241,11 +248,8 @@ namespace Math
     /// <returns>The power of 2.</returns>
     static int64 RoundUpToPowerOf2(int64 value)
     {
-        // Source:
-        // http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-        if (value < 0)
-            return 0;
-        value++;
+        // Source: http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+        value--;
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
@@ -262,9 +266,8 @@ namespace Math
     /// <returns>The power of 2.</returns>
     static uint64 RoundUpToPowerOf2(uint64 value)
     {
-        // Source:
-        // http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-        value++;
+        // Source: http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+        value--;
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
@@ -287,20 +290,14 @@ namespace Math
         return dividend / divisor;
     }
 
-    // Check if value is inside the given range
-    // @param value value to check
-    // @param min Minimum value
-    // @param max Maximum value
+    // Checks if value is inside the given range.
     template<class T>
     static bool IsInRange(const T value, const T min, const T max)
     {
         return value >= min && value <= max;
     }
 
-    // Check if value isn't inside the given range
-    // @param value value to check
-    // @param min Minimum value
-    // @param max Maximum value
+    // Checks if value isn't inside the given range.
     template<class T>
     static bool IsNotInRange(const T value, const T min, const T max)
     {
@@ -308,21 +305,19 @@ namespace Math
     }
 
     // Checks whether a number is a power of two.
-    // @param value Number to check
-    // @returns True if value is a power of two
     static bool IsPowerOfTwo(uint32 value)
     {
         return (value & value - 1) == 0;
     }
 
-    // Clamp value to be between minimum and maximum values, inclusive
+    // Clamps value to be between minimum and maximum values, inclusive
     template<class T>
     static T Clamp(const T value, const T min, const T max)
     {
         return value < min ? min : value < max ? value : max;
     }
 
-    // Clamp value to be between 0 and 1 range, inclusive
+    // Clamps value to be between 0 and 1 range, inclusive
     template<class T>
     static T Saturate(const T value)
     {
@@ -383,6 +378,61 @@ namespace Math
         return Min(Min(Min(a, b), c), d);
     }
 
+    /// <summary>
+    /// Moves a value current towards target.
+    /// </summary>
+    /// <param name="current">The current value.</param>
+    /// <param name="target">The value to move towards.</param>
+    /// <param name="maxDelta">The maximum change that should be applied to the value.</param>
+    template<class T>
+    static T MoveTowards(const T current, const T target, const T maxDelta)
+    {
+        if (Abs(target - current) <= maxDelta)
+            return target;
+        return current + Sign(target - current) * maxDelta;
+    }
+
+    /// <summary>
+    /// Same as MoveTowards but makes sure the values interpolate correctly when they wrap around 360 degrees.
+    /// </summary>
+    /// <param name="current"></param>
+    /// <param name="target"></param>
+    /// <param name="maxDelta"></param>
+    template<class T>
+    static T MoveTowardsAngle(const T current, const T target, const T maxDelta)
+    {
+        T delta = DeltaAngle(current, target);
+        if ((-maxDelta < delta) && (delta < maxDelta))
+            return target;
+        T deltaTarget = current + delta;
+        return MoveTowards(current, deltaTarget, maxDelta);
+    }
+
+    /// <summary>
+    /// Calculates the shortest difference between two given angles given in degrees.
+    /// </summary>
+    /// <param name="current"></param>
+    /// <param name="target"></param>
+    template<class T>
+    static T DeltaAngle(const T current, const T target)
+    {
+        T t = Repeat(target - current, (T)360);
+        if (t > (T)180)
+            t -= (T)360;
+        return t;
+    }
+
+    /// <summary>
+    /// Loops the value t, so that it is never larger than length and never smaller than 0.
+    /// </summary>
+    /// <param name="t"></param>
+    /// <param name="length"></param>
+    template<class T>
+    static T Repeat(const T t, const T length)
+    {
+        return t - Floor(t / length) * length;
+    }
+
     // Multiply value by itself
     template<class T>
     static T Square(const T a)
@@ -411,38 +461,52 @@ namespace Math
         return (T)(a * (1.0f - alpha) + b * alpha);
     }
 
-    // Performs smooth (cubic Hermite) interpolation between 0 and 1
-    // @param amount Value between 0 and 1 indicating interpolation amount
+    // Calculates the linear parameter t that produces the interpolation value within the range [a, b].
+    template<class T, class U>
+    static T InverseLerp(const T& a, const T& b, const U& value)
+    {
+        if (a == b)
+            return (T)0;
+        return Saturate((value - a) / (b - a));
+    }
+
+    // Performs smooth (cubic Hermite) interpolation between 0 and 1.
     static float SmoothStep(float amount)
     {
         return amount <= 0 ? 0 : amount >= 1 ? 1 : amount * amount * (3 - 2 * amount);
     }
 
-    // Performs a smooth(er) interpolation between 0 and 1 with 1st and 2nd order derivatives of zero at endpoints
-    // @param amount Value between 0 and 1 indicating interpolation amount
+    // Performs a smooth(er) interpolation between 0 and 1 with 1st and 2nd order derivatives of zero at endpoints.
     static float SmootherStep(float amount)
     {
         return amount <= 0 ? 0 : amount >= 1 ? 1 : amount * amount * amount * (amount * (amount * 6 - 15) + 10);
     }
 
-    // Determines whether the specified value is close to zero (0.0f)
-    // @param a The floating value
-    // @returns True if the specified value is close to zero (0.0f). otherwise false
+    // Determines whether the specified value is close to zero (0.0).
+    inline int32 IsZero(int32 a)
+    {
+        return a == 0;
+    }
+
+    // Determines whether the specified value is close to zero (0.0f).
     inline bool IsZero(float a)
     {
         return Abs(a) < ZeroTolerance;
     }
 
-    // Determines whether the specified value is close to one (1.0f)
-    // @param a The floating value
-    // @returns True if the specified value is close to one (1.0f). otherwise false
+    // Determines whether the specified value is close to one (1.0).
+    inline bool IsOne(int32 a)
+    {
+        return a == 1;
+    }
+
+    // Determines whether the specified value is close to one (1.0f).
     inline bool IsOne(float a)
     {
         return IsZero(a - 1.0f);
     }
 
-    // Returns a value indicating the sign of a number
-    // @returns A number that indicates the sign of value
+    // Returns a value indicating the sign of a number.
     inline float Sign(float v)
     {
         return v > 0.0f ? 1.0f : v < 0.0f ? -1.0f : 0.0f;
@@ -471,44 +535,16 @@ namespace Math
     }
 
     /// <summary>
-    /// Checks if a and b are not even almost equal, taking into account the magnitude of floating point numbers
+    /// Checks if a and b are almost equals, taking into account the magnitude of floating point numbers.
     /// </summary>
-    /// <param name="a">The left value to compare</param>
-    /// <param name="b">The right value to compare</param>
-    /// <returns>False if a almost equal to b, otherwise true</returns>
-    static bool NotNearEqual(float a, float b)
-    {
-        // Check if the numbers are really close - needed when comparing numbers near zero
-        if (IsZero(a - b))
-            return false;
-
-        // Original from Bruce Dawson: http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/
-        const int32 aInt = *(int32*)&a;
-        const int32 bInt = *(int32*)&b;
-
-        // Different signs means they do not match
-        if (aInt < 0 != bInt < 0)
-            return true;
-
-        // Find the difference in ULPs
-        const int ulp = Abs(aInt - bInt);
-
-        // Choose of maxUlp = 4
-        // according to http://code.google.com/p/googletest/source/browse/trunk/include/gtest/internal/gtest-internal.h
-        const int maxUlp = 4;
-        return ulp > maxUlp;
-    }
-
-    /// <summary>
-    /// Checks if a and b are almost equals, taking into account the magnitude of floating point numbers
-    /// </summary>
+    /// <remarks>The code is using the technique described by Bruce Dawson in <a href="http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/">Comparing Floating point numbers 2012 edition</a>.</remarks>
     /// <param name="a">The left value to compare</param>
     /// <param name="b">The right value to compare</param>
     /// <returns>True if a almost equal to b, otherwise false</returns>
     static bool NearEqual(float a, float b)
     {
         // Check if the numbers are really close - needed when comparing numbers near zero
-        if (IsZero(a - b))
+        if (Abs(a - b) < ZeroTolerance)
             return true;
 
         // Original from Bruce Dawson: http://randomascii.wordpress.com/2012/02/25/comparing-floating-point-numbers-2012-edition/
@@ -526,6 +562,17 @@ namespace Math
         // according to http://code.google.com/p/googletest/source/browse/trunk/include/gtest/internal/gtest-internal.h
         const int maxUlp = 4;
         return ulp <= maxUlp;
+    }
+
+    /// <summary>
+    /// Checks if a and b are not even almost equal, taking into account the magnitude of floating point numbers
+    /// </summary>
+    /// <param name="a">The left value to compare</param>
+    /// <param name="b">The right value to compare</param>
+    /// <returns>False if a almost equal to b, otherwise true</returns>
+    static FORCE_INLINE bool NotNearEqual(float a, float b)
+    {
+        return !NearEqual(a, b);
     }
 
     /// <summary>
@@ -549,7 +596,8 @@ namespace Math
     /// <param name="toMin">The destination range minimum.</param>
     /// <param name="toMax">The destination range maximum.</param>
     /// <returns>The remapped value.</returns>
-    static float Remap(float value, float fromMin, float fromMax, float toMin, float toMax)
+    template<typename T>
+    static float Remap(T value, T fromMin, T fromMax, T toMin, T toMax)
     {
         return (value - fromMin) / (fromMax - fromMin) * (toMax - toMin) + toMin;
     }
@@ -557,7 +605,7 @@ namespace Math
     template<typename T>
     static T AlignUpWithMask(T value, T mask)
     {
-        return (T)(value + mask & ~mask);
+        return (T)((value + mask) & ~mask);
     }
 
     template<typename T>
@@ -576,7 +624,7 @@ namespace Math
     static T AlignUp(T value, T alignment)
     {
         T mask = alignment - 1;
-        return (T)(value + mask & ~mask);
+        return (T)((value + mask) & ~mask);
     }
 
     /// <summary>
@@ -601,7 +649,7 @@ namespace Math
     template<typename T>
     static bool IsAligned(T value, T alignment)
     {
-        return 0 == (value & alignment - 1);
+        return 0 == (value & (alignment - 1));
     }
 
     template<typename T>
@@ -638,7 +686,8 @@ namespace Math
     }
 
     // Given a heading which may be outside the +/- PI range, 'unwind' it back into that range
-    static float UnwindRadians(float a)
+    template<typename T>
+    static T UnwindRadians(T a)
     {
         while (a > PI)
             a -= TWO_PI;
@@ -648,21 +697,20 @@ namespace Math
     }
 
     // Utility to ensure angle is between +/- 180 degrees by unwinding
-    static float UnwindDegrees(float a)
+    template<typename T>
+    static T UnwindDegrees(T a)
     {
-        while (a > 180.f)
-            a -= 360.f;
-        while (a < -180.f)
-            a += 360.f;
+        while (a > 180)
+            a -= 360;
+        while (a < -180)
+            a += 360;
         return a;
     }
 
     /// <summary>
     ///  Returns value based on comparand. The main purpose of this function is to avoid branching based on floating point comparison which can be avoided via compiler intrinsics.
     /// </summary>
-    /// <remarks>
-    /// Please note that this doesn't define what happens in the case of NaNs as there might be platform specific differences.
-    /// </remarks>
+    /// <remarks>Please note that this doesn't define what happens in the case of NaNs as there might be platform specific differences.</remarks>
     /// <param name="comparand">Comparand the results are based on.</param>
     /// <param name="valueGEZero">The result value if comparand >= 0.</param>
     /// <param name="valueLTZero">The result value if comparand < 0.</param>
@@ -823,7 +871,19 @@ namespace Math
         return Lerp<T>(a, b, alpha < 0.5f ? InterpCircularIn(0.f, 1.f, alpha * 2.f) * 0.5f : InterpCircularOut(0.f, 1.f, alpha * 2.f - 1.f) * 0.5f + 0.5f);
     }
 
-    // Rotates position about the given axis by the given angle, in radians, and returns the offset to position
+    /// <summary>
+    /// Ping pongs the value <paramref name="t"/>, so that it is never larger than <paramref name="length"/> and never smaller than 0.
+    /// </summary>
+    /// <param name="t"></param>
+    /// <param name="length"></param>
+    /// <returns></returns>
+    template<class T>
+    static FORCE_INLINE T PingPong(const T& t, T length)
+    {
+        return length - Abs(Repeat(t, length * 2.0f) - length);
+    }
+
+    // Rotates position about the input axis by the given angle (in radians), and returns the delta to position
     Vector3 FLAXENGINE_API RotateAboutAxis(const Vector3& normalizedRotationAxis, float angle, const Vector3& positionOnAxis, const Vector3& position);
 
     Vector3 FLAXENGINE_API ExtractLargestComponent(const Vector3& v);

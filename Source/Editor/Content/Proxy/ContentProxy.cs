@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.GUI.ContextMenu;
@@ -37,6 +37,16 @@ namespace FlaxEditor.Content
         public virtual bool IsProxyFor<T>() where T : Asset
         {
             return false;
+        }
+
+        /// <summary>
+        /// Constructs the item for the file.
+        /// </summary>
+        /// <param name="path">The file path.</param>
+        /// <returns>Created item or null.</returns>
+        public virtual ContentItem ConstructItem(string path)
+        {
+            return null;
         }
 
         /// <summary>
@@ -82,7 +92,7 @@ namespace FlaxEditor.Content
         {
             return true;
         }
-        
+
         /// <summary>
         /// Determines whether this proxy can create items in the specified target location.
         /// </summary>
@@ -125,7 +135,7 @@ namespace FlaxEditor.Content
         /// <summary>
         /// Gets the unique accent color for that asset type.
         /// </summary>
-        public abstract Color AccentColor { get; }
+        public virtual Color AccentColor => Color.Transparent;
 
         /// <summary>
         /// Releases resources and unregisters the proxy utilities. Called during editor closing. For custom proxies from game/plugin modules it should be called before scripting reload.

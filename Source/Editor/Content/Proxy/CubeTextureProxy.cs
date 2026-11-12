@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Content.Thumbnails;
@@ -44,33 +44,15 @@ namespace FlaxEditor.Content
         {
             if (_preview == null)
             {
-                _preview = new CubeTexturePreview(false)
-                {
-                    RenderOnlyWithWindow = false,
-                    UseAutomaticTaskManagement = false,
-                    AnchorPreset = AnchorPresets.StretchAll,
-                    Offsets = Margin.Zero,
-                };
-                _preview.Task.Enabled = false;
-
-                var eyeAdaptation = _preview.PostFxVolume.EyeAdaptation;
-                eyeAdaptation.Mode = EyeAdaptationMode.None;
-                eyeAdaptation.OverrideFlags |= EyeAdaptationSettingsOverride.Mode;
-                _preview.PostFxVolume.EyeAdaptation = eyeAdaptation;
+                _preview = new CubeTexturePreview(false);
+                InitAssetPreview(_preview);
             }
-
-            // TODO: disable streaming for asset during thumbnail rendering (and restore it after)
         }
 
         /// <inheritdoc />
         public override bool CanDrawThumbnail(ThumbnailRequest request)
         {
-            if (!_preview.HasLoadedAssets)
-                return false;
-
-            // Check if all mip maps are streamed
-            var asset = (CubeTexture)request.Asset;
-            return asset.ResidentMipLevels >= Mathf.Max(1, (int)(asset.MipLevels * ThumbnailsModule.MinimumRequiredResourcesQuality));
+            return _preview.HasContentLoaded && ThumbnailsModule.HasMinimumQuality((CubeTexture)request.Asset);
         }
 
         /// <inheritdoc />

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.IO;
 using Flax.Build;
@@ -19,17 +19,26 @@ namespace Flax.Deps.Dependencies
                 switch (BuildPlatform)
                 {
                 case TargetPlatform.Windows:
+                    return Globals.AllPlatforms;
+                default: return new TargetPlatform[0];
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public override TargetArchitecture[] Architectures
+        {
+            get
+            {
+                switch (BuildPlatform)
+                {
+                case TargetPlatform.Windows:
                     return new[]
                     {
-                        TargetPlatform.Windows,
-                        TargetPlatform.UWP,
-                        TargetPlatform.Linux,
-                        TargetPlatform.XboxOne,
-                        TargetPlatform.XboxScarlett,
-                        TargetPlatform.PS4,
-                        TargetPlatform.Switch,
+                        TargetArchitecture.x64,
+                        TargetArchitecture.ARM64,
                     };
-                default: return new TargetPlatform[0];
+                default: return new TargetArchitecture[0];
                 }
             }
         }
@@ -47,48 +56,33 @@ namespace Flax.Deps.Dependencies
                 "Newtonsoft.Json.pdb",
                 "Newtonsoft.Json.xml",
             };
-            var binFolder = Path.Combine(root, "Src", "Newtonsoft.Json", "bin", configuration, "net45");
+            var binFolder = Path.Combine(root, "Src", "Newtonsoft.Json", "bin", configuration, "net10.0");
 
             // Get the source
             CloneGitRepo(root, "https://github.com/FlaxEngine/Newtonsoft.Json.git");
 
             // Default build
-            GitCheckout(root, "master");
+            GitCheckout(root, "flax-net100");
             Deploy.VCEnvironment.BuildSolution(solutionPath, configuration, buildPlatform);
-            foreach (var platform in options.Platforms)
             {
-                switch (platform)
-                {
-                case TargetPlatform.Windows:
-                case TargetPlatform.Linux:
-                {
-                    foreach (var file in outputFileNames)
-                    {
-                        Utilities.FileCopy(Path.Combine(binFolder, file), Path.Combine(options.PlatformsFolder, "DotNet", file));
-                    }
-                    break;
-                }
-                }
+                var platform = "JIT";
+                Log.Info($"Building {GetType().Name} for {platform}");
+                foreach (var file in outputFileNames)
+                    Utilities.FileCopy(Path.Combine(binFolder, file), Path.Combine(options.PlatformsFolder, "DotNet", file));
             }
 
-            // AOT build
-            GitCheckout(root, "aot");
+            // AOT build (disabled codegen)
+            Utilities.ReplaceInFile(Path.Combine(root, "Src", "Newtonsoft.Json", "Newtonsoft.Json.csproj"), "HAVE_REFLECTION_EMIT;", ";");
+            Utilities.ReplaceInFile(Path.Combine(root, "Src", "Newtonsoft.Json", "Newtonsoft.Json.csproj"), "HAVE_DYNAMIC;", ";");
+            Utilities.ReplaceInFile(Path.Combine(root, "Src", "Newtonsoft.Json", "Newtonsoft.Json.csproj"), "HAVE_EXPRESSIONS;", ";");
+            Utilities.ReplaceInFile(Path.Combine(root, "Src", "Newtonsoft.Json", "Newtonsoft.Json.csproj"), "HAVE_REGEX;", ";");
+            //Utilities.ReplaceInFile(Path.Combine(root, "Src", "Newtonsoft.Json", "Newtonsoft.Json.csproj"), "HAVE_TYPE_DESCRIPTOR;", ";");
             Deploy.VCEnvironment.BuildSolution(solutionPath, configuration, buildPlatform);
-            foreach (var platform in options.Platforms)
             {
-                switch (platform)
-                {
-                case TargetPlatform.UWP:
-                case TargetPlatform.XboxOne:
-                case TargetPlatform.PS4:
-                case TargetPlatform.XboxScarlett:
-                case TargetPlatform.Switch:
-                {
-                    var file = "Newtonsoft.Json.dll";
-                    Utilities.FileCopy(Path.Combine(binFolder, file), Path.Combine(options.PlatformsFolder, platform.ToString(), "Binaries", file));
-                    break;
-                }
-                }
+                var platform = "AOT";
+                Log.Info($"Building {GetType().Name} for {platform}");
+                var file = "Newtonsoft.Json.dll";
+                Utilities.FileCopy(Path.Combine(binFolder, file), Path.Combine(options.PlatformsFolder, "DotNet/AOT", file));
             }
         }
     }

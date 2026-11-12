@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,16 +12,16 @@
 /// <summary>
 /// Used to create fogging effects such as clouds but with a density that is related to the height of the fog.
 /// </summary>
-API_CLASS() class FLAXENGINE_API ExponentialHeightFog : public Actor, public IFogRenderer
+API_CLASS(Attributes="ActorContextMenu(\"New/Visuals/Lighting & PostFX/Exponential Height Fog\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API ExponentialHeightFog : public Actor, public IFogRenderer
 {
-DECLARE_SCENE_OBJECT(ExponentialHeightFog);
+    DECLARE_SCENE_OBJECT(ExponentialHeightFog);
 private:
-
     AssetReference<Shader> _shader;
     GPUPipelineStatePermutationsPs<2> _psFog;
+    int32 _sceneRenderingKey = -1;
 
 public:
-
     /// <summary>
     /// The fog density factor.
     /// </summary>
@@ -29,7 +29,7 @@ public:
     float FogDensity = 0.02f;
 
     /// <summary>
-    /// The fog height density factor that controls how the density increases as height decreases. The smaller values produce more visible transition larger.
+    /// The fog height density factor that controls how the density increases as height decreases. Smaller values produce a more visible transition layer.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(20), DefaultValue(0.2f), Limit(0.0001f, 10.0f, 0.001f), EditorDisplay(\"Exponential Height Fog\")")
     float FogHeightFalloff = 0.2f;
@@ -55,13 +55,12 @@ public:
     float StartDistance = 0.0f;
 
     /// <summary>
-    /// Scene elements past this distance will not have fog applied. This is useful for excluding skyboxes which already have fog baked in.
+    /// Scene elements past this distance will not have fog applied. This is useful for excluding skyboxes which already have fog baked in. Setting this value to 0 disables it. Negative value sets the cutoff distance relative to the far plane of the camera.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(60), DefaultValue(0.0f), Limit(0), EditorDisplay(\"Exponential Height Fog\")")
+    API_FIELD(Attributes="EditorOrder(60), DefaultValue(0.0f), EditorDisplay(\"Exponential Height Fog\")")
     float FogCutoffDistance = 0.0f;
 
 public:
-
     /// <summary>
     /// Directional light used for Directional Inscattering.
     /// </summary>
@@ -90,7 +89,6 @@ public:
     Color DirectionalInscatteringColor = Color(0.25, 0.25f, 0.125f);
 
 public:
-
     /// <summary>
     /// Whether to enable Volumetric fog. Graphics quality settings control the resolution of the fog simulation.
     /// </summary>
@@ -113,7 +111,7 @@ public:
     Color VolumetricFogAlbedo = Color::White;
 
     /// <summary>
-    /// Light emitted by height fog. This is a density so more light is emitted the further you are looking through the fog.
+    /// Light emitted by height fog. This is a density value so more light is emitted the further you are looking through the fog.
     /// In most cases using a Skylight is a better choice, however, it may be useful in certain scenarios.
     /// </summary>
     API_FIELD(Attributes="EditorOrder(330), DefaultValue(typeof(Color), \"0,0,0,1\"), EditorDisplay(\"Volumetric Fog\", \"Emissive\")")
@@ -133,7 +131,6 @@ public:
     float VolumetricFogDistance = 6000.0f;
 
 private:
-
 #if COMPILE_WITH_DEV_ENV
     void OnShaderReloading(Asset* obj)
     {
@@ -142,28 +139,26 @@ private:
 #endif
 
 public:
-
     // [Actor]
 #if USE_EDITOR
-    BoundingBox GetEditorBox() const override
+    BoundingBox GetEditorBoundingBox() const override
     {
         const Vector3 size(50);
         return BoundingBox(_transform.Translation - size, _transform.Translation + size);
     }
 #endif
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     bool HasContentLoaded() const override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
 
     // [IFogRenderer]
-    void GetVolumetricFogOptions(VolumetricFogOptions& result) const override;
-    void GetExponentialHeightFogData(const RenderView& view, ExponentialHeightFogData& result) const override;
+    void GetVolumetricFogOptions(const RenderView& view, VolumetricFogOptions& result) const override;
+    void GetExponentialHeightFogData(const RenderView& view, ShaderExponentialHeightFogData& result) const override;
     void DrawFog(GPUContext* context, RenderContext& renderContext, GPUTextureView* output) override;
 
 protected:
-
     // [Actor]
     void OnEnable() override;
     void OnDisable() override;

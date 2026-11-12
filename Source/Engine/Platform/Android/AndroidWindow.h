@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,7 +10,7 @@
 /// <summary>
 /// Implementation of the window class for Android platform.
 /// </summary>
-class AndroidWindow : public WindowBase
+class FLAXENGINE_API AndroidWindow : public WindowBase
 {
     friend AndroidPlatform;
 public:
@@ -23,7 +23,7 @@ public:
 
 public:
 
-    // [Window]
+    // [WindowBase]
     void* GetNativePtr() const override;
     void Show() override;
     void Hide() override;

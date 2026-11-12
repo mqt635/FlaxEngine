@@ -1,13 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#include "Engine/Core/Collections/Array.h"
 #include "Stream.h"
+#include "Engine/Core/Templates.h"
 
-struct CommonValue;
-struct Variant;
-struct VariantType;
+extern FLAXENGINE_API class ScriptingObject* FindObject(const Guid& id, class MClass* type);
+extern FLAXENGINE_API class Asset* LoadAsset(const Guid& id, const struct ScriptingTypeHandle& type);
 
 /// <summary>
 /// Base class for all data read streams
@@ -15,16 +14,6 @@ struct VariantType;
 class FLAXENGINE_API ReadStream : public Stream
 {
 public:
-
-    /// <summary>
-    /// Virtual destructor
-    /// </summary>
-    virtual ~ReadStream()
-    {
-    }
-
-public:
-
     /// <summary>
     /// Reads bytes from the stream
     /// </summary>
@@ -33,23 +22,6 @@ public:
     virtual void ReadBytes(void* data, uint32 bytes) = 0;
 
 public:
-
-    template<typename T>
-    FORCE_INLINE void Read(T* data)
-    {
-        ReadBytes((void*)data, sizeof(T));
-    }
-
-    template<typename T>
-    FORCE_INLINE void Read(T* data, int32 count)
-    {
-        ReadBytes((void*)data, sizeof(T) * count);
-    }
-
-public:
-
-    // Reads byte from the stream
-    // @returns Single byte
     byte ReadByte()
     {
         byte data;
@@ -57,7 +29,6 @@ public:
         return data;
     }
 
-    // Reads bool from the stream
     bool ReadBool()
     {
         byte data;
@@ -65,8 +36,6 @@ public:
         return data != 0;
     }
 
-    // Reads char from the stream
-    // @param data Data to read
     char ReadChar()
     {
         char data;
@@ -76,135 +45,237 @@ public:
 
     FORCE_INLINE void ReadByte(byte* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(byte));
     }
 
-    // Reads Char from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadChar(Char* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(Char));
     }
 
-    // Reads uint8 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadUint8(uint8* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(uint8));
     }
 
-    // Reads int8 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadInt8(int8* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(int8));
     }
 
-    // Reads uint16 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadUint16(uint16* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(uint16));
     }
 
-    // Reads int16 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadInt16(int16* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(int16));
     }
 
-    // Reads uint32 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadUint32(uint32* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(uint32));
     }
 
-    // Reads int32 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadInt32(int32* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(int32));
     }
 
-    // Reads uint64 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadUint64(uint64* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(uint64));
     }
 
-    // Reads int64 from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadInt64(int64* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(int64));
     }
 
-    // Reads float from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadFloat(float* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(float));
     }
 
-    // Reads double from the stream
-    // @param data Data to read
     FORCE_INLINE void ReadDouble(double* data)
     {
-        Read(data);
+        ReadBytes(data, sizeof(double));
     }
 
 public:
+    void Read(String& data);
+    void Read(String& data, int16 lock);
+    void Read(StringAnsi& data);
+    void Read(StringAnsi& data, int8 lock);
+    void Read(VariantType& data);
+    void Read(Variant& data);
 
-    // Reads StringAnsi from the stream
-    // @param data Data to read
-    void ReadStringAnsi(StringAnsi* data);
+    template<typename T>
+    FORCE_INLINE typename TEnableIf<TIsPODType<T>::Value>::Type Read(T& data)
+    {
+        ReadBytes((void*)&data, sizeof(T));
+    }
 
-    // Reads StringAnsi from the stream with a key
-    // @param data Data to read
-    void ReadStringAnsi(StringAnsi* data, int8 lock);
+    template<typename T>
+    typename TEnableIf<TIsBaseOf<ScriptingObject, T>::Value>::Type Read(T*& data)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        data = (T*)::FindObject(*(Guid*)id, T::GetStaticClass());
+    }
 
-    // Reads String from the stream
-    // @param data Data to read
-    void ReadString(String* data);
+    template<typename T>
+    FORCE_INLINE void Read(ScriptingObjectReference<T>& v)
+    {
+        T* ptr;
+        Read(ptr);
+        v = ptr;
+    }
 
-    // Reads String from the stream
-    // @param data Data to read
-    // @param lock Characters pass in the stream
-    void ReadString(String* data, int16 lock);
+    template<typename T>
+    FORCE_INLINE void Read(ScriptingObjectInterfaceReference<T>& v)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        v = *(Guid*)id;
+    }
 
-public:
+    template<typename T>
+    FORCE_INLINE void Read(SoftObjectReference<T>& v)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        v.Set(*(Guid*)id);
+    }
 
-    // Reads CommonValue from the stream
-    // @param data Data to read
-    void ReadCommonValue(CommonValue* data);
+    template<typename T>
+    FORCE_INLINE void Read(AssetReference<T>& v)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        v = (T*)::LoadAsset(*(Guid*)id, T::TypeInitializer);
+    }
 
-    // Reads VariantType from the stream
-    // @param data Data to read
-    void ReadVariantType(VariantType* data);
+    template<typename T>
+    FORCE_INLINE void Read(WeakAssetReference<T>& v)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        v = (T*)::LoadAsset(*(Guid*)id, T::TypeInitializer);
+    }
 
-    // Reads Variant from the stream
-    // @param data Data to read
-    void ReadVariant(Variant* data);
+    template<typename T>
+    FORCE_INLINE void Read(SoftAssetReference<T>& v)
+    {
+        uint32 id[4];
+        ReadBytes(id, sizeof(id));
+        v.Set(*(Guid*)id);
+    }
 
     /// <summary>
-    /// Read data array
+    /// Reads array.
     /// </summary>
-    /// <param name="data">Array to read</param>
-    template<typename T>
-    void ReadArray(Array<T>* data)
+    /// <param name="data">Array to read.</param>
+    template<typename T, typename AllocationType = HeapAllocation>
+    void Read(Array<T, AllocationType>& data)
     {
         int32 size;
         ReadInt32(&size);
-        data->Resize(size, false);
+        data.Resize(size, false);
         if (size > 0)
-            ReadBytes(data->Get(), size * sizeof(T));
+        {
+            if (TIsPODType<T>::Value && !TIsPointer<T>::Value)
+                ReadBytes(data.Get(), size * sizeof(T));
+            else
+            {
+                for (int32 i = 0; i < size; i++)
+                    Read(data[i]);
+            }
+        }
     }
 
-public:
+    /// <summary>
+    /// Reads dictionary.
+    /// </summary>
+    /// <param name="data">Dictionary to read.</param>
+    template<typename KeyType, typename ValueType, typename AllocationType = HeapAllocation>
+    void Read(Dictionary<KeyType, ValueType, AllocationType>& data)
+    {
+        int32 count;
+        ReadInt32(&count);
+        data.Clear();
+        data.EnsureCapacity(count);
+        for (int32 i = 0; i < count; i++)
+        {
+            KeyType key;
+            Read(key);
+            Read(data[key]);
+        }
+    }
 
+    /// <summary>
+    /// Deserializes object from Json by reading it as a raw data (ver+length+bytes).
+    /// </summary>
+    /// <remarks>Reads version number, data length and actual data bytes from the stream.</remarks>
+    /// <param name="obj">The object to deserialize.</param>
+    void ReadJson(ISerializable* obj);
+
+    // Deserialization of math types with float or double depending on the context (must match serialization)
+    // Set useDouble=true to explicitly use 64-bit precision for serialized data
+    void Read(BoundingBox& box, bool useDouble = false);
+    void Read(BoundingSphere& sphere, bool useDouble = false);
+    void Read(Transform& transform, bool useDouble = false);
+    void Read(Ray& ray, bool useDouble = false);
+
+public:
+    // Reads StringAnsi from the stream
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadStringAnsi(StringAnsi* data);
+
+    // Reads StringAnsi from the stream with a key
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadStringAnsi(StringAnsi* data, int8 lock);
+
+    // Reads String from the stream
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadString(String* data);
+
+    // Reads String from the stream
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadString(String* data, int16 lock);
+
+    // Reads VariantType from the stream
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadVariantType(VariantType* data);
+
+    // Reads Variant from the stream
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    DEPRECATED("Use Read method") void ReadVariant(Variant* data);
+
+    /// <summary>
+    /// Read data array
+    /// [Deprecated on 11.10.2022, expires on 11.10.2024]
+    /// </summary>
+    /// <param name="data">Array to read</param>
+    template<typename T, typename AllocationType = HeapAllocation>
+    DEPRECATED("Use Read method") void ReadArray(Array<T, AllocationType>* data)
+    {
+        Read(*data);
+    }
+
+    // Deserialization of math types with float or double depending on the context (must match serialization)
+    // Set useDouble=true to explicitly use 64-bit precision for serialized data
+    // [Deprecated in v1.10]
+    DEPRECATED("Use Read method") void ReadBoundingBox(BoundingBox* box, bool useDouble = false);
+    // [Deprecated in v1.10]
+    DEPRECATED("Use Read method") void ReadBoundingSphere(BoundingSphere* sphere, bool useDouble = false);
+    // [Deprecated in v1.10]
+    DEPRECATED("Use Read method") void ReadTransform(Transform* transform, bool useDouble = false);
+    // [Deprecated in v1.10]
+    DEPRECATED("Use Read method") void ReadRay(Ray* ray, bool useDouble = false);
+
+public:
     // [Stream]
     bool CanRead() override
     {

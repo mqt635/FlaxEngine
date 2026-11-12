@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 struct AssetInfo;
 class Content;
 class Asset;
-class LoadAssetTask;
 class ContentLoadTask;
+class LoadAssetTask;
 template<typename T>
 class AssetReference;

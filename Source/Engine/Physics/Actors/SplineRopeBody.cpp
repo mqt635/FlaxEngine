@@ -1,12 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SplineRopeBody.h"
 #include "Engine/Level/Actors/Spline.h"
 #include "Engine/Level/Scene/Scene.h"
-#include "Engine/Physics/Physics.h"
+#include "Engine/Physics/PhysicsScene.h"
 #include "Engine/Engine/Time.h"
 #include "Engine/Profiler/ProfilerCPU.h"
-#include "Engine/Serialization/Serialization.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 SplineRopeBody::SplineRopeBody(const SpawnParams& params)
     : Actor(params)
@@ -18,14 +18,15 @@ void SplineRopeBody::Tick()
     if (!_spline || _spline->GetSplinePointsCount() < 2)
         return;
     PROFILE_CPU();
+    PROFILE_MEM(Physics);
 
     // Cache data
-    const Vector3 gravity = Physics::GetGravity() * GravityScale;
+    const Vector3 gravity = GetPhysicsScene()->GetGravity() * GravityScale;
     auto& keyframes = _spline->Curve.GetKeyframes();
     const Transform splineTransform = _spline->GetTransform();
     const int32 keyframesCount = keyframes.Count();
     const float substepTime = SubstepTime;
-    const float substepTimeSqr = substepTime * substepTime;
+    // TODO: scale substep time based on distance to the camera to have better performance when rope is far away
     bool splineDirty = false;
 
     // Synchronize spline keyframes with simulated masses
@@ -38,7 +39,7 @@ void SplineRopeBody::Tick()
         {
             const int32 i = _masses.Count();
             auto& mass = _masses.AddOne();
-            mass.PrevPosition = splineTransform.LocalToWorld(keyframes[i].Value.Translation);
+            mass.Position = mass.PrevPosition = splineTransform.LocalToWorld(keyframes[i].Value.Translation);
             if (i != 0)
                 mass.SegmentLength = Vector3::Distance(mass.PrevPosition, _masses[i - 1].PrevPosition);
             else
@@ -48,44 +49,54 @@ void SplineRopeBody::Tick()
     {
         // Rope start
         auto& mass = _masses.First();
-        mass.Position = mass.PrevPosition = GetPosition();
+        mass.Position = GetPosition();
         mass.Unconstrained = false;
         if (splineTransform.LocalToWorld(keyframes.First().Value.Translation) != mass.Position)
             splineDirty = true;
     }
-    for (int32 i = 1; i < keyframesCount; i++)
+    bool syncPositions = true;
+    if (splineTransform != _splineTransform)
     {
-        auto& mass = _masses[i];
-        mass.Unconstrained = true;
-        mass.Position = splineTransform.LocalToWorld(keyframes[i].Value.Translation);
+        _splineTransform = splineTransform;
+        syncPositions = false;
+        splineDirty = true;
+    }
+    if (syncPositions)
+    {
+        for (int32 i = 1; i < keyframesCount; i++)
+        {
+            auto& mass = _masses[i];
+            mass.Unconstrained = true;
+            mass.Position = splineTransform.LocalToWorld(keyframes[i].Value.Translation);
+        }
     }
     if (AttachEnd)
     {
         // Rope end
         auto& mass = _masses.Last();
-        mass.Position = mass.PrevPosition = AttachEnd->GetPosition();
+        mass.Position = AttachEnd->GetPosition();
         mass.Unconstrained = false;
         if (splineTransform.LocalToWorld(keyframes.Last().Value.Translation) != mass.Position)
             splineDirty = true;
     }
 
     // Perform simulation in substeps to have better stability
-    _time += Time::Update.DeltaTime.GetTotalSeconds();
+    _time += Time::Physics.DeltaTime.GetTotalSeconds();
+    float stretchLimit = StretchLimit + 1;
     while (_time > substepTime)
     {
         // Verlet integration
-        // [Reference: https://en.wikipedia.org/wiki/Verlet_integration]
-        const Vector3 force = gravity + AdditionalForce;
+        const Vector3 force = (gravity + AdditionalForce) * (substepTime * substepTime);
         for (int32 i = 0; i < keyframesCount; i++)
         {
             auto& mass = _masses[i];
+            Vector3 position = mass.Position;
             if (mass.Unconstrained)
             {
-                const Vector3 velocity = mass.Position - mass.PrevPosition;
-                mass.PrevPosition = mass.Position;
-                mass.Position = mass.Position + velocity + (substepTimeSqr * force);
-                keyframes[i].Value.Translation = splineTransform.WorldToLocal(mass.Position);
+                const Vector3 velocity = (mass.Position - mass.PrevPosition) * (1 - Drag);
+                mass.Position += velocity + force;
             }
+            mass.PrevPosition = position;
         }
 
         // Distance constraint
@@ -94,8 +105,12 @@ void SplineRopeBody::Tick()
             auto& massA = _masses[i - 1];
             auto& massB = _masses[i];
             Vector3 offset = massB.Position - massA.Position;
-            const float distance = offset.Length();
-            const float scale = (distance - massB.SegmentLength) / Math::Max(distance, ZeroTolerance);
+            const Real distance = offset.Length();
+            const Real minDistance = massB.SegmentLength;
+            const Real maxDistance = massB.SegmentLength * stretchLimit;
+            if ((distance <= maxDistance && distance >= minDistance) || distance <= ZeroTolerance)
+                continue;
+            const Real scale = (distance - maxDistance) / distance;
             if (massA.Unconstrained && massB.Unconstrained)
             {
                 offset *= scale * 0.5f;
@@ -120,8 +135,11 @@ void SplineRopeBody::Tick()
                 auto& massA = _masses[i - 2];
                 auto& massB = _masses[i];
                 Vector3 offset = massB.Position - massA.Position;
-                const float distance = offset.Length();
-                const float scale = (distance - massB.SegmentLength * 2.0f) / Math::Max(distance, ZeroTolerance);
+                const Real distance = offset.Length();
+                const Real maxDistance = massB.SegmentLength * stretchLimit * 2.0f;
+                if (distance <= ZeroTolerance)
+                    continue;
+                const Real scale = (distance - maxDistance) / distance;
                 if (massA.Unconstrained && massB.Unconstrained)
                 {
                     offset *= scale * 0.5f;
@@ -172,6 +190,7 @@ void SplineRopeBody::OnParentChanged()
     Actor::OnParentChanged();
 
     _spline = Cast<Spline>(_parent);
+    _splineTransform = _spline ? _spline->GetTransform() : Transform::Identity;
 }
 
 void SplineRopeBody::OnTransformChanged()

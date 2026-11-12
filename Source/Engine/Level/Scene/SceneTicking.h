@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,7 +11,6 @@
 class FLAXENGINE_API SceneTicking
 {
 public:
-
     /// <summary>
     /// Tick function type.
     /// </summary>
@@ -47,8 +46,10 @@ public:
     /// </summary>
     class FLAXENGINE_API TickData
     {
+    protected:
+        friend SceneTicking;
+        bool _canTick = true;
     public:
-
         Array<Script*> Scripts;
         Array<Tick> Ticks;
 #if USE_EDITOR
@@ -93,7 +94,6 @@ public:
     class FLAXENGINE_API FixedUpdateTickData : public TickData
     {
     public:
-
         FixedUpdateTickData();
         void TickScripts(const Array<Script*>& scripts) override;
     };
@@ -101,7 +101,6 @@ public:
     class FLAXENGINE_API UpdateTickData : public TickData
     {
     public:
-
         UpdateTickData();
         void TickScripts(const Array<Script*>& scripts) override;
     };
@@ -109,13 +108,18 @@ public:
     class FLAXENGINE_API LateUpdateTickData : public TickData
     {
     public:
-
         LateUpdateTickData();
         void TickScripts(const Array<Script*>& scripts) override;
     };
 
-public:
+    class FLAXENGINE_API LateFixedUpdateTickData : public TickData
+    {
+    public:
+        LateFixedUpdateTickData();
+        void TickScripts(const Array<Script*>& scripts) override;
+    };
 
+public:
     /// <summary>
     /// Adds the script to scene ticking system.
     /// </summary>
@@ -133,8 +137,12 @@ public:
     /// </summary>
     void Clear();
 
-public:
+    /// <summary>
+    /// Changes the ability to tick. When disabled, the ticking functions won't be called. Can be called during ticking (eg. when scene is unloaded) to stp performing any more ticks.
+    /// </summary>
+    void SetTicking(bool enable);
 
+public:
     /// <summary>
     /// The fixed update tick function.
     /// </summary>
@@ -149,4 +157,9 @@ public:
     /// The late update tick function.
     /// </summary>
     LateUpdateTickData LateUpdate;
+
+    /// <summary>
+    /// The late fixed update tick function.
+    /// </summary>
+    LateFixedUpdateTickData LateFixedUpdate;
 };

@@ -1,45 +1,61 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 @0// Forward Shading: Defines
 #define MAX_LOCAL_LIGHTS 4
 @1// Forward Shading: Includes
-#include "./Flax/LightingCommon.hlsl"
+#include "./Flax/Lighting/LightingCommon.hlsl"
+#include "./Flax/Reflections/ReflectionsCommon.hlsl"
 #if USE_REFLECTIONS
-#include "./Flax/ReflectionsCommon.hlsl"
+#define MATERIAL_REFLECTIONS_SSR 1
+#if MATERIAL_REFLECTIONS == MATERIAL_REFLECTIONS_SSR
+#include "./Flax/Reflections/SSR.hlsl"
 #endif
-#include "./Flax/Lighting.hlsl"
-#include "./Flax/ShadowsSampling.hlsl"
-#include "./Flax/ExponentialHeightFog.hlsl"
+#endif
+#include "./Flax/Lighting/Lighting.hlsl"
+#include "./Flax/Lighting/ExponentialHeightFog.hlsl"
+#include "./Flax/Lighting/VolumetricFog.hlsl"
+#include "./Flax/Shadows/ShadowsSampling.hlsl"
 @2// Forward Shading: Constants
 LightData DirectionalLight;
-LightShadowData DirectionalLightShadow;
 LightData SkyLight;
-ProbeData EnvironmentProbe;
+EnvProbeData EnvironmentProbe;
 ExponentialHeightFogData ExponentialHeightFog;
+VolumetricFogData VolumetricFog;
 float3 Dummy2;
 uint LocalLightsCount;
 LightData LocalLights[MAX_LOCAL_LIGHTS];
 @3// Forward Shading: Resources
 TextureCube EnvProbe : register(t__SRV__);
 TextureCube SkyLightTexture : register(t__SRV__);
-Texture2DArray DirectionalLightShadowMap : register(t__SRV__);
+Buffer<float4> ShadowsBuffer : register(t__SRV__);
+Texture2D<float> ShadowMap : register(t__SRV__);
+Texture3D VolumetricFogTexture : register(t__SRV__);
+Texture2D PreIntegratedGF : register(t__SRV__);
 @4// Forward Shading: Utilities
-DECLARE_LIGHTSHADOWDATA_ACCESS(DirectionalLightShadow);
+// Public accessors for lighting data, use them as data binding might change but those methods will remain.
+LightData GetDirectionalLight() { return DirectionalLight; }
+LightData GetSkyLight() { return SkyLight; }
+EnvProbeData GetEnvironmentProbe() { return EnvironmentProbe; }
+ExponentialHeightFogData GetExponentialHeightFog() { return ExponentialHeightFog; }
+VolumetricFogData GetVolumetricFog() { return VolumetricFog; }
+uint GetLocalLightsCount() { return LocalLightsCount; }
+LightData GetLocalLight(uint i) { return LocalLights[i]; }
 @5// Forward Shading: Shaders
 
 // Pixel Shader function for Forward Pass
 META_PS(USE_FORWARD, FEATURE_LEVEL_ES2)
-float4 PS_Forward(PixelInput input) : SV_Target0
+void PS_Forward(
+		in PixelInput input
+		,out float4 output : SV_Target0
+	)
 {
-	float4 output = 0;
-
+	output = 0;
+	MaterialInput materialInput = GetMaterialInput(input);
 #if USE_DITHERED_LOD_TRANSITION
-	// LOD masking
-	ClipLODTransition(input);
+	ClipLODTransition(materialInput);
 #endif
 
 	// Get material parameters
-	MaterialInput materialInput = GetMaterialInput(input);
 	Material material = GetMaterialPS(materialInput);
 
 	// Masking
@@ -72,12 +88,12 @@ float4 PS_Forward(PixelInput input) : SV_Target0
 	gBuffer.ShadingModel = MATERIAL_SHADING_MODEL;
 
 	// Calculate lighting from a single directional light
-	float4 shadowMask = 1.0f;
-	if (DirectionalLight.CastShadows > 0)
-	{
-		LightShadowData directionalLightShadowData = GetDirectionalLightShadowData();
-		shadowMask.r = SampleShadow(DirectionalLight, directionalLightShadowData, DirectionalLightShadowMap, gBuffer, shadowMask.g);
-	}
+#if LIGHTING_NO_SHADOW
+	float4 shadowMask = (float4)1;
+#else
+	ShadowSample shadow = SampleDirectionalLightShadow(DirectionalLight, ShadowsBuffer, ShadowMap, gBuffer);
+	float4 shadowMask = GetShadowMask(shadow);
+#endif
 	float4 light = GetLighting(ViewPos, DirectionalLight, gBuffer, shadowMask, false, false);
 
 	// Calculate lighting from sky light
@@ -93,17 +109,77 @@ float4 PS_Forward(PixelInput input) : SV_Target0
 		light += GetLighting(ViewPos, localLight, gBuffer, shadowMask, true, isSpotLight);
 	}
 
-#if USE_REFLECTIONS
-	// Calculate reflections
-	light.rgb += GetEnvProbeLighting(ViewPos, EnvProbe, EnvironmentProbe, gBuffer) * light.a;	
+	// Calculate lighting from Global Illumination
+#if USE_GI
+	light += GetGlobalIlluminationLighting(gBuffer);
+    // TODO: when using both indirect and specular lighting from DDGI, merge cascade selection and probes visibility resolving to be done once
 #endif
 
-	// Add lighting (apply ambient occlusion)
-	output.rgb += light.rgb * gBuffer.AO;
+	// Calculate reflections
+#if USE_REFLECTIONS
+    float4 reflectionsProbe = SampleReflectionProbe(ViewPos, EnvProbe, EnvironmentProbe, gBuffer.WorldPos, gBuffer.Normal, gBuffer.Roughness);
+    float3 reflections = reflectionsProbe.rgb * reflectionsProbe.a;
+#if USE_GI
+    float4 reflectionsGI = GetGlobalIlluminationSpecular(gBuffer);
+    reflections = lerp(reflections, reflectionsGI.rgb, reflectionsGI.a);
+#endif
 
-#if USE_FOG
+#if MATERIAL_REFLECTIONS == MATERIAL_REFLECTIONS_SSR
+	// Screen Space Reflections
+	Texture2D sceneDepthTexture = MATERIAL_REFLECTIONS_SSR_DEPTH; // Material Generator inserts depth and color buffers and plugs it via internal define
+	Texture2D sceneColorTexture = MATERIAL_REFLECTIONS_SSR_COLOR;
+	float2 screenUV = materialInput.SvPosition.xy * ScreenSize.zw;
+	float stepSize = ScreenSize.z; // 1 / screenWidth
+	float maxSamples = 50;
+	float worldAntiSelfOcclusionBias = 0.1f;
+	float brdfBias = 0.82f;
+	float drawDistance = 5000.0f;
+	float3 hit = TraceScreenSpaceReflection(screenUV, gBuffer, sceneDepthTexture, ViewPos, ViewMatrix, ViewProjectionMatrix, stepSize, maxSamples, false, 0.0f, worldAntiSelfOcclusionBias, brdfBias, drawDistance);
+	if (hit.z > 0)
+	{
+		float3 screenColor = sceneColorTexture.SampleLevel(SamplerPointClamp, hit.xy, 0).rgb;
+		reflections = lerp(reflections, screenColor, hit.z);
+	}
+
+	// Fallback to software tracing if possible
+#if USE_GLOBAL_SURFACE_ATLAS && CAN_USE_GLOBAL_SURFACE_ATLAS
+	if (hit.z < REFLECTIONS_HIT_THRESHOLD)
+	{
+		float3 reflectWS = ScreenSpaceReflectionDirection(screenUV, gBuffer, ViewPos);
+		float4 surfaceAtlas;
+		if (TraceSDFSoftwareReflections(gBuffer, reflectWS, surfaceAtlas))
+		{
+			float3 screenColor = sceneColorTexture.SampleLevel(SamplerPointClamp, hit.xy, 0).rgb;
+        	reflections = lerp(surfaceAtlas, float4(screenColor, 1), hit.z);
+		}
+	}
+#endif
+#endif
+
+	light.rgb += reflections * GetReflectionSpecularLighting(PreIntegratedGF, ViewPos, gBuffer);
+#endif
+
+	// Add lighting
+	output.rgb += light.rgb;
+#endif
+
+#if USE_FOG && MATERIAL_SHADING_MODEL != SHADING_MODEL_UNLIT
 	// Calculate exponential height fog
-	float4 fog = GetExponentialHeightFog(ExponentialHeightFog, materialInput.WorldPosition, ViewPos, 0);
+#if DIRECTX && FEATURE_LEVEL < FEATURE_LEVEL_SM6
+	// TODO: fix D3D11/D3D10 bug with incorrect distance
+	float fogSceneDistance = distance(materialInput.WorldPosition, ViewPos);
+#else
+	float fogSceneDistance = gBuffer.ViewPos.z;
+#endif
+	float fogSkipDistance = max(ExponentialHeightFog.VolumetricFogMaxDistance - 100, 0);
+	float4 fog = GetExponentialHeightFog(ExponentialHeightFog, materialInput.WorldPosition, ViewPos, fogSkipDistance, fogSceneDistance);
+	if (ExponentialHeightFog.VolumetricFogMaxDistance > 0)
+	{
+		// Sample volumetric fog and mix it in
+		float2 screenUV = materialInput.SvPosition.xy * ScreenSize.zw;
+		float4 volumetricFog = SampleVolumetricFog(VolumetricFogTexture, VolumetricFog, materialInput.WorldPosition - ViewPos, screenUV, TemporalAAJitter);
+		fog = CombineVolumetricFog(fog, volumetricFog);
+	}
 
 	// Apply fog to the output color
 #if MATERIAL_BLEND == MATERIAL_BLEND_OPAQUE
@@ -117,8 +193,4 @@ float4 PS_Forward(PixelInput input) : SV_Target0
 #endif
 
 #endif
-	
-#endif
-
-	return output;
 }

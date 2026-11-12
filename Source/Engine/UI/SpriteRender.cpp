@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SpriteRender.h"
 #include "Engine/Core/Types/Variant.h"
@@ -7,7 +7,7 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Content/Assets/MaterialInstance.h"
-#include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Level/Actors/Camera.h"
 #include "Engine/Serialization/Serialization.h"
 
@@ -18,15 +18,15 @@ SpriteRender::SpriteRender(const SpawnParams& params)
 {
     _quadModel = Content::LoadAsyncInternal<Model>(TEXT("Engine/Models/Quad"));
     Material.Loaded.Bind<SpriteRender, &SpriteRender::OnMaterialLoaded>(this);
-    Image.Changed.Bind<SpriteRender, &SpriteRender::SetImage>(this);
+    Image.Changed.Bind<SpriteRender, &SpriteRender::SetImageParam>(this);
 }
 
-Vector2 SpriteRender::GetSize() const
+Float2 SpriteRender::GetSize() const
 {
     return _size;
 }
 
-void SpriteRender::SetSize(const Vector2& value)
+void SpriteRender::SetSize(const Float2& value)
 {
     if (_size == value)
         return;
@@ -42,8 +42,7 @@ Color SpriteRender::GetColor() const
 void SpriteRender::SetColor(const Color& value)
 {
     _color = value;
-    if (_paramColor)
-        _paramColor->SetValue(value);
+    SetColorParam();
 }
 
 SpriteHandle SpriteRender::GetSprite() const
@@ -54,7 +53,7 @@ SpriteHandle SpriteRender::GetSprite() const
 void SpriteRender::SetSprite(const SpriteHandle& value)
 {
     _sprite = value;
-    SetImage();
+    SetImageParam();
 }
 
 void SpriteRender::OnMaterialLoaded()
@@ -66,6 +65,7 @@ void SpriteRender::OnMaterialLoaded()
         _materialInstance->AddReference();
     }
     _materialInstance->SetBaseMaterial(Material);
+    _materialInstance->ResetParameters();
 
     // Cache parameters
     _paramImageMAD = _materialInstance->GetParameter(TEXT("ImageMAD"));
@@ -75,15 +75,15 @@ void SpriteRender::OnMaterialLoaded()
     if (_paramImage && _paramImage->GetParameterType() != MaterialParameterType::Texture)
         _paramImage = nullptr;
     else if (_paramImage)
-        SetImage();
+        SetImageParam();
     _paramColor = _materialInstance->GetParameter(TEXT("Color"));
     if (_paramColor && _paramColor->GetParameterType() != MaterialParameterType::Color && _paramColor->GetParameterType() != MaterialParameterType::Vector4 && _paramColor->GetParameterType() != MaterialParameterType::Vector3)
         _paramColor = nullptr;
     else if (_paramColor)
-        _paramColor->SetValue(_color);
+        SetColorParam();
 }
 
-void SpriteRender::SetImage()
+void SpriteRender::SetImageParam()
 {
     TextureBase* image = Image.Get();
     Vector4 imageMAD(Vector2::One, Vector2::Zero);
@@ -94,9 +94,24 @@ void SpriteRender::SetImage()
         imageMAD = Vector4(sprite->Area.Size, sprite->Area.Location);
     }
     if (_paramImage)
+    {
         _paramImage->SetValue(image);
+        _paramImage->SetIsOverride(true);
+    }
     if (_paramImageMAD)
+    {
         _paramImageMAD->SetValue(imageMAD);
+        _paramImageMAD->SetIsOverride(true);
+    }
+}
+
+void SpriteRender::SetColorParam()
+{
+    if (_paramColor)
+    {
+        _paramColor->SetValue(_color);
+        _paramColor->SetIsOverride(true);
+    }
 }
 
 bool SpriteRender::HasContentLoaded() const
@@ -104,36 +119,34 @@ bool SpriteRender::HasContentLoaded() const
     return (Material == nullptr || Material->IsLoaded()) && (Image == nullptr || Image->IsLoaded());
 }
 
-void SpriteRender::Draw(RenderContext& renderContext)
+void SpriteRender::Draw(RenderContextBatch& renderContextBatch)
 {
+    RenderContext& renderContext = renderContextBatch.GetMainContext();
+    if (renderContext.View.Pass == DrawPass::GlobalSDF || renderContext.View.Pass == DrawPass::GlobalSurfaceAtlas)
+        return;
     if (!Material || !Material->IsLoaded() || !_quadModel || !_quadModel->IsLoaded())
         return;
     auto model = _quadModel.As<Model>();
     if (model->GetLoadedLODs() == 0)
         return;
-    auto& view = renderContext.View;
+    const auto& view = (renderContext.LodProxyView ? *renderContext.LodProxyView : renderContext.View);
     Matrix m1, m2, m3, world;
     Matrix::Scaling(_size.X, _size.Y, 1.0f, m2);
     Matrix::RotationY(PI, m3);
     Matrix::Multiply(m2, m3, m1);
     if (FaceCamera)
     {
-        Matrix::Billboard(_transform.Translation, view.Position, Vector3::Up, view.Direction, m2);
+        Matrix::Billboard(_transform.Translation - view.Origin, view.Position, Vector3::Up, view.Direction, m2);
         Matrix::Multiply(m1, m2, m3);
         Matrix::Scaling(_transform.Scale, m1);
         Matrix::Multiply(m1, m3, world);
     }
     else
     {
-        _transform.GetWorld(m2);
+        view.GetWorldMatrix(_transform, m2);
         Matrix::Multiply(m1, m2, world);
     }
-    model->LODs[0].Draw(renderContext, _materialInstance, world, GetStaticFlags(), false, DrawModes, GetPerInstanceRandom());
-}
-
-void SpriteRender::DrawGeneric(RenderContext& renderContext)
-{
-    Draw(renderContext);
+    model->LODs[0].Draw(renderContextBatch, _materialInstance, world, GetStaticFlags(), false, DrawModes, GetPerInstanceRandom(), SortOrder);
 }
 
 void SpriteRender::Serialize(SerializeStream& stream, const void* otherObj)
@@ -150,6 +163,7 @@ void SpriteRender::Serialize(SerializeStream& stream, const void* otherObj)
     SERIALIZE(Material);
     SERIALIZE(FaceCamera);
     SERIALIZE(DrawModes);
+    SERIALIZE(SortOrder);
 }
 
 void SpriteRender::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
@@ -164,16 +178,16 @@ void SpriteRender::Deserialize(DeserializeStream& stream, ISerializeModifier* mo
     DESERIALIZE(Material);
     DESERIALIZE(FaceCamera);
     DESERIALIZE(DrawModes);
+    DESERIALIZE(SortOrder);
 
-    SetImage();
-    if (_paramColor)
-        _paramColor->SetValue(_color);
+    SetImageParam();
+    SetColorParam();
 }
 
 void SpriteRender::OnLayerChanged()
 {
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateGeometry(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Layer);
 }
 
 void SpriteRender::OnEndPlay()
@@ -193,7 +207,7 @@ void SpriteRender::OnEndPlay()
 
 void SpriteRender::OnEnable()
 {
-    _sceneRenderingKey = GetSceneRendering()->AddGeometry(this);
+    GetSceneRendering()->AddActor(this, _sceneRenderingKey);
 
     // Base
     Actor::OnEnable();
@@ -201,7 +215,7 @@ void SpriteRender::OnEnable()
 
 void SpriteRender::OnDisable()
 {
-    GetSceneRendering()->RemoveGeometry(this, _sceneRenderingKey);
+    GetSceneRendering()->RemoveActor(this, _sceneRenderingKey);
 
     // Base
     Actor::OnDisable();
@@ -214,9 +228,9 @@ void SpriteRender::OnTransformChanged()
 
     const BoundingSphere localSphere(Vector3::Zero, _size.Length());
     Matrix world;
-    _transform.GetWorld(world);
+    GetLocalToWorldMatrix(world);
     BoundingSphere::Transform(localSphere, world, _sphere);
     BoundingBox::FromSphere(_sphere, _box);
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateGeometry(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey);
 }

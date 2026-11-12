@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -11,44 +11,37 @@
 /// </summary>
 API_STRUCT() struct RenderStatsData
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(RenderStatsData);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(RenderStatsData);
 
     /// <summary>
     /// The draw calls count.
     /// </summary>
-    API_FIELD() int64 DrawCalls;
+    API_FIELD() int64 DrawCalls = 0;
 
     /// <summary>
     /// The compute shader dispatch calls count.
     /// </summary>
-    API_FIELD() int64 DispatchCalls;
+    API_FIELD() int64 DispatchCalls = 0;
 
     /// <summary>
     /// The vertices drawn count.
     /// </summary>
-    API_FIELD() int64 Vertices;
+    API_FIELD() int64 Vertices = 0;
 
     /// <summary>
     /// The triangles drawn count.
     /// </summary>
-    API_FIELD() int64 Triangles;
+    API_FIELD() int64 Triangles = 0;
 
     /// <summary>
     /// The pipeline state changes count.
     /// </summary>
-    API_FIELD() int64 PipelineStateChanges;
+    API_FIELD() int64 PipelineStateChanges = 0;
 
     /// <summary>
-    /// Initializes a new instance of the <see cref="RenderStatsData"/> struct.
+    /// The amount of bytes uploaded to GPU (to buffers and textures).
     /// </summary>
-    RenderStatsData()
-        : DrawCalls(0)
-        , DispatchCalls(0)
-        , Vertices(0)
-        , Triangles(0)
-        , PipelineStateChanges(0)
-    {
-    }
+    API_FIELD() int64 DataUpload = 0;
 
     /// <summary>
     /// The global rendering stats counter.
@@ -67,12 +60,40 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(RenderStatsData);
         MIX(Vertices);
         MIX(Triangles);
         MIX(PipelineStateChanges);
+        MIX(DataUpload);
 #undef MIX
+    }
+
+    RenderStatsData& operator+=(const RenderStatsData& other)
+    {
+#define MIX(name) name += other.name
+        MIX(DrawCalls);
+        MIX(DispatchCalls);
+        MIX(Vertices);
+        MIX(Triangles);
+        MIX(PipelineStateChanges);
+        MIX(DataUpload);
+#undef MIX
+        return *this;
+    }
+
+    RenderStatsData& operator*=(float scale)
+    {
+#define MIX(name) name = (int64)(name * scale)
+        MIX(DrawCalls);
+        MIX(DispatchCalls);
+        MIX(Vertices);
+        MIX(Triangles);
+        MIX(PipelineStateChanges);
+        MIX(DataUpload);
+#undef MIX
+        return *this;
     }
 };
 
 #define RENDER_STAT_DISPATCH_CALL() Platform::InterlockedIncrement(&RenderStatsData::Counter.DispatchCalls)
 #define RENDER_STAT_PS_STATE_CHANGE() Platform::InterlockedIncrement(&RenderStatsData::Counter.PipelineStateChanges)
+#define RENDER_STAT_DATA_UPLOAD(bytes) Platform::InterlockedAdd(&RenderStatsData::Counter.DataUpload, bytes)
 #define RENDER_STAT_DRAW_CALL(vertices, triangles) \
 	Platform::InterlockedIncrement(&RenderStatsData::Counter.DrawCalls); \
 	Platform::InterlockedAdd(&RenderStatsData::Counter.Vertices, vertices); \
@@ -82,6 +103,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(RenderStatsData);
 
 #define RENDER_STAT_DISPATCH_CALL()
 #define RENDER_STAT_PS_STATE_CHANGE()
+#define RENDER_STAT_DATA_UPLOAD(bytes)
 #define RENDER_STAT_DRAW_CALL(vertices, primitives)
 
 #endif

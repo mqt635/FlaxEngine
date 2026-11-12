@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,7 +14,6 @@
 class CreateMaterial
 {
 public:
-
     struct Options
     {
         MaterialInfo Info;
@@ -37,6 +36,20 @@ public:
             float Value = 1.0f;
             Guid Texture = Guid::Empty;
         } Opacity;
+
+        struct
+        {
+            float Value = 0.5f;
+            uint8 Channel = 0;
+            Guid Texture = Guid::Empty;
+        } Roughness;
+
+        struct
+        {
+            float Value = 0.0f;
+            uint8 Channel = 0;
+            Guid Texture = Guid::Empty;
+        } Metalness;
 
         struct
         {

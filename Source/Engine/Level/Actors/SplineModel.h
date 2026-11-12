@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -12,9 +12,8 @@ class Spline;
 /// </summary>
 API_CLASS() class FLAXENGINE_API SplineModel : public ModelInstanceActor
 {
-DECLARE_SCENE_OBJECT(SplineModel);
+    DECLARE_SCENE_OBJECT(SplineModel);
 private:
-
     struct Instance
     {
         BoundingSphere Sphere;
@@ -33,7 +32,6 @@ private:
     float _chunksPerSegment, _meshMinZ, _meshMaxZ;
 
 public:
-
     ~SplineModel();
 
     /// <summary>
@@ -104,26 +102,25 @@ public:
     API_PROPERTY() void SetForcedLOD(int32 value);
 
 private:
-
     void OnModelChanged();
     void OnModelLoaded();
     void OnSplineUpdated();
     void UpdateDeformationBuffer();
 
 public:
-
     // [ModelInstanceActor]
     bool HasContentLoaded() const override;
-    void Draw(RenderContext& renderContext) override;
-    void DrawGeneric(RenderContext& renderContext) override;
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
     void OnParentChanged() override;
+    const Span<MaterialSlot> GetMaterialSlots() const override;
+    MaterialBase* GetMaterial(int32 entryIndex) override;
+    ModelBase* GetModel() override;
+    void UpdateBounds() override;
 
 protected:
-
     // [ModelInstanceActor]
-    void OnTransformChanged() override;
     void OnActiveInTreeChanged() override;
 };

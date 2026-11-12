@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Lightmap.h"
 #include "Scene.h"
@@ -103,7 +103,7 @@ void Lightmap::EnsureSize(int32 size)
 #if COMPILE_WITH_ASSETS_IMPORTER
 
             Guid id = Guid::New();
-            LOG(Info, "Cannot load lightmap {0} ({1}:{2}). Creating new one.", id, _index, textureIndex);
+            LOG(Info, "Cannot load lightmap ({1}:{2}). Creating new one with ID={0}.", id, _index, textureIndex);
             String assetPath;
             _manager->GetCachedLightmapPath(&assetPath, _index, textureIndex);
 
@@ -111,7 +111,11 @@ void Lightmap::EnsureSize(int32 size)
             ImportTexture::Options options;
             options.Type = TextureFormatType::HdrRGBA;
             options.IndependentChannels = true;
+#if PLATFORM_WINDOWS
             options.Compress = _manager->GetScene()->GetLightmapSettings().CompressLightmaps;
+#else
+            options.Compress = false; // TODO: use better BC7 compressor that would handle alpha more precisely (otherwise lightmaps have artifacts, see TextureTool.stb.cpp)
+#endif
             options.IsAtlas = false;
             options.sRGB = false;
             options.NeverStream = false;

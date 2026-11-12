@@ -1,26 +1,37 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Content.h"
 #include "JsonAsset.h"
+#include "SceneReference.h"
 #include "Cache/AssetsCache.h"
 #include "Storage/ContentStorageManager.h"
 #include "Storage/JsonStorageProxy.h"
 #include "Factories/IAssetFactory.h"
+#include "Loading/LoadingThread.h"
+#include "Loading/ContentLoadTask.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/LogContext.h"
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/ObjectsRemovalService.h"
-#include "Engine/Engine/EngineService.h"
+#include "Engine/Serialization/Serialization.h"
 #include "Engine/Platform/FileSystem.h"
+#include "Engine/Platform/ConditionVariable.h"
+#include "Engine/Platform/Thread.h"
+#include "Engine/Platform/CPUInfo.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Threading/MainThreadTask.h"
+#include "Engine/Threading/ConcurrentTaskQueue.h"
 #include "Engine/Graphics/Graphics.h"
+#include "Engine/Engine/Engine.h"
+#include "Engine/Engine/EngineService.h"
 #include "Engine/Engine/Time.h"
 #include "Engine/Engine/Globals.h"
 #include "Engine/Level/Types.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Scripting/ManagedCLR/MClass.h"
-#include "Engine/Scripting/ManagedCLR/MUtils.h"
+#include "Engine/Scripting/Internal/InternalCalls.h"
 #include "Engine/Scripting/Scripting.h"
-#include "Engine/Utilities/StringConverter.h"
 #if USE_EDITOR
 #include "Editor/Editor.h"
 #include "Editor/ProjectInfo.h"
@@ -28,25 +39,55 @@
 #if ENABLE_ASSETS_DISCOVERY
 #include "Engine/Core/Collections/HashSet.h"
 #endif
+#if USE_EDITOR && PLATFORM_WINDOWS
+#include "Engine/Platform/Win32/IncludeWindowsHeaders.h"
+#include <propidlbase.h>
+#endif
 
 TimeSpan Content::AssetsUpdateInterval = TimeSpan::FromMilliseconds(500);
 TimeSpan Content::AssetsUnloadInterval = TimeSpan::FromSeconds(10);
 Delegate<Asset*> Content::AssetDisposing;
 Delegate<Asset*> Content::AssetReloading;
 
+String AssetInfo::ToString() const
+{
+    return String::Format(TEXT("ID: {0}, TypeName: {1}, Path: \'{2}\'"), ID, TypeName, Path);
+}
+
+void FLAXENGINE_API Serialization::Serialize(ISerializable::SerializeStream& stream, const SceneReference& v, const void* otherObj)
+{
+    Serialize(stream, v.ID, otherObj);
+}
+
+void FLAXENGINE_API Serialization::Deserialize(ISerializable::DeserializeStream& stream, SceneReference& v, ISerializeModifier* modifier)
+{
+    Deserialize(stream, v.ID, modifier);
+}
+
 namespace
 {
     // Assets
     CriticalSection AssetsLocker;
-    Dictionary<Guid, Asset*> Assets(2048);
-    CriticalSection LoadCallAssetsLocker;
-    Array<Guid> LoadCallAssets(64);
+    Dictionary<Guid, Asset*> Assets;
     CriticalSection LoadedAssetsToInvokeLocker;
-    Array<Asset*> LoadedAssetsToInvoke(64);
+    Array<Asset*> LoadedAssetsToInvoke;
     Array<Asset*> ToUnload;
 
     // Assets Registry Stuff
     AssetsCache Cache;
+
+    // Loading assets
+    THREADLOCAL LoadingThread* ThisLoadThread = nullptr;
+    LoadingThread* MainLoadThread = nullptr;
+#if PLATFORM_THREADS_LIMIT > 1
+    Array<LoadingThread*> LoadThreads;
+    ConcurrentTaskQueue<ContentLoadTask> LoadTasks;
+    ConditionVariable LoadTasksSignal;
+    CriticalSection LoadTasksMutex;
+    Array<Guid> LoadCallAssets;
+#else
+    Array<ContentLoadTask*> LoadTasks;
+#endif
 
     // Unloading assets
     Dictionary<Asset*, TimeSpan> UnloadQueue;
@@ -57,6 +98,9 @@ namespace
     DateTime LastWorkspaceDiscovery;
     CriticalSection WorkspaceDiscoveryLocker;
 #endif
+#if USE_EDITOR
+    Dictionary<Guid, HashSet<BinaryAsset*>> PendingDependencies;
+#endif
 }
 
 #if ENABLE_ASSETS_DISCOVERY
@@ -66,7 +110,6 @@ bool findAsset(const Guid& id, const String& directory, Array<String>& tmpCache,
 class ContentService : public EngineService
 {
 public:
-
     ContentService()
         : EngineService(TEXT("Content"), -600)
     {
@@ -75,6 +118,7 @@ public:
     bool Init() override;
     void Update() override;
     void LateUpdate() override;
+    void BeforeExit() override;
     void Dispose() override;
 };
 
@@ -82,8 +126,38 @@ ContentService ContentServiceInstance;
 
 bool ContentService::Init()
 {
+    PROFILE_MEM(Content);
+
+    // Init memory containers
+    Assets.EnsureCapacity(2048);
+    LoadedAssetsToInvoke.EnsureCapacity(64);
+#if PLATFORM_THREADS_LIMIT > 1
+    LoadCallAssets.EnsureCapacity(PLATFORM_THREADS_LIMIT);
+#endif
+
     // Load assets registry
     Cache.Init();
+
+    // Create loading threads
+    MainLoadThread = New<LoadingThread>();
+    ThisLoadThread = MainLoadThread;
+#if PLATFORM_THREADS_LIMIT > 1
+    const CPUInfo cpuInfo = Platform::GetCPUInfo();
+    const int32 count = Math::Clamp(Math::CeilToInt(LOADING_THREAD_PER_LOGICAL_CORE * (float)cpuInfo.LogicalProcessorCount), 1, 12);
+    LOG(Info, "Creating {0} content loading threads...", count);
+    LoadThreads.Resize(count);
+    for (int32 i = 0; i < count; i++)
+    {
+        auto thread = New<LoadingThread>();
+        LoadThreads[i] = thread;
+        if (thread->Start(String::Format(TEXT("Load Thread {0}"), i)))
+        {
+            LOG(Fatal, "Cannot spawn content thread {0}/{1}", i, count);
+            Delete(thread);
+            return true;
+        }
+    }
+#endif
 
     return false;
 }
@@ -92,35 +166,50 @@ void ContentService::Update()
 {
     PROFILE_CPU();
 
-    ScopeLock lock(LoadedAssetsToInvokeLocker);
+#if PLATFORM_THREADS_LIMIT == 1
+    // Run content-streaming tasks on a main thread
+    if (LoadTasks.HasItems())
+    {
+        double timeLimit = 0.01; // 10ms
+        double startTime = Platform::GetTimeSeconds();
+        do
+        {
+            auto task = LoadTasks[0];
+            LoadTasks.RemoveAt(0);
+            MainLoadThread->Run(task);
+        } while (LoadTasks.HasItems() && Platform::GetTimeSeconds() - startTime < timeLimit);
+    }
+#endif
 
     // Broadcast `OnLoaded` events
+    LoadedAssetsToInvokeLocker.Lock();
     while (LoadedAssetsToInvoke.HasItems())
     {
         auto asset = LoadedAssetsToInvoke.Dequeue();
         asset->onLoaded_MainThread();
+#if USE_EDITOR
+        Content::onAddDependencies(asset);
+#endif
     }
+    LoadedAssetsToInvokeLocker.Unlock();
 }
 
 void ContentService::LateUpdate()
 {
     PROFILE_CPU();
+    PROFILE_MEM(Content);
 
     // Check if need to perform an update of unloading assets
     const TimeSpan timeNow = Time::Update.UnscaledTime;
     if (timeNow - LastUnloadCheckTime < Content::AssetsUpdateInterval)
         return;
     LastUnloadCheckTime = timeNow;
-
-    Asset* asset;
-    ScopeLock lock(AssetsLocker);
-
-    // TODO: maybe it would be better to link for asset remove ref event and cache only assets with no references - test it with millions of assets?
+    AssetsLocker.Lock();
 
     // Verify all assets
     for (auto i = Assets.Begin(); i.IsNotEnd(); ++i)
     {
-        asset = i->Value;
+        Asset* asset = i->Value;
 
         // Check if has no references and is not during unloading
         if (asset->GetReferencesCount() <= 0 && !UnloadQueue.ContainsKey(asset))
@@ -144,7 +233,7 @@ void ContentService::LateUpdate()
     // Unload marked assets
     for (int32 i = 0; i < ToUnload.Count(); i++)
     {
-        asset = ToUnload[i];
+        Asset* asset = ToUnload[i];
 
         // Check if has no references
         if (asset->GetReferencesCount() <= 0)
@@ -156,8 +245,20 @@ void ContentService::LateUpdate()
         UnloadQueue.Remove(asset);
     }
 
+    AssetsLocker.Unlock();
+
     // Update cache (for longer sessions it will help to reduce cache misses)
     Cache.Save();
+}
+
+void ContentService::BeforeExit()
+{
+#if PLATFORM_THREADS_LIMIT > 1
+    // Signal threads to end work soon
+    for (auto thread : LoadThreads)
+        thread->NotifyExit();
+    LoadTasksSignal.NotifyAll();
+#endif
 }
 
 void ContentService::Dispose()
@@ -166,6 +267,9 @@ void ContentService::Dispose()
 
     // Save assets registry before engine closing
     Cache.Save();
+
+    // Flush objects (some asset-related objects/references may be pending to delete)
+    ObjectsRemovalService::Flush();
 
     // Unload all remaining assets
     {
@@ -182,6 +286,163 @@ void ContentService::Dispose()
 
     // NOW dispose graphics device - where there is no loaded assets at all
     Graphics::DisposeDevice();
+
+#if PLATFORM_THREADS_LIMIT > 1
+    // Exit all load threads
+    for (auto thread : LoadThreads)
+        thread->NotifyExit();
+    LoadTasksSignal.NotifyAll();
+    for (auto thread : LoadThreads)
+        thread->Join();
+    LoadThreads.ClearDelete();
+#endif
+    Delete(MainLoadThread);
+    MainLoadThread = nullptr;
+    ThisLoadThread = nullptr;
+
+#if PLATFORM_THREADS_LIMIT > 1
+    // Cancel all remaining tasks (no chance to execute them)
+    LoadTasks.CancelAll();
+#else
+    for (auto* e : LoadTasks)
+        e->Cancel();
+    LoadTasks.Clear();
+    LoadTasks.SetCapacity(0);
+#endif
+}
+
+IAssetFactory::Collection& IAssetFactory::Get()
+{
+    static Collection Factories(1024);
+    return Factories;
+}
+
+LoadingThread::LoadingThread()
+    : _exitFlag(false)
+    , _thread(nullptr)
+    , _totalTasksDoneCount(0)
+{
+}
+
+LoadingThread::~LoadingThread()
+{
+    if (_thread != nullptr)
+    {
+        _thread->Kill(true);
+        Delete(_thread);
+    }
+}
+
+void LoadingThread::NotifyExit()
+{
+    Platform::InterlockedIncrement(&_exitFlag);
+}
+
+void LoadingThread::Join()
+{
+    auto thread = _thread;
+    if (thread)
+        thread->Join();
+}
+
+bool LoadingThread::Start(const String& name)
+{
+    ASSERT(_thread == nullptr && name.HasChars());
+
+    // Create new thread
+    auto thread = Thread::Create(this, name, ThreadPriority::Normal);
+    if (thread == nullptr)
+        return true;
+
+    _thread = thread;
+
+    return false;
+}
+
+void LoadingThread::Run(ContentLoadTask* job)
+{
+    ASSERT(job);
+
+    job->Execute();
+    _totalTasksDoneCount++;
+}
+
+String LoadingThread::ToString() const
+{
+    return String::Format(TEXT("Loading Thread {0}"), _thread ? _thread->GetID() : 0);
+}
+
+int32 LoadingThread::Run()
+{
+#if PLATFORM_THREADS_LIMIT > 1
+    PROFILE_MEM(Content);
+#if USE_EDITOR && PLATFORM_WINDOWS
+    // Initialize COM
+    // TODO: maybe add sth to Thread::Create to indicate that thread will use COM stuff
+    const auto result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(result))
+    {
+        LOG(Error, "Failed to init COM for WIC texture importing! Result: {0:x}", static_cast<uint32>(result));
+        return -1;
+    }
+#endif
+#ifdef LOADING_THREAD_AFFINITY_MASK
+    Platform::SetThreadAffinityMask(LOADING_THREAD_AFFINITY_MASK(LoadThreads.Find(this)));
+#endif
+
+    ContentLoadTask* task;
+    ThisLoadThread = this;
+
+    MONO_THREAD_INFO_TYPE* monoThreadInfo = nullptr;
+    while (Platform::AtomicRead(&_exitFlag) == 0)
+    {
+        if (LoadTasks.try_dequeue(task))
+        {
+            Run(task);
+            MONO_THREAD_INFO_GET(monoThreadInfo);
+        }
+        else
+        {
+            MONO_ENTER_GC_SAFE_WITH_INFO(monoThreadInfo);
+            LoadTasksMutex.Lock();
+            LoadTasksSignal.Wait(LoadTasksMutex);
+            LoadTasksMutex.Unlock();
+            MONO_EXIT_GC_SAFE_WITH_INFO;
+        }
+    }
+
+    ThisLoadThread = nullptr;
+#endif
+    return 0;
+}
+
+void LoadingThread::Exit()
+{
+    LOG(Info, "Content thread '{0}' exited. Load calls: {1}", _thread->GetName(), _totalTasksDoneCount);
+}
+
+String ContentLoadTask::ToString() const
+{
+    return String::Format(TEXT("Content Load Task ({})"), (int32)GetState());
+}
+
+void ContentLoadTask::Enqueue()
+{
+    LoadTasks.Add(this);
+#if PLATFORM_THREADS_LIMIT > 1
+    LoadTasksSignal.NotifyOne();
+#endif
+}
+
+bool ContentLoadTask::Run()
+{
+    const auto result = run();
+    const bool failed = result != Result::Ok;
+    if (failed)
+    {
+        LOG(Warning, "\'{0}\' failed with result: {1}", ToString(), ToString(result));
+    }
+    return failed;
 }
 
 AssetsCache* Content::GetRegistry()
@@ -195,7 +456,6 @@ bool FindAssets(const ProjectInfo* project, HashSet<const ProjectInfo*>& project
 {
     if (projects.Contains(project))
         return false;
-
     projects.Add(project);
     bool found = findAsset(id, project->ProjectFolderPath / TEXT("Content"), tmpCache, info);
     for (const auto& reference : project->References)
@@ -203,7 +463,6 @@ bool FindAssets(const ProjectInfo* project, HashSet<const ProjectInfo*>& project
         if (reference.Project)
             found |= FindAssets(reference.Project, projects, id, tmpCache, info);
     }
-
     return found;
 }
 
@@ -211,18 +470,15 @@ bool FindAssets(const ProjectInfo* project, HashSet<const ProjectInfo*>& project
 
 bool Content::GetAssetInfo(const Guid& id, AssetInfo& info)
 {
-    // Validate ID
     if (!id.IsValid())
-    {
-        LOG(Warning, "Invalid asset ID.");
         return false;
-    }
 
 #if ENABLE_ASSETS_DISCOVERY
-
     // Find asset in registry
     if (Cache.FindAsset(id, info))
         return true;
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
 
     // Locking injects some stalls but we need to make it safe (only one thread can pass though it at once)
     ScopeLock lock(WorkspaceDiscoveryLocker);
@@ -234,7 +490,7 @@ bool Content::GetAssetInfo(const Guid& id, AssetInfo& info)
     auto diff = now - LastWorkspaceDiscovery;
     if (diff <= TimeSpan::FromSeconds(5))
     {
-        LOG(Warning, "Cannot perform workspace scan for '{1}'. Too often call. Time diff: {0} ms", static_cast<int32>(diff.GetTotalMilliseconds()), id);
+        //LOG(Warning, "Cannot perform workspace scan for '{1}'. Too often call. Time diff: {0} ms", static_cast<int32>(diff.GetTotalMilliseconds()), id);
         return false;
     }
     LastWorkspaceDiscovery = now;
@@ -255,24 +511,24 @@ bool Content::GetAssetInfo(const Guid& id, AssetInfo& info)
         return true;
     }
 
-    LOG(Warning, "Cannot find {0}.", id);
+    //LOG(Warning, "Cannot find {0}.", id);
     return false;
-
 #else
-
     // Find asset in registry
     return Cache.FindAsset(id, info);
-
 #endif
 }
 
 bool Content::GetAssetInfo(const StringView& path, AssetInfo& info)
 {
 #if ENABLE_ASSETS_DISCOVERY
-
     // Find asset in registry
     if (Cache.FindAsset(path, info))
         return true;
+    if (!FileSystem::FileExists(path))
+        return false;
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
 
     const auto extension = FileSystem::GetExtension(path).ToLower();
 
@@ -289,7 +545,7 @@ bool Content::GetAssetInfo(const StringView& path, AssetInfo& info)
         auto storage = ContentStorageManager::GetStorage(path);
         if (storage)
         {
-#if BUILD_DEBUG
+#if BUILD_DEBUG || FLAX_TESTS
             ASSERT(storage->GetPath() == path);
 #endif
 
@@ -298,7 +554,7 @@ bool Content::GetAssetInfo(const StringView& path, AssetInfo& info)
             return Cache.FindAsset(path, info);
         }
     }
-        // Check for json resource
+    // Check for json resource
     else if (JsonStorageProxy::IsValidExtension(extension))
     {
         // Check Json storage layer
@@ -313,13 +569,22 @@ bool Content::GetAssetInfo(const StringView& path, AssetInfo& info)
     }
 
     return false;
-
 #else
-
     // Find asset in registry
     return Cache.FindAsset(path, info);
-
 #endif
+}
+
+StringView Content::GetEditorAssetPath(const Guid& id)
+{
+    return Cache.GetEditorAssetPath(id);
+}
+
+Array<Guid> Content::GetAllAssets()
+{
+    Array<Guid> result;
+    Cache.GetAll(result);
+    return result;
 }
 
 Array<Guid> Content::GetAllAssetsByType(const MClass* type)
@@ -365,21 +630,22 @@ ContentStats Content::GetStats()
     ContentStats stats;
     AssetsLocker.Lock();
     stats.AssetsCount = Assets.Count();
-    for (auto& e : Assets)
+    int32 loadFailedCount = 0;
+    for (const auto& e : Assets)
     {
         if (e.Value->IsLoaded())
             stats.LoadedAssetsCount++;
         else if (e.Value->LastLoadFailed())
-            stats.LoadingAssetsCount++;
+            loadFailedCount++;
         if (e.Value->IsVirtual())
             stats.VirtualAssetsCount++;
     }
-    stats.LoadingAssetsCount = stats.AssetsCount - stats.LoadingAssetsCount - stats.LoadedAssetsCount;
+    stats.LoadingAssetsCount = stats.AssetsCount - loadFailedCount - stats.LoadedAssetsCount;
     AssetsLocker.Unlock();
     return stats;
 }
 
-Asset* Content::LoadAsyncInternal(const StringView& internalPath, MClass* type)
+Asset* Content::LoadAsyncInternal(const StringView& internalPath, const MClass* type)
 {
     CHECK_RETURN(type, nullptr);
     const auto scriptingType = Scripting::FindScriptingType(type->GetFullName());
@@ -391,6 +657,7 @@ Asset* Content::LoadAsyncInternal(const StringView& internalPath, MClass* type)
 
 Asset* Content::LoadAsyncInternal(const StringView& internalPath, const ScriptingTypeHandle& type)
 {
+    PROFILE_MEM(Content);
 #if USE_EDITOR
     const String path = Globals::EngineContentFolder / internalPath + ASSET_FILES_EXTENSION_WITH_DOT;
     if (!FileSystem::FileExists(path))
@@ -421,7 +688,7 @@ FLAXENGINE_API Asset* LoadAsset(const Guid& id, const ScriptingTypeHandle& type)
     return Content::LoadAsync(id, type);
 }
 
-Asset* Content::LoadAsync(const StringView& path, MClass* type)
+Asset* Content::LoadAsync(const StringView& path, const MClass* type)
 {
     CHECK_RETURN(type, nullptr);
     const auto scriptingType = Scripting::FindScriptingType(type->GetFullName());
@@ -433,20 +700,23 @@ Asset* Content::LoadAsync(const StringView& path, MClass* type)
 
 Asset* Content::LoadAsync(const StringView& path, const ScriptingTypeHandle& type)
 {
+    PROFILE_MEM(Content);
+
     // Ensure path is in a valid format
     String pathNorm(path);
-    StringUtils::PathRemoveRelativeParts(pathNorm);
+    ContentStorageManager::FormatPath(pathNorm);
+    const StringView filePath = pathNorm;
 
 #if USE_EDITOR
-    if (!FileSystem::FileExists(pathNorm))
+    if (!FileSystem::FileExists(filePath))
     {
-        LOG(Error, "Missing file \'{0}\'", pathNorm);
+        LOG(Error, "Missing file \'{0}\'", filePath);
         return nullptr;
     }
 #endif
 
     AssetInfo assetInfo;
-    if (GetAssetInfo(pathNorm, assetInfo))
+    if (GetAssetInfo(filePath, assetInfo))
     {
         return LoadAsync(assetInfo.ID, type);
     }
@@ -457,12 +727,29 @@ Asset* Content::LoadAsync(const StringView& path, const ScriptingTypeHandle& typ
 Array<Asset*> Content::GetAssets()
 {
     Array<Asset*> assets;
+    AssetsLocker.Lock();
     Assets.GetValues(assets);
+    AssetsLocker.Unlock();
+    return assets;
+}
+
+Array<Asset*> Content::GetAssets(const MClass* type)
+{
+    Array<Asset*> assets;
+    AssetsLocker.Lock();
+    for (auto& e : Assets)
+    {
+        if (e.Value->Is(type))
+            assets.Add(e.Value);
+    }
+    AssetsLocker.Unlock();
     return assets;
 }
 
 const Dictionary<Guid, Asset*>& Content::GetAssetsRaw()
 {
+    AssetsLocker.Lock();
+    AssetsLocker.Unlock();
     return Assets;
 }
 
@@ -480,7 +767,7 @@ Asset* Content::GetAsset(const StringView& outputPath)
 {
     if (outputPath.IsEmpty())
         return nullptr;
-
+    PROFILE_CPU();
     ScopeLock lock(AssetsLocker);
     for (auto i = Assets.Begin(); i.IsNotEnd(); ++i)
     {
@@ -503,36 +790,56 @@ Asset* Content::GetAsset(const Guid& id)
 
 void Content::DeleteAsset(Asset* asset)
 {
-    ScopeLock locker(AssetsLocker);
-
-    // Validate
     if (asset == nullptr || asset->_deleteFileOnUnload)
-    {
-        // Back
         return;
-    }
 
     LOG(Info, "Deleting asset {0}...", asset->ToString());
+
+    // Ensure that asset is loaded (easier than cancel in-flight loading)
+    asset->WaitForLoaded();
 
     // Mark asset for delete queue (delete it after auto unload)
     asset->_deleteFileOnUnload = true;
 
     // Unload
-    UnloadAsset(asset);
+    asset->DeleteObject();
+}
+
+void Content::DeleteScript(const StringView& path)
+{
+    PROFILE_CPU();
+    if (path.IsEmpty())
+        return;
+    
+    // Return if asset
+    Asset* asset = GetAsset(path);
+    if (asset != nullptr)
+    {
+        return;
+    }
+    
+#if USE_EDITOR
+    LOG(Info, "Deleting script '{0}'", path);
+
+    // Delete file
+    deleteFileSafety(path);
+#endif
 }
 
 void Content::DeleteAsset(const StringView& path)
 {
-    ScopeLock locker(AssetsLocker);
+    PROFILE_CPU();
 
-    // Check if is loaded
+    // Try to delete already loaded asset
     Asset* asset = GetAsset(path);
     if (asset != nullptr)
     {
-        // Delete asset
         DeleteAsset(asset);
         return;
     }
+
+#if USE_EDITOR
+    ScopeLock locker(AssetsLocker);
 
     // Remove from registry
     AssetInfo info;
@@ -547,33 +854,32 @@ void Content::DeleteAsset(const StringView& path)
     }
 
     // Delete file
-    deleteFileSafety(path, info.ID);
+    deleteFileSafety(path, &info.ID);
+#endif
 }
 
-void Content::deleteFileSafety(const StringView& path, const Guid& id)
+void Content::deleteFileSafety(const StringView& path, const Guid* id)
 {
-    // Check if given id is invalid
-    if (!id.IsValid())
+    if (id && !id->IsValid())
     {
-        // Cancel operation
         LOG(Warning, "Cannot remove file \'{0}\'. Given ID is invalid.", path);
         return;
     }
+    PROFILE_CPU();
 
     // Ensure that file has the same ID (prevent from deleting different assets)
     auto storage = ContentStorageManager::TryGetStorage(path);
-    if (storage)
+    if (storage && id)
     {
         storage->CloseFileHandles(); // Close file handle to allow removing it
-        if (!storage->HasAsset(id))
+        if (!storage->HasAsset(*id))
         {
-            // Skip removing
-            LOG(Warning, "Cannot remove file \'{0}\'. It doesn\'t contain asset {1}.", path, id);
+            LOG(Warning, "Cannot remove file \'{0}\'. It doesn\'t contain asset {1}.", path, *id);
             return;
         }
     }
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS || PLATFORM_LINUX
     // Safety way - move file to the recycle bin
     if (FileSystem::MoveFileToRecycleBin(path))
     {
@@ -587,6 +893,23 @@ void Content::deleteFileSafety(const StringView& path, const Guid& id)
     }
 #endif
 }
+
+#if !COMPILE_WITHOUT_CSHARP
+
+#include "Engine/Scripting/ManagedCLR/MUtils.h"
+
+void* Content::GetAssetsInternal()
+{
+    AssetsLocker.Lock();
+    MArray* result = MCore::Array::New(Asset::TypeInitializer.GetClass(), Assets.Count());
+    int32 i = 0;
+    for (const auto& e : Assets)
+        MCore::GC::WriteArrayRef(result, e.Value->GetOrCreateManagedInstance(), i++);
+    AssetsLocker.Unlock();
+    return result;
+}
+
+#endif
 
 #if USE_EDITOR
 
@@ -664,100 +987,142 @@ bool Content::FastTmpAssetClone(const StringView& path, String& resultPath)
     return false;
 }
 
-bool Content::CloneAssetFile(const StringView& dstPath, const StringView& srcPath, const Guid& dstId)
+class CloneAssetFileTask : public MainThreadTask
 {
-    ASSERT(FileSystem::AreFilePathsEqual(srcPath, dstPath) == false && dstId.IsValid());
+public:
+    StringView dstPath;
+    StringView srcPath;
+    Guid dstId;
+    bool* output;
 
-    LOG(Info, "Cloning asset \'{0}\' to \'{1}\'({2}).", srcPath, dstPath, dstId);
-
-    // Check source file
-    if (!FileSystem::FileExists(srcPath))
+protected:
+    bool Run() override
     {
-        LOG(Warning, "Missing source file.");
-        return true;
-    }
-
-    // Special case for json resources
-    if (JsonStorageProxy::IsValidExtension(FileSystem::GetExtension(srcPath).ToLower()))
-    {
-        if (FileSystem::CopyFile(dstPath, srcPath))
-        {
-            LOG(Warning, "Cannot copy file to destination.");
-            return true;
-        }
-
-        if (JsonStorageProxy::ChangeId(dstPath, dstId))
-        {
-            LOG(Warning, "Cannot change asset ID.");
-            return true;
-        }
-
+        *output = Content::CloneAssetFile(dstPath, srcPath, dstId);
         return false;
     }
+};
 
-    // Check if destination file is missing
-    if (!FileSystem::FileExists(dstPath))
+bool Content::CloneAssetFile(const StringView& dstPath, const StringView& srcPath, const Guid& dstId)
+{
+    // Best to run this on the main thread to avoid clone conflicts.
+    if (IsInMainThread())
     {
-        // Use quick file copy
-        if (FileSystem::CopyFile(dstPath, srcPath))
+        PROFILE_CPU();
+        ASSERT(FileSystem::AreFilePathsEqual(srcPath, dstPath) == false && dstId.IsValid());
+
+        LOG(Info, "Cloning asset \'{0}\' to \'{1}\'({2}).", srcPath, dstPath, dstId);
+
+        // Check source file
+        if (!FileSystem::FileExists(srcPath))
         {
-            LOG(Warning, "Cannot copy file to destination.");
+            LOG(Warning, "Missing source file.");
             return true;
         }
 
-        // Change ID
-        auto storage = ContentStorageManager::GetStorage(dstPath);
-        FlaxStorage::Entry e;
-        storage->GetEntry(0, e);
-        if (storage == nullptr || storage->ChangeAssetID(e, dstId))
+        // Special case for json resources
+        if (JsonStorageProxy::IsValidExtension(FileSystem::GetExtension(srcPath).ToLower()))
         {
-            LOG(Warning, "Cannot change asset ID.");
-            return true;
-        }
-    }
-    else
-    {
-        // Use temporary file
-        String tmpPath = Globals::TemporaryFolder / Guid::New().ToString(Guid::FormatType::D);
-        if (FileSystem::CopyFile(tmpPath, srcPath))
-        {
-            LOG(Warning, "Cannot copy file.");
-            return true;
+            if (FileSystem::CopyFile(dstPath, srcPath))
+            {
+                LOG(Warning, "Cannot copy file to destination.");
+                return true;
+            }
+            if (JsonStorageProxy::ChangeId(dstPath, dstId))
+            {
+                LOG(Warning, "Cannot change asset ID.");
+                return true;
+            }
+            return false;
         }
 
-        // Change asset ID
+        // Check if destination file is missing
+        if (!FileSystem::FileExists(dstPath))
         {
-            auto storage = ContentStorageManager::GetStorage(tmpPath);
+            // Use quick file copy
+            if (FileSystem::CopyFile(dstPath, srcPath))
+            {
+                LOG(Warning, "Cannot copy file to destination.");
+                return true;
+            }
+
+            // Change ID
+            auto storage = ContentStorageManager::GetStorage(dstPath);
             FlaxStorage::Entry e;
             storage->GetEntry(0, e);
-            if (!storage || storage->ChangeAssetID(e, dstId))
+            if (storage == nullptr || storage->ChangeAssetID(e, dstId))
             {
                 LOG(Warning, "Cannot change asset ID.");
                 return true;
             }
         }
-
-        // Unlock destination file
-        ContentStorageManager::EnsureAccess(dstPath);
-
-        // Copy temp file to the destination
-        if (FileSystem::CopyFile(dstPath, tmpPath))
+        else
         {
-            LOG(Warning, "Cannot copy file to destination.");
-            return true;
-        }
+            // Use temporary file
+            String tmpPath = Globals::TemporaryFolder / Guid::New().ToString(Guid::FormatType::D);
+            if (FileSystem::CopyFile(tmpPath, srcPath))
+            {
+                LOG(Warning, "Cannot copy file.");
+                return true;
+            }
 
-        // Cleanup
-        FileSystem::DeleteFile(tmpPath);
+            // Change asset ID
+            {
+                auto storage = ContentStorageManager::GetStorage(tmpPath);
+                if (!storage)
+                {
+                    LOG(Warning, "Cannot change asset ID.");
+                    return true;
+                }
+                FlaxStorage::Entry e;
+                storage->GetEntry(0, e);
+                if (storage->ChangeAssetID(e, dstId))
+                {
+                    LOG(Warning, "Cannot change asset ID.");
+                    return true;
+                }
+            }
 
-        // Reload storage
-        {
-            auto storage = ContentStorageManager::GetStorage(dstPath);
-            if (storage)
+            // Unlock destination file
+            ContentStorageManager::EnsureAccess(dstPath);
+
+            // Copy temp file to the destination
+            if (FileSystem::CopyFile(dstPath, tmpPath))
+            {
+                LOG(Warning, "Cannot copy file to destination.");
+                return true;
+            }
+
+            // Cleanup
+            FileSystem::DeleteFile(tmpPath);
+
+            // Reload storage
+            auto storage = ContentStorageManager::GetStorage(dstPath, false);
+            if (storage && storage->IsLoaded())
             {
                 storage->Reload();
             }
+            else if (auto dependencies = PendingDependencies.TryGet(dstId))
+            {
+                // Destination storage is not loaded but there are other assets that depend on it so update them
+                for (const auto& e : *dependencies)
+                    e.Item->OnDependencyModified(nullptr);
+            }
         }
+    }
+    else
+    {
+        CloneAssetFileTask* task = New<CloneAssetFileTask>();
+        task->dstId = dstId;
+        task->dstPath = dstPath;
+        task->srcPath = srcPath;
+
+        bool result = false;
+        task->output = &result;
+        task->Start();
+        task->Wait();
+
+        return result;
     }
 
     return false;
@@ -767,14 +1132,12 @@ bool Content::CloneAssetFile(const StringView& dstPath, const StringView& srcPat
 
 void Content::UnloadAsset(Asset* asset)
 {
-    // Check input
     if (asset == nullptr)
         return;
-
     asset->DeleteObject();
 }
 
-Asset* Content::CreateVirtualAsset(MClass* type)
+Asset* Content::CreateVirtualAsset(const MClass* type)
 {
     CHECK_RETURN(type, nullptr);
     const auto scriptingType = Scripting::FindScriptingType(type->GetFullName());
@@ -786,6 +1149,8 @@ Asset* Content::CreateVirtualAsset(MClass* type)
 
 Asset* Content::CreateVirtualAsset(const ScriptingTypeHandle& type)
 {
+    PROFILE_CPU();
+    PROFILE_MEM(Content);
     auto& assetType = type.GetType();
 
     // Init mock asset info
@@ -808,15 +1173,20 @@ Asset* Content::CreateVirtualAsset(const ScriptingTypeHandle& type)
     }
 
     // Create asset object
+    PROFILE_MEM_BEGIN(ContentAssets);
     auto asset = factory->NewVirtual(info);
+    PROFILE_MEM_END();
     if (asset == nullptr)
     {
         LOG(Error, "Cannot create virtual asset object.");
         return nullptr;
     }
+    asset->RegisterObject();
 
     // Call initializer function
+    PROFILE_MEM_BEGIN(ContentAssets);
     asset->InitAsVirtual();
+    PROFILE_MEM_END();
 
     // Register asset
     AssetsLocker.Lock();
@@ -827,6 +1197,125 @@ Asset* Content::CreateVirtualAsset(const ScriptingTypeHandle& type)
     return asset;
 }
 
+void Content::WaitForTask(ContentLoadTask* loadingTask, double timeoutInMilliseconds)
+{
+    // Check if call is made from the Loading Thread and task has not been taken yet
+    auto thread = ThisLoadThread;
+    if (thread != nullptr)
+    {
+        // Note: to reproduce this case just include material into material (use layering).
+        // So during loading first material it will wait for child materials loaded calling this function
+
+        const double timeoutInSeconds = timeoutInMilliseconds * 0.001;
+        const double startTime = Platform::GetTimeSeconds();
+        int32 loopCounter = 0;
+        Task* task = loadingTask;
+        Array<ContentLoadTask*, InlinedAllocation<64>> localQueue;
+#define CHECK_CONDITIONS() (!Engine::ShouldExit() && (timeoutInSeconds <= 0.0 || Platform::GetTimeSeconds() - startTime < timeoutInSeconds))
+        do
+        {
+#if PLATFORM_THREADS_LIMIT > 1
+            // Give opportunity for other threads to use the current core
+            if (loopCounter == 0)
+                ; // First run is fast
+            else if (loopCounter < 10)
+                Platform::Yield();
+            else
+                Platform::Sleep(1);
+            loopCounter++;
+
+            // Try to execute content tasks
+            while (task->IsQueued() && CHECK_CONDITIONS())
+            {
+                // Dequeue task from the loading queue
+                ContentLoadTask* tmp;
+                if (LoadTasks.try_dequeue(tmp))
+                {
+                    if (tmp == task)
+                    {
+                        if (localQueue.Count() != 0)
+                        {
+                            // Put back queued tasks
+                            LoadTasks.enqueue_bulk(localQueue.Get(), localQueue.Count());
+                            localQueue.Clear();
+                        }
+
+                        PROFILE_CPU_NAMED("Inline");
+                        ZoneColor(0xffaaaaaa);
+                        thread->Run(tmp);
+                    }
+                    else
+                    {
+                        localQueue.Add(tmp);
+                    }
+                }
+                else
+                {
+                    // No task in queue but it's queued so other thread could have stolen it into own local queue
+                    break;
+                }
+            }
+            if (localQueue.Count() != 0)
+            {
+                // Put back queued tasks
+                LoadTasks.enqueue_bulk(localQueue.Get(), localQueue.Count());
+                localQueue.Clear();
+            }
+#else
+            // Try to execute content tasks
+            if (task->IsQueued() && CHECK_CONDITIONS() && !LoadTasks.Remove((ContentLoadTask*)task))
+            {
+                PROFILE_CPU_NAMED("Inline");
+                ZoneColor(0xffaaaaaa);
+                thread->Run((ContentLoadTask*)task);
+            }
+            while (!task->IsQueued() && CHECK_CONDITIONS() && LoadTasks.HasItems())
+            {
+                // Find a task that can be executed (some tasks may be waiting for other tasks to finish so they are not queued yet)
+                int32 index = 0;
+                for (int32 i = 0; i < LoadTasks.Count(); i++)
+                {
+                    if (LoadTasks[i]->GetContinueWithTask() == task)
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+                ContentLoadTask* tmp = LoadTasks[index];
+                LoadTasks.RemoveAt(index);
+
+                PROFILE_CPU_NAMED("Inline");
+                ZoneColor(0xffaaaaaa);
+                thread->Run(tmp);
+            }
+#endif
+
+            // Check if task is done
+            if (task->IsEnded())
+            {
+                // If was fine then wait for the next task
+                if (task->IsFinished())
+                {
+                    task = task->GetContinueWithTask();
+                    if (!task)
+                        break;
+                }
+                else
+                {
+                    // Failed or cancelled so this wait also fails
+                    break;
+                }
+            }
+        } while (CHECK_CONDITIONS());
+#undef CHECK_CONDITIONS
+    }
+    else
+    {
+        // Wait for task end
+        loadingTask->Wait(timeoutInMilliseconds);
+    }
+}
+
 void Content::tryCallOnLoaded(Asset* asset)
 {
     ScopeLock lock(LoadedAssetsToInvokeLocker);
@@ -835,29 +1324,72 @@ void Content::tryCallOnLoaded(Asset* asset)
     {
         LoadedAssetsToInvoke.RemoveAtKeepOrder(index);
         asset->onLoaded_MainThread();
+#if USE_EDITOR
+        onAddDependencies(asset);
+#endif
     }
 }
 
 void Content::onAssetLoaded(Asset* asset)
 {
     // This is called by the asset on loading end
-    ASSERT(asset && asset->IsLoaded());
-
     ScopeLock locker(LoadedAssetsToInvokeLocker);
-
     LoadedAssetsToInvoke.Add(asset);
 }
 
 void Content::onAssetUnload(Asset* asset)
 {
     // This is called by the asset on unloading
-
     ScopeLock locker(AssetsLocker);
-
     Assets.Remove(asset->GetID());
     UnloadQueue.Remove(asset);
     LoadedAssetsToInvoke.Remove(asset);
+#if USE_EDITOR
+    for (auto& e : PendingDependencies)
+        e.Value.Remove(asset);
+#endif
 }
+
+void Content::onAssetChangeId(Asset* asset, const Guid& oldId, const Guid& newId)
+{
+    ScopeLock locker(AssetsLocker);
+    Assets.Remove(oldId);
+    Assets.Add(newId, asset);
+#if USE_EDITOR
+    if (PendingDependencies.ContainsKey(oldId))
+    {
+        auto deps = MoveTemp(PendingDependencies[oldId]);
+        PendingDependencies.Remove(oldId);
+        PendingDependencies.Add(newId, MoveTemp(deps));
+    }
+#endif
+}
+
+#if USE_EDITOR
+
+void Content::onAssetDepend(BinaryAsset* asset, const Guid& otherId)
+{
+    ScopeLock locker(AssetsLocker);
+    PendingDependencies[otherId].Add(asset);
+}
+
+void Content::onAddDependencies(Asset* asset)
+{
+    auto it = PendingDependencies.Find(asset->GetID());
+    if (it.IsNotEnd())
+    {
+        auto& dependencies = it->Value;
+        auto binaryAsset = Asset::Cast<BinaryAsset>(asset);
+        if (binaryAsset)
+        {
+            for (const auto& e : dependencies)
+                binaryAsset->_dependantAssets.Add(e.Item);
+        }
+        PendingDependencies.Remove(it);
+    }
+}
+
+#endif
 
 bool Content::IsAssetTypeIdInvalid(const ScriptingTypeHandle& type, const ScriptingTypeHandle& assetType)
 {
@@ -865,7 +1397,7 @@ bool Content::IsAssetTypeIdInvalid(const ScriptingTypeHandle& type, const Script
     if (!type || !assetType)
         return false;
 
-#if BUILD_DEBUG
+#if BUILD_DEBUG || FLAX_TESTS
     // Peek types for debugging
     const auto& typeObj = type.GetType();
     const auto& assetTypeObj = assetType.GetType();
@@ -889,91 +1421,70 @@ bool Content::IsAssetTypeIdInvalid(const ScriptingTypeHandle& type, const Script
 
 Asset* Content::LoadAsync(const Guid& id, const ScriptingTypeHandle& type)
 {
-    // Early out
     if (!id.IsValid())
-    {
-        // Back
         return nullptr;
-    }
+    PROFILE_MEM(Content);
 
     // Check if asset has been already loaded
-    Asset* result = GetAsset(id);
+    Asset* result = nullptr;
+    AssetsLocker.Lock();
+    Assets.TryGet(id, result);
     if (result)
     {
+        AssetsLocker.Unlock();
+
         // Validate type
         if (IsAssetTypeIdInvalid(type, result->GetTypeHandle()) && !result->Is(type))
         {
             LOG(Warning, "Different loaded asset type! Asset: \'{0}\'. Expected type: {1}", result->ToString(), type.ToString());
+            LogContext::Print(LogType::Warning);
             return nullptr;
         }
-
         return result;
     }
 
+#if PLATFORM_THREADS_LIMIT > 1
     // Check if that asset is during loading
-    LoadCallAssetsLocker.Lock();
     if (LoadCallAssets.Contains(id))
     {
-        LoadCallAssetsLocker.Unlock();
+        AssetsLocker.Unlock();
 
-        // Wait for load end
-        // TODO: dont use active waiting and prevent deadlocks if running on a main thread
-        //while (!Engine::ShouldExit())
-        while (true)
+        // Wait for loading end by other thread
+        bool contains = true;
+        while (contains)
         {
-            LoadCallAssetsLocker.Lock();
-            const bool contains = LoadCallAssets.Contains(id);
-            LoadCallAssetsLocker.Unlock();
-
-            if (!contains)
-            {
-                return GetAsset(id);
-            }
-
             Platform::Sleep(1);
+            AssetsLocker.Lock();
+            contains = LoadCallAssets.Contains(id);
+            AssetsLocker.Unlock();
         }
-    }
-    else
-    {
-        // Mark asset as loading
-        LoadCallAssets.Add(id);
-
-        LoadCallAssetsLocker.Unlock();
+        Assets.TryGet(id, result);
+        return result;
     }
 
-    // Load asset
-    AssetInfo assetInfo;
-    result = load(id, type, assetInfo);
+    // Mark asset as loading and release lock so other threads can load other assets
+    LoadCallAssets.Add(id);
+#define LOAD_FAILED() AssetsLocker.Lock(); LoadCallAssets.Remove(id); AssetsLocker.Unlock(); return nullptr
+#else
+#define LOAD_FAILED() return nullptr
+#endif
 
-    // End loading
-    LoadCallAssetsLocker.Lock();
-    LoadCallAssets.Remove(id);
-    LoadCallAssetsLocker.Unlock();
+    AssetsLocker.Unlock();
 
-    return result;
-}
-
-Asset* Content::load(const Guid& id, const ScriptingTypeHandle& type, AssetInfo& assetInfo)
-{
     // Get cached asset info (from registry)
+    AssetInfo assetInfo;
     if (!GetAssetInfo(id, assetInfo))
     {
-        LOG(Warning, "Invalid asset ID ({0}).", id.ToString(Guid::FormatType::N));
-        return nullptr;
+        LOG(Warning, "Invalid or missing asset ({0}, {1}).", id, type.ToString());
+        LogContext::Print(LogType::Warning);
+        LOAD_FAILED();
     }
-
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-
-    // Ensure we have valid asset info
-    ASSERT(assetInfo.TypeName.HasChars() && assetInfo.Path.HasChars());
-
-    // Check if file exists
     if (!FileSystem::FileExists(assetInfo.Path))
     {
         LOG(Error, "Cannot find file '{0}'", assetInfo.Path);
-        return nullptr;
+        LOAD_FAILED();
     }
-
 #endif
 
     // Find asset factory based in its type
@@ -981,44 +1492,47 @@ Asset* Content::load(const Guid& id, const ScriptingTypeHandle& type, AssetInfo&
     if (factory == nullptr)
     {
         LOG(Error, "Cannot find asset factory. Info: {0}", assetInfo.ToString());
-        return nullptr;
+        LOAD_FAILED();
     }
 
     // Create asset object
-    auto result = factory->New(assetInfo);
+    PROFILE_MEM_BEGIN(ContentAssets);
+    result = factory->New(assetInfo);
+    PROFILE_MEM_END();
     if (result == nullptr)
     {
         LOG(Error, "Cannot create asset object. Info: {0}", assetInfo.ToString());
-        return nullptr;
+        LOAD_FAILED();
     }
-
+    ASSERT(result->GetID() == id);
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-
-    // Validate type
     if (IsAssetTypeIdInvalid(type, result->GetTypeHandle()) && !result->Is(type))
     {
-        LOG(Error, "Different loaded asset type! Asset: '{0}'. Expected type: {1}", assetInfo.ToString(), type.ToString());
+        LOG(Warning, "Different loaded asset type! Asset: '{0}'. Expected type: {1}", assetInfo.ToString(), type.ToString());
         result->DeleteObject();
-        return nullptr;
+        LOAD_FAILED();
     }
-
 #endif
+    if (!result->IsInternalType())
+        result->RegisterObject();
 
     // Register asset
-    ASSERT(result->GetID() == id);
     AssetsLocker.Lock();
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-    // Asset id has to be unique
-    if (Assets.ContainsKey(id))
-    {
-        CRASH;
-    }
+    ASSERT(!Assets.ContainsKey(id));
 #endif
     Assets.Add(id, result);
-    AssetsLocker.Unlock();
 
     // Start asset loading
     result->startLoading();
+
+    // Remove from the loading queue and release lock
+#if PLATFORM_THREADS_LIMIT > 1
+    LoadCallAssets.Remove(id);
+#endif
+    AssetsLocker.Unlock();
+
+#undef LOAD_FAILED
 
     return result;
 }
@@ -1029,9 +1543,10 @@ bool findAsset(const Guid& id, const String& directory, Array<String>& tmpCache,
 {
     // Get all asset files
     tmpCache.Clear();
-    if (FileSystem::DirectoryGetFiles(tmpCache, directory, TEXT("*"), DirectorySearchOption::AllDirectories))
+    if (FileSystem::DirectoryGetFiles(tmpCache, directory))
     {
-        LOG(Error, "Cannot query files in folder '{0}'.", directory);
+        if (FileSystem::DirectoryExists(directory))
+            LOG(Error, "Cannot query files in folder '{0}'.", directory);
         return false;
     }
 
@@ -1077,7 +1592,7 @@ bool findAsset(const Guid& id, const String& directory, Array<String>& tmpCache,
                     LOG(Error, "Cannot open file '{0}' error code: {1}", path, 0);
                 }
             }
-                // Check for json resource
+            // Check for json resource
             else if (JsonStorageProxy::IsValidExtension(extension))
             {
                 // Check Json storage layer

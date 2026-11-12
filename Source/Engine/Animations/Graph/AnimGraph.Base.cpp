@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "AnimGraph.h"
 #include "Engine/Core/Collections/Array.h"
@@ -23,7 +23,7 @@ AnimSubGraph* AnimGraphBase::LoadSubGraph(const void* data, int32 dataLength, co
     auto subGraph = New<AnimSubGraph>(_graph);
 
     // Load graph
-    MemoryReadStream stream((byte*)data, dataLength);
+    MemoryReadStream stream((const byte*)data, dataLength);
     if (subGraph->Load(&stream, false))
     {
         // Load failed
@@ -61,14 +61,14 @@ void AnimGraphBase::Clear()
     StateTransitions.Resize(0);
 
     // Base
-    GraphType::Clear();
+    VisjectGraph::Clear();
 }
 
 #if USE_EDITOR
 
 void AnimGraphBase::GetReferences(Array<Guid>& output) const
 {
-    GraphType::GetReferences(output);
+    VisjectGraph::GetReferences(output);
 
     // Collect references from nested graph (assets used in state machines)
     for (const auto* subGraph : SubGraphs)
@@ -87,29 +87,53 @@ void AnimationBucketInit(AnimGraphInstanceData::Bucket& bucket)
 
 void MultiBlendBucketInit(AnimGraphInstanceData::Bucket& bucket)
 {
-    bucket.MultiBlend.TimePosition = 0.0f;
-    bucket.MultiBlend.LastUpdateFrame = 0;
+    Platform::MemoryClear(&bucket.MultiBlend, sizeof(bucket.MultiBlend));
 }
 
 void BlendPoseBucketInit(AnimGraphInstanceData::Bucket& bucket)
 {
     bucket.BlendPose.TransitionPosition = 0.0f;
+    bucket.BlendPose.BlendPoseIndex = -1;
     bucket.BlendPose.PreviousBlendPoseIndex = -1;
 }
 
 void StateMachineBucketInit(AnimGraphInstanceData::Bucket& bucket)
 {
-    bucket.StateMachine.LastUpdateFrame = 0;
-    bucket.StateMachine.CurrentState = nullptr;
-    bucket.StateMachine.ActiveTransition = nullptr;
-    bucket.StateMachine.TransitionPosition = 0.0f;
+    Platform::MemoryClear(&bucket.StateMachine, sizeof(bucket.StateMachine));
 }
 
-bool SortMultiBlend1D(const byte& a, const byte& b, AnimGraphNode* n)
+void SlotBucketInit(AnimGraphInstanceData::Bucket& bucket)
+{
+    bucket.Slot.Index = -1;
+    bucket.Slot.TimePosition = 0.0f;
+    bucket.Slot.BlendInPosition = 0.0f;
+    bucket.Slot.BlendOutPosition = 0.0f;
+    bucket.Slot.LoopsDone = 0;
+    bucket.Slot.LoopsLeft = 0;
+}
+
+void InstanceDataBucketInit(AnimGraphInstanceData::Bucket& bucket)
+{
+    bucket.InstanceData.Init = true;
+}
+
+void SpringBonePhysicsBucketInit(AnimGraphInstanceData::Bucket& bucket)
+{
+    bucket.SpringBonePhysics.LastUpdateFrame = 0;
+    bucket.SpringBonePhysics.StateDataStart = -1;
+}
+
+struct MultiBlendSortTag
+{
+    Variant* Values;
+    int32 AnimationsStartIndex;
+};
+
+bool SortMultiBlend1D(const ANIM_GRAPH_MULTI_BLEND_INDEX& a, const ANIM_GRAPH_MULTI_BLEND_INDEX& b, MultiBlendSortTag* tag)
 {
     // Sort items by X location from the lowest to the highest
-    const auto aX = a == ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS ? MAX_float : n->Values[4 + a * 2].AsVector4().X;
-    const auto bX = b == ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS ? MAX_float : n->Values[4 + b * 2].AsVector4().X;
+    const auto aX = a == ANIM_GRAPH_MULTI_BLEND_INVALID ? MAX_float : tag->Values[tag->AnimationsStartIndex + a * 2].AsFloat4().X;
+    const auto bX = b == ANIM_GRAPH_MULTI_BLEND_INVALID ? MAX_float : tag->Values[tag->AnimationsStartIndex + b * 2].AsFloat4().X;
     return aX < bX;
 }
 
@@ -121,109 +145,126 @@ bool SortMultiBlend1D(const byte& a, const byte& b, AnimGraphNode* n)
 bool AnimGraphBase::onNodeLoaded(Node* n)
 {
     ((AnimGraphNode*)n)->Graph = _graph;
-
-    // Check if this node needs a state container
     switch (n->GroupID)
     {
-        // Tools
+    // Tools
     case 7:
         switch (n->TypeID)
         {
-            // Time
+        // Time
         case 5:
             ADD_BUCKET(AnimationBucketInit);
             break;
         }
         break;
-        // Animation
+    // Animation
     case 9:
         switch (n->TypeID)
         {
-            // Output
+        // Output
         case 1:
             _rootNode = n;
             if (_rootNode->Values.Count() < 1)
             {
                 _rootNode->Values.Resize(1);
-                _rootNode->Values[0] = (int32)RootMotionMode::NoExtraction;
+                _rootNode->Values[0] = (int32)RootMotionExtraction::NoExtraction;
             }
             break;
-            // Animation
+        // Animation
         case 2:
             ADD_BUCKET(AnimationBucketInit);
+            n->Assets.Resize(1);
             n->Assets[0] = (Asset*)Content::LoadAsync<Animation>((Guid)n->Values[0]);
             break;
-            // Blend with Mask
+        // Blend with Mask
         case 11:
+            n->Assets.Resize(1);
             n->Assets[0] = (Asset*)Content::LoadAsync<SkeletonMask>((Guid)n->Values[1]);
             break;
-            // Multi Blend 1D
+        // Multi Blend 1D
         case 12:
         {
             ADD_BUCKET(MultiBlendBucketInit);
+            MultiBlendInputs inputs(n);
+            n->Data.MultiBlend1D.Count = (ANIM_GRAPH_MULTI_BLEND_INDEX)((n->Values.Count() - inputs.AnimationsStartIndex) / 2); // 5 node values + 2 per blend point
             n->Data.MultiBlend1D.Length = -1;
-            const Vector4 range = n->Values[0].AsVector4();
-            for (int32 i = 0; i < ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS; i++)
+            n->Data.MultiBlend1D.IndicesSorted = (ANIM_GRAPH_MULTI_BLEND_INDEX*)Allocator::Allocate(sizeof(ANIM_GRAPH_MULTI_BLEND_INDEX) * n->Data.MultiBlend1D.Count);
+            n->Assets.Resize(n->Data.MultiBlend1D.Count);
+            for (int32 i = 0; i < n->Data.MultiBlend1D.Count; i++)
             {
-                auto data0 = n->Values[i * 2 + 4].AsVector4();
-                data0.X = Math::Clamp(data0.X, range.X, range.Y);
-                n->Assets[i] = Content::LoadAsync<Animation>((Guid)n->Values[i * 2 + 5]);
-                n->Data.MultiBlend1D.IndicesSorted[i] = n->Assets[i] ? i : ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS;
-            }
-            Sorting::SortArray(n->Data.MultiBlend1D.IndicesSorted, ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS, &SortMultiBlend1D, n);
-            break;
-        }
-            // Multi Blend 2D
-        case 13:
-        {
-            ADD_BUCKET(MultiBlendBucketInit);
-            n->Data.MultiBlend2D.Length = -1;
-
-            // Get blend points locations
-            Array<Vector2, FixedAllocation<ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS + 3>> vertices;
-            byte vertexIndexToAnimIndex[ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS];
-            const Vector4 range = n->Values[0].AsVector4();
-            for (int32 i = 0; i < ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS; i++)
-            {
-                auto data0 = n->Values[i * 2 + 4].AsVector4();
-                data0.X = Math::Clamp(data0.X, range.X, range.Y);
-                data0.Y = Math::Clamp(data0.Y, range.Z, range.W);
-                n->Assets[i] = (Asset*)Content::LoadAsync<Animation>((Guid)n->Values[i * 2 + 5]);
-                if (n->Assets[i])
+                if (inputs.Sources == MultiBlendAnimationSources::Default)
                 {
-                    const int32 vertexIndex = vertices.Count();
-                    vertexIndexToAnimIndex[vertexIndex] = i;
-                    vertices.Add(Vector2(n->Values[i * 2 + 4].AsVector4()));
+                    n->Assets[i] = Content::LoadAsync<Animation>((Guid)n->Values[i * 2 + inputs.AnimationsStartIndex + 1]);
+                    n->Data.MultiBlend1D.IndicesSorted[i] = (ANIM_GRAPH_MULTI_BLEND_INDEX)(n->Assets[i] ? i : ANIM_GRAPH_MULTI_BLEND_INVALID);
                 }
                 else
                 {
-                    vertexIndexToAnimIndex[i] = -1;
+                    n->Data.MultiBlend1D.IndicesSorted[i] = i;
+                }
+            }
+            MultiBlendSortTag tag = { n->Values.Get(), inputs.AnimationsStartIndex };
+            Sorting::SortArray(n->Data.MultiBlend1D.IndicesSorted, n->Data.MultiBlend1D.Count, &SortMultiBlend1D, &tag);
+            break;
+        }
+        // Multi Blend 2D
+        case 13:
+        {
+            ADD_BUCKET(MultiBlendBucketInit);
+            MultiBlendInputs inputs(n);
+            n->Data.MultiBlend1D.Count = (ANIM_GRAPH_MULTI_BLEND_INDEX)((n->Values.Count() - inputs.AnimationsStartIndex) / 2); // 5 node values + 2 per blend point
+            n->Data.MultiBlend2D.Length = -1;
+
+            // Get blend points locations
+            Array<Float2> vertices;
+            Array<ANIM_GRAPH_MULTI_BLEND_INDEX> vertexToAnim;
+            n->Assets.Resize(n->Data.MultiBlend1D.Count);
+            for (int32 i = 0; i < n->Data.MultiBlend1D.Count; i++)
+            {
+                if (inputs.Sources == MultiBlendAnimationSources::Default)
+                    n->Assets[i] = Content::LoadAsync<Animation>((Guid)n->Values[i * 2 + inputs.AnimationsStartIndex + 1]);
+                if (inputs.Sources != MultiBlendAnimationSources::Default || n->Assets[i])
+                {
+                    vertices.Add(Float2(n->Values[i * 2 + inputs.AnimationsStartIndex].AsFloat4()));
+                    vertexToAnim.Add(i);
                 }
             }
 
             // Triangulate
-            Array<Delaunay2D::Triangle, FixedAllocation<ANIM_GRAPH_MULTI_BLEND_2D_MAX_TRIS>> triangles;
+            Array<Delaunay2D::Triangle> triangles;
             Delaunay2D::Triangulate(vertices, triangles);
+            if (triangles.Count() == 0)
+            {
+                // Insert dummy triangles to have something working (eg. blend points are on the same axis)
+                int32 verticesLeft = vertices.Count();
+                while (verticesLeft >= 3)
+                {
+                    verticesLeft -= 3;
+                    triangles.Add(Delaunay2D::Triangle(verticesLeft, verticesLeft + 1, verticesLeft + 2));
+                }
+                if (verticesLeft == 1)
+                    triangles.Add(Delaunay2D::Triangle(0, 0, 0));
+                else if (verticesLeft == 2)
+                    triangles.Add(Delaunay2D::Triangle(0, 1, 0));
+            }
 
             // Store triangles vertices indices (map the back to the anim node slots)
-            for (int32 i = 0; i < triangles.Count(); i++)
+            n->Data.MultiBlend2D.TrianglesCount = triangles.Count();
+            n->Data.MultiBlend2D.Triangles = (ANIM_GRAPH_MULTI_BLEND_INDEX*)Allocator::Allocate(triangles.Count() * 3 * sizeof(ANIM_GRAPH_MULTI_BLEND_INDEX));
+            for (int32 i = 0, t = 0; i < triangles.Count(); i++)
             {
-                n->Data.MultiBlend2D.TrianglesP0[i] = vertexIndexToAnimIndex[triangles[i].Indices[0]];
-                n->Data.MultiBlend2D.TrianglesP1[i] = vertexIndexToAnimIndex[triangles[i].Indices[1]];
-                n->Data.MultiBlend2D.TrianglesP2[i] = vertexIndexToAnimIndex[triangles[i].Indices[2]];
+                n->Data.MultiBlend2D.Triangles[t++] = vertexToAnim[triangles[i].Indices[0]];
+                n->Data.MultiBlend2D.Triangles[t++] = vertexToAnim[triangles[i].Indices[1]];
+                n->Data.MultiBlend2D.Triangles[t++] = vertexToAnim[triangles[i].Indices[2]];
             }
-            if (triangles.Count() < ANIM_GRAPH_MULTI_BLEND_2D_MAX_TRIS)
-                n->Data.MultiBlend2D.TrianglesP0[triangles.Count()] = ANIM_GRAPH_MULTI_BLEND_MAX_ANIMS;
-
             break;
         }
-            // Blend Pose
+        // Blend Pose
         case 14:
         {
             ADD_BUCKET(BlendPoseBucketInit);
             break;
         }
-            // State Machine
+        // State Machine
         case 18:
         {
             ADD_BUCKET(StateMachineBucketInit);
@@ -239,19 +280,13 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
 
             break;
         }
-            // Entry
+        // Entry
         case 19:
         {
-            const auto entryTargetId = (int32)n->Values[0];
-            const auto entryTarget = GetNode(entryTargetId);
-            if (entryTarget == nullptr)
-            {
-                LOG(Warning, "Missing Entry node in animation state machine graph.");
-            }
-            _rootNode = entryTarget;
+            _rootNode = GetNode((int32)n->Values[0]);
             break;
         }
-            // State
+        // State
         case 20:
         {
             // Load the graph
@@ -260,107 +295,27 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
             Value& surfaceData = n->Values[1];
             data.Graph = LoadSubGraph(surfaceData.AsBlob.Data, surfaceData.AsBlob.Length, (const Char*)name.AsBlob.Data);
 
-            // Initialize transitions
-            Value& transitionsData = n->Values[2];
-            int32 validTransitions = 0;
-            if (transitionsData.Type == VariantType::Blob && transitionsData.AsBlob.Length)
-            {
-                MemoryReadStream stream((byte*)transitionsData.AsBlob.Data, transitionsData.AsBlob.Length);
-
-                int32 version;
-                stream.ReadInt32(&version);
-                if (version != 1)
-                {
-                    LOG(Warning, "Invalid version of the Anim Graph state transitions data.");
-                    return true;
-                }
-
-                int32 transitionsCount;
-                stream.ReadInt32(&transitionsCount);
-
-                StateTransitions.EnsureCapacity(StateTransitions.Count() + transitionsCount);
-
-                AnimGraphStateTransition transition;
-                for (int32 i = 0; i < transitionsCount; i++)
-                {
-                    struct Data
-                    {
-                        int32 Destination;
-                        int32 Flags;
-                        int32 Order;
-                        float BlendDuration;
-                        int32 BlendMode;
-                        int32 Unused0;
-                        int32 Unused1;
-                        int32 Unused2;
-                    };
-                    Data transitionData;
-                    stream.ReadBytes(&transitionData, sizeof(transitionData));
-
-                    transition.Flags = (AnimGraphStateTransition::FlagTypes)transitionData.Flags;
-                    transition.BlendDuration = transitionData.BlendDuration;
-                    transition.BlendMode = (AlphaBlendMode)transitionData.BlendMode;
-                    transition.Destination = GetNode(transitionData.Destination);
-                    transition.RuleGraph = nullptr;
-
-                    int32 ruleSize;
-                    stream.ReadInt32(&ruleSize);
-                    const auto ruleBytes = (byte*)stream.Read(ruleSize);
-
-                    if (static_cast<int32>(transition.Flags & AnimGraphStateTransition::FlagTypes::Enabled) == 0)
-                    {
-                        // Skip disabled transitions
-                        continue;
-                    }
-
-                    if (ruleSize != 0)
-                    {
-                        transition.RuleGraph = LoadSubGraph(ruleBytes, ruleSize, TEXT("Rule"));
-                        if (transition.RuleGraph && transition.RuleGraph->GetRootNode() == nullptr)
-                        {
-                            LOG(Warning, "Missing root node for the state machine transition rule graph.");
-                            continue;
-                        }
-                    }
-
-                    if (transition.Destination == nullptr)
-                    {
-                        LOG(Warning, "Missing target node for the state machine transition.");
-                        continue;
-                    }
-
-                    if (validTransitions == ANIM_GRAPH_MAX_STATE_TRANSITIONS)
-                    {
-                        LOG(Warning, "State uses too many transitions.");
-                        continue;
-                    }
-
-                    data.Transitions[validTransitions++] = (uint16)StateTransitions.Count();
-                    StateTransitions.Add(transition);
-                }
-            }
-            if (validTransitions != ANIM_GRAPH_MAX_STATE_TRANSITIONS)
-                data.Transitions[validTransitions] = AnimGraphNode::StateData::InvalidTransitionIndex;
-
             // Release data to don't use that memory
             surfaceData = Value::Null;
-            transitionsData = Value::Null;
+
+            // Initialize transitions
+            LoadStateTransitions(data, n->Values[2]);
 
             break;
         }
-            // State Output
+        // State Output
         case 21:
         {
             _rootNode = n;
             break;
         }
-            // Rule Output
+        // Rule Output
         case 22:
         {
             _rootNode = n;
             break;
         }
-            // Animation Graph Function
+        // Animation Graph Function
         case 24:
         {
             auto& data = n->Data.AnimationGraphFunction;
@@ -372,6 +327,7 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
                 data.Graph = nullptr;
                 break;
             }
+            n->Assets.Resize(1);
             n->Assets[0] = function;
 
             // Load the graph
@@ -379,24 +335,30 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
             data.Graph = LoadSubGraph(graphData.Get(), graphData.Length(), TEXT("Animation Graph Function"));
             break;
         }
-            // Transform Node (local/model space)
-            // Get Node Transform (local/model space)
-            // IK Aim, Two Bone IK
+        // Transform Node (local/model space)
+        // Get Node Transform (local/model space)
+        // IK Aim, Two Bone IK
+        // Spring Bone Physics
         case 25:
         case 26:
         case 28:
         case 29:
         case 30:
         case 31:
+        case 35:
         {
             auto& data = n->Data.TransformNode;
             if (_graph->BaseModel && !_graph->BaseModel->WaitForLoaded())
                 data.NodeIndex = _graph->BaseModel->FindNode((StringView)n->Values[0]);
             else
                 data.NodeIndex = -1;
+            if (n->TypeID == 35)
+            {
+                ADD_BUCKET(SpringBonePhysicsBucketInit);
+            }
             break;
         }
-            // Copy Node
+        // Copy Node
         case 27:
         {
             auto& data = n->Data.CopyNode;
@@ -412,9 +374,21 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
             }
             break;
         }
+        // Animation Slot
+        case 32:
+            ADD_BUCKET(SlotBucketInit);
+            break;
+        // Animation Instance Data
+        case 33:
+            ADD_BUCKET(InstanceDataBucketInit);
+            break;
+        // Any State
+        case 34:
+            LoadStateTransitions(n->Data.AnyState, n->Values[0]);
+            break;
         }
         break;
-        // Custom
+    // Custom
     case 13:
     {
         // Clear data
@@ -432,6 +406,90 @@ bool AnimGraphBase::onNodeLoaded(Node* n)
     }
 
     return VisjectGraph::onNodeLoaded(n);
+}
+
+void AnimGraphBase::LoadStateTransitions(AnimGraphNode::StateBaseData& data, Value& transitionsData)
+{
+    int32 validTransitions = 0;
+    data.Transitions = nullptr;
+    if (transitionsData.Type == VariantType::Blob && transitionsData.AsBlob.Length)
+    {
+        MemoryReadStream stream((byte*)transitionsData.AsBlob.Data, transitionsData.AsBlob.Length);
+
+        int32 version;
+        stream.ReadInt32(&version);
+        if (version != 1)
+        {
+            LOG(Warning, "Invalid version of the Anim Graph state transitions data.");
+            return;
+        }
+
+        int32 transitionsCount;
+        stream.ReadInt32(&transitionsCount);
+        if (transitionsCount == 0)
+            return;
+
+        StateTransitions.EnsureCapacity(StateTransitions.Count() + transitionsCount);
+        data.Transitions = (uint16*)Allocator::Allocate(transitionsCount * sizeof(uint16));
+
+        AnimGraphStateTransition transition;
+        for (int32 i = 0; i < transitionsCount; i++)
+        {
+            // Must match StateMachineTransition.Data in C#
+            struct Data
+            {
+                int32 Destination;
+                int32 Flags;
+                int32 Order;
+                float BlendDuration;
+                int32 BlendMode;
+                int32 Unused0;
+                int32 Unused1;
+                int32 Unused2;
+            };
+            Data transitionData;
+            stream.ReadBytes(&transitionData, sizeof(transitionData));
+
+            transition.Flags = (AnimGraphStateTransition::FlagTypes)transitionData.Flags;
+            transition.BlendDuration = transitionData.BlendDuration;
+            transition.BlendMode = (AlphaBlendMode)transitionData.BlendMode;
+            transition.Destination = GetNode(transitionData.Destination);
+            transition.RuleGraph = nullptr;
+
+            int32 ruleSize;
+            stream.ReadInt32(&ruleSize);
+            const auto ruleBytes = (byte*)stream.Move(ruleSize);
+
+            if (static_cast<int32>(transition.Flags & AnimGraphStateTransition::FlagTypes::Enabled) == 0)
+            {
+                // Skip disabled transitions
+                continue;
+            }
+            if (ruleSize != 0)
+            {
+                transition.RuleGraph = LoadSubGraph(ruleBytes, ruleSize, TEXT("Rule"));
+                if (transition.RuleGraph && transition.RuleGraph->GetRootNode() == nullptr)
+                {
+                    LOG(Warning, "Missing root node for the state machine transition rule graph.");
+                    continue;
+                }
+            }
+            if (transition.Destination == nullptr)
+            {
+                LOG(Warning, "Missing target node for the state machine transition.");
+                continue;
+            }
+
+            data.Transitions[validTransitions++] = (uint16)StateTransitions.Count();
+            StateTransitions.Add(transition);
+        }
+
+        // Last entry is invalid to indicate end
+        data.Transitions[validTransitions] = AnimGraphNode::StateData::InvalidTransitionIndex;
+    }
+
+    // Release data to don't use that memory
+    transitionsData = AnimGraphExecutor::Value::Null;
 }
 
 #undef ADD_BUCKET

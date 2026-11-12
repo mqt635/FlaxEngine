@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SkeletonMask.h"
 #include "Engine/Core/Log.h"
@@ -6,6 +6,7 @@
 #include "Engine/Serialization/MemoryWriteStream.h"
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
 #include "Engine/Content/Upgraders/SkeletonMaskUpgrader.h"
+#include "Engine/Threading/Threading.h"
 
 REGISTER_BINARY_ASSET_WITH_UPGRADER(SkeletonMask, "FlaxEngine.SkeletonMask", SkeletonMaskUpgrader, true);
 
@@ -23,13 +24,13 @@ Asset::LoadResult SkeletonMask::load()
     MemoryReadStream stream(dataChunk->Get(), dataChunk->Size());
 
     Guid skeletonId;
-    stream.Read(&skeletonId);
+    stream.Read(skeletonId);
     int32 maskedNodesCount;
     stream.ReadInt32(&maskedNodesCount);
     _maskedNodes.Resize(maskedNodesCount);
     for (auto& e : _maskedNodes)
     {
-        stream.ReadString(&e, -13);
+        stream.Read(e, -13);
     }
     Skeleton = skeletonId;
 
@@ -50,13 +51,14 @@ AssetChunksFlag SkeletonMask::getChunksToPreload() const
 
 const BitArray<>& SkeletonMask::GetNodesMask()
 {
-    if (_mask.IsEmpty() && Skeleton && !Skeleton->WaitForLoaded())
+    if (!Skeleton || Skeleton->WaitForLoaded())
+        return _mask;
+    ScopeLock lock(Locker);
+    if (_mask.IsEmpty())
     {
         _mask.Resize(Skeleton->Skeleton.Nodes.Count());
         for (int32 i = 0; i < _mask.Count(); i++)
-        {
             _mask.Set(i, _maskedNodes.Contains(Skeleton->Skeleton.Nodes[i].Name));
-        }
     }
 
     return _mask;
@@ -66,28 +68,18 @@ const BitArray<>& SkeletonMask::GetNodesMask()
 
 bool SkeletonMask::Save(const StringView& path)
 {
-    // Validate state
-    if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave(path))
         return true;
-    }
-    if (IsVirtual() && path.IsEmpty())
-    {
-        LOG(Error, "To save virtual asset asset you need to specify the target asset path location.");
-        return true;
-    }
-
     ScopeLock lock(Locker);
 
     // Write data
     MemoryWriteStream stream(4096);
     const auto skeletonId = Skeleton.GetID();
-    stream.Write(&skeletonId);
+    stream.Write(skeletonId);
     stream.WriteInt32(_maskedNodes.Count());
     for (auto& e : _maskedNodes)
     {
-        stream.WriteString(e, -13);
+        stream.Write(e, -13);
     }
 
     // Save
@@ -98,7 +90,7 @@ bool SkeletonMask::Save(const StringView& path)
         Platform::MemoryClear(tmpChunks, sizeof(tmpChunks));
         FlaxChunk chunk;
         tmpChunks[0] = &chunk;
-        tmpChunks[0]->Data.Link(stream.GetHandle(), stream.GetPosition());
+        tmpChunks[0]->Data.Link(ToSpan(stream));
 
         AssetInitData initData;
         initData.SerializedVersion = SerializedVersion;
@@ -109,7 +101,7 @@ bool SkeletonMask::Save(const StringView& path)
     else
     {
         auto chunk0 = GetChunk(0);
-        chunk0->Data.Copy(stream.GetHandle(), stream.GetPosition());
+        chunk0->Data.Copy(ToSpan(stream));
 
         AssetInitData initData;
         initData.SerializedVersion = SerializedVersion;

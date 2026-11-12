@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,11 +10,11 @@
 /// <summary>
 /// The main game engine configuration service. Loads and applies game configuration.
 /// </summary>
-API_CLASS(sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API GameSettings : public SettingsBase
+API_CLASS(Sealed, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API GameSettings : public SettingsBase
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(GameSettings);
-public:
+    DECLARE_SCRIPTING_TYPE_MINIMAL(GameSettings);
 
+public:
     /// <summary>
     /// The product full name.
     /// </summary>
@@ -32,6 +32,12 @@ public:
     /// </summary>
     API_FIELD(Attributes="EditorOrder(15), EditorDisplay(\"General\")")
     String CopyrightNotice;
+
+    /// <summary>
+    /// The game version number. Usually in format: MAJOR.MINOR.BUILD.REVISION
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(20), EditorDisplay(\"General\")")
+    String Version;
 
     /// <summary>
     /// The default application icon.
@@ -59,7 +65,6 @@ public:
     Dictionary<String, Guid> CustomSettings;
 
 public:
-
     // Settings containers
     Guid Time;
     Guid Audio;
@@ -67,6 +72,7 @@ public:
     Guid Physics;
     Guid Input;
     Guid Graphics;
+    Guid Network;
     Guid Navigation;
     Guid Localization;
     Guid GameCooking;
@@ -81,9 +87,12 @@ public:
     Guid XboxScarlettPlatform;
     Guid AndroidPlatform;
     Guid SwitchPlatform;
+    Guid PS5Platform;
+    Guid MacPlatform;
+    Guid iOSPlatform;
+    Guid WebPlatform;
 
 public:
-
     /// <summary>
     /// Gets the instance of the game settings asset (null if missing). Object returned by this method is always loaded with valid data to use.
     /// </summary>

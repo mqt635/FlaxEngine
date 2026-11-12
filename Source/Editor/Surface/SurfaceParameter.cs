@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEditor.Scripting;
@@ -26,7 +26,7 @@ namespace FlaxEditor.Surface
         /// <summary>
         /// Parameter unique ID
         /// </summary>
-        public Guid ID;
+        public Guid ID = Guid.Empty;
 
         /// <summary>
         /// Parameter name
@@ -49,22 +49,10 @@ namespace FlaxEditor.Surface
         [NoSerialize, HideInEditor]
         public readonly SurfaceMeta Meta = new SurfaceMeta();
 
-        /// <summary>
-        /// Creates the new parameter of the given type.
-        /// </summary>
-        /// <param name="type">The type.</param>
-        /// <param name="name">The name.</param>
-        /// <returns>The created parameter.</returns>
-        public static SurfaceParameter Create(ScriptType type, string name)
+        /// <inheritdoc />
+        public override string ToString()
         {
-            return new SurfaceParameter
-            {
-                ID = Guid.NewGuid(),
-                IsPublic = true,
-                Name = name,
-                Type = type,
-                Value = TypeUtils.GetDefaultValue(type),
-            };
+            return $"{Type} {Name} = {Value?.ToString() ?? "null"}";
         }
     }
 }

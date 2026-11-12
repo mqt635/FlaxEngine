@@ -1,17 +1,23 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS && !PLATFORM_SDL
 
 #include "WindowsWindow.h"
 #include "WindowsPlatform.h"
 #include "WindowsInput.h"
-#include "Engine/Core/Log.h"
+#include "Engine/Engine/Engine.h"
 #include "Engine/Core/Math/Math.h"
+#include "Engine/Core/Math/Color32.h"
 #include "Engine/Graphics/GPUSwapChain.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/Textures/TextureData.h"
 #include "../Win32/IncludeWindowsHeaders.h"
 #include <propidl.h>
+#if USE_EDITOR
+#include <oleidl.h>
+#include <shellapi.h>
+#endif
 
 #define DefaultDPI 96
 
@@ -27,6 +33,8 @@ WIN_API HRGN WIN_API_CALLCONV CreateRectRgn(int x1, int y1, int x2, int y2);
 WIN_API HRESULT WIN_API_CALLCONV DwmExtendFrameIntoClientArea(HWND hWnd, const void* pMarInset);
 WIN_API HRESULT WIN_API_CALLCONV DwmIsCompositionEnabled(BOOL* pfEnabled);
 
+#define WINDOWS_LAZY_SET_LAYERED_FOR_TRANSPARENCY 1
+
 namespace
 {
     bool IsCompositionEnabled()
@@ -35,7 +43,11 @@ namespace
         const bool success = ::DwmIsCompositionEnabled(&result) == S_OK;
         return result && success;
     }
+}
+#endif
 
+namespace
+{
     bool IsWindowMaximized(HWND window)
     {
         WINDOWPLACEMENT placement;
@@ -44,7 +56,6 @@ namespace
         return placement.showCmd == SW_MAXIMIZE;
     }
 }
-#endif
 
 WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
     : WindowBase(settings)
@@ -58,12 +69,14 @@ WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
     int32 clientHeight = Math::TruncToInt(settings.Size.Y);
     int32 windowWidth = clientWidth;
     int32 windowHeight = clientHeight;
-    _clientSize = Vector2((float)clientWidth, (float)clientHeight);
+    _clientSize = Float2((float)clientWidth, (float)clientHeight);
 
     // Setup window style
     uint32 style = WS_POPUP, exStyle = 0;
+#if !WINDOWS_LAZY_SET_LAYERED_FOR_TRANSPARENCY
     if (settings.SupportsTransparency)
         exStyle |= WS_EX_LAYERED;
+#endif
     if (!settings.ActivateWhenFirstShown)
         exStyle |= WS_EX_NOACTIVATE;
     if (settings.ShowInTaskbar)
@@ -101,11 +114,11 @@ WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
         // Create window style flags
         style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
 #if WINDOWS_USE_NEW_BORDER_LESS
-        if (settings.IsRegularWindow)
+        if (settings.Type == WindowType::Regular)
             style |= WS_BORDER | WS_CAPTION | WS_DLGFRAME | WS_SYSMENU | WS_THICKFRAME | WS_GROUP;
 #elif WINDOWS_USE_NEWER_BORDER_LESS
-        if (settings.IsRegularWindow)
-            style |= WS_THICKFRAME | WS_SYSMENU;
+        if (settings.Type == WindowType::Regular)
+            style |= WS_THICKFRAME | WS_SYSMENU | WS_CAPTION;
 #endif
         exStyle |= WS_EX_WINDOWEDGE;
     }
@@ -113,7 +126,7 @@ WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
     // Creating the window
     _handle = CreateWindowExW(
         exStyle,
-        Platform::ApplicationWindowClass,
+        Platform::ApplicationClassName,
         settings.Title.GetText(),
         style,
         x,
@@ -124,13 +137,19 @@ WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
         nullptr,
         (HINSTANCE)Platform::Instance,
         nullptr);
+    if (_handle == nullptr)
+    {
+        LOG_WIN32_LAST_ERROR;
+        Platform::Fatal(TEXT("Cannot create window."));
+        return;
+    }
 
     // Query DPI
     _dpi = Platform::GetDpi();
     const HMODULE user32Dll = LoadLibraryW(L"user32.dll");
     if (user32Dll)
     {
-        typedef UINT (STDAPICALLTYPE* GetDpiForWindowProc)(HWND hwnd);
+        typedef UINT(STDAPICALLTYPE* GetDpiForWindowProc)(HWND hwnd);
         const GetDpiForWindowProc getDpiForWindowProc = (GetDpiForWindowProc)GetProcAddress(user32Dll, "GetDpiForWindow");
         if (getDpiForWindowProc)
         {
@@ -140,18 +159,11 @@ WindowsWindow::WindowsWindow(const CreateWindowSettings& settings)
     }
     _dpiScale = (float)_dpi / (float)DefaultDPI;
 
-    // Validate result
-    if (!HasHWND())
-    {
-        LOG_WIN32_LAST_ERROR;
-        Platform::Fatal(TEXT("Cannot create window."));
-    }
-
 #if WINDOWS_USE_NEWER_BORDER_LESS
     // Enable shadow
-    if (_settings.IsRegularWindow && !_settings.HasBorder && IsCompositionEnabled())
+    if (settings.Type == WindowType::Regular && !_settings.HasBorder && IsCompositionEnabled())
     {
-        static const int margin[4] = { 1, 1, 1, 1 };
+        const int margin[4] = { 1, 1, 1, 1 };
         ::DwmExtendFrameIntoClientArea(_handle, margin);
     }
 #endif
@@ -175,13 +187,7 @@ WindowsWindow::~WindowsWindow()
 {
     if (HasHWND())
     {
-        // Destroy window
-        if (DestroyWindow(_handle) == 0)
-        {
-            LOG(Warning, "DestroyWindow failed! Error: {0:#x}", GetLastError());
-        }
-
-        // Clear
+        DestroyWindow(_handle);
         _handle = nullptr;
         _visible = false;
     }
@@ -209,9 +215,14 @@ void WindowsWindow::Show()
         // Show
         ShowWindow(_handle, (_settings.AllowInput && _settings.ActivateWhenFirstShown) ? SW_SHOW : SW_SHOWNA);
 #if WINDOWS_USE_NEW_BORDER_LESS
-        if (!_settings.HasBorder && _settings.IsRegularWindow)
+        if (!_settings.HasBorder && settings.Type == WindowType::Regular)
         {
             SetWindowPos(_handle, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+#elif WINDOWS_USE_NEWER_BORDER_LESS
+        if (!_settings.HasBorder)
+        {
+            SetWindowPos(_handle, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
         }
 #endif
 
@@ -236,16 +247,125 @@ void WindowsWindow::Hide()
 
 void WindowsWindow::Minimize()
 {
+    if (!_settings.AllowMinimize)
+        return;
     ASSERT(HasHWND());
     ShowWindow(_handle, SW_MINIMIZE);
 }
 
 void WindowsWindow::Maximize()
 {
+    if (!_settings.AllowMaximize)
+        return;
     ASSERT(HasHWND());
     _isDuringMaximize = true;
     ShowWindow(_handle, SW_MAXIMIZE);
     _isDuringMaximize = false;
+}
+
+void WindowsWindow::SetBorderless(bool isBorderless, bool maximized)
+{
+    ASSERT(HasHWND());
+
+    Float2 preserveSize(0, 0);
+    if (IsFullscreen())
+    {
+        if (_swapChain && !maximized)
+            preserveSize = _swapChain->GetSize();
+        SetIsFullscreen(false);
+    }
+
+    // Fixes issue of borderless window not going full screen
+    if (IsMaximized())
+        Restore();
+
+    _settings.HasBorder = !isBorderless;
+
+    BringToFront();
+
+    if (isBorderless)
+    {
+        LONG lStyle = GetWindowLong(_handle, GWL_STYLE);
+        lStyle &= ~(WS_THICKFRAME | WS_SYSMENU | WS_OVERLAPPED | WS_BORDER | WS_CAPTION);
+        lStyle |= WS_POPUP;
+        lStyle |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+#if WINDOWS_USE_NEW_BORDER_LESS
+        if (_settings.Type == WindowType::Regular)
+            style |= WS_BORDER | WS_CAPTION | WS_DLGFRAME | WS_SYSMENU | WS_THICKFRAME | WS_GROUP;
+#elif WINDOWS_USE_NEWER_BORDER_LESS
+        if (_settings.Type == WindowType::Regular)
+            lStyle |= WS_THICKFRAME | WS_SYSMENU;
+#endif
+
+        SetWindowLong(_handle, GWL_STYLE, lStyle);
+        SetWindowPos(_handle, HWND_TOP, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+        if (maximized)
+        {
+            ShowWindow(_handle, SW_SHOWMAXIMIZED);
+        }
+        else
+        {
+            ShowWindow(_handle, SW_SHOW);
+        }
+
+        // Maintain resolution when going out the fullscreen
+        if (preserveSize != Float2::Zero)
+        {
+            Int4 monitorBounds;
+            GetScreenInfo(monitorBounds.X, monitorBounds.Y, monitorBounds.Z, monitorBounds.W);
+            monitorBounds.X += (monitorBounds.Z - (int32)preserveSize.X) / 2;
+            monitorBounds.Y += (monitorBounds.W - (int32)preserveSize.Y) / 2;
+            SetWindowPos(_handle, nullptr, monitorBounds.X, monitorBounds.Y, (int32)preserveSize.X, (int32)preserveSize.Y, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    else
+    {
+        LONG lStyle = GetWindowLong(_handle, GWL_STYLE);
+        lStyle &= ~(WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+        if (_settings.AllowMaximize)
+            lStyle |= WS_MAXIMIZEBOX;
+        if (_settings.AllowMinimize)
+            lStyle |= WS_MINIMIZEBOX;
+        if (_settings.HasSizingFrame)
+            lStyle |= WS_THICKFRAME;
+        lStyle |= WS_OVERLAPPED | WS_SYSMENU | WS_BORDER | WS_CAPTION;
+        SetWindowLong(_handle, GWL_STYLE, lStyle);
+
+        const Float2 clientSize = GetClientSize();
+        const Float2 desktopSize = Platform::GetDesktopSize();
+        if (preserveSize != Float2::Zero)
+        {
+            // Maintain resolution when going out the fullscreen
+            Int4 monitorBounds;
+            GetScreenInfo(monitorBounds.X, monitorBounds.Y, monitorBounds.Z, monitorBounds.W);
+            monitorBounds.X += (monitorBounds.Z - (int32)preserveSize.X) / 2;
+            monitorBounds.Y += (monitorBounds.W - (int32)preserveSize.Y) / 2;
+            SetWindowPos(_handle, nullptr, monitorBounds.X, monitorBounds.Y, (int32)preserveSize.X, (int32)preserveSize.Y, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        else if (clientSize.X >= desktopSize.X && clientSize.Y >= desktopSize.Y)
+        {
+            // Move window and half size if it is larger than desktop size
+            const Float2 halfSize = desktopSize * 0.5f;
+            const Float2 middlePos = halfSize * 0.5f;
+            SetWindowPos(_handle, nullptr, (int)middlePos.X, (int)middlePos.Y, (int)halfSize.X, (int)halfSize.Y, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        else
+        {
+            SetWindowPos(_handle, nullptr, 0, 0, (int)clientSize.X, (int)clientSize.Y, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        if (maximized)
+        {
+            Maximize();
+        }
+        else
+        {
+            ShowWindow(_handle, SW_SHOW);
+        }
+    }
+
+    CheckForWindowResize();
 }
 
 void WindowsWindow::Restore()
@@ -256,7 +376,7 @@ void WindowsWindow::Restore()
 
 bool WindowsWindow::IsClosed() const
 {
-    return !HasHWND();
+    return !HasHWND() || EnumHasAnyFlags(Flags, ObjectFlags::WasMarkedToDelete);
 }
 
 bool WindowsWindow::IsForegroundWindow() const
@@ -268,7 +388,7 @@ void WindowsWindow::BringToFront(bool force)
 {
     ASSERT(HasHWND());
 
-    if (_settings.IsRegularWindow)
+    if (_settings.Type == WindowType::Regular)
     {
         if (IsIconic(_handle))
         {
@@ -304,8 +424,8 @@ void WindowsWindow::SetClientBounds(const Rectangle& clientArea)
 
     // Check if position or/and size will change
     const auto rect = GetClientBounds();
-    const bool changeLocation = !Vector2::NearEqual(rect.Location, clientArea.Location);
-    const bool changeSize = !Vector2::NearEqual(rect.Size, clientArea.Size);
+    const bool changeLocation = !Float2::NearEqual(rect.Location, clientArea.Location);
+    const bool changeSize = !Float2::NearEqual(rect.Size, clientArea.Size);
     if (!changeLocation && !changeSize)
         return;
 
@@ -314,6 +434,17 @@ void WindowsWindow::SetClientBounds(const Rectangle& clientArea)
     int32 y = (int32)clientArea.GetY();
     int32 width = (int32)clientArea.GetWidth();
     int32 height = (int32)clientArea.GetHeight();
+
+    // Resize during fullscreen
+    if (changeSize && _swapChain && _swapChain->IsFullscreen())
+    {
+        // Go out fullscreen, resize, and then go back in
+        _swapChain->SetFullscreen(false);
+        _clientSize = clientArea.Size;
+        OnResize(width, height);
+        _swapChain->SetFullscreen(true);
+        return;
+    }
 
     if (changeSize)
     {
@@ -354,7 +485,7 @@ void WindowsWindow::SetClientBounds(const Rectangle& clientArea)
     }
 }
 
-void WindowsWindow::SetPosition(const Vector2& position)
+void WindowsWindow::SetPosition(const Float2& position)
 {
     ASSERT(HasHWND());
 
@@ -366,7 +497,7 @@ void WindowsWindow::SetPosition(const Vector2& position)
     SetWindowPos(_handle, nullptr, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
-void WindowsWindow::SetClientPosition(const Vector2& position)
+void WindowsWindow::SetClientPosition(const Float2& position)
 {
     ASSERT(HasHWND());
 
@@ -414,30 +545,30 @@ void WindowsWindow::SetIsFullscreen(bool isFullscreen)
     _isSwitchingFullScreen = false;
 }
 
-Vector2 WindowsWindow::GetPosition() const
+Float2 WindowsWindow::GetPosition() const
 {
     ASSERT(HasHWND());
 
     RECT rect;
     GetWindowRect(_handle, &rect);
-    return Vector2(static_cast<float>(rect.left), static_cast<float>(rect.top));
+    return Float2(static_cast<float>(rect.left), static_cast<float>(rect.top));
 }
 
-Vector2 WindowsWindow::GetSize() const
+Float2 WindowsWindow::GetSize() const
 {
     ASSERT(HasHWND());
 
     RECT rect;
     GetWindowRect(_handle, &rect);
-    return Vector2(static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top));
+    return Float2(static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top));
 }
 
-Vector2 WindowsWindow::GetClientSize() const
+Float2 WindowsWindow::GetClientSize() const
 {
     return _clientSize;
 }
 
-Vector2 WindowsWindow::ScreenToClient(const Vector2& screenPos) const
+Float2 WindowsWindow::ScreenToClient(const Float2& screenPos) const
 {
     ASSERT(HasHWND());
 
@@ -445,18 +576,24 @@ Vector2 WindowsWindow::ScreenToClient(const Vector2& screenPos) const
     p.x = static_cast<LONG>(screenPos.X);
     p.y = static_cast<LONG>(screenPos.Y);
     ::ScreenToClient(_handle, &p);
-    return Vector2(static_cast<float>(p.x), static_cast<float>(p.y));
+    return Float2(static_cast<float>(p.x), static_cast<float>(p.y));
 }
 
-Vector2 WindowsWindow::ClientToScreen(const Vector2& clientPos) const
+Float2 WindowsWindow::ClientToScreen(const Float2& clientPos) const
 {
     ASSERT(HasHWND());
+
+    if (_minimized)
+    {
+        // Return cached position when window is not on screen
+        return _minimizedScreenPosition + clientPos;
+    }
 
     POINT p;
     p.x = static_cast<LONG>(clientPos.X);
     p.y = static_cast<LONG>(clientPos.Y);
     ::ClientToScreen(_handle, &p);
-    return Vector2(static_cast<float>(p.x), static_cast<float>(p.y));
+    return Float2(static_cast<float>(p.x), static_cast<float>(p.y));
 }
 
 void WindowsWindow::FlashWindow()
@@ -488,26 +625,32 @@ void WindowsWindow::GetScreenInfo(int32& x, int32& y, int32& width, int32& heigh
 
 float WindowsWindow::GetOpacity() const
 {
-    ASSERT(HasHWND());
-
-    COLORREF color;
-    BYTE alpha;
-    DWORD flags;
-    GetLayeredWindowAttributes(_handle, &color, &alpha, &flags);
-    return (float)alpha / 255.0f;
+    return _opacity;
 }
 
 void WindowsWindow::SetOpacity(const float opacity)
 {
-    ASSERT(HasHWND());
+    if (_handle == nullptr || Math::NearEqual(_opacity, opacity) || !_settings.SupportsTransparency)
+        return;
+
+#if WINDOWS_LAZY_SET_LAYERED_FOR_TRANSPARENCY
+    LONG exStyle = GetWindowLongW(_handle, GWL_EXSTYLE);
+    if (_opacity >= 1.0f)
+        SetWindowLongW(_handle, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+#endif
 
     SetLayeredWindowAttributes(_handle, 0, static_cast<BYTE>(Math::Saturate(opacity) * 255), LWA_ALPHA);
+    _opacity = opacity;
+
+#if WINDOWS_LAZY_SET_LAYERED_FOR_TRANSPARENCY
+    if (opacity >= 1.0f)
+        SetWindowLongW(_handle, GWL_EXSTYLE, exStyle & ~WS_EX_LAYERED);
+#endif
 }
 
 void WindowsWindow::Focus()
 {
     ASSERT(HasHWND());
-
     if (GetFocus() != _handle)
     {
         SetFocus(_handle);
@@ -531,8 +674,10 @@ void WindowsWindow::StartTrackingMouse(bool useMouseScreenOffset)
     if (!_isTrackingMouse)
     {
         _isTrackingMouse = true;
-        _trackingMouseOffset = Vector2::Zero;
+        _trackingMouseOffset = Float2::Zero;
         _isUsingMouseOffset = useMouseScreenOffset;
+        _isHorizontalFlippingMouse = false;
+        _isVerticalFlippingMouse = false;
 
         int32 x = 0, y = 0, width = 0, height = 0;
         GetScreenInfo(x, y, width, height);
@@ -547,8 +692,36 @@ void WindowsWindow::EndTrackingMouse()
     if (_isTrackingMouse)
     {
         _isTrackingMouse = false;
+        _isHorizontalFlippingMouse = false;
+        _isVerticalFlippingMouse = false;
 
         ReleaseCapture();
+    }
+}
+
+void WindowsWindow::StartClippingCursor(const Rectangle& bounds)
+{
+    _isClippingCursor = true;
+    *(RECT*)_clipCursorRect = {
+        (LONG)bounds.GetUpperLeft().X,
+        (LONG)bounds.GetUpperLeft().Y,
+        (LONG)bounds.GetBottomRight().X,
+        (LONG)bounds.GetBottomRight().Y
+    };
+    if (IsFocused())
+    {
+        _clipCursorSet = true;
+        ClipCursor((RECT*)_clipCursorRect);
+    }
+}
+
+void WindowsWindow::EndClippingCursor()
+{
+    if (_isClippingCursor)
+    {
+        _isClippingCursor = false;
+        _clipCursorSet = false;
+        ClipCursor(nullptr);
     }
 }
 
@@ -560,37 +733,72 @@ void WindowsWindow::SetCursor(CursorType type)
     UpdateCursor();
 }
 
-#if USE_EDITOR
-
-Windows::HRESULT WindowsWindow::QueryInterface(const Windows::IID& id, void** ppvObject)
+void WindowsWindow::SetCursorImage(void* image)
 {
-    // Check to see what interface has been requested
-    if ((const IID&)id == IID_IUnknown || (const IID&)id == IID_IDropTarget)
+    // Base
+    WindowBase::SetCursorImage(image);
+
+    if (_cursor == CursorType::Image)
+        UpdateCursor();
+}
+
+void* WindowsWindow::LoadCursorImage(const StringView& path)
+{
+    return ::LoadCursorFromFileW(path.GetText());
+}
+
+// From wingdi.h
+WIN_API HBITMAP WIN_API_CALLCONV CreateBitmap(int nWidth, int nHeight, UINT nPlanes, UINT nBitCount, CONST VOID* lpBits);
+WIN_API BOOL WIN_API_CALLCONV DeleteObject(HGDIOBJ ho);
+#pragma comment(lib, "Gdi32.lib")
+
+void* WindowsWindow::LoadCursorImage(const TextureData& image, const Int2& hotSpot)
+{
+    // Get image pixels
+    Array<Color32> pixels;
+    if (image.GetPixels(pixels))
     {
-        AddRef();
-        *ppvObject = this;
-        return S_OK;
+        LOG(Error, "Invalid cursor texture");
+        return nullptr;
     }
 
-    // No interface
-    *ppvObject = nullptr;
-    return E_NOINTERFACE;
+    // RGBA -> BGRA
+    for (int32 y = 0; y < image.Height; y++)
+    {
+        for (int32 x = 0; x < image.Width; x++)
+        {
+            auto& color = *(pixels.Get() + y * image.Width + x);
+            color = Color32(color.B, color.G, color.R, color.A);
+        }
+    }
+
+    // Initialize a dummy mask
+    Array<uint8> pixelsMask;
+    pixelsMask.AddUninitialized(pixels.Count());
+    Platform::MemorySet(pixelsMask.Get(), pixelsMask.Count(), 255);
+
+    // Create cursor from the image
+    HBITMAP colorBitmap = ::CreateBitmap(image.Width, image.Height, 1, 32, pixels.Get());
+    HBITMAP maskBitmap = ::CreateBitmap(image.Width, image.Height, 1, 8, pixelsMask.Get());
+    ICONINFO iconInfo = {};
+    iconInfo.xHotspot = hotSpot.X;
+    iconInfo.yHotspot = hotSpot.Y;
+    iconInfo.hbmColor = colorBitmap;
+    iconInfo.hbmMask = maskBitmap;
+    HCURSOR result = ::CreateIconIndirect(&iconInfo);
+    ::DeleteObject(colorBitmap);
+    ::DeleteObject(maskBitmap);
+    return result;
 }
 
-Windows::ULONG WindowsWindow::AddRef()
+void WindowsWindow::DestroyCursorImage(void* image)
 {
-    _InterlockedIncrement(&_refCount);
-    return _refCount;
+    if (!image)
+        return;
+    ::DestroyCursor((HCURSOR)image);
 }
 
-Windows::ULONG WindowsWindow::Release()
-{
-    return _InterlockedDecrement(&_refCount);
-}
-
-#endif
-
-void WindowsWindow::CheckForWindowResize()
+void WindowsWindow::CheckForWindowResize(bool force)
 {
     // Skip for minimized window (GetClientRect for minimized window returns 0)
     if (_minimized)
@@ -601,84 +809,107 @@ void WindowsWindow::CheckForWindowResize()
     // Cache client size
     RECT rect;
     GetClientRect(_handle, &rect);
-    const int32 width = Math::Max(rect.right - rect.left, 0L);
-    const int32 height = Math::Max(rect.bottom - rect.top, 0L);
-    _clientSize = Vector2(static_cast<float>(width), static_cast<float>(height));
+    int32 width = Math::Max(rect.right - rect.left, 0L);
+    int32 height = Math::Max(rect.bottom - rect.top, 0L);
+
+    // Check for windows maximized size and see if it needs to adjust position if needed
+    if (_maximized)
+    {
+        // Pick the current monitor data for sizing
+        const HMONITOR monitor = MonitorFromWindow(_handle, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo;
+        monitorInfo.cbSize = sizeof(MONITORINFO);
+        GetMonitorInfoW(monitor, &monitorInfo);
+
+        auto cwidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+        auto cheight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+        if (width > cwidth && height > cheight)
+        {
+            width = cwidth;
+            height = cheight;
+            SetWindowPos(_handle, HWND_TOP, monitorInfo.rcWork.left, monitorInfo.rcWork.top, width, height, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
+    }
+    _clientSize = Float2(static_cast<float>(width), static_cast<float>(height));
 
     // Check if window size has been changed
-    if (width > 0 && height > 0 && (_swapChain == nullptr || width != _swapChain->GetWidth() || height != _swapChain->GetHeight()))
+    if (width > 0 && height > 0 && (force || _swapChain == nullptr || width != _swapChain->GetWidth() || height != _swapChain->GetHeight()))
     {
         UpdateRegion();
         OnResize(width, height);
     }
 }
 
-void WindowsWindow::UpdateCursor() const
+void WindowsWindow::UpdateCursor()
 {
-    if (_cursor == CursorType::Hidden)
+    // Don't hide cursor when window is not focused
+    if (_cursor == CursorType::Hidden && _focused)
     {
+        if (!_lastCursorHidden)
+        {
+            _lastCursorHidden = true;
+            while (::ShowCursor(FALSE) >= 0)
+            {
+                if (_cursorHiddenSafetyCount >= 100)
+                {
+                    LOG(Warning, "Cursor has failed to hide.");
+                    break;
+                }
+                _cursorHiddenSafetyCount += 1;
+            }
+            _cursorHiddenSafetyCount = 0;
+        }
         ::SetCursor(nullptr);
         return;
     }
-
-    int32 index = 0;
-    switch (_cursor)
+    else if (_lastCursorHidden)
     {
-    case CursorType::Default:
-        break;
-    case CursorType::Cross:
-        index = 1;
-        break;
-    case CursorType::Hand:
-        index = 2;
-        break;
-    case CursorType::Help:
-        index = 3;
-        break;
-    case CursorType::IBeam:
-        index = 4;
-        break;
-    case CursorType::No:
-        index = 5;
-        break;
-    case CursorType::Wait:
-        index = 11;
-        break;
-    case CursorType::SizeAll:
-        index = 6;
-        break;
-    case CursorType::SizeNESW:
-        index = 7;
-        break;
-    case CursorType::SizeNS:
-        index = 8;
-        break;
-    case CursorType::SizeNWSE:
-        index = 9;
-        break;
-    case CursorType::SizeWE:
-        index = 10;
-        break;
+        _lastCursorHidden = false;
+        while (::ShowCursor(TRUE) < 0)
+        {
+            if (_cursorHiddenSafetyCount >= 100)
+            {
+                LOG(Warning, "Cursor has failed to show.");
+                break;
+            }
+            _cursorHiddenSafetyCount++;
+        }
+        _cursorHiddenSafetyCount = 0;
     }
+    if (_cursor == CursorType::Hidden)
+        return;
 
-    static const LPCWSTR cursors[] =
+    const LPCWSTR cursors[] =
     {
-        IDC_ARROW,
-        IDC_CROSS,
-        IDC_HAND,
-        IDC_HELP,
-        IDC_IBEAM,
-        IDC_NO,
-        IDC_SIZEALL,
-        IDC_SIZENESW,
-        IDC_SIZENS,
-        IDC_SIZENWSE,
-        IDC_SIZEWE,
-        IDC_WAIT,
+        IDC_ARROW, // Default
+        IDC_CROSS, // Cross
+        IDC_HAND, // Hand
+        IDC_HELP, // Help
+        IDC_IBEAM, // IBeam
+        IDC_NO, // No
+        IDC_WAIT, // Wait
+        IDC_SIZEALL, // SizeAll
+        IDC_SIZENESW, // SizeNESW
+        IDC_SIZENS, // SizeNS
+        IDC_SIZENWSE, // SizeNWSE
+        IDC_SIZEWE, // SizeWE
     };
+    static_assert(ARRAY_COUNT(cursors) + 2 == (int32)CursorType::MAX, "Invalid cursors count.");
 
-    ASSERT(index >= 0 && index < ARRAY_COUNT(cursors));
-    const HCURSOR cursor = LoadCursorW(nullptr, cursors[index]);
+    HCURSOR cursor;
+    if (_cursor == CursorType::Image)
+    {
+        static bool Once = true;
+        if (!_cursorImage && Once)
+        {
+            Once = false;
+            LOG(Error, "Missing cursor image to set.");
+        }
+        cursor = (HCURSOR)_cursorImage;
+    }
+    else
+        cursor = LoadCursorW(nullptr, cursors[(int32)_cursor]);
+
     ::SetCursor(cursor);
 }
 
@@ -686,7 +917,7 @@ void WindowsWindow::UpdateRegion()
 {
 #if WINDOWS_USE_NEW_BORDER_LESS
     // Use region to remove rounded corners of the window
-    if (!_settings.HasBorder && _settings.IsRegularWindow)
+    if (!_settings.HasBorder && _settings.Type == WindowType::Regular)
     {
         if (!_maximized && !_isResizing)
         {
@@ -730,16 +961,24 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_PAINT:
     {
         // Check if window is during resizing
-        if (_isResizing && _swapChain)
+        if ((_isResizing || _forceRedrawOnPaint) && _swapChain)
         {
-            // Redraw window backbuffer on DX11
-            switch (GPUDevice::Instance->GetRendererType())
+            _forceRedrawOnPaint = false;
+            if (GPUDevice::Instance && !GPUDevice::Instance->IsRendering() && GPUDevice::Instance->CanDraw())
             {
-            case RendererType::DirectX10:
-            case RendererType::DirectX10_1:
-            case RendererType::DirectX11:
-                _swapChain->Present(false);
-                break;
+                Engine::OnDraw();
+            }
+            else if (GPUDevice::Instance)
+            {
+                // Redraw window backbuffer on DX11
+                switch (GPUDevice::Instance->GetRendererType())
+                {
+                case RendererType::DirectX10:
+                case RendererType::DirectX10_1:
+                case RendererType::DirectX11:
+                    _swapChain->Present(false);
+                    break;
+                }
             }
         }
         break;
@@ -761,7 +1000,6 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
             UpdateCursor();
             return true;
         }
-
         break;
     }
     case WM_MOUSEMOVE:
@@ -782,21 +1020,21 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         if (_isTrackingMouse && _isUsingMouseOffset)
         {
             // Check if move mouse to another edge of the desktop
-            Vector2 desktopLocation = _mouseOffsetScreenSize.Location;
-            Vector2 desktopSize = _mouseOffsetScreenSize.GetBottomRight();
+            Float2 desktopLocation = _mouseOffsetScreenSize.Location;
+            Float2 desktopSize = _mouseOffsetScreenSize.GetBottomRight();
 
-            const Vector2 mousePos(static_cast<float>(WINDOWS_GET_X_LPARAM(lParam)), static_cast<float>(WINDOWS_GET_Y_LPARAM(lParam)));
-            Vector2 mousePosition = ClientToScreen(mousePos);
-            Vector2 newMousePosition = mousePosition;
-            if (mousePosition.X <= desktopLocation.X + 2)
-                newMousePosition.X = desktopSize.X - 2;
-            else if (mousePosition.X >= desktopSize.X - 1)
-                newMousePosition.X = desktopLocation.X + 2;
-            if (mousePosition.Y <= desktopLocation.Y + 2)
-                newMousePosition.Y = desktopSize.Y - 2;
-            else if (mousePosition.Y >= desktopSize.Y - 1)
-                newMousePosition.Y = desktopLocation.Y + 2;
-            if (!Vector2::NearEqual(mousePosition, newMousePosition))
+            const Float2 mousePos(static_cast<float>(WINDOWS_GET_X_LPARAM(lParam)), static_cast<float>(WINDOWS_GET_Y_LPARAM(lParam)));
+            Float2 mousePosition = ClientToScreen(mousePos);
+            Float2 newMousePosition = mousePosition;
+            if (_isHorizontalFlippingMouse = mousePosition.X <= desktopLocation.X + 2)
+                newMousePosition.X = desktopSize.X - 3;
+            else if (_isHorizontalFlippingMouse = mousePosition.X >= desktopSize.X - 1)
+                newMousePosition.X = desktopLocation.X + 3;
+            if (_isVerticalFlippingMouse = mousePosition.Y <= desktopLocation.Y + 2)
+                newMousePosition.Y = desktopSize.Y - 3;
+            else if (_isVerticalFlippingMouse = mousePosition.Y >= desktopSize.Y - 1)
+                newMousePosition.Y = desktopLocation.Y + 3;
+            if (!Float2::NearEqual(mousePosition, newMousePosition))
             {
                 _trackingMouseOffset -= newMousePosition - mousePosition;
                 SetMousePosition(ScreenToClient(newMousePosition));
@@ -813,7 +1051,7 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_NCCALCSIZE:
     {
 #if WINDOWS_USE_NEW_BORDER_LESS
-        if (wParam && !_settings.HasBorder && _settings.IsRegularWindow)
+        if (wParam && !_settings.HasBorder && _settings.Type == WindowType::Regular)
         {
             if (_maximized)
             {
@@ -847,10 +1085,10 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
 #elif WINDOWS_USE_NEWER_BORDER_LESS
-        if (wParam == TRUE && !_settings.HasBorder && _settings.IsRegularWindow)
+        if (wParam == TRUE && !_settings.HasBorder) // && _settings.Type == WindowType::Regular)
         {
             // In maximized mode fill the whole work area of the monitor (excludes task bar)
-            if (::IsWindowMaximized(_handle))
+            if (IsWindowMaximized(_handle))
             {
                 HMONITOR monitor = ::MonitorFromWindow(_handle, MONITOR_DEFAULTTONULL);
                 if (monitor)
@@ -864,7 +1102,7 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
                     }
                 }
             }
-            SetWindowPos(_handle, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            //SetWindowPos(_handle, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             return 0;
         }
 #endif
@@ -876,7 +1114,7 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         if (IsFullscreen())
             return static_cast<int32>(WindowHitCodes::Client);
 
-        const Vector2 mouse(static_cast<float>(WINDOWS_GET_X_LPARAM(lParam)), static_cast<float>(WINDOWS_GET_Y_LPARAM(lParam)));
+        const Float2 mouse(static_cast<float>(WINDOWS_GET_X_LPARAM(lParam)), static_cast<float>(WINDOWS_GET_Y_LPARAM(lParam)));
         WindowHitCodes hit = WindowHitCodes::Client;
         bool handled = false;
         OnHitTest(mouse, hit, handled);
@@ -901,44 +1139,45 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
             Maximize();
         return 0;
     }
+#if WINDOWS_USE_NEWER_BORDER_LESS
     case WM_NCACTIVATE:
     {
         // Skip for border-less windows
-        if (!_settings.HasBorder)
+        if (!_settings.HasBorder && !IsCompositionEnabled())
             return 1;
         break;
     }
+#endif
+#if 0
     case WM_NCPAINT:
-    {
         // Skip for border-less windows
         if (!_settings.HasBorder)
             return 1;
         break;
-    }
+#endif
     case WM_ERASEBKGND:
-    {
         // Skip the window background erasing
         return 1;
-    }
     case WM_GETMINMAXINFO:
     {
         const auto minMax = reinterpret_cast<MINMAXINFO*>(lParam);
-
-        int32 borderWidth = 0, borderHeight = 0;
-        if (_settings.HasBorder)
-        {
-            const DWORD windowStyle = GetWindowLongW(_handle, GWL_STYLE);
-            const DWORD windowExStyle = GetWindowLongW(_handle, GWL_EXSTYLE);
-            RECT borderRect = { 0, 0, 0, 0 };
-            AdjustWindowRectEx(&borderRect, windowStyle, false, windowExStyle);
-            borderWidth = borderRect.right - borderRect.left;
-            borderHeight = borderRect.bottom - borderRect.top;
-        }
-
         minMax->ptMinTrackSize.x = (int32)_settings.MinimumSize.X;
         minMax->ptMinTrackSize.y = (int32)_settings.MinimumSize.Y;
-        minMax->ptMaxTrackSize.x = (int32)_settings.MaximumSize.X + borderWidth;
-        minMax->ptMaxTrackSize.y = (int32)_settings.MaximumSize.Y + borderHeight;
+        if (_settings.MaximumSize.SumValues() > 0)
+        {
+            int32 borderWidth = 0, borderHeight = 0;
+            if (_settings.HasBorder)
+            {
+                const DWORD windowStyle = GetWindowLongW(_handle, GWL_STYLE);
+                const DWORD windowExStyle = GetWindowLongW(_handle, GWL_EXSTYLE);
+                RECT borderRect = { 0, 0, 0, 0 };
+                AdjustWindowRectEx(&borderRect, windowStyle, false, windowExStyle);
+                borderWidth = borderRect.right - borderRect.left;
+                borderHeight = borderRect.bottom - borderRect.top;
+            }
+            minMax->ptMaxTrackSize.x = (int32)_settings.MaximumSize.X + borderWidth;
+            minMax->ptMaxTrackSize.y = (int32)_settings.MaximumSize.Y + borderHeight;
+        }
 
         // Include Windows task bar size into maximized tool window
         WINDOWPLACEMENT e;
@@ -963,7 +1202,6 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_SYSCOMMAND:
-    {
         // Prevent moving/sizing in full screen mode
         if (IsFullscreen())
         {
@@ -976,21 +1214,35 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
         }
-
         break;
-    }
     case WM_CREATE:
-    {
         return 0;
-    }
-    case WM_MOVE:
-    {
-        break;
-    }
     case WM_SIZE:
     {
         if (SIZE_MINIMIZED == wParam)
         {
+            // Get the minimized window position in workspace coordinates
+            WINDOWPLACEMENT placement;
+            placement.length = sizeof(WINDOWPLACEMENT);
+            GetWindowPlacement(_handle, &placement);
+
+            // Calculate client offsets from window borders and title bar
+            RECT winRect = { 0, 0, static_cast<LONG>(_clientSize.X), static_cast<LONG>(_clientSize.Y) };
+            LONG style = GetWindowLong(_handle, GWL_STYLE);
+            LONG exStyle = GetWindowLong(_handle, GWL_EXSTYLE);
+            AdjustWindowRectEx(&winRect, style, FALSE, exStyle);
+
+            // Calculate monitor offsets from taskbar position
+            const HMONITOR monitor = MonitorFromWindow(_handle, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO monitorInfo;
+            monitorInfo.cbSize = sizeof(MONITORINFO);
+            GetMonitorInfoW(monitor, &monitorInfo);
+
+            // Convert the workspace coordinates to screen space and store it
+            _minimizedScreenPosition = Float2(
+                static_cast<float>(placement.rcNormalPosition.left + monitorInfo.rcWork.left - monitorInfo.rcMonitor.left - winRect.left),
+                static_cast<float>(placement.rcNormalPosition.top + monitorInfo.rcWork.top - monitorInfo.rcMonitor.top - winRect.top));
+
             _minimized = true;
             _maximized = false;
         }
@@ -1026,8 +1278,12 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
                 else if (_isResizing)
                 {
                     // If we're neither maximized nor minimized, the window size is changing by the user dragging the window edges.
-                    // In this case, we don't resize yet -- we wait until the user stops dragging, and a WM_EXITSIZEMOVE message comes.
-                    UpdateRegion();
+                    CheckForWindowResize();
+                    RedrawWindow(_handle, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+                }
+                else if (_isSwitchingFullScreen)
+                {
+                    // Ignored
                 }
                 else
                 {
@@ -1044,13 +1300,11 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         _dpi = HIWORD(wParam);
         _dpiScale = (float)_dpi / (float)DefaultDPI;
         RECT* windowRect = (RECT*)lParam;
-        SetWindowPos(_handle,
-                     nullptr,
-                     windowRect->left,
-                     windowRect->top,
-                     windowRect->right - windowRect->left,
-                     windowRect->bottom - windowRect->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(_handle, nullptr, windowRect->left, windowRect->top, windowRect->right - windowRect->left, windowRect->bottom - windowRect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        CheckForWindowResize(true);
+        UpdateRegion();
+        _forceRedrawOnPaint = true;
+        RedrawWindow(_handle, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
         // TODO: Recalculate fonts
         return 0;
     }
@@ -1060,17 +1314,27 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_EXITSIZEMOVE:
-    {
         _isResizing = false;
         CheckForWindowResize();
         UpdateRegion();
         break;
-    }
     case WM_SETFOCUS:
         OnGotFocus();
+        UpdateCursor();
+        if (_isClippingCursor && !_clipCursorSet)
+        {
+            _clipCursorSet = true;
+            ClipCursor((RECT*)_clipCursorRect);
+        }
         break;
     case WM_KILLFOCUS:
+        if (_clipCursorSet)
+        {
+            _clipCursorSet = false;
+            ClipCursor(nullptr);
+        }
         OnLostFocus();
+        UpdateCursor();
         break;
     case WM_ACTIVATEAPP:
         if (wParam == TRUE && !_focused)
@@ -1085,20 +1349,25 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
                 SetIsFullscreen(false);
             }
         }
+        UpdateCursor();
         break;
     case WM_MENUCHAR:
         // A menu is active and the user presses a key that does not correspond to any mnemonic or accelerator key so just ignore and don't beep
         return MAKELRESULT(0, MNC_CLOSE);
     case WM_SYSKEYDOWN:
-    {
         if (wParam == VK_F4)
         {
             LOG(Info, "Alt+F4 pressed");
             Close(ClosingReason::User);
             return 0;
         }
-    }
-    break;
+        if (wParam == VK_RETURN)
+        {
+            LOG(Info, "Alt+Enter pressed");
+            SetIsFullscreen(!IsFullscreen());
+            return 0;
+        }
+        break;
     case WM_POWERBROADCAST:
         switch (wParam)
         {
@@ -1110,7 +1379,6 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
             return true;
         }
         break;
-
     case WM_CLOSE:
         Close(ClosingReason::User);
         return 0;
@@ -1134,7 +1402,7 @@ LRESULT WindowsWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam)
 
     if (_settings.AllowInput)
     {
-        if (WindowsInput::WndProc(this, msg, wParam, lParam))
+        if (WindowsInput::WndProc((Window*)this, msg, wParam, lParam))
             return true;
     }
 

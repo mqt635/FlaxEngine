@@ -2,6 +2,7 @@
 // Version: @0
 
 #define MATERIAL 1
+#define MaterialTextureMipBias 0.0f
 @3
 #include "./Flax/Common.hlsl"
 #include "./Flax/MaterialCommon.hlsl"
@@ -19,6 +20,9 @@ float3 ViewDir;
 float TimeParam;
 float4 ViewInfo;
 float4 ScreenSize;
+float4 ViewSize;
+float3 ViewPadding0;
+float ScaledTimeParam;
 @1META_CB_END
 
 // Shader resources
@@ -35,6 +39,7 @@ struct VertexOutput
 #endif
 	float4 ClipExtents       : TEXCOORD3;
 	float2 ClipOrigin        : TEXCOORD4;
+    float2 CustomData        : TEXCOORD5; // x-per-geometry type, y-features mask
 #if USE_CUSTOM_VERTEX_INTERPOLATORS
 	float4 CustomVSToPS[CUSTOM_VERTEX_INTERPOLATORS_COUNT] : TEXCOORD9;
 #endif
@@ -52,6 +57,7 @@ struct PixelInput
 #endif
 	float4 ClipExtents       : TEXCOORD3;
 	float2 ClipOrigin        : TEXCOORD4;
+    float2 CustomData        : TEXCOORD5; // x-per-geometry type, y-features mask
 #if USE_CUSTOM_VERTEX_INTERPOLATORS
 	float4 CustomVSToPS[CUSTOM_VERTEX_INTERPOLATORS_COUNT] : TEXCOORD9;
 #endif
@@ -64,6 +70,7 @@ struct MaterialInput
 	float3 WorldPosition;
 	float TwoSidedSign;
 	float2 TexCoord;
+    float2 CustomData; // x-per-geometry type, y-features mask
 #if USE_VERTEX_COLOR
 	half4 VertexColor;
 #endif
@@ -81,6 +88,7 @@ MaterialInput GetMaterialInput(Render2DVertex input, VertexOutput output)
 	MaterialInput result;
 	result.WorldPosition = output.WorldPosition;
 	result.TexCoord = output.TexCoord;
+	result.CustomData = input.CustomDataAndClipOrigin.xy;
 #if USE_VERTEX_COLOR
 	result.VertexColor = output.VertexColor;
 #endif
@@ -100,6 +108,7 @@ MaterialInput GetMaterialInput(PixelInput input)
 	MaterialInput result;
 	result.WorldPosition = input.WorldPosition;
 	result.TexCoord = input.TexCoord;
+	result.CustomData = input.CustomData;
 #if USE_VERTEX_COLOR
 	result.VertexColor = input.VertexColor;
 #endif
@@ -162,6 +171,12 @@ float3 GetObjectSize(MaterialInput input)
 	return float3(1, 1, 1);
 }
 
+// Gets the current object scale (supports instancing)
+float3 GetObjectScale(MaterialInput input)
+{
+	return float3(1, 1, 1);
+}
+
 // Get the current object random value supports instancing)
 float GetPerInstanceRandom(MaterialInput input)
 {
@@ -213,13 +228,14 @@ VertexOutput VS_GUI(Render2DVertex input)
 	if ((int)input.CustomDataAndClipOrigin.y & 1)
 		input.Position = (int2)input.Position;
 
-	output.Position = mul(float4(input.Position, 0, 1), ViewProjectionMatrix);
+	output.Position = PROJECT_POINT(float4(input.Position, 0, 1), ViewProjectionMatrix);
 	output.WorldPosition = mul(float4(input.Position, 0, 1), WorldMatrix).xyz;
 	output.TexCoord = input.TexCoord;
 	output.WindowPos = input.Position;
 #if USE_VERTEX_COLOR
 	output.VertexColor = input.Color;
 #endif
+	output.CustomData = input.CustomDataAndClipOrigin.xy;
 	output.ClipOrigin = input.CustomDataAndClipOrigin.zw;
 	output.ClipExtents = input.ClipExtents;
 

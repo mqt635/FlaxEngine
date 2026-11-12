@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using FlaxEngine;
@@ -37,7 +37,7 @@ namespace FlaxEditor.Tools.Terrain.Undo
             var offset = Int2.Zero;
             var size = new Int2((int)Mathf.Sqrt(_heightmapLength));
             if (TerrainTools.ModifySplatMap(Terrain, ref patchCoord, (int)tag, (Color32*)data, ref offset, ref size))
-                throw new FlaxException("Failed to modify the splatmap.");
+                throw new Exception("Failed to modify the splatmap.");
         }
     }
 }

@@ -1,10 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Graphics.h"
 #include "GPUDevice.h"
 #include "PixelFormatExtensions.h"
+#include "Async/GPUTasksManager.h"
+#include "Engine/Core/Log.h"
+#include "Engine/Core/Config/GraphicsSettings.h"
 #include "Engine/Engine/CommandLine.h"
 #include "Engine/Engine/EngineService.h"
+#include "Engine/Profiler/ProfilerGPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
+#if !USE_EDITOR
+#include "Engine/Render2D/Font.h"
+#endif
 
 bool Graphics::UseVSync = false;
 Quality Graphics::AAQuality = Quality::Medium;
@@ -13,7 +21,22 @@ Quality Graphics::SSAOQuality = Quality::Medium;
 Quality Graphics::VolumetricFogQuality = Quality::High;
 Quality Graphics::ShadowsQuality = Quality::Medium;
 Quality Graphics::ShadowMapsQuality = Quality::Medium;
+float Graphics::ShadowUpdateRate = 1.0f;
 bool Graphics::AllowCSMBlending = false;
+Quality Graphics::GlobalSDFQuality = Quality::High;
+Quality Graphics::GIQuality = Quality::High;
+float Graphics::GIProbesSpacing = 100;
+bool Graphics::GICascadesBlending = false;
+int32 Graphics::GlobalSurfaceAtlasResolution = 2048;
+PostProcessSettings Graphics::PostProcessSettings;
+bool Graphics::GammaColorSpace = true;
+bool Graphics::SpreadWorkload = true;
+#if !BUILD_RELEASE || USE_EDITOR
+float Graphics::TestValue = 0.0f;
+#endif
+float Graphics::MotionVectors::MinObjectScreenSize = 0.02f;
+float Graphics::Shadows::MinObjectPixelSize = 2.0f;
+bool Graphics::PostProcessing::ColorGradingVolumeLUT = true;
 
 #if GRAPHICS_API_NULL
 extern GPUDevice* CreateGPUDeviceNull();
@@ -27,14 +50,10 @@ extern GPUDevice* CreateGPUDeviceDX11();
 #if GRAPHICS_API_DIRECTX12
 extern GPUDevice* CreateGPUDeviceDX12();
 #endif
-#if GRAPHICS_API_PS4
-extern GPUDevice* CreateGPUDevicePS4();
-#endif
 
 class GraphicsService : public EngineService
 {
 public:
-
     GraphicsService()
         : EngineService(TEXT("Graphics"), -40)
     {
@@ -47,13 +66,36 @@ public:
 
 GraphicsService GraphicsServiceInstance;
 
+void GraphicsSettings::Apply()
+{
+    Graphics::UseVSync = UseVSync;
+    Graphics::AAQuality = AAQuality;
+    Graphics::SSRQuality = SSRQuality;
+    Graphics::SSAOQuality = SSAOQuality;
+    Graphics::VolumetricFogQuality = VolumetricFogQuality;
+    Graphics::ShadowsQuality = ShadowsQuality;
+    Graphics::ShadowMapsQuality = ShadowMapsQuality;
+    Graphics::AllowCSMBlending = AllowCSMBlending;
+    Graphics::GlobalSDFQuality = GlobalSDFQuality;
+    Graphics::GIQuality = GIQuality;
+    Graphics::GIProbesSpacing = GIProbesSpacing;
+    Graphics::GICascadesBlending = GICascadesBlending;
+    Graphics::GlobalSurfaceAtlasResolution = GlobalSurfaceAtlasResolution;
+    Graphics::PostProcessSettings = ::PostProcessSettings();
+    Graphics::PostProcessSettings.BlendWith(PostProcessSettings, 1.0f);
+    Graphics::GammaColorSpace = GammaColorSpace;
+#if !USE_EDITOR // OptionsModule handles fallback fonts in Editor
+    Font::FallbackFonts = FallbackFonts;
+#endif
+}
+
 void Graphics::DisposeDevice()
 {
-    // Clean any danging pointer to last task (might stay if engine is disposing after crash)
-    GPUDevice::Instance->CurrentTask = nullptr;
-
     if (GPUDevice::Instance)
     {
+        // Clean any danging pointer to last task (might stay if engine is disposing after crash)
+        GPUDevice::Instance->CurrentTask = nullptr;
+
         GPUDevice::Instance->Dispose();
         LOG_FLUSH();
         Delete(GPUDevice::Instance);
@@ -64,15 +106,16 @@ void Graphics::DisposeDevice()
 bool GraphicsService::Init()
 {
     ASSERT(GPUDevice::Instance == nullptr);
+    PROFILE_MEM(Graphics);
 
     // Create and initialize graphics device
-    Log::Logger::WriteFloor();
+    LOG_FLOOR();
     LOG(Info, "Creating Graphics Device...");
     PixelFormatExtensions::Init();
     GPUDevice* device = nullptr;
 
     // Null
-    if (!device && CommandLine::Options.Null)
+    if (!device && CommandLine::Options.Null.IsTrue())
     {
 #if GRAPHICS_API_NULL
         device = CreateGPUDeviceNull();
@@ -82,7 +125,7 @@ bool GraphicsService::Init()
     }
 
     // Vulkan
-    if (!device && CommandLine::Options.Vulkan)
+    if (!device && CommandLine::Options.Vulkan.IsTrue())
     {
 #if GRAPHICS_API_VULKAN
         device = CreateGPUDeviceVulkan();
@@ -92,7 +135,7 @@ bool GraphicsService::Init()
     }
 
     // DirectX 12
-    if (!device && CommandLine::Options.D3D12)
+    if (!device && CommandLine::Options.D3D12.IsTrue())
     {
 #if GRAPHICS_API_DIRECTX12
         if (Platform::IsWindows10())
@@ -105,7 +148,7 @@ bool GraphicsService::Init()
     }
 
     // DirectX 11 and DirectX 10
-    if (!device && (CommandLine::Options.D3D11 || CommandLine::Options.D3D10))
+    if (!device && (CommandLine::Options.D3D11.IsTrue() || CommandLine::Options.D3D10.IsTrue()))
     {
 #if GRAPHICS_API_DIRECTX11
         device = CreateGPUDeviceDX11();
@@ -130,8 +173,19 @@ bool GraphicsService::Init()
             device = CreateGPUDeviceVulkan();
 #endif
 #if GRAPHICS_API_PS4
+        extern GPUDevice* CreateGPUDevicePS4();
         if (!device)
             device = CreateGPUDevicePS4();
+#endif
+#if GRAPHICS_API_PS5
+        extern GPUDevice* CreateGPUDevicePS5();
+        if (!device)
+            device = CreateGPUDevicePS5();
+#endif
+#if GRAPHICS_API_WEBGPU
+        extern GPUDevice* CreateGPUDeviceWebGPU();
+        if (!device)
+            device = CreateGPUDeviceWebGPU();
 #endif
     }
 
@@ -146,20 +200,38 @@ bool GraphicsService::Init()
         return true;
     }
     GPUDevice::Instance = device;
-    LOG(Info,
-        "Graphics Device created! Adapter: \'{0}\', Renderer: {1}, Shader Profile: {2}, Feature Level: {3}",
-        device->GetAdapter()->GetDescription(),
+    LOG(Info, "GPU Device created: {}", device->GetAdapter()->GetDescription());
+    LOG(Info, "Renderer: {}, Shader Profile: {}, Feature Level: {}, Driver: {}",
         ::ToString(device->GetRendererType()),
         ::ToString(device->GetShaderProfile()),
-        ::ToString(device->GetFeatureLevel())
+        ::ToString(device->GetFeatureLevel()),
+        device->GetAdapter()->GetDriverVersion().ToString()
     );
 
     // Initialize
+    if (device->IsDebugToolAttached
+#if USE_EDITOR || !BUILD_RELEASE
+        || CommandLine::Options.ShaderProfile.IsTrue()
+#endif
+#if USE_EDITOR
+        || CommandLine::Options.ShaderDebug.IsTrue()
+#endif
+        )
+    {
+#if !USE_EDITOR && BUILD_RELEASE && !PLATFORM_CONSOLE
+        // Block graphics debugging to protect contents
+        Platform::Fatal(TEXT("Graphics debugger attached."));
+#endif
+#if COMPILE_WITH_PROFILER
+        // Auto-enable GPU events
+        ProfilerGPU::EventsEnabled = true;
+#endif
+    }
     if (device->LoadContent())
     {
         return true;
     }
-    Log::Logger::WriteFloor();
+    LOG_FLOOR();
 
     return false;
 }
@@ -169,7 +241,7 @@ void GraphicsService::BeforeExit()
     if (GPUDevice::Instance)
     {
         // Start disposing
-        GPUDevice::Instance->TasksManager.Dispose();
+        GPUDevice::Instance->GetTasksManager()->Dispose();
     }
 }
 
@@ -177,3 +249,10 @@ void GraphicsService::Dispose()
 {
     // Device is disposed AFTER Content (faster and safer because there is no assets so there is less gpu resources to cleanup)
 }
+
+#if PLATFORM_WEB && !GRAPHICS_API_WEBGPU
+// Fix missing method when using Null backend on Web
+void SetWebGPUTextureViewSampler(GPUTextureView* view, uint32 samplerType)
+{
+}
+#endif

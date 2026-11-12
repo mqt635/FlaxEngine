@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "BoxBrush.h"
+#include "Engine/Core/Math/Matrix.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Serialization/Serialization.h"
 #include "Engine/Level/Scene/Scene.h"
@@ -49,7 +50,18 @@ Array<BrushSurface> BoxBrush::GetSurfaces() const
 void BoxBrush::SetSurfaces(const Array<BrushSurface>& value)
 {
     CHECK(value.Count() == ARRAY_COUNT(Surfaces));
-    Platform::MemoryCopy(Surfaces, value.Get(), sizeof(Surfaces));
+    for (int32 i = 0; i < ARRAY_COUNT(Surfaces); i++)
+    {
+        auto& dst = Surfaces[i];
+        const auto& src = value[i];
+        dst.Brush = this;
+        dst.Index = i;
+        dst.Material = src.Material;
+        dst.TexCoordScale = src.TexCoordScale;
+        dst.TexCoordOffset = src.TexCoordOffset;
+        dst.TexCoordRotation = src.TexCoordRotation;
+        dst.ScaleInLightmap = src.ScaleInLightmap;
+    }
     OnBrushModified();
 }
 
@@ -64,24 +76,18 @@ void BoxBrush::SetMode(BrushMode value)
 
 void BoxBrush::SetCenter(const Vector3& value)
 {
-    if (Vector3::NearEqual(value, _center))
+    if (value == _center)
         return;
-
     _center = value;
-
-    // Fire events
     UpdateBounds();
     OnBrushModified();
 }
 
 void BoxBrush::SetSize(const Vector3& value)
 {
-    if (Vector3::NearEqual(value, _size))
+    if (value == _size)
         return;
-
     _size = value;
-
-    // Fire events
     UpdateBounds();
     OnBrushModified();
 }
@@ -97,7 +103,7 @@ void BoxBrush::GetSurfaces(CSG::Surface surfaces[6])
     surfaces[5].Normal = Vector3::Backward;
 
     // Calculate final transformation
-    const auto transform = _transform.LocalToWorld(Transform(_center, Quaternion::Identity, _size));
+    const auto transform = _transform.LocalToWorld(Transform(_center, Quaternion::Identity, _size.GetAbsolute()));
 
     // Set size and scale
     surfaces[0].D = surfaces[1].D = transform.Scale.X / 2;
@@ -135,9 +141,9 @@ void BoxBrush::SetMaterial(int32 surfaceIndex, MaterialBase* material)
     OnBrushModified();
 }
 
-bool BoxBrush::Intersects(int32 surfaceIndex, const Ray& ray, float& distance, Vector3& normal) const
+bool BoxBrush::Intersects(int32 surfaceIndex, const Ray& ray, Real& distance, Vector3& normal) const
 {
-    distance = MAX_float;
+    distance = MAX_Real;
     normal = Vector3::Up;
     auto scene = GetScene();
     CHECK_RETURN(scene, false);
@@ -160,6 +166,14 @@ void BoxBrush::GetVertices(int32 surfaceIndex, Array<Vector3>& outputData) const
     {
         outputData.Add((Vector3*)surfaceData.Triangles.Get(), 3 * surfaceData.Triangles.Count());
     }
+}
+
+void BoxBrush::UpdateBounds()
+{
+    OrientedBoundingBox::CreateCentered(_center, _size.GetAbsolute(), _bounds);
+    _bounds.Transform(_transform);
+    _bounds.GetBoundingBox(_box);
+    BoundingSphere::FromBox(_box, _sphere);
 }
 
 void BoxBrush::Serialize(SerializeStream& stream, const void* otherObj)
@@ -201,12 +215,11 @@ void BoxBrush::Deserialize(DeserializeStream& stream, ISerializeModifier* modifi
     }
 }
 
-bool BoxBrush::IntersectsItself(const Ray& ray, float& distance, Vector3& normal)
+bool BoxBrush::IntersectsItself(const Ray& ray, Real& distance, Vector3& normal)
 {
     bool result = false;
-    float minDistance = MAX_float;
+    Real minDistance = MAX_float;
     Vector3 minDistanceNormal = Vector3::Up;
-
     if (_bounds.Intersects(ray, distance))
     {
         for (int32 surfaceIndex = 0; surfaceIndex < 6; surfaceIndex++)
@@ -219,7 +232,6 @@ bool BoxBrush::IntersectsItself(const Ray& ray, float& distance, Vector3& normal
             }
         }
     }
-
     distance = minDistance;
     normal = minDistanceNormal;
     return result;
@@ -231,7 +243,8 @@ bool BoxBrush::IntersectsItself(const Ray& ray, float& distance, Vector3& normal
 
 void BoxBrush::OnDebugDrawSelected()
 {
-    DEBUG_DRAW_WIRE_BOX(_bounds, Color::Yellow, 0, false);
+    DEBUG_DRAW_WIRE_BOX(_bounds, Color::Yellow.AlphaMultiplied(0.2f), 0, false);
+    DEBUG_DRAW_WIRE_BOX(_bounds, Color::Yellow, 0, true);
 
     // Base
     Actor::OnDebugDrawSelected();

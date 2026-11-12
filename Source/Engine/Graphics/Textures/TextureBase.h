@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,6 +6,7 @@
 #include "StreamingTexture.h"
 
 class TextureData;
+class TextureMipData;
 
 /// <summary>
 /// Base class for <see cref="Texture"/>, <see cref="SpriteAtlas"/>, <see cref="IESProfile"/> and other assets that can contain texture data.
@@ -13,7 +14,7 @@ class TextureData;
 /// <seealso cref="FlaxEngine.BinaryAsset" />
 API_CLASS(Abstract, NoSpawn) class FLAXENGINE_API TextureBase : public BinaryAsset, public ITextureOwner
 {
-DECLARE_ASSET_HEADER(TextureBase);
+    DECLARE_ASSET_HEADER(TextureBase);
     static const uint32 TexturesSerializedVersion = 4;
 
     /// <summary>
@@ -24,15 +25,28 @@ DECLARE_ASSET_HEADER(TextureBase);
         struct MipData
         {
             BytesContainer Data;
-            uint32 RowPitch;
-            uint32 SlicePitch;
+            uint32 RowPitch = 0;
+            uint32 SlicePitch = 0;
+
+            MipData() = default;
+            MipData(MipData&& other) noexcept;
         };
 
-        PixelFormat Format;
-        int32 Width;
-        int32 Height;
-        int32 ArraySize;
+        PixelFormat Format = PixelFormat::Unknown;
+        int32 Width = 0;
+        int32 Height = 0;
+        int32 ArraySize = 1;
         Array<MipData, FixedAllocation<14>> Mips;
+
+        InitData() = default;
+        InitData(InitData&& other) noexcept;
+
+        InitData& operator=(InitData&& other)
+        {
+            if (this != &other)
+                *this = MoveTemp(other);
+            return *this;
+        }
 
         /// <summary>
         /// Generates the mip map data.
@@ -43,17 +57,17 @@ DECLARE_ASSET_HEADER(TextureBase);
         /// <param name="mipIndex">Index of the mip.</param>
         /// <param name="linear">True if use linear filer, otherwise point filtering.</param>
         /// <returns>True if failed, otherwise false.</returns>
-        bool GenerateMip(int32 mipIndex, bool linear);
+        bool GenerateMip(int32 mipIndex, bool linear = false);
+
+        void FromTextureData(const TextureData& textureData, bool generateMips = false);
     };
 
 protected:
-
     StreamingTexture _texture;
     InitData* _customData;
     BinaryAsset* _parent;
 
 public:
-
     /// <summary>
     /// Gets the streaming texture object handle.
     /// </summary>
@@ -95,9 +109,9 @@ public:
     }
 
     /// <summary>
-    /// Gets the total size of the texture. Actual resident size may be different due to dynamic content streaming. Returns Vector2::Zero if texture is not loaded.
+    /// Gets the total size of the texture. Actual resident size may be different due to dynamic content streaming. Returns Float2::Zero if texture is not loaded.
     /// </summary>
-    API_PROPERTY() Vector2 Size() const;
+    API_PROPERTY() Float2 Size() const;
 
     /// <summary>
     /// Gets the total array size of the texture.
@@ -123,7 +137,7 @@ public:
     /// Gets the total memory usage that texture may have in use (if loaded to the maximum quality). Exact value may differ due to memory alignment and resource allocation policy.
     /// </summary>
     API_PROPERTY() uint64 GetTotalMemoryUsage() const;
-    
+
     /// <summary>
     /// Gets the index of the texture group used by this texture.
     /// </summary>
@@ -134,11 +148,21 @@ public:
     /// </summary>
     API_PROPERTY() void SetTextureGroup(int32 textureGroup);
 
-public:
+    /// <summary>
+    /// Returns true if texture streaming failed (eg. pixel format is unsupported or texture data cannot be uploaded to GPU due to memory limit).
+    /// </summary>
+    API_PROPERTY() bool HasStreamingError() const;
 
+    /// <summary>
+    /// Sets the texture as visible this frame to inform streaming about usage which will stream boost its priority for the streaming.
+    /// </summary>
+    API_FUNCTION() void SetStreamingVisible() const;
+
+public:
     /// <summary>
     /// Gets the mip data.
     /// </summary>
+    /// <remarks>Use with caution as this operation loads texture data from the file.</remarks>
     /// <param name="mipIndex">The mip index (zero-based).</param>
     /// <param name="rowPitch">The data row pitch (in bytes).</param>
     /// <param name="slicePitch">The data slice pitch (in bytes).</param>
@@ -148,28 +172,98 @@ public:
     /// <summary>
     /// Loads the texture data from the asset.
     /// </summary>
+    /// <remarks>Use with caution as this operation loads texture data from the file.</remarks>
     /// <param name="result">The result data.</param>
     /// <param name="copyData">True if copy asset data to the result buffer, otherwise texture data will be linked to the internal storage (then the data is valid while asset is loaded and there is no texture data copy operations - faster).</param>
     /// <returns>True if cannot load data, otherwise false.</returns>
     bool GetTextureData(TextureData& result, bool copyData = true);
 
     /// <summary>
+    /// Loads the texture data from the asset (single mip).
+    /// </summary>
+    /// <remarks>Use with caution as this operation loads texture data from the file.</remarks>
+    /// <param name="result">The result data.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <param name="copyData">True if copy asset data to the result buffer, otherwise texture data will be linked to the internal storage (then the data is valid while asset is loaded and there is no texture data copy operations - faster).</param>
+    /// <returns>True if cannot load data, otherwise false.</returns>
+    bool GetTextureMipData(TextureMipData& result, int32 mipIndex = 0, int32 arrayIndex = 0, bool copyData = true);
+
+    /// <summary>
+    /// Gets the texture pixels as Color32 array.
+    /// </summary>
+    /// <remarks>Use with caution as this operation loads texture data from the file.</remarks>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The result texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool GetPixels(API_PARAM(Out) Array<Color32>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0);
+
+    /// <summary>
+    /// Gets the texture pixels as Color array.
+    /// </summary>
+    /// <remarks>Use with caution as this operation loads texture data from the file.</remarks>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The result texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool GetPixels(API_PARAM(Out) Array<Color>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0);
+
+    /// <summary>
+    /// Sets the texture pixels as Color32 array (asset must be virtual and already initialized).
+    /// </summary>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <param name="generateMips">Enables automatic mip-maps generation (fast point filter) based on the current mip (will generate lower mips).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool SetPixels(const Span<Color32>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0, bool generateMips = false);
+
+    /// <summary>
+    /// Sets the texture pixels as Color array (asset must be virtual and already initialized).
+    /// </summary>
+    /// <remarks>Supported only for 'basic' texture formats (uncompressed, single plane).</remarks>
+    /// <param name="pixels">The texture pixels array.</param>
+    /// <param name="mipIndex">The mip index (zero-based).</param>
+    /// <param name="arrayIndex">The array or depth slice index (zero-based).</param>
+    /// <param name="generateMips">Enables automatic mip-maps generation (fast point filter) based on the current mip (will generate lower mips).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    API_FUNCTION() bool SetPixels(const Span<Color>& pixels, int32 mipIndex = 0, int32 arrayIndex = 0, bool generateMips = false);
+
+    /// <summary>
     /// Initializes the texture with specified initialize data source (asset must be virtual).
     /// </summary>
-    /// <param name="initData">The initialize data (allocated by the called, will be used and released by the asset internal layer).</param>
+    /// <param name="initData">The initializer data allocated by the caller with New. It will be owned and released by the asset internal layer.</param>
     /// <returns>True if failed, otherwise false.</returns>
     bool Init(InitData* initData);
 
-protected:
+    /// <summary>
+    /// Initializes the texture with specified initialize data source (asset must be virtual).
+    /// </summary>
+    /// <param name="initData">The initializer data. It will be used and released by the asset internal layer (memory allocation will be swapped).</param>
+    /// <returns>True if failed, otherwise false.</returns>
+    bool Init(InitData&& initData)
+    {
+        return Init(New<InitData>(MoveTemp(initData)));
+    }
 
+protected:
     virtual int32 CalculateChunkIndex(int32 mipIndex) const;
 
 private:
-
+#if !COMPILE_WITHOUT_CSHARP
     // Internal bindings
-    API_FUNCTION(NoProxy) bool Init(void* ptr);
+    API_FUNCTION(NoProxy) bool InitCSharp(void* ptr);
+    API_FUNCTION(NoProxy) TextureData* GetTextureData();
+#endif
 
 public:
+    // [BinaryAsset]
+    uint64 GetMemoryUsage() const override;
+    void CancelStreaming() override;
 
     // [ITextureOwner]
     CriticalSection& GetOwnerLocker() const override;
@@ -180,7 +274,6 @@ public:
     bool GetMipDataCustomPitch(int32 mipIndex, uint32& rowPitch, uint32& slicePitch) const override;
 
 protected:
-
     // [BinaryAsset]
     bool init(AssetInitData& initData) override;
     LoadResult load() override;

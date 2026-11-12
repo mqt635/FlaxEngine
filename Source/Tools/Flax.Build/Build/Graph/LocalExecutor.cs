@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Collections.Generic;
@@ -184,18 +184,6 @@ namespace Flax.Build.BuildSystem.Graph
                 name = Path.GetFileName(task.ProducedFiles[0]);
             var profilerEvent = Profiling.Begin(name);
 
-            var startInfo = new ProcessStartInfo
-            {
-                WorkingDirectory = task.WorkingDirectory,
-                FileName = task.CommandPath,
-                Arguments = task.CommandArguments,
-                UseShellExecute = false,
-                RedirectStandardInput = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-
             if (Configuration.Verbose)
             {
                 lock (_locker)
@@ -212,15 +200,44 @@ namespace Flax.Build.BuildSystem.Graph
                 Log.Info(task.InfoMessage);
             }
 
+            // Custom action execution (eg. instead of executable file run)
+            if (task.Command != null)
+            {
+                try
+                {
+                    task.Command();
+                }
+                catch (Exception ex)
+                {
+                    Log.Exception(ex);
+                    return -1;
+                }
+            }
+            if (task.CommandPath == null)
+            {
+                Profiling.End(profilerEvent);
+                return 0;
+            }
+
             Process process = null;
             try
             {
                 try
                 {
                     process = new Process();
-                    process.StartInfo = startInfo;
+                    process.StartInfo = new ProcessStartInfo
+                    {
+                        WorkingDirectory = task.WorkingDirectory,
+                        FileName = task.CommandPath,
+                        Arguments = task.CommandArguments,
+                        UseShellExecute = false,
+                        RedirectStandardInput = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true,
+                    };
                     process.OutputDataReceived += ProcessDebugOutput;
-                    process.ErrorDataReceived += ProcessDebugOutput;
+                    process.ErrorDataReceived += ProcessDebugError;
                     process.Start();
 
                     process.BeginOutputReadLine();
@@ -254,6 +271,15 @@ namespace Flax.Build.BuildSystem.Graph
             if (output != null)
             {
                 Log.Info(output);
+            }
+        }
+
+        private static void ProcessDebugError(object sender, DataReceivedEventArgs e)
+        {
+            string output = e.Data;
+            if (output != null)
+            {
+                Log.Error(output);
             }
         }
     }

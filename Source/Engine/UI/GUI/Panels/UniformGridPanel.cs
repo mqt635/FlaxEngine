@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 namespace FlaxEngine.GUI
 {
@@ -6,10 +6,12 @@ namespace FlaxEngine.GUI
     /// A panel that evenly divides up available space between all of its children.
     /// </summary>
     /// <seealso cref="FlaxEngine.GUI.ContainerControl" />
+    [ActorToolbox("UI")]
     public class UniformGridPanel : ContainerControl
     {
         private Margin _slotPadding;
         private int _slotsV, _slotsH;
+        private Float2 _slotSpacing;
 
         /// <summary>
         /// Gets or sets the padding given to each slot.
@@ -62,10 +64,27 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Gets or sets grid slot spacing.
+        /// </summary>
+        [EditorOrder(30), Limit(0), Tooltip("The Grid slot spacing.")]
+        public Float2 SlotSpacing
+        {
+            get => _slotSpacing;
+            set
+            {
+                if (!Float2.NearEqual(ref _slotSpacing, ref value))
+                {
+                    _slotSpacing = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="UniformGridPanel"/> class.
         /// </summary>
         public UniformGridPanel()
-        : this(2)
+        : this(0)
         {
         }
 
@@ -73,9 +92,11 @@ namespace FlaxEngine.GUI
         /// Initializes a new instance of the <see cref="UniformGridPanel"/> class.
         /// </summary>
         /// <param name="slotPadding">The slot padding.</param>
-        public UniformGridPanel(float slotPadding = 2)
+        public UniformGridPanel(float slotPadding)
         {
-            SlotPadding = new Margin(slotPadding);
+            AutoFocus = false;
+            _slotPadding = new Margin(slotPadding);
+            _slotSpacing = new Float2(2);
             _slotsH = _slotsV = 5;
         }
 
@@ -86,26 +107,33 @@ namespace FlaxEngine.GUI
 
             int slotsV = _slotsV;
             int slotsH = _slotsH;
-            Vector2 slotSize;
+            Float2 slotSize;
+            Float2 size = Size;
+            bool applySpacing = true;
+            APPLY_SPACING:
             if (_slotsV + _slotsH == 0)
             {
-                slotSize = HasChildren ? Children[0].Size : new Vector2(32);
-                slotsH = Mathf.CeilToInt(Width / slotSize.X);
-                slotsV = Mathf.CeilToInt(Height / slotSize.Y);
+                slotSize = HasChildren ? Children[0].Size : new Float2(32);
+                slotsH = Mathf.CeilToInt(size.X / slotSize.X);
+                slotsV = Mathf.CeilToInt(size.Y / slotSize.Y);
             }
             else if (slotsH == 0)
             {
-                float size = Height / slotsV;
-                slotSize = new Vector2(size);
+                slotSize = new Float2(size.Y / slotsV);
             }
             else if (slotsV == 0)
             {
-                float size = Width / slotsH;
-                slotSize = new Vector2(size);
+                slotSize = new Float2(size.X / slotsH);
             }
             else
             {
-                slotSize = new Vector2(Width / slotsH, Height / slotsV);
+                slotSize = new Float2(size.X / slotsH, size.Y / slotsV);
+            }
+            if (applySpacing && _slotSpacing != Float2.Zero)
+            {
+                applySpacing = false;
+                size -= _slotSpacing * new Float2(slotsH > 1 ? slotsH - 1 : 0, slotsV > 1 ? slotsV - 1 : 0);
+                goto APPLY_SPACING;
             }
 
             int i = 0;
@@ -117,7 +145,7 @@ namespace FlaxEngine.GUI
 
                 for (int x = 0; x < end; x++)
                 {
-                    var slotBounds = new Rectangle(slotSize.X * x, slotSize.Y * y, slotSize.X, slotSize.Y);
+                    var slotBounds = new Rectangle((slotSize + _slotSpacing) * new Float2(x, y), slotSize);
                     _slotPadding.ShrinkRectangle(ref slotBounds);
 
                     var c = _children[i++];

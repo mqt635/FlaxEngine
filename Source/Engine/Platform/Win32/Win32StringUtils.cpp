@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WIN32
 
@@ -164,8 +164,15 @@ Char* StringUtils::Copy(Char* dst, const Char* src)
 
 Char* StringUtils::Copy(Char* dst, const Char* src, int32 count)
 {
-    wcsncpy(dst, src, count - 1);
-    dst[count - 1] = 0;
+    if (count != 0)
+    {
+        wcsncpy(dst, src, count - 1);
+        dst[count - 1] = 0;
+    }
+    else
+    {
+        dst[0] = 0;
+    }
     return dst;
 }
 
@@ -179,10 +186,12 @@ const char* StringUtils::Find(const char* str, const char* toFind)
     return strstr(str, toFind);
 }
 
-void StringUtils::ConvertANSI2UTF16(const char* from, Char* to, int32 len)
+void StringUtils::ConvertANSI2UTF16(const char* from, Char* to, int32 fromLength, int32& toLength)
 {
-    if (len)
-        mbstowcs(to, from, len);
+    if (fromLength)
+        toLength = (int32)mbstowcs(to, from, fromLength);
+    else
+        toLength = 0;
 }
 
 void StringUtils::ConvertUTF162ANSI(const Char* from, char* to, int32 len)

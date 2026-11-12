@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -21,6 +21,11 @@ API_ENUM() enum class CursorLockMode
     /// Cursor position is locked to the center of the game window.
     /// </summary>
     Locked = 1,
+
+    /// <summary>
+    /// Cursor position is confined to the bounds of the game window.
+    /// </summary>
+    Clipped = 2,
 };
 
 /// <summary>
@@ -145,32 +150,32 @@ API_ENUM() enum class GamepadButton
     Back = 6,
 
     /// <summary>
-    /// Left thumbstick button.
+    /// Left thumbstick button (L).
     /// </summary>
     LeftThumb = 7,
 
     /// <summary>
-    /// Right thumbstick button.
+    /// Right thumbstick button (R).
     /// </summary>
     RightThumb = 8,
 
     /// <summary>
-    /// Left shoulder button.
+    /// Left shoulder button (LB).
     /// </summary>
     LeftShoulder = 9,
 
     /// <summary>
-    /// Right shoulder button.
+    /// Right shoulder button (RB).
     /// </summary>
     RightShoulder = 10,
 
     /// <summary>
-    /// Left trigger button.
+    /// Left trigger button (LT).
     /// </summary>
     LeftTrigger = 11,
 
     /// <summary>
-    /// Right trigger button.
+    /// Right trigger button (RT).
     /// </summary>
     RightTrigger = 12,
 
@@ -256,6 +261,37 @@ API_ENUM() enum class InputActionMode
     /// User released the key/button (was pressing it in the previous frame).
     /// </summary>
     Release = 2,
+};
+
+/// <summary>
+/// The input action event phases.
+/// </summary>
+API_ENUM() enum class InputActionState
+{
+    /// <summary>
+    /// The key/button is not assigned.
+    /// </summary>
+    None = 0,
+
+    /// <summary>
+    /// The key/button is waiting for input.
+    /// </summary>
+    Waiting = 1,
+
+    /// <summary>
+    /// User is pressing the key/button.
+    /// </summary>
+    Pressing = 2,
+
+    /// <summary>
+    /// User pressed the key/button (but wasn't pressing it in the previous frame).
+    /// </summary>
+    Press = 3,
+
+    /// <summary>
+    /// User released the key/button (was pressing it in the previous frame).
+    /// </summary>
+    Release = 4,
 };
 
 /// <summary>
@@ -353,4 +389,14 @@ API_ENUM() enum class InputAxisType
     /// The keyboard only mode. For key inputs.
     /// </summary>
     KeyboardOnly = 9,
+
+    /// <summary>
+    /// Pad X axis - left/right (DPad / Directional Pad).
+    /// </summary>
+    GamepadDPadX = 10,
+
+    /// <summary>
+    /// Pad Y axis - up/down (DPad / Directional Pad).
+    /// </summary>
+    GamepadDPadY = 11,
 };

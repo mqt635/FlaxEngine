@@ -1,13 +1,17 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "MaterialShader.h"
 #include "Engine/Core/Log.h"
-#include "Engine/Serialization/MemoryReadStream.h"
+#include "Engine/Level/LargeWorlds.h"
 #include "Engine/Renderer/RenderList.h"
+#include "Engine/Graphics/Graphics.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/GPUDevice.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Engine/Time.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "DecalMaterialShader.h"
 #include "PostFxMaterialShader.h"
 #include "ForwardMaterialShader.h"
@@ -18,39 +22,116 @@
 #include "DeformableMaterialShader.h"
 #include "VolumeParticleMaterialShader.h"
 
+GPU_CB_STRUCT(MaterialShaderDataPerView {
+    Matrix ViewMatrix;
+    Matrix ViewProjectionMatrix;
+    Matrix PrevViewProjectionMatrix;
+    Matrix MainViewProjectionMatrix;
+    Float4 MainScreenSize;
+    Float3 ViewPos;
+    float ViewFar;
+    Float3 ViewDir;
+    float TimeParam;
+    Float4 ViewInfo;
+    Float4 ScreenSize;
+    Float4 TemporalAAJitter;
+    Float3 LargeWorldsChunkIndex;
+    float LargeWorldsChunkSize;
+    float MaterialTextureMipBias;
+    float ViewPadding0;
+    float TestValue;
+    float ScaledTimeParam;
+    });
+
 IMaterial::BindParameters::BindParameters(::GPUContext* context, const ::RenderContext& renderContext)
     : GPUContext(context)
     , RenderContext(renderContext)
-    , FirstDrawCall(nullptr)
-    , DrawCallsCount(0)
-    , TimeParam(Time::Draw.UnscaledTime.GetTotalSeconds())
+    , Time(Time::Draw.UnscaledTime.GetTotalSeconds())
+    , ScaledTime(Time::Draw.Time.GetTotalSeconds())
 {
 }
 
-IMaterial::BindParameters::BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const DrawCall& drawCall)
-    : GPUContext(context)
-    , RenderContext(renderContext)
-    , FirstDrawCall(&drawCall)
-    , DrawCallsCount(1)
-    , TimeParam(Time::Draw.UnscaledTime.GetTotalSeconds())
+IMaterial::BindParameters::BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const ::DrawCall& drawCall, bool instanced)
+    : BindParameters(context, renderContext)
 {
+    DrawCall = &drawCall;
+    Instanced = instanced;
 }
 
-IMaterial::BindParameters::BindParameters(::GPUContext* context, const ::RenderContext& renderContext, const DrawCall* firstDrawCall, int32 drawCallsCount)
-    : GPUContext(context)
-    , RenderContext(renderContext)
-    , FirstDrawCall(firstDrawCall)
-    , DrawCallsCount(drawCallsCount)
-    , TimeParam(Time::Draw.UnscaledTime.GetTotalSeconds())
+GPUConstantBuffer* IMaterial::BindParameters::PerViewConstants = nullptr;
+GPUConstantBuffer* IMaterial::BindParameters::PerDrawConstants = nullptr;
+
+void IMaterial::BindParameters::BindViewData()
 {
+    // Lazy-init
+    if (!PerViewConstants)
+    {
+        PerViewConstants = GPUDevice::Instance->CreateConstantBuffer(sizeof(MaterialShaderDataPerView), TEXT("PerViewConstants"));
+        PerDrawConstants = GPUDevice::Instance->CreateConstantBuffer(sizeof(MaterialShaderDataPerDraw), TEXT("PerDrawConstants"));
+    }
+
+    // Setup data
+    const auto& view = RenderContext.View;
+    MaterialShaderDataPerView cb;
+    Matrix::Transpose(view.Frustum.GetMatrix(), cb.ViewProjectionMatrix);
+    Matrix::Transpose(view.View, cb.ViewMatrix);
+    Matrix::Transpose(view.PrevViewProjection, cb.PrevViewProjectionMatrix);
+    Matrix::Transpose(view.MainViewProjection, cb.MainViewProjectionMatrix);
+    cb.MainScreenSize = view.MainScreenSize;
+    cb.ViewPos = view.Position;
+    cb.ViewFar = view.Far;
+    cb.ViewDir = view.Direction;
+    cb.TimeParam = Time;
+    cb.ScaledTimeParam = ScaledTime;
+    cb.ViewInfo = view.ViewInfo;
+    cb.ScreenSize = view.ScreenSize;
+    cb.TemporalAAJitter = view.TemporalAAJitter;
+    cb.LargeWorldsChunkIndex = LargeWorlds::Enable ? (Float3)Int3(view.Origin / LargeWorlds::ChunkSize) : Float3::Zero;
+    cb.LargeWorldsChunkSize = LargeWorlds::ChunkSize;
+    cb.MaterialTextureMipBias = RenderContext.List->Setup.MaterialTextureMipBias;
+    cb.TestValue = Graphics::TestValue;
+
+    // Update constants
+    GPUContext->UpdateCB(PerViewConstants, &cb);
+    GPUContext->BindCB(1, PerViewConstants);
 }
 
-GPUPipelineState* MaterialShader::PipelineStateCache::InitPS(CullMode mode, bool wireframe)
+void IMaterial::BindParameters::BindDrawData()
+{
+    // Write draw call to the object buffer
+    ASSERT(DrawCall);
+    auto& objectBuffer = RenderContext.List->TempObjectBuffer;
+    objectBuffer.Clear();
+    ShaderObjectData objData;
+    objData.Store(*DrawCall);
+    objectBuffer.Write(objData);
+    objectBuffer.Flush(GPUContext);
+    ObjectBuffer = objectBuffer.GetBuffer()->View();
+
+    // Setup data
+    MaterialShaderDataPerDraw perDraw;
+    perDraw.DrawPadding = Float3::Zero;
+    perDraw.DrawObjectIndex = 0;
+
+    // Update constants
+    GPUContext->UpdateCB(PerDrawConstants, &perDraw);
+    GPUContext->BindCB(2, PerDrawConstants);
+}
+
+GPUPipelineState* MaterialShader::PipelineStateCache::InitPS(const MaterialShader* owner, CullMode mode)
 {
     Desc.CullMode = mode;
-    Desc.Wireframe = wireframe;
     auto ps = GPUDevice::Instance->CreatePipelineState();
-    ps->Init(Desc);
+    if (ps->Init(Desc))
+    {
+#if GPU_ENABLE_RESOURCE_NAMING
+        LOG(Error, "Failed to initialize PSO for material '{}'", owner->GetShader()->GetName());
+#else
+        LOG(Error, "Failed to initialize PSO");
+#endif
+        SAFE_DELETE_GPU_RESOURCE(ps);
+        return nullptr;
+    }
     return ps;
 }
 
@@ -70,6 +151,7 @@ MaterialShader::~MaterialShader()
 
 MaterialShader* MaterialShader::Create(const StringView& name, MemoryReadStream& shaderCacheStream, const MaterialInfo& info)
 {
+    PROFILE_MEM(GraphicsMaterials);
     MaterialShader* material;
     switch (info.Domain)
     {
@@ -112,21 +194,18 @@ MaterialShader* MaterialShader::Create(const StringView& name, MemoryReadStream&
 class DummyMaterial : public MaterialShader
 {
 public:
-
     DummyMaterial()
         : MaterialShader(String::Empty)
     {
     }
 
 public:
-
     // [Material]
     void Bind(BindParameters& params) override
     {
     }
 
 protected:
-
     // [Material]
     bool Load() override
     {
@@ -136,6 +215,7 @@ protected:
 
 MaterialShader* MaterialShader::CreateDummy(MemoryReadStream& shaderCacheStream, const MaterialInfo& info)
 {
+    PROFILE_MEM(GraphicsMaterials);
     MaterialShader* material = New<DummyMaterial>();
     if (material->Load(shaderCacheStream, info))
     {
@@ -150,6 +230,11 @@ GPUShader* MaterialShader::GetShader() const
     return _shader;
 }
 
+DrawPass MaterialShader::GetDrawModes() const
+{
+    return _drawModes;
+}
+
 const MaterialInfo& MaterialShader::GetInfo() const
 {
     return _info;
@@ -162,10 +247,12 @@ bool MaterialShader::IsReady() const
 
 bool MaterialShader::Load(MemoryReadStream& shaderCacheStream, const MaterialInfo& info)
 {
+    PROFILE_MEM(GraphicsMaterials);
     ASSERT(!_isLoaded);
 
     // Cache material info
     _info = info;
+    _drawModes = DrawPass::None;
 
     // Create shader
     if (_shader->Create(shaderCacheStream))
@@ -186,6 +273,7 @@ bool MaterialShader::Load(MemoryReadStream& shaderCacheStream, const MaterialInf
             _cb = nullptr;
         }
         _cbData.Resize(cbSize, false);
+        Platform::MemoryClear(_cbData.Get(), cbSize);
     }
 
     // Initialize the material based on type (create pipeline states and setup)

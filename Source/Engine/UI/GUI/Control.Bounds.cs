@@ -1,6 +1,7 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
+using System.ComponentModel;
 
 namespace FlaxEngine.GUI
 {
@@ -33,7 +34,7 @@ namespace FlaxEngine.GUI
         public float LocalX
         {
             get => LocalLocation.X;
-            set => LocalLocation = new Vector2(value, LocalLocation.Y);
+            set => LocalLocation = new Float2(value, LocalLocation.Y);
         }
 
         /// <summary>
@@ -43,14 +44,14 @@ namespace FlaxEngine.GUI
         public float LocalY
         {
             get => LocalLocation.Y;
-            set => LocalLocation = new Vector2(LocalLocation.X, value);
+            set => LocalLocation = new Float2(LocalLocation.X, value);
         }
 
         /// <summary>
         /// Gets or sets the normalized position in the parent control that the upper left corner is anchored to (range 0-1).
         /// </summary>
-        [Serialize, HideInEditor]
-        public Vector2 AnchorMin
+        [Serialize, HideInEditor, Limit(0, 1, 0.01f)]
+        public Float2 AnchorMin
         {
             get => _anchorMin;
             set
@@ -68,8 +69,8 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the normalized position in the parent control that the bottom right corner is anchored to (range 0-1).
         /// </summary>
-        [Serialize, HideInEditor]
-        public Vector2 AnchorMax
+        [Serialize, HideInEditor, Limit(0, 1, 0.01f)]
+        public Float2 AnchorMax
         {
             get => _anchorMax;
             set
@@ -105,7 +106,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Helper for Editor UI (see UIControlControlEditor).
         /// </summary>
-        [NoSerialize, HideInEditor]
+        [NoSerialize, HideInEditor, NoAnimate]
         internal float Proxy_Offset_Left
         {
             get => _offsets.Left;
@@ -115,7 +116,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Helper for Editor UI (see UIControlControlEditor).
         /// </summary>
-        [NoSerialize, HideInEditor]
+        [NoSerialize, HideInEditor, NoAnimate]
         internal float Proxy_Offset_Right
         {
             get => _offsets.Right;
@@ -125,7 +126,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Helper for Editor UI (see UIControlControlEditor).
         /// </summary>
-        [NoSerialize, HideInEditor]
+        [NoSerialize, HideInEditor, NoAnimate]
         internal float Proxy_Offset_Top
         {
             get => _offsets.Top;
@@ -135,7 +136,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Helper for Editor UI (see UIControlControlEditor).
         /// </summary>
-        [NoSerialize, HideInEditor]
+        [NoSerialize, HideInEditor, NoAnimate]
         internal float Proxy_Offset_Bottom
         {
             get => _offsets.Bottom;
@@ -147,20 +148,54 @@ namespace FlaxEngine.GUI
         /// Gets or sets coordinates of the upper-left corner of the control relative to the upper-left corner of its container.
         /// </summary>
         [NoSerialize, HideInEditor]
-        public Vector2 Location
+        public Float2 Location
         {
             get => _bounds.Location;
-            set => Bounds = new Rectangle(value, _bounds.Size);
+            set
+            {
+                if (_bounds.Location.Equals(ref value))
+                    return;
+                var bounds = new Rectangle(value, _bounds.Size);
+                SetBounds(ref bounds);
+            }
         }
 
         /// <summary>
         /// Gets or sets the local position of the pivot of the control relative to the anchor in parent of its container.
         /// </summary>
         [NoSerialize, HideInEditor]
-        public Vector2 LocalLocation
+        public Float2 LocalLocation
         {
-            get => _bounds.Location - (_parent != null ? _parent._bounds.Size * (_anchorMax + _anchorMin) * 0.5f : Vector2.Zero) + _bounds.Size * _pivot;
-            set => Bounds = new Rectangle(value + (_parent != null ? _parent.Bounds.Size * (_anchorMax + _anchorMin) * 0.5f : Vector2.Zero) - _bounds.Size * _pivot, _bounds.Size);
+            get
+            {
+                var anchor = Float2.Zero;
+                if (_parent != null)
+                {
+                    _parent.GetDesireClientArea(out var parentBounds);
+                    anchor = parentBounds.Location + parentBounds.Size * (_anchorMin + _anchorMax) * 0.5f;
+                }
+                return _bounds.Location - anchor + _bounds.Size * _pivot;
+            }
+            set
+            {
+                var anchor = Float2.Zero;
+                if (_parent != null)
+                {
+                    _parent.GetDesireClientArea(out var parentBounds);
+                    anchor = parentBounds.Location + parentBounds.Size * (_anchorMin + _anchorMax) * 0.5f;
+                }
+                Bounds = new Rectangle(value + anchor - _bounds.Size * _pivot, _bounds.Size);
+            }
+        }
+
+        /// <summary>
+        /// Whether to resize the UI Control based on where the pivot is rather than just the top-left.
+        /// </summary>
+        [NoSerialize, HideInEditor]
+        public bool PivotRelative
+        {
+            get => _pivotRelativeSizing;
+            set => _pivotRelativeSizing = value;
         }
 
         /// <summary>
@@ -169,8 +204,19 @@ namespace FlaxEngine.GUI
         [NoSerialize, HideInEditor]
         public float Width
         {
-            get => _bounds.Width;
-            set => Bounds = new Rectangle(_bounds.Location, value, _bounds.Height);
+            get => _bounds.Size.X;
+            set
+            {
+                if (Mathf.NearEqual(_bounds.Size.X, value))
+                    return;
+                var bounds = new Rectangle(_bounds.Location, value, _bounds.Size.Y);
+                if (_pivotRelativeSizing)
+                {
+                    var delta = _bounds.Size.X - value;
+                    bounds.Location.X += delta * Pivot.X;
+                }
+                SetBounds(ref bounds);
+            }
         }
 
         /// <summary>
@@ -179,18 +225,40 @@ namespace FlaxEngine.GUI
         [NoSerialize, HideInEditor]
         public float Height
         {
-            get => _bounds.Height;
-            set => Bounds = new Rectangle(_bounds.Location, _bounds.Width, value);
+            get => _bounds.Size.Y;
+            set
+            {
+                if (Mathf.NearEqual(_bounds.Size.Y, value))
+                    return;
+                var bounds = new Rectangle(_bounds.Location, _bounds.Size.X, value);
+                if (_pivotRelativeSizing)
+                {
+                    var delta = _bounds.Size.Y - value;
+                    bounds.Location.Y += delta * Pivot.Y;
+                }
+                SetBounds(ref bounds);
+            }
         }
 
         /// <summary>
         /// Gets or sets control's size.
         /// </summary>
         [NoSerialize, HideInEditor]
-        public Vector2 Size
+        public Float2 Size
         {
             get => _bounds.Size;
-            set => Bounds = new Rectangle(_bounds.Location, value);
+            set
+            {
+                if (_bounds.Size.Equals(ref value))
+                    return;
+                var bounds = new Rectangle(_bounds.Location, value);
+                if (_pivotRelativeSizing)
+                {
+                    var delta = _bounds.Size - value;
+                    bounds.Location += delta * Pivot;
+                }
+                SetBounds(ref bounds);
+            }
         }
 
         /// <summary>
@@ -216,27 +284,32 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets position of the upper left corner of the control relative to the upper-left corner of its container.
         /// </summary>
-        public Vector2 UpperLeft => _bounds.UpperLeft;
+        public Float2 UpperLeft => _bounds.UpperLeft;
 
         /// <summary>
         /// Gets position of the upper right corner of the control relative to the upper-left corner of its container.
         /// </summary>
-        public Vector2 UpperRight => _bounds.UpperRight;
+        public Float2 UpperRight => _bounds.UpperRight;
 
         /// <summary>
         /// Gets position of the bottom right corner of the control relative to the upper-left corner of its container.
         /// </summary>
-        public Vector2 BottomRight => _bounds.BottomRight;
+        public Float2 BottomRight => _bounds.BottomRight;
 
         /// <summary>
         /// Gets position of the bottom left of the control relative to the upper-left corner of its container.
         /// </summary>
-        public Vector2 BottomLeft => _bounds.BottomLeft;
+        public Float2 BottomLeft => _bounds.BottomLeft;
 
         /// <summary>
         /// Gets center position of the control relative to the upper-left corner of its container.
         /// </summary>
-        public Vector2 Center => _bounds.Center;
+        [HideInEditor, NoSerialize]
+        public Float2 Center
+        {
+            get => _bounds.Center;
+            set => Location = value - Size * 0.5f;
+        }
 
         /// <summary>
         /// Gets or sets control's bounds rectangle.
@@ -302,7 +375,7 @@ namespace FlaxEngine.GUI
         /// Gets or sets the scale. Scales control according to its Pivot which by default is (0.5,0.5) (middle of the control). If you set pivot to (0,0) it will scale the control based on it's upper-left corner.
         /// </summary>
         [ExpandGroups, EditorDisplay("Transform"), Limit(float.MinValue, float.MaxValue, 0.1f), EditorOrder(1020), Tooltip("The control scale parameter. Scales control according to its Pivot which by default is (0.5,0.5) (middle of the control). If you set pivot to (0,0) it will scale the control based on it's upper-left corner.")]
-        public Vector2 Scale
+        public Float2 Scale
         {
             get => _scale;
             set
@@ -318,7 +391,7 @@ namespace FlaxEngine.GUI
         /// Gets or sets the normalized pivot location (used to transform control around it). Point (0,0) is upper left corner, (0.5,0.5) is center, (1,1) is bottom right corner.
         /// </summary>
         [ExpandGroups, EditorDisplay("Transform"), Limit(0.0f, 1.0f, 0.1f), EditorOrder(1030), Tooltip("The control rotation pivot location in normalized control size. Point (0,0) is upper left corner, (0.5,0.5) is center, (1,1) is bottom right corner.")]
-        public Vector2 Pivot
+        public Float2 Pivot
         {
             get => _pivot;
             set
@@ -333,8 +406,9 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the shear transform angles (x, y). Defined in degrees. Shearing happens relative to the control pivot point.
         /// </summary>
+        [DefaultValue(typeof(Float2), "0,0")]
         [ExpandGroups, EditorDisplay("Transform"), EditorOrder(1040), Tooltip("The shear transform angles (x, y). Defined in degrees. Shearing happens relative to the control pivot point.")]
-        public Vector2 Shear
+        public Float2 Shear
         {
             get => _shear;
             set
@@ -349,6 +423,7 @@ namespace FlaxEngine.GUI
         /// <summary>
         /// Gets or sets the rotation angle (in degrees). Control is rotated around it's pivot point (middle of the control by default).
         /// </summary>
+        [DefaultValue(0.0f)]
         [ExpandGroups, EditorDisplay("Transform"), EditorOrder(1050), Tooltip("The control rotation angle (in degrees). Control is rotated around it's pivot point (middle of the control by default).")]
         public float Rotation
         {
@@ -363,6 +438,19 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
+        /// Resizes the control based on where the pivot is rather than just the top-left.
+        /// </summary>
+        [NoAnimate]
+        public void Resize(ref Float2 value)
+        {
+            if (_bounds.Size.Equals(ref value))
+                return;
+            var bounds = new Rectangle(_bounds.Location, value);
+            bounds.Location += (_bounds.Size - value) * Pivot; // Pivot-relative resizing
+            SetBounds(ref bounds);
+        }
+
+        /// <summary>
         /// Updates the control cached bounds (based on anchors and offsets).
         /// </summary>
         [NoAnimate]
@@ -372,7 +460,7 @@ namespace FlaxEngine.GUI
 
             // Calculate anchors based on the parent container client area
             Margin anchors;
-            Vector2 offset;
+            Float2 offset;
             if (_parent != null)
             {
                 _parent.GetDesireClientArea(out var parentBounds);
@@ -388,7 +476,7 @@ namespace FlaxEngine.GUI
             else
             {
                 anchors = Margin.Zero;
-                offset = Vector2.Zero;
+                offset = Float2.Zero;
             }
 
             // Calculate position and size on X axis
@@ -420,12 +508,12 @@ namespace FlaxEngine.GUI
             UpdateTransform();
 
             // Handle location/size changes
-            if (_bounds.Location != prevBounds.Location)
+            if (!_bounds.Location.Equals(ref prevBounds.Location))
             {
                 OnLocationChanged();
             }
 
-            if (_bounds.Size != prevBounds.Size)
+            if (!_bounds.Size.Equals(ref prevBounds.Size))
             {
                 OnSizeChanged();
             }
@@ -438,9 +526,12 @@ namespace FlaxEngine.GUI
         public void UpdateTransform()
         {
             // Actual pivot and negative pivot
-            Vector2.Multiply(ref _pivot, ref _bounds.Size, out Vector2 v1);
-            Vector2.Negate(ref v1, out Vector2 v2);
-            Vector2.Add(ref v1, ref _bounds.Location, out v1);
+            //Float2.Multiply(ref _pivot, ref _bounds.Size, out var v1);
+            //Float2.Negate(ref v1, out var v2);
+            //Float2.Add(ref v1, ref _bounds.Location, out v1);
+            var v1 = _pivot * _bounds.Size;
+            var v2 = -v1;
+            v1 += _bounds.Location;
 
             // ------ Matrix3x3 based version:
 
@@ -469,25 +560,49 @@ namespace FlaxEngine.GUI
             // ------ Matrix2x2 based version:
 
             // 2D transformation
-            Matrix2x2.Scale(ref _scale, out Matrix2x2 m1);
-            Matrix2x2.Shear(ref _shear, out Matrix2x2 m2);
-            Matrix2x2.Multiply(ref m1, ref m2, out m1);
-            Matrix2x2.Rotation(Mathf.DegreesToRadians * _rotation, out m2);
-            Matrix2x2.Multiply(ref m1, ref m2, out m1);
 
+            //Matrix2x2.Scale(ref _scale, out Matrix2x2 m1);
+            //Matrix2x2.Shear(ref _shear, out Matrix2x2 m2);
+            //Matrix2x2.Multiply(ref m1, ref m2, out m1);
+
+            // Scale and Shear
+            Matrix3x3 m1 = new Matrix3x3
+                (
+                _scale.X,
+                _scale.X * (_shear.Y == 0 ? 0 : (1.0f / Mathf.Tan(Mathf.DegreesToRadians * (90 - Mathf.Clamp(_shear.Y, -89.0f, 89.0f))))),
+                0,
+                _scale.Y * (_shear.X == 0 ? 0 : (1.0f / Mathf.Tan(Mathf.DegreesToRadians * (90 - Mathf.Clamp(_shear.X, -89.0f, 89.0f))))),
+                _scale.Y,
+                0, 0, 0, 1
+                );
+
+            
+            //Matrix2x2.Rotation(Mathf.DegreesToRadians * _rotation, out m2);
+            float sin = Mathf.Sin(Mathf.DegreesToRadians * _rotation);
+            float cos = Mathf.Cos(Mathf.DegreesToRadians * _rotation);
+
+            //Matrix2x2.Multiply(ref m1, ref m2, out m1);
+            m1.M11 = (_scale.X * cos) + (m1.M12 * -sin);
+            m1.M12 = (_scale.X * sin) + (m1.M12 * cos);
+            float m21 = (m1.M21 * cos) + (_scale.Y * -sin);
+            m1.M22 = (m1.M21 * sin) + (_scale.Y * cos);
+            m1.M21 = m21;
             // Mix all the stuff
-            Matrix3x3.Translation2D(ref v2, out Matrix3x3 m3);
-            Matrix3x3 m4 = (Matrix3x3)m1;
-            Matrix3x3.Multiply(ref m3, ref m4, out m3);
-            Matrix3x3.Translation2D(ref v1, out m4);
-            Matrix3x3.Multiply(ref m3, ref m4, out _cachedTransform);
+            //Matrix3x3.Translation2D(ref v2, out Matrix3x3 m3);
+            //Matrix3x3 m4 = (Matrix3x3)m1;
+            //Matrix3x3.Multiply(ref m3, ref m4, out m3);
+            //Matrix3x3.Translation2D(ref v1, out m4);
+            //Matrix3x3.Multiply(ref m3, ref m4, out _cachedTransform);
+            m1.M31 = (v2.X * m1.M11) + (v2.Y * m1.M21) + v1.X;
+            m1.M32 = (v2.X * m1.M12) + (v2.Y * m1.M22) + v1.Y;
+            _cachedTransform = m1;
 
             // Cache inverted transform
             Matrix3x3.Invert(ref _cachedTransform, out _cachedTransformInv);
         }
 
         /// <summary>
-        /// Sets the anchor preset for the control. Can be use to auto-place the control for a given preset or can preserve the current control bounds.
+        /// Sets the anchor preset for the control. Can be used to auto-place the control for a given preset or can preserve the current control bounds.
         /// </summary>
         /// <param name="anchorPreset">The anchor preset to set.</param>
         /// <param name="preserveBounds">True if preserve current control bounds, otherwise will align control position accordingly to the anchor location.</param>
@@ -501,8 +616,8 @@ namespace FlaxEngine.GUI
                     var anchorMin = AnchorPresetsData[i].Min;
                     var anchorMax = AnchorPresetsData[i].Max;
                     var bounds = _bounds;
-                    if (!Vector2.NearEqual(ref _anchorMin, ref anchorMin) ||
-                        !Vector2.NearEqual(ref _anchorMax, ref anchorMax))
+                    if (!Float2.NearEqual(ref _anchorMin, ref anchorMin) ||
+                        !Float2.NearEqual(ref _anchorMax, ref anchorMax))
                     {
                         // Disable scrolling for anchored controls (by default but can be manually restored)
                         if (!anchorMin.IsZero || !anchorMax.IsZero)
@@ -524,58 +639,58 @@ namespace FlaxEngine.GUI
                             switch (anchorPreset)
                             {
                             case AnchorPresets.TopLeft:
-                                bounds.Location = Vector2.Zero;
+                                bounds.Location = Float2.Zero;
                                 break;
                             case AnchorPresets.TopCenter:
-                                bounds.Location = new Vector2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, 0);
+                                bounds.Location = new Float2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, 0);
                                 break;
                             case AnchorPresets.TopRight:
-                                bounds.Location = new Vector2(parentBounds.Width - bounds.Width, 0);
+                                bounds.Location = new Float2(parentBounds.Width - bounds.Width, 0);
                                 break;
                             case AnchorPresets.MiddleLeft:
-                                bounds.Location = new Vector2(0, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
+                                bounds.Location = new Float2(0, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
                                 break;
                             case AnchorPresets.MiddleCenter:
-                                bounds.Location = new Vector2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
+                                bounds.Location = new Float2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
                                 break;
                             case AnchorPresets.MiddleRight:
-                                bounds.Location = new Vector2(parentBounds.Width - bounds.Width, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
+                                bounds.Location = new Float2(parentBounds.Width - bounds.Width, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
                                 break;
                             case AnchorPresets.BottomLeft:
-                                bounds.Location = new Vector2(0, parentBounds.Height - bounds.Height);
+                                bounds.Location = new Float2(0, parentBounds.Height - bounds.Height);
                                 break;
                             case AnchorPresets.BottomCenter:
-                                bounds.Location = new Vector2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, parentBounds.Height - bounds.Height);
+                                bounds.Location = new Float2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, parentBounds.Height - bounds.Height);
                                 break;
                             case AnchorPresets.BottomRight:
-                                bounds.Location = new Vector2(parentBounds.Width - bounds.Width, parentBounds.Height - bounds.Height);
+                                bounds.Location = new Float2(parentBounds.Width - bounds.Width, parentBounds.Height - bounds.Height);
                                 break;
                             case AnchorPresets.VerticalStretchLeft:
-                                bounds.Location = Vector2.Zero;
-                                bounds.Size = new Vector2(bounds.Width, parentBounds.Height);
+                                bounds.Location = Float2.Zero;
+                                bounds.Size = new Float2(bounds.Width, parentBounds.Height);
                                 break;
                             case AnchorPresets.VerticalStretchCenter:
-                                bounds.Location = new Vector2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, 0);
-                                bounds.Size = new Vector2(bounds.Width, parentBounds.Height);
+                                bounds.Location = new Float2(parentBounds.Width * 0.5f - bounds.Width * 0.5f, 0);
+                                bounds.Size = new Float2(bounds.Width, parentBounds.Height);
                                 break;
                             case AnchorPresets.VerticalStretchRight:
-                                bounds.Location = new Vector2(parentBounds.Width - bounds.Width, 0);
-                                bounds.Size = new Vector2(bounds.Width, parentBounds.Height);
+                                bounds.Location = new Float2(parentBounds.Width - bounds.Width, 0);
+                                bounds.Size = new Float2(bounds.Width, parentBounds.Height);
                                 break;
                             case AnchorPresets.HorizontalStretchTop:
-                                bounds.Location = Vector2.Zero;
-                                bounds.Size = new Vector2(parentBounds.Width, bounds.Height);
+                                bounds.Location = Float2.Zero;
+                                bounds.Size = new Float2(parentBounds.Width, bounds.Height);
                                 break;
                             case AnchorPresets.HorizontalStretchMiddle:
-                                bounds.Location = new Vector2(0, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
-                                bounds.Size = new Vector2(parentBounds.Width, bounds.Height);
+                                bounds.Location = new Float2(0, parentBounds.Height * 0.5f - bounds.Height * 0.5f);
+                                bounds.Size = new Float2(parentBounds.Width, bounds.Height);
                                 break;
                             case AnchorPresets.HorizontalStretchBottom:
-                                bounds.Location = new Vector2(0, parentBounds.Height - bounds.Height);
-                                bounds.Size = new Vector2(parentBounds.Width, bounds.Height);
+                                bounds.Location = new Float2(0, parentBounds.Height - bounds.Height);
+                                bounds.Size = new Float2(parentBounds.Width, bounds.Height);
                                 break;
                             case AnchorPresets.StretchAll:
-                                bounds.Location = Vector2.Zero;
+                                bounds.Location = Float2.Zero;
                                 bounds.Size = parentBounds.Size;
                                 break;
                             default: throw new ArgumentOutOfRangeException(nameof(anchorPreset), anchorPreset, null);
@@ -592,6 +707,23 @@ namespace FlaxEngine.GUI
                     return;
                 }
             }
+        }
+
+        /// <summary>
+        /// Sets the anchors for the control.
+        /// </summary>
+        /// <param name="anchorMin">The minimum anchors point to use.</param>
+        /// <param name="anchorMax">The maximum anchors point to use.</param>
+        /// <param name="preserveBounds">True if preserve current control bounds, otherwise will align control position accordingly to the anchor location.</param>
+        public void SetAnchors(Float2 anchorMin, Float2 anchorMax, bool preserveBounds)
+        {
+            var bounds = _bounds;
+            _anchorMin = anchorMin;
+            _anchorMax = anchorMax;
+            if (preserveBounds)
+                Bounds = bounds;
+            else
+                UpdateBounds();
         }
     }
 }

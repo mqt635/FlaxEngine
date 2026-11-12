@@ -1,8 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
-#if PLATFORM_UNIX
+#if PLATFORM_ANDROID
 
 #include "Engine/Platform/Unix/UnixFile.h"
 
@@ -11,7 +11,7 @@ typedef struct AAsset AAsset;
 /// <summary>
 /// Android platform file object implementation.
 /// </summary>
-class AndroidFile : public UnixFile
+class FLAXENGINE_API AndroidFile : public UnixFile
 {
 public:
 

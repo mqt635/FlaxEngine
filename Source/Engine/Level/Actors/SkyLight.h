@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -9,11 +9,11 @@
 /// <summary>
 /// Sky light captures the distant parts of the scene and applies it as a light. Allows to add ambient light.
 /// </summary>
-API_CLASS() class FLAXENGINE_API SkyLight : public Light
+API_CLASS(Attributes="ActorContextMenu(\"New/Lights/Sky Light\"), ActorToolbox(\"Lights\")")
+class FLAXENGINE_API SkyLight : public Light
 {
-DECLARE_SCENE_OBJECT(SkyLight);
+    DECLARE_SCENE_OBJECT(SkyLight);
 public:
-
     /// <summary>
     /// Sky light source mode.
     /// </summary>
@@ -28,15 +28,18 @@ public:
         /// The custom cube texture will be used as a light source.
         /// </summary>
         CustomTexture = 1,
+
+        /// <summary>
+        /// Realtime skybox will be used as a light source. Uses low-res cubemap generated from the sky/skybox (used by Global Illumination for fallback traces). Offers optimized dynamic ambient lighting.
+        /// </summary>
+        RealtimeSkybox = 2,
     };
 
 private:
-
     AssetReference<CubeTexture> _bakedProbe;
     float _radius;
 
 public:
-
     /// <summary>
     /// Additional color to add. Source texture colors are summed with it. Can be used to apply custom ambient color.
     /// </summary>
@@ -46,13 +49,13 @@ public:
     /// <summary>
     /// Distance from the light at which any geometry should be treated as part of the sky.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(45), DefaultValue(150000.0f), Limit(0), EditorDisplay(\"Probe\")")
+    API_FIELD(Attributes="EditorOrder(45), Limit(0), EditorDisplay(\"Probe\")")
     float SkyDistanceThreshold = 150000.0f;
 
     /// <summary>
     /// The current light source mode.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(40), DefaultValue(Modes.CustomTexture), EditorDisplay(\"Probe\")")
+    API_FIELD(Attributes="EditorOrder(40), EditorDisplay(\"Probe\")")
     Modes Mode = Modes::CustomTexture;
 
     /// <summary>
@@ -62,11 +65,9 @@ public:
     AssetReference<CubeTexture> CustomTexture;
 
 public:
-
     /// <summary>
     /// Gets the radius.
     /// </summary>
-    /// <returns>The value.</returns>
     API_PROPERTY(Attributes="EditorOrder(29), DefaultValue(1000000.0f), Limit(0), EditorDisplay(\"Light\")")
     FORCE_INLINE float GetRadius() const
     {
@@ -76,8 +77,7 @@ public:
     /// <summary>
     /// Sets the radius.
     /// </summary>
-    /// <param name="value">The value.</param>
-    void SetRadius(float value);
+    API_PROPERTY() void SetRadius(float value);
 
     /// <summary>
     /// Gets the scaled radius of the sky light.
@@ -87,18 +87,9 @@ public:
     /// <summary>
     /// Gets the light source texture.
     /// </summary>
-    /// <returns>The cube texture.</returns>
-    CubeTexture* GetSource() const
-    {
-        if (Mode == Modes::CaptureScene)
-            return _bakedProbe;
-        if (Mode == Modes::CustomTexture)
-            return CustomTexture.Get();
-        return nullptr;
-    }
+    CubeTexture* GetSource() const;
 
 public:
-
     /// <summary>
     /// Bakes that probe.
     /// </summary>
@@ -112,13 +103,11 @@ public:
     void SetProbeData(TextureData& data);
 
 private:
-
     void UpdateBounds();
 
 public:
-
     // [Light]
-    void Draw(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
 #endif
@@ -127,9 +116,6 @@ public:
     bool HasContentLoaded() const override;
 
 protected:
-
     // [Light]
-    void OnEnable() override;
-    void OnDisable() override;
     void OnTransformChanged() override;
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -10,6 +10,7 @@
 #include "TextLayoutOptions.h"
 
 class FontAsset;
+struct FontCharacterEntry;
 
 // The default DPI that engine is using
 #define DefaultDPI 96
@@ -17,24 +18,24 @@ class FontAsset;
 /// <summary>
 /// The text range.
 /// </summary>
-API_STRUCT() struct TextRange
+API_STRUCT(NoDefault) struct FLAXENGINE_API TextRange
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(TextRange);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(TextRange);
 
     /// <summary>
-    /// The start index.
+    /// The start index (inclusive).
     /// </summary>
     API_FIELD() int32 StartIndex;
 
     /// <summary>
-    /// The end index.
+    /// The end index (exclusive).
     /// </summary>
     API_FIELD() int32 EndIndex;
 
     /// <summary>
     /// Gets the range length.
     /// </summary>
-    int32 Length() const
+    FORCE_INLINE int32 Length() const
     {
         return EndIndex - StartIndex;
     }
@@ -42,7 +43,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(TextRange);
     /// <summary>
     /// Gets a value indicating whether range is empty.
     /// </summary>
-    bool IsEmpty() const
+    FORCE_INLINE bool IsEmpty() const
     {
         return (EndIndex - StartIndex) <= 0;
     }
@@ -52,7 +53,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(TextRange);
     /// </summary>
     /// <param name="index">The index.</param>
     /// <returns><c>true</c> if range contains the specified character index; otherwise, <c>false</c>.</returns>
-    bool Contains(int32 index) const
+    FORCE_INLINE bool Contains(int32 index) const
     {
         return index >= StartIndex && index < EndIndex;
     }
@@ -66,6 +67,16 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(TextRange);
     {
         return Math::Min(EndIndex, other.EndIndex) > Math::Max(StartIndex, other.StartIndex);
     }
+
+    /// <summary>
+    /// Gets the substring from the source text.
+    /// </summary>
+    /// <param name="text">The text.</param>
+    /// <returns>The substring of the original text of the defined range.</returns>
+    StringView Substring(const StringView& text) const
+    {
+        return StringView(text.Get() + StartIndex, EndIndex - StartIndex);
+    }
 };
 
 template<>
@@ -77,19 +88,19 @@ struct TIsPODType<TextRange>
 /// <summary>
 /// The font line info generated during text processing.
 /// </summary>
-API_STRUCT() struct FontLineCache
+API_STRUCT(NoDefault) struct FLAXENGINE_API FontLineCache
 {
-DECLARE_SCRIPTING_TYPE_MINIMAL(FontLineCache);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(FontLineCache);
 
     /// <summary>
     /// The root position of the line (upper left corner).
     /// </summary>
-    API_FIELD() Vector2 Location;
+    API_FIELD() Float2 Location;
 
     /// <summary>
     /// The line bounds (width and height).
     /// </summary>
-    API_FIELD() Vector2 Size;
+    API_FIELD() Float2 Size;
 
     /// <summary>
     /// The first character index (from the input text).
@@ -97,7 +108,7 @@ DECLARE_SCRIPTING_TYPE_MINIMAL(FontLineCache);
     API_FIELD() int32 FirstCharIndex;
 
     /// <summary>
-    /// The last character index (from the input text).
+    /// The last character index (from the input text), inclusive.
     /// </summary>
     API_FIELD() int32 LastCharIndex;
 };
@@ -108,127 +119,31 @@ struct TIsPODType<FontLineCache>
     enum { Value = true };
 };
 
-// Font glyph metrics:
-//
-//                       xmin                     xmax
-//                        |                         |
-//                        |<-------- width -------->|
-//                        |                         |
-//              |         +-------------------------+----------------- ymax
-//              |         |    ggggggggg   ggggg    |     ^        ^
-//              |         |   g:::::::::ggg::::g    |     |        |
-//              |         |  g:::::::::::::::::g    |     |        |
-//              |         | g::::::ggggg::::::gg    |     |        |
-//              |         | g:::::g     g:::::g     |     |        |
-//    offsetX  -|-------->| g:::::g     g:::::g     |  offsetY     |
-//              |         | g:::::g     g:::::g     |     |        |
-//              |         | g::::::g    g:::::g     |     |        |
-//              |         | g:::::::ggggg:::::g     |     |        |
-//              |         |  g::::::::::::::::g     |     |      height
-//              |         |   gg::::::::::::::g     |     |        |
-//  baseline ---*---------|---- gggggggg::::::g-----*--------      |
-//            / |         |             g:::::g     |              |
-//     origin   |         | gggggg      g:::::g     |              |
-//              |         | g:::::gg   gg:::::g     |              |
-//              |         |  g::::::ggg:::::::g     |              |
-//              |         |   gg:::::::::::::g      |              |
-//              |         |     ggg::::::ggg        |              |
-//              |         |         gggggg          |              v
-//              |         +-------------------------+----------------- ymin
-//              |                                   |
-//              |------------- advanceX ----------->|
-
-/// <summary>
-/// The cached font character entry (read for rendering and further processing).
-/// </summary>
-API_STRUCT() struct FontCharacterEntry
-{
-DECLARE_SCRIPTING_TYPE_MINIMAL(FontCharacterEntry);
-
-    /// <summary>
-    /// The character represented by this entry.
-    /// </summary>
-    API_FIELD() Char Character;
-
-    /// <summary>
-    /// True if entry is valid, otherwise false.
-    /// </summary>
-    API_FIELD() bool IsValid = false;
-
-    /// <summary>
-    /// The index to a specific texture in the font cache.
-    /// </summary>
-    API_FIELD() byte TextureIndex;
-
-    /// <summary>
-    /// The left bearing expressed in integer pixels.
-    /// </summary>
-    API_FIELD() int16 OffsetX;
-
-    /// <summary>
-    /// The top bearing expressed in integer pixels.
-    /// </summary>
-    API_FIELD() int16 OffsetY;
-
-    /// <summary>
-    /// The amount to advance in X before drawing the next character in a string.
-    /// </summary>
-    API_FIELD() int16 AdvanceX;
-
-    /// <summary>
-    /// The distance from baseline to glyph top most point.
-    /// </summary>
-    API_FIELD() int16 BearingY;
-
-    /// <summary>
-    /// The height in pixels of the glyph.
-    /// </summary>
-    API_FIELD() int16 Height;
-
-    /// <summary>
-    /// The start location of the character in the texture (in texture coordinates space).
-    /// </summary>
-    API_FIELD() Vector2 UV;
-
-    /// <summary>
-    /// The size the character in the texture (in texture coordinates space).
-    /// </summary>
-    API_FIELD() Vector2 UVSize;
-};
-
-template<>
-struct TIsPODType<FontCharacterEntry>
-{
-    enum { Value = true };
-};
-
 /// <summary>
 /// Represents font object that can be using during text rendering (it uses Font Asset but with pre-cached data for chosen font properties).
 /// </summary>
 API_CLASS(Sealed, NoSpawn) class FLAXENGINE_API Font : public ManagedScriptingObject
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Font);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Font);
     friend FontAsset;
-private:
 
+private:
     FontAsset* _asset;
-    int32 _size;
+    float _size;
     int32 _height;
     int32 _ascender;
     int32 _descender;
     int32 _lineGap;
     bool _hasKerning;
-    Dictionary<Char, FontCharacterEntry> _characters;
     mutable Dictionary<uint32, int32> _kerningTable;
 
 public:
-
     /// <summary>
     /// Initializes a new instance of the <see cref="Font"/> class.
     /// </summary>
     /// <param name="parentAsset">The parent asset.</param>
     /// <param name="size">The size.</param>
-    Font(FontAsset* parentAsset, int32 size);
+    Font(FontAsset* parentAsset, float size);
 
     /// <summary>
     /// Finalizes an instance of the <see cref="Font"/> class.
@@ -236,6 +151,22 @@ public:
     ~Font();
 
 public:
+    /// <summary>
+    /// The active fallback fonts.
+    /// </summary>
+    API_FIELD() static Array<AssetReference<FontAsset>, HeapAllocation> FallbackFonts;
+
+    /// <summary>
+    /// Gets the global font scaling factor used to rasterize font glyphs at higher resolutions (eg. for high-DPI displays or UI scaling).
+    /// </summary>
+    API_PROPERTY() static float GetGlobalScale();
+
+    /// <summary>
+    /// Sets the global font scaling factor used to rasterize font glyphs at higher resolutions (eg. for high-DPI displays or UI scaling).
+    /// Calling this rebuilds the cached glyphs and metrics of every loaded font so text rendered afterwards stays crisp at the new scale.
+    /// </summary>
+    /// <param name="scale">The new font scale (must be greater than 0).</param>
+    API_FUNCTION() static void SetGlobalScale(float scale);
 
     /// <summary>
     /// Gets parent font asset that contains font family used by this font.
@@ -248,7 +179,7 @@ public:
     /// <summary>
     /// Gets font size.
     /// </summary>
-    API_PROPERTY() FORCE_INLINE int32 GetSize() const
+    API_PROPERTY() FORCE_INLINE float GetSize() const
     {
         return _size;
     }
@@ -264,7 +195,7 @@ public:
     /// <summary>
     /// Gets the largest vertical distance above the baseline for any character in the font.
     /// </summary>
-    FORCE_INLINE int32 GetAscender() const
+    API_PROPERTY() FORCE_INLINE int32 GetAscender() const
     {
         return _ascender;
     }
@@ -286,13 +217,13 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Gets character entry.
     /// </summary>
     /// <param name="c">The character.</param>
     /// <param name="result">The output character entry.</param>
-    void GetCharacter(Char c, FontCharacterEntry& result);
+    /// <param name="enableFallback">True if fallback to secondary font when the primary font doesn't contain this character.</param>
+    void GetCharacter(Char c, FontCharacterEntry& result, bool enableFallback = true);
 
     /// <summary>
     /// Gets the kerning amount for a pair of characters.
@@ -309,11 +240,17 @@ public:
     API_FUNCTION() void CacheText(const StringView& text);
 
     /// <summary>
-    /// Invalidates all cached dynamic font atlases using this font. Can be used to reload font characters after changing font asset options.
+    /// Refresh cached metrics and invalidates all cached characters (in atlases). Can be used after changing font asset options.
     /// </summary>
     API_FUNCTION() void Invalidate();
 
 public:
+    /// <summary>
+    /// Gets the scale factor that maps the rasterized font size to the actual rendered size.
+    /// </summary>
+    /// <param name="layoutScale">The layout scale.</param>
+    /// <returns>The scale factor.</returns>
+    float GetScale(float layoutScale) const;
 
     /// <summary>
     /// Processes text to get cached lines for rendering.
@@ -321,7 +258,7 @@ public:
     /// <param name="text">The input text.</param>
     /// <param name="layout">The layout properties.</param>
     /// <param name="outputLines">The output lines list.</param>
-    void ProcessText(const StringView& text, Array<FontLineCache>& outputLines, API_PARAM(Ref) const TextLayoutOptions& layout);
+    void ProcessText(const StringView& text, Array<FontLineCache, InlinedAllocation<8>>& outputLines, API_PARAM(Ref) const TextLayoutOptions& layout);
 
     /// <summary>
     /// Processes text to get cached lines for rendering.
@@ -329,9 +266,9 @@ public:
     /// <param name="text">The input text.</param>
     /// <param name="layout">The layout properties.</param>
     /// <returns>The output lines list.</returns>
-    API_FUNCTION() Array<FontLineCache> ProcessText(const StringView& text, API_PARAM(Ref) const TextLayoutOptions& layout)
+    API_FUNCTION() Array<FontLineCache, InlinedAllocation<8>> ProcessText(const StringView& text, API_PARAM(Ref) const TextLayoutOptions& layout)
     {
-        Array<FontLineCache> lines;
+        Array<FontLineCache, InlinedAllocation<8>> lines;
         ProcessText(text, lines, layout);
         return lines;
     }
@@ -340,10 +277,35 @@ public:
     /// Processes text to get cached lines for rendering.
     /// </summary>
     /// <param name="text">The input text.</param>
+    /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
+    /// <param name="layout">The layout properties.</param>
     /// <returns>The output lines list.</returns>
-    API_FUNCTION() FORCE_INLINE Array<FontLineCache> ProcessText(const StringView& text)
+    API_FUNCTION() Array<FontLineCache, InlinedAllocation<8>> ProcessText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, API_PARAM(Ref) const TextLayoutOptions& layout)
+    {
+        Array<FontLineCache, InlinedAllocation<8>> lines;
+        ProcessText(textRange.Substring(text), lines, layout);
+        return lines;
+    }
+
+    /// <summary>
+    /// Processes text to get cached lines for rendering.
+    /// </summary>
+    /// <param name="text">The input text.</param>
+    /// <returns>The output lines list.</returns>
+    API_FUNCTION() FORCE_INLINE Array<FontLineCache, InlinedAllocation<8>> ProcessText(const StringView& text)
     {
         return ProcessText(text, TextLayoutOptions());
+    }
+
+    /// <summary>
+    /// Processes text to get cached lines for rendering.
+    /// </summary>
+    /// <param name="text">The input text.</param>
+    /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
+    /// <returns>The output lines list.</returns>
+    API_FUNCTION() FORCE_INLINE Array<FontLineCache, InlinedAllocation<8>> ProcessText(const StringView& text, API_PARAM(Ref) const TextRange& textRange)
+    {
+        return ProcessText(textRange.Substring(text), TextLayoutOptions());
     }
 
     /// <summary>
@@ -351,17 +313,40 @@ public:
     /// </summary>
     /// <param name="text">The input text to test.</param>
     /// <param name="layout">The layout properties.</param>
-    /// <returns>The minimum size for that text and fot to render properly.</returns>
-    API_FUNCTION() Vector2 MeasureText(const StringView& text, API_PARAM(Ref) const TextLayoutOptions& layout);
+    /// <returns>The minimum size for that text and font to render properly.</returns>
+    API_FUNCTION() Float2 MeasureText(const StringView& text, API_PARAM(Ref) const TextLayoutOptions& layout);
+
+    /// <summary>
+    /// Measures minimum size of the rectangle that will be needed to draw given text.
+    /// </summary>
+    /// <param name="text">The input text to test.</param>
+    /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
+    /// <param name="layout">The layout properties.</param>
+    /// <returns>The minimum size for that text and font to render properly.</returns>
+    API_FUNCTION() Float2 MeasureText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, API_PARAM(Ref) const TextLayoutOptions& layout)
+    {
+        return MeasureText(textRange.Substring(text), layout);
+    }
 
     /// <summary>
     /// Measures minimum size of the rectangle that will be needed to draw given text
     /// </summary>.
     /// <param name="text">The input text to test.</param>
-    /// <returns>The minimum size for that text and fot to render properly.</returns>
-    API_FUNCTION() FORCE_INLINE Vector2 MeasureText(const StringView& text)
+    /// <returns>The minimum size for that text and font to render properly.</returns>
+    API_FUNCTION() FORCE_INLINE Float2 MeasureText(const StringView& text)
     {
         return MeasureText(text, TextLayoutOptions());
+    }
+
+    /// <summary>
+    /// Measures minimum size of the rectangle that will be needed to draw given text
+    /// </summary>.
+    /// <param name="text">The input text to test.</param>
+    /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
+    /// <returns>The minimum size for that text and font to render properly.</returns>
+    API_FUNCTION() FORCE_INLINE Float2 MeasureText(const StringView& text, API_PARAM(Ref) const TextRange& textRange)
+    {
+        return MeasureText(textRange.Substring(text), TextLayoutOptions());
     }
 
     /// <summary>
@@ -372,9 +357,9 @@ public:
     /// <param name="location">The input location to test.</param>
     /// <param name="layout">The text layout properties.</param>
     /// <returns>The selected character position index (can be equal to text length if location is outside of the layout rectangle).</returns>
-    API_FUNCTION() int32 HitTestText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, const Vector2& location, API_PARAM(Ref) const TextLayoutOptions& layout)
+    API_FUNCTION() int32 HitTestText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, const Float2& location, API_PARAM(Ref) const TextLayoutOptions& layout)
     {
-        return HitTestText(StringView(text.Get() + textRange.StartIndex, textRange.Length()), location, layout);
+        return HitTestText(textRange.Substring(text), location, layout);
     }
 
     /// <summary>
@@ -384,7 +369,7 @@ public:
     /// <param name="location">The input location to test.</param>
     /// <param name="layout">The text layout properties.</param>
     /// <returns>The selected character position index (can be equal to text length if location is outside of the layout rectangle).</returns>
-    API_FUNCTION() int32 HitTestText(const StringView& text, const Vector2& location, API_PARAM(Ref) const TextLayoutOptions& layout);
+    API_FUNCTION() int32 HitTestText(const StringView& text, const Float2& location, API_PARAM(Ref) const TextLayoutOptions& layout);
 
     /// <summary>
     /// Calculates hit character index at given location.
@@ -392,7 +377,7 @@ public:
     /// <param name="text">The input text to test.</param>
     /// <param name="location">The input location to test.</param>
     /// <returns>The selected character position index (can be equal to text length if location is outside of the layout rectangle).</returns>
-    API_FUNCTION() FORCE_INLINE int32 HitTestText(const StringView& text, const Vector2& location)
+    API_FUNCTION() FORCE_INLINE int32 HitTestText(const StringView& text, const Float2& location)
     {
         return HitTestText(text, location, TextLayoutOptions());
     }
@@ -404,9 +389,9 @@ public:
     /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
     /// <param name="location">The input location to test.</param>
     /// <returns>The selected character position index (can be equal to text length if location is outside of the layout rectangle).</returns>
-    API_FUNCTION() FORCE_INLINE int32 HitTestText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, const Vector2& location)
+    API_FUNCTION() FORCE_INLINE int32 HitTestText(const StringView& text, API_PARAM(Ref) const TextRange& textRange, const Float2& location)
     {
-        return HitTestText(StringView(text.Get() + textRange.StartIndex, textRange.Length()), location, TextLayoutOptions());
+        return HitTestText(textRange.Substring(text), location, TextLayoutOptions());
     }
 
     /// <summary>
@@ -416,7 +401,7 @@ public:
     /// <param name="index">The text position to get coordinates of.</param>
     /// <param name="layout">The text layout properties.</param>
     /// <returns>The character position (upper left corner which can be used for a caret position).</returns>
-    API_FUNCTION() Vector2 GetCharPosition(const StringView& text, int32 index, API_PARAM(Ref) const TextLayoutOptions& layout);
+    API_FUNCTION() Float2 GetCharPosition(const StringView& text, int32 index, API_PARAM(Ref) const TextLayoutOptions& layout);
 
     /// <summary>
     /// Calculates character position for given text and character index.
@@ -426,9 +411,9 @@ public:
     /// <param name="index">The text position to get coordinates of.</param>
     /// <param name="layout">The text layout properties.</param>
     /// <returns>The character position (upper left corner which can be used for a caret position).</returns>
-    API_FUNCTION() Vector2 GetCharPosition(const StringView& text, API_PARAM(Ref) const TextRange& textRange, int32 index, API_PARAM(Ref) const TextLayoutOptions& layout)
+    API_FUNCTION() Float2 GetCharPosition(const StringView& text, API_PARAM(Ref) const TextRange& textRange, int32 index, API_PARAM(Ref) const TextLayoutOptions& layout)
     {
-        return GetCharPosition(StringView(text.Get() + textRange.StartIndex, textRange.Length()), index, layout);
+        return GetCharPosition(textRange.Substring(text), index, layout);
     }
 
     /// <summary>
@@ -437,7 +422,7 @@ public:
     /// <param name="text">The input text to test.</param>
     /// <param name="index">The text position to get coordinates of.</param>
     /// <returns>The character position (upper left corner which can be used for a caret position).</returns>
-    API_FUNCTION() FORCE_INLINE Vector2 GetCharPosition(const StringView& text, int32 index)
+    API_FUNCTION() FORCE_INLINE Float2 GetCharPosition(const StringView& text, int32 index)
     {
         return GetCharPosition(text, index, TextLayoutOptions());
     }
@@ -449,9 +434,9 @@ public:
     /// <param name="textRange">The input text range (substring range of the input text parameter).</param>
     /// <param name="index">The text position to get coordinates of.</param>
     /// <returns>The character position (upper left corner which can be used for a caret position).</returns>
-    API_FUNCTION() FORCE_INLINE Vector2 GetCharPosition(const StringView& text, API_PARAM(Ref) const TextRange& textRange, int32 index)
+    API_FUNCTION() FORCE_INLINE Float2 GetCharPosition(const StringView& text, API_PARAM(Ref) const TextRange& textRange, int32 index)
     {
-        return GetCharPosition(StringView(text.Get() + textRange.StartIndex, textRange.Length()), index, TextLayoutOptions());
+        return GetCharPosition(textRange.Substring(text), index, TextLayoutOptions());
     }
 
     /// <summary>
@@ -460,7 +445,6 @@ public:
     void FlushFaceSize() const;
 
 public:
-
     // [Object]
     String ToString() const override;
 };

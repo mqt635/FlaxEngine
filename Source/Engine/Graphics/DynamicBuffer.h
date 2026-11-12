@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,12 +6,11 @@
 #include "GPUBuffer.h"
 
 /// <summary>
-/// Dynamic GPU buffer that allows to update and use GPU data (index/vertex/other) during single frame (supports dynamic resizing)
+/// Dynamic GPU buffer that allows to update and use GPU data (index/vertex/other) during single frame (supports dynamic resizing).
 /// </summary>
 class FLAXENGINE_API DynamicBuffer
 {
 protected:
-
     GPUBuffer* _buffer;
     String _name;
     uint32 _stride;
@@ -33,6 +32,10 @@ public:
     virtual ~DynamicBuffer();
 
 public:
+    /// <summary>
+    /// GPU usage of the resource. Use Dynamic for resources that can be updated multiple timers per-frame.
+    /// </summary>
+    GPUResourceUsage Usage = GPUResourceUsage::Dynamic;
 
     /// <summary>
     /// The data container (raw bytes storage).
@@ -40,7 +43,7 @@ public:
     Array<byte> Data;
 
     /// <summary>
-    /// Gets buffer (may be null since it's using 'late init' feature)
+    /// Gets buffer (can be null due to 'late init' feature).
     /// </summary>
     FORCE_INLINE GPUBuffer* GetBuffer() const
     {
@@ -72,13 +75,37 @@ public:
     /// <param name="size">Amount of data to write (in bytes)</param>
     FORCE_INLINE void Write(const void* bytes, int32 size)
     {
-        Data.Add((byte*)bytes, size);
+        Data.Add((const byte*)bytes, size);
+    }
+
+    /// <summary>
+    /// Allocates bytes in the buffer by resizing the buffer for new memory and returns the pointer to the start of the allocated space.
+    /// </summary>
+    /// <param name="size">Amount of data to allocate (in bytes)</param>
+    FORCE_INLINE byte* WriteReserve(int32 size)
+    {
+        const int32 start = Data.Count();
+        Data.AddUninitialized(size);
+        return Data.Get() + start;
+    }
+
+    /// <summary>
+    /// Allocates bytes in the buffer by resizing the buffer for new memory and returns the pointer to the start of the allocated space.
+    /// </summary>
+    /// <param name="count">Amount of items to allocate</param>
+    template<typename T>
+    FORCE_INLINE T* WriteReserve(int32 count)
+    {
+        return (T*)WriteReserve(count * sizeof(T));
     }
 
     /// <summary>
     /// Unlock buffer and flush data with a buffer (it will be ready for an immediate draw).
     /// </summary>
-    void Flush();
+    void Flush()
+    {
+        Flush(nullptr);
+    }
 
     /// <summary>
     /// Unlock buffer and flush data with a buffer (it will be ready for a during next frame draw).
@@ -92,7 +119,6 @@ public:
     void Dispose();
 
 protected:
-
     virtual void InitDesc(GPUBufferDescription& desc, int32 numElements) = 0;
 };
 
@@ -101,26 +127,31 @@ protected:
 /// </summary>
 class FLAXENGINE_API DynamicVertexBuffer : public DynamicBuffer
 {
-public:
+private:
+    GPUVertexLayout* _layout;
 
+public:
     /// <summary>
     /// Init
     /// </summary>
     /// <param name="initialCapacity">Initial capacity of the buffer (in bytes)</param>
     /// <param name="stride">Stride in bytes</param>
     /// <param name="name">Buffer name</param>
-    DynamicVertexBuffer(uint32 initialCapacity, uint32 stride, const String& name = String::Empty)
+    /// <param name="layout">The vertex buffer layout.</param>
+    DynamicVertexBuffer(uint32 initialCapacity, uint32 stride, const String& name = String::Empty, GPUVertexLayout* layout = nullptr)
         : DynamicBuffer(initialCapacity, stride, name)
+        , _layout(layout)
     {
     }
+
+    // Gets the vertex buffer layout.
+    GPUVertexLayout* GetLayout() const;
+    // Sets the vertex buffer layout.
+    void SetLayout(GPUVertexLayout* layout);
 
 protected:
-
     // [DynamicBuffer]
-    void InitDesc(GPUBufferDescription& desc, int32 numElements) override
-    {
-        desc = GPUBufferDescription::Vertex(_stride, numElements, GPUResourceUsage::Dynamic);
-    }
+    void InitDesc(GPUBufferDescription& desc, int32 numElements) override;
 };
 
 /// <summary>
@@ -129,7 +160,6 @@ protected:
 class FLAXENGINE_API DynamicIndexBuffer : public DynamicBuffer
 {
 public:
-
     /// <summary>
     /// Init
     /// </summary>
@@ -142,10 +172,53 @@ public:
     }
 
 protected:
-
     // [DynamicBuffer]
-    void InitDesc(GPUBufferDescription& desc, int32 numElements) override
-    {
-        desc = GPUBufferDescription::Index(_stride, numElements, GPUResourceUsage::Dynamic);
-    }
+    void InitDesc(GPUBufferDescription& desc, int32 numElements) override;
+};
+
+/// <summary>
+/// Dynamic structured buffer that allows to upload data to the GPU from CPU (supports dynamic resizing).
+/// </summary>
+class FLAXENGINE_API DynamicStructuredBuffer : public DynamicBuffer
+{
+private:
+    bool _isUnorderedAccess;
+
+public:
+    /// <summary>
+    /// Init
+    /// </summary>
+    /// <param name="initialCapacity">Initial capacity of the buffer (in bytes).</param>
+    /// <param name="stride">Stride in bytes.</param>
+    /// <param name="isUnorderedAccess">True if unordered access usage.</param>
+    /// <param name="name">Buffer name.</param>
+    DynamicStructuredBuffer(uint32 initialCapacity, uint32 stride, bool isUnorderedAccess = false, const String& name = String::Empty);
+
+protected:
+    // [DynamicBuffer]
+    void InitDesc(GPUBufferDescription& desc, int32 numElements) override;
+};
+
+/// <summary>
+/// Dynamic Typed buffer that allows to upload data to the GPU from CPU (supports dynamic resizing).
+/// </summary>
+class FLAXENGINE_API DynamicTypedBuffer : public DynamicBuffer
+{
+private:
+    PixelFormat _format;
+    bool _isUnorderedAccess;
+
+public:
+    /// <summary>
+    /// Init
+    /// </summary>
+    /// <param name="initialCapacity">Initial capacity of the buffer (in bytes).</param>
+    /// <param name="format">Format of the data.</param>
+    /// <param name="isUnorderedAccess">True if unordered access usage.</param>
+    /// <param name="name">Buffer name.</param>
+    DynamicTypedBuffer(uint32 initialCapacity, PixelFormat format, bool isUnorderedAccess = false, const String& name = String::Empty);
+
+protected:
+    // [DynamicBuffer]
+    void InitDesc(GPUBufferDescription& desc, int32 numElements) override;
 };

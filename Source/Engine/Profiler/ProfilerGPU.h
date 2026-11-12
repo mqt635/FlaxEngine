@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -6,8 +6,6 @@
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingType.h"
 #include "RenderStats.h"
-
-class GPUTimerQuery;
 
 #if COMPILE_WITH_PROFILER
 
@@ -19,15 +17,16 @@ class GPUTimerQuery;
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API ProfilerGPU
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(ProfilerGPU);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(ProfilerGPU);
+    friend class Engine;
+    friend class GPUDevice;
 public:
-
     /// <summary>
     /// Represents single CPU profiling event data.
     /// </summary>
-    API_STRUCT() struct Event
+    API_STRUCT(NoDefault) struct Event
     {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(Event);
+        DECLARE_SCRIPTING_TYPE_MINIMAL(Event);
 
         /// <summary>
         /// The name of the event.
@@ -37,7 +36,7 @@ public:
         /// <summary>
         /// The timer query used to get the exact event time on a GPU. Assigned and managed by the internal profiler layer.
         /// </summary>
-        API_FIELD() GPUTimerQuery* Timer;
+        API_FIELD() uint64 Query;
 
         /// <summary>
         /// The rendering stats for this event. When event is active it holds the stats on event begin.
@@ -53,6 +52,11 @@ public:
         /// The event depth. Value 0 is used for the root events.
         /// </summary>
         API_FIELD() int32 Depth;
+
+        /// <summary>
+        /// True if event timer query is active.
+        /// </summary>
+        API_FIELD() bool QueryActive;
     };
 
     /// <summary>
@@ -61,16 +65,19 @@ public:
     class EventBuffer : public NonCopyable
     {
     private:
-
         bool _isResolved = true;
         Array<Event> _data;
 
     public:
-
         /// <summary>
         /// The index of the frame buffer was used for recording events (for the last time).
         /// </summary>
         uint64 FrameIndex;
+
+        /// <summary>
+        /// Sum of all present events duration on CPU during this frame (in milliseconds).
+        /// </summary>
+        float PresentTime;
 
         /// <summary>
         /// Determines whether this buffer has ready data (resolved and not empty).
@@ -80,7 +87,7 @@ public:
         /// <summary>
         /// Ends all used timer queries.
         /// </summary>
-        void EndAll();
+        void EndAllQueries();
 
         /// <summary>
         /// Tries the resolve this frame. Skips if already resolved or has no collected events.
@@ -116,21 +123,16 @@ public:
         void Clear();
     };
 
-private:
-
-    static int32 _depth;
-
-    static Array<GPUTimerQuery*> _timerQueriesPool;
-    static Array<GPUTimerQuery*> _timerQueriesFree;
-
-    static GPUTimerQuery* GetTimerQuery();
-
 public:
-
     /// <summary>
     /// True if GPU profiling is enabled, otherwise false to disable events collecting and GPU timer queries usage. Can be changed during rendering.
     /// </summary>
-    static bool Enabled;
+    API_FIELD(Attributes="DebugCommand") static bool Enabled;
+
+    /// <summary>
+    /// True if GPU events are enabled (see GPUContext::EventBegin), otherwise false. Cannot be changed during rendering.
+    /// </summary>
+    API_FIELD(Attributes="DebugCommand") static bool EventsEnabled;
 
     /// <summary>
     /// The current frame buffer to collect events.
@@ -138,12 +140,23 @@ public:
     static int32 CurrentBuffer;
 
     /// <summary>
-    /// The events buffers (one per frame).
+    /// The event buffers (one per frame).
     /// </summary>
     static EventBuffer Buffers[PROFILER_GPU_EVENTS_FRAMES];
 
 public:
+    // Callbacks used by the profiler to notify about GPU events. These can be used to integrate with external profilers like NVIDIA Nsight PerfSDK.
+    typedef void (*EventBeginDelegate)(const Char* name, int32 depth, int32 index, class GPUContext* context);
+    typedef void (*EventEndDelegate)(int32 index, class GPUContext* context);
+    static EventBeginDelegate EventBegin;
+    static EventEndDelegate EventEnd;
 
+    // Callbacks used by the profiler to notify about GPU frame begin (before commands recording) and end (after submit/present). These can be used to integrate with external profilers like NVIDIA Nsight PerfSDK.
+    typedef void (*FrameDelegate)();
+    static FrameDelegate FrameBegin;
+    static FrameDelegate FrameEnd;
+
+public:
     /// <summary>
     /// Begins the event. Call EndEvent with index parameter equal to the returned value by BeginEvent function.
     /// </summary>
@@ -158,31 +171,25 @@ public:
     static void EndEvent(int32 index);
 
     /// <summary>
-    /// Begins the new frame rendering. Called by the engine to sync profiling data.
-    /// </summary>
-    static void BeginFrame();
-
-    /// <summary>
-    /// Called when just before flushing current frame GPU commands (via Present or Flush). Call active timer queries should be ended now.
-    /// </summary>
-    static void OnPresent();
-
-    /// <summary>
-    /// Ends the frame rendering. Called by the engine to sync profiling data.
-    /// </summary>
-    static void EndFrame();
-
-    /// <summary>
     /// Tries to get the rendering stats from the last frame drawing (that has been resolved and has valid data).
     /// </summary>
     /// <param name="drawTimeMs">The draw execution time on a GPU (in milliseconds).</param>
+    /// <param name="presentTimeMs">The final frame present time on a CPU (in milliseconds). Time game waited for vsync or GPU to finish previous frame rendering.</param>
     /// <param name="statsData">The rendering stats data.</param>
     /// <returns>True if got the data, otherwise false.</returns>
-    static bool GetLastFrameData(float& drawTimeMs, RenderStatsData& statsData);
+    API_FUNCTION() static bool GetLastFrameData(float& drawTimeMs, float& presentTimeMs, RenderStatsData& statsData);
 
     /// <summary>
-    /// Releases resources. Calls to the profiling API after Dispose are not valid
+    /// Profiles next frame(s) rendering performance and dumps the results to the log (as a hierarchy structure). When using more than 1 frame, the results are averaged for more accurate profiling (especially for A/B testing).
     /// </summary>
+    /// <param name="frames">Amount of frames to profile for more stable results (event durations are averaged). Value 0 uses default of 4 frames.</param>
+    API_FUNCTION(Attributes="DebugCommand") static void Dump(int32 frames = 4);
+
+private:
+    static void BeginFrame();
+    static void OnPresent();
+    static void OnPresentTime(float time);
+    static void EndFrame();
     static void Dispose();
 };
 
@@ -197,7 +204,7 @@ struct ScopeProfileBlockGPU
     {
         Index = ProfilerGPU::BeginEvent(name);
     }
- 
+
     FORCE_INLINE ~ScopeProfileBlockGPU()
     {
         ProfilerGPU::EndEvent(Index);

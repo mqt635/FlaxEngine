@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Xml;
 using FlaxEditor.Content;
@@ -6,6 +6,7 @@ using FlaxEditor.Content.Import;
 using FlaxEditor.CustomEditors;
 using FlaxEditor.CustomEditors.Editors;
 using FlaxEditor.GUI;
+using FlaxEditor.Scripting;
 using FlaxEditor.Viewport.Previews;
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -19,6 +20,48 @@ namespace FlaxEditor.Windows.Assets
     /// <seealso cref="FlaxEditor.Windows.Assets.AssetEditorWindow" />
     public sealed class AudioClipWindow : AssetEditorWindowBase<AudioClip>
     {
+        private sealed class Preview : AudioClipPreview
+        {
+            public AudioSource Source;
+
+            public override void Draw()
+            {
+                base.Draw();
+
+                if (!Source || Source.State == AudioSource.States.Stopped)
+                    return;
+                var info = DataInfo;
+                if (!HasData || info.NumSamples == 0)
+                    return;
+                var height = Height;
+                var width = Width;
+
+                // Draw current time
+                var playPosition = Source.Time / info.Length * width;
+                Render2D.DrawLine(new Float2(playPosition, 0), new Float2(playPosition, height), Color.White);
+
+                // Draw current mouse pointer
+                var mousePos = PointFromScreen(Input.MouseScreenPosition);
+                if (mousePos.X > 0 && mousePos.Y > 0 && mousePos.X < width && mousePos.Y < height)
+                {
+                    Render2D.DrawLine(new Float2(mousePos.X, 0), new Float2(mousePos.X, height), Color.White.AlphaMultiplied(0.3f));
+                }
+            }
+
+            public override bool OnMouseDown(Float2 location, MouseButton button)
+            {
+                if (base.OnMouseDown(location, button))
+                    return true;
+
+                if (button == MouseButton.Left && Source && Source.State != AudioSource.States.Stopped)
+                {
+                    var info = DataInfo;
+                    Source.Time = location.X / Width * info.Length;
+                }
+                return false;
+            }
+        }
+
         /// <summary>
         /// The AudioClip properties proxy object.
         /// </summary>
@@ -34,7 +77,8 @@ namespace FlaxEditor.Windows.Assets
             {
                 public override void Initialize(LayoutElementsContainer layout)
                 {
-                    var window = ((PropertiesProxy)Values[0])._window;
+                    var proxy = ((PropertiesProxy)Values[0]);
+                    var window = proxy._window;
                     if (window == null)
                     {
                         layout.Label("Loading...", TextAlignment.Center);
@@ -58,7 +102,11 @@ namespace FlaxEditor.Windows.Assets
 
                     base.Initialize(layout);
 
-                    layout.Space(10);
+                    // Creates the import path UI
+                    var pathGroup = layout.Group("Import Path");
+                    Utilities.Utils.CreateImportPathUI(pathGroup, window.Item as BinaryAssetItem);
+
+                    layout.Space(5);
                     var reimportButton = layout.Button("Reimport");
                     reimportButton.Button.Clicked += () => ((PropertiesProxy)Values[0]).Reimport();
                 }
@@ -74,7 +122,7 @@ namespace FlaxEditor.Windows.Assets
                 _window = window;
 
                 // Try to restore target asset AudioClip import options (useful for fast reimport)
-                AudioImportSettings.TryRestore(ref ImportSettings, window.Item.Path);
+                Editor.TryRestoreImportOptions(ref ImportSettings.Settings, window.Item.Path);
 
                 // Prepare restore data
                 PeekState();
@@ -92,6 +140,11 @@ namespace FlaxEditor.Windows.Assets
             /// </summary>
             public void Reimport()
             {
+                if (_window?._previewSource != null)
+                {
+                    _window._previewSource.Stop();
+                    _window.UpdateToolstrip();
+                }
                 Editor.Instance.ContentImporting.Reimport((BinaryAssetItem)_window.Item, ImportSettings, true);
             }
 
@@ -113,7 +166,7 @@ namespace FlaxEditor.Windows.Assets
         }
 
         private readonly SplitPanel _split;
-        private readonly AudioClipPreview _preview;
+        private readonly Preview _preview;
         private readonly CustomEditorPresenter _propertiesEditor;
         private readonly ToolStripButton _playButton;
         private readonly ToolStripButton _pauseButton;
@@ -137,7 +190,7 @@ namespace FlaxEditor.Windows.Assets
             };
 
             // Preview
-            _preview = new AudioClipPreview
+            _preview = new Preview
             {
                 DrawMode = AudioClipPreview.DrawModes.Fill,
                 AnchorPreset = AnchorPresets.StretchAll,
@@ -154,10 +207,13 @@ namespace FlaxEditor.Windows.Assets
             // Toolstrip
             _toolstrip.AddButton(Editor.Icons.Import64, () => Editor.ContentImporting.Reimport((BinaryAssetItem)Item)).LinkTooltip("Reimport");
             _toolstrip.AddSeparator();
-            _playButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Play64, OnPlay).LinkTooltip("Play/stop audio");
-            _pauseButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Pause64, OnPause).LinkTooltip("Pause audio");
+            _playButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Play64, OnPlay).LinkTooltip("Play/stop audio (F5)");
+            _pauseButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Pause64, OnPause).LinkTooltip("Pause audio (F6)");
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/audio/audio-clip.html")).LinkTooltip("See documentation to learn more");
+
+            InputActions.Add(options => options.Play, OnPlay);
+            InputActions.Add(options => options.Pause, OnPause);
         }
 
         private void OnPlay()
@@ -171,8 +227,10 @@ namespace FlaxEditor.Windows.Assets
                 _previewSource = new AudioSource
                 {
                     Parent = _previewScene,
+                    AllowSpatialization = false,
                     Clip = _asset,
                 };
+                _preview.Source = _previewSource;
             }
             if (_previewSource.State == AudioSource.States.Playing)
                 _previewSource.Stop();
@@ -184,7 +242,12 @@ namespace FlaxEditor.Windows.Assets
         private void OnPause()
         {
             if (_previewSource)
-                _previewSource.Pause();
+            {
+                if (_previewSource.State == AudioSource.States.Playing)
+                    _previewSource.Pause();
+                else
+                    _previewSource.Play();
+            }
             UpdateToolstrip();
         }
 
@@ -228,15 +291,18 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnDestroy()
         {
+            if (IsDisposing)
+                return;
+            base.OnDestroy();
+
             if (_previewSource)
             {
+                _preview.Source = null;
                 _previewSource.Stop();
-                Object.Destroy(_previewSource);
+                FlaxEngine.Object.Destroy(_previewSource);
                 _previewSource = null;
             }
-            Object.Destroy(ref _previewScene);
-
-            base.OnDestroy();
+            FlaxEngine.Object.Destroy(ref _previewScene);
         }
 
         /// <inheritdoc />
@@ -263,6 +329,7 @@ namespace FlaxEditor.Windows.Assets
                 _propertiesEditor.BuildLayout();
                 if (_previewSource)
                     _previewSource.Stop();
+                _preview.RefreshPreview();
 
                 // Setup
                 ClearEditedFlag();
@@ -270,7 +337,26 @@ namespace FlaxEditor.Windows.Assets
 
             // Tick scene
             if (_previewScene)
+            {
                 _previewScene.Update();
+                UpdateToolstrip();
+            }
+        }
+
+        /// <inheritdoc />
+        public override bool OnKeyDown(KeyboardKeys key)
+        {
+            if (base.OnKeyDown(key))
+                return true;
+
+            if (key == KeyboardKeys.Spacebar)
+            {
+                if (_previewSource?.State == AudioSource.States.Playing)
+                    OnPause();
+                else
+                    OnPlay();
+            }
+            return false;
         }
 
         /// <inheritdoc />
@@ -279,14 +365,13 @@ namespace FlaxEditor.Windows.Assets
         /// <inheritdoc />
         public override void OnLayoutSerialize(XmlWriter writer)
         {
-            writer.WriteAttributeString("Split", _split.SplitterValue.ToString());
+            LayoutSerializeSplitter(writer, "Split", _split);
         }
 
         /// <inheritdoc />
         public override void OnLayoutDeserialize(XmlElement node)
         {
-            if (float.TryParse(node.GetAttribute("Split"), out float value1))
-                _split.SplitterValue = value1;
+            LayoutDeserializeSplitter(node, "Split", _split);
         }
 
         /// <inheritdoc />

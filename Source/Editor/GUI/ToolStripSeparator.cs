@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using FlaxEngine;
 using FlaxEngine.GUI;
@@ -27,7 +27,8 @@ namespace FlaxEditor.GUI
             base.Draw();
 
             // Draw the separator line
-            Render2D.FillRectangle(new Rectangle((Width - 4) / 2, 2, 1, Height - 4), Style.Current.LightBackground * 1.3f);
+            float margin = 4.0f, size = 1.0f;
+            Render2D.FillRectangle(new Rectangle(Width * 0.5f - size, margin, size, Height - margin * 2), Style.Current.BackgroundHighlighted);
         }
     }
 }

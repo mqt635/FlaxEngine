@@ -1,9 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Core/Config/Settings.h"
-#include "Engine/Serialization/Serialization.h"
+#include "Engine/Serialization/SerializationFwd.h"
 
 /// <summary>
 /// Specifies the display mode of a game window.

@@ -1,34 +1,41 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if PLATFORM_WINDOWS
 
 #include "Engine/Platform/Platform.h"
 #include "Engine/Platform/Window.h"
+#include "Engine/Platform/Windows/WindowsInput.h"
+#include "Engine/Platform/Windows/WindowsWindow.h"
 #include "Engine/Platform/FileSystem.h"
 #include "Engine/Platform/CreateWindowSettings.h"
+#include "Engine/Platform/CreateProcessSettings.h"
 #include "Engine/Platform/WindowsManager.h"
 #include "Engine/Platform/MemoryStats.h"
 #include "Engine/Platform/BatteryInfo.h"
-#include "Engine/Engine/Globals.h"
+#include "Engine/Platform/Base/PlatformUtils.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/Types/Version.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Platform/MessageBox.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Engine/CommandLine.h"
+#include "Engine/Profiler/ProfilerCPU.h"
 #include "../Win32/IncludeWindowsHeaders.h"
 #include <VersionHelpers.h>
 #include <ShellAPI.h>
-#include <timeapi.h>
 #include <Psapi.h>
 #include <objbase.h>
 #include <cstdio>
+#undef ShellExecute
 #if CRASH_LOG_ENABLE
 #include <dbghelp.h>
 #endif
 #include "resource.h"
 
-const Char* WindowsPlatform::ApplicationWindowClass = TEXT("FlaxWindow");
+#define CLR_EXCEPTION 0xE0434352
+#define VCPP_EXCEPTION 0xE06D7363
+
 void* WindowsPlatform::Instance = nullptr;
 
 #if CRASH_LOG_ENABLE || TRACY_ENABLE
@@ -36,17 +43,17 @@ void* WindowsPlatform::Instance = nullptr;
 extern "C" {
 static HANDLE dbgHelpLock;
 
-void DbgHelpInit()
+void FlaxDbgHelpInit()
 {
     dbgHelpLock = CreateMutexW(nullptr, FALSE, nullptr);
 }
 
-void DbgHelpLock()
+void FlaxDbgHelpLock()
 {
     WaitForSingleObject(dbgHelpLock, INFINITE);
 }
 
-void DbgHelpUnlock()
+void FlaxDbgHelpUnlock()
 {
     ReleaseMutex(dbgHelpLock);
 }
@@ -55,9 +62,9 @@ void DbgHelpUnlock()
 
 namespace
 {
-    String UserLocale, ComputerName, UserName, WindowsName;
+    String UserLanguage, UserLocale, ComputerName, WindowsName;
     HANDLE EngineMutex = nullptr;
-    Rectangle VirtualScreenBounds = Rectangle(0.0f, 0.0f, 0.0f, 0.0f);
+    Rectangle VirtualScreenBounds(0.0f, 0.0f, 0.0f, 0.0f);
     int32 VersionMajor = 0;
     int32 VersionMinor = 0;
     int32 VersionBuild = 0;
@@ -117,8 +124,6 @@ int32 CalculateDpi(HMODULE shCoreDll)
                 dpiY = (int32)y;
             }
         }
-
-        FreeLibrary(shCoreDll);
     }
 
     return (dpiX + dpiY) / 2;
@@ -176,8 +181,12 @@ void GetWindowsVersion(String& windowsName, int32& versionMajor, int32& versionM
             VersionMajor = 6;
             VersionMinor = 2;
         }
-
-        if (VersionMajor == 0 && VersionMinor == 0)
+        else if (VersionMajor >= 10 && VersionBuild >= 22000)
+        {
+            // Windows 11
+            windowsName.Replace(TEXT("10"), TEXT("11"));
+        }
+        else if (VersionMajor == 0 && VersionMinor == 0)
         {
             String windowsVersion;
             GetStringRegKey(hKey, TEXT("CurrentVersion"), windowsVersion, TEXT(""));
@@ -247,6 +256,39 @@ void GetWindowsVersion(String& windowsName, int32& versionMajor, int32& versionM
     RegCloseKey(hKey);
 }
 
+#if PLATFORM_ARCH_X86 || PLATFORM_ARCH_X64
+
+struct CPUBrand
+{
+    char Buffer[0x40];
+
+    CPUBrand()
+    {
+        Buffer[0] = 0;
+        int32 cpuInfo[4];
+        __cpuid(cpuInfo, 0x80000000);
+        if (cpuInfo[0] >= 0x80000004)
+        {
+            // Get name
+            for (uint32 i = 0; i < 3; i++)
+            {
+                __cpuid(cpuInfo, 0x80000002 + i);
+                memcpy(Buffer + i * sizeof(cpuInfo), cpuInfo, sizeof(cpuInfo));
+            }
+
+            // Trim ending whitespaces
+            int32 size = StringUtils::Length(Buffer);
+            while (size > 1 && Buffer[size - 1] == ' ')
+                size--;
+            Buffer[size] = 0;
+        }
+    }
+};
+
+#endif
+
+#if !PLATFORM_SDL
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     // Find window to process that message
@@ -264,10 +306,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-LONG CALLBACK SehExceptionHandler(EXCEPTION_POINTERS* ep)
+#endif
+
+long __stdcall WindowsPlatform::SehExceptionHandler(EXCEPTION_POINTERS* ep)
 {
+    if (ep->ExceptionRecord->ExceptionCode == CLR_EXCEPTION)
+    {
+        // Pass CLR exceptions back to runtime
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     // Skip if engine already crashed
-    if (Globals::FatalErrorOccurred)
+    if (Engine::FatalError != FatalErrorType::None)
         return EXCEPTION_CONTINUE_SEARCH;
 
     // Get exception info
@@ -301,14 +351,17 @@ LONG CALLBACK SehExceptionHandler(EXCEPTION_POINTERS* ep)
         errorMsg += String::Format(TEXT("{:#x}"), (uint32)ep->ExceptionRecord->ExceptionCode);
     }
 
-    // Pause if debugging
+    // Log exception and return to the crash location when using debugger
     if (Platform::IsDebuggerPresent())
     {
-        PLATFORM_DEBUG_BREAK;
+        LOG_STR(Error, errorMsg);
+        const String stackTrace = Platform::GetStackTrace(0, 60, ep);
+        LOG_STR(Error, stackTrace);
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 
     // Crash engine
-    Platform::Fatal(errorMsg.Get(), ep);
+    Platform::Fatal(errorMsg.Get(), ep, FatalErrorType::Exception);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -379,6 +432,8 @@ cleanup:
 
 DialogResult MessageBox::Show(Window* parent, const StringView& text, const StringView& caption, MessageBoxButtons buttons, MessageBoxIcon icon)
 {
+    PROFILE_CPU();
+
     // Construct input flags
     UINT flags = 0;
     switch (buttons)
@@ -419,11 +474,12 @@ DialogResult MessageBox::Show(Window* parent, const StringView& text, const Stri
         flags |= MB_ICONHAND;
         break;
     case MessageBoxIcon::Information:
+    case MessageBoxIcon::Question:
         flags |= MB_ICONINFORMATION;
         break;
-    case MessageBoxIcon::Question:
-        flags |= MB_ICONQUESTION;
-        break;
+    //case MessageBoxIcon::Question:
+    //    flags |= MB_ICONQUESTION;
+    //    break;
     case MessageBoxIcon::Stop:
         flags |= MB_ICONSTOP;
         break;
@@ -433,6 +489,7 @@ DialogResult MessageBox::Show(Window* parent, const StringView& text, const Stri
     default:
         break;
     }
+    flags |= MB_TASKMODAL;
 
     // Show dialog
     int result = MessageBoxW(parent ? static_cast<HWND>(parent->GetNativePtr()) : nullptr, String(text).GetText(), String(caption).GetText(), flags);
@@ -492,14 +549,75 @@ void WindowsPlatform::ReleaseMutex()
     }
 }
 
+void CheckInstructionSet()
+{
+#if PLATFORM_ARCH_X86 || PLATFORM_ARCH_X64
+    // Check the minimum vector instruction set support
+    int32 cpuInfo[4] = { -1 };
+    __cpuid(cpuInfo, 0);
+    int32 cpuInfoSize = cpuInfo[0];
+    __cpuid(cpuInfo, 1);
+    bool SSE2 = cpuInfo[3] & (1u << 26);
+    bool SSE3 = cpuInfo[2] & (1u << 0);
+    bool SSE41 = cpuInfo[2] & (1u << 19);
+    bool SSE42 = cpuInfo[2] & (1u << 20);
+    bool AVX = cpuInfo[2] & (1u << 28);
+    bool POPCNT = cpuInfo[2] & (1u << 23);
+    bool AVX2 = false;
+    if (cpuInfoSize >= 7)
+    {
+        __cpuid(cpuInfo, 7);
+        AVX2 = cpuInfo[1] & (1u << 5) && (_xgetbv(0) & 6) == 6;
+    }
+    const Char* missingFeature = nullptr;
+#if defined(__AVX__)
+    if (!AVX)
+        missingFeature = TEXT("AVX");
+#endif
+#if defined(__AVX2__)
+    if (!AVX2)
+        missingFeature = TEXT("AVX2");
+#endif
+#if PLATFORM_SIMD_SSE2
+    if (!SSE2)
+        missingFeature = TEXT("SSE2");
+#endif
+#if PLATFORM_SIMD_SSE3
+    if (!SSE3)
+        missingFeature = TEXT("SSE3");
+#endif
+#if PLATFORM_SIMD_SSE4_1
+    if (!SSE41)
+        missingFeature = TEXT("SSE4.1");
+#endif
+#if PLATFORM_SIMD_SSE4_2
+    if (!SSE42)
+        missingFeature = TEXT("SSE4.2");
+    if (!POPCNT)
+        missingFeature = TEXT("POPCNT");
+#endif
+    if (missingFeature)
+    {
+        // Not supported CPU
+        CPUBrand cpu;
+        Platform::Error(String::Format(TEXT("Cannot start program due to lack of CPU feature {}.\n\n{}"), missingFeature, String(cpu.Buffer)));
+        exit(-1);
+    }
+#endif
+}
+PRAGMA_ENABLE_OPTIMIZATION;
+
 void WindowsPlatform::PreInit(void* hInstance)
 {
     ASSERT(hInstance);
     Instance = hInstance;
 
+    CheckInstructionSet();
+
     // Disable the process from being showing "ghosted" while not responding messages during slow tasks
     DisableProcessWindowsGhosting();
 
+#if !PLATFORM_SDL
     // Register window class
     WNDCLASS windowsClass;
     Platform::MemoryClear(&windowsClass, sizeof(WNDCLASS));
@@ -508,12 +626,13 @@ void WindowsPlatform::PreInit(void* hInstance)
     windowsClass.hInstance = (HINSTANCE)Instance;
     windowsClass.hIcon = LoadIconW(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDR_MAINFRAME));
     windowsClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    windowsClass.lpszClassName = ApplicationWindowClass;
+    windowsClass.lpszClassName = ApplicationClassName;
     if (!RegisterClassW(&windowsClass))
     {
         Error(TEXT("Window class registration failed!"));
         exit(-1);
     }
+#endif
 
     // Init OLE
     if (OleInitialize(nullptr) != S_OK)
@@ -524,7 +643,7 @@ void WindowsPlatform::PreInit(void* hInstance)
 
 #if CRASH_LOG_ENABLE
     TCHAR buffer[MAX_PATH] = { 0 };
-    DbgHelpLock();
+    FlaxDbgHelpLock();
     if (::GetModuleFileNameW(::GetModuleHandleW(nullptr), buffer, MAX_PATH))
         SymbolsPath.Add(StringUtils::GetDirectoryName(buffer));
     if (::GetEnvironmentVariableW(TEXT("_NT_SYMBOL_PATH"), buffer, MAX_PATH))
@@ -533,17 +652,11 @@ void WindowsPlatform::PreInit(void* hInstance)
     options |= SYMOPT_LOAD_LINES | SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_DEFERRED_LOADS | SYMOPT_EXACT_SYMBOLS;
     SymSetOptions(options);
     OnSymbolsPathModified();
-    DbgHelpUnlock();
+    FlaxDbgHelpUnlock();
 #endif
 
+    // Get system version
     GetWindowsVersion(WindowsName, VersionMajor, VersionMinor, VersionBuild);
-
-    // Validate platform
-    if (VersionMajor < 6)
-    {
-        Error(TEXT("Not supported operating system version."));
-        exit(-1);
-    }
 }
 
 bool WindowsPlatform::IsWindows10()
@@ -595,9 +708,9 @@ bool WindowsPlatform::Init()
 {
     if (Win32Platform::Init())
         return true;
-   
+
     // Init console output (engine is linked with /SUBSYSTEM:WINDOWS so it lacks of proper console output on Windows)
-    if (CommandLine::Options.Std)
+    if (CommandLine::Options.Std.IsTrue())
     {
         // Attaches output of application to parent console, returns true if running in console-mode
         // [Reference: https://www.tillett.info/2013/05/13/how-to-create-a-windows-program-that-works-as-both-as-a-gui-and-console-application]
@@ -618,26 +731,60 @@ bool WindowsPlatform::Init()
         }
     }
 
-    // Check if can run Engine on current platform (requires Windows Vista SP1 or above)
-    if (!IsWindowsVistaSP1OrGreater() && !IsWindowsServer())
+    // Check if can run Engine on current platform
+#if WINVER >= 0x0A00
+    if (VersionMajor < 10 && !IsWindowsServer())
     {
-        Platform::Fatal(TEXT("Flax Engine requires Windows Vista SP1 or higher."));
+        Platform::Fatal(TEXT("Flax Engine requires Windows 10 or higher."));
         return true;
     }
-
-    // Set lowest possible timer resolution for previous Windows versions
-    if (VersionMajor < 10 || (VersionMajor == 10 && VersionBuild < 17134))
+#elif WINVER >= 0x0603
+    if ((VersionMajor < 8 || (VersionMajor == 8 && VersionMinor == 0)) && !IsWindowsServer())
     {
-        timeBeginPeriod(1);
+        Platform::Fatal(TEXT("Flax Engine requires Windows 8.1 or higher."));
+        return true;
+    }
+#elif WINVER >= 0x0602
+    if (VersionMajor < 8 && !IsWindowsServer())
+    {
+        Platform::Fatal(TEXT("Flax Engine requires Windows 8 or higher."));
+        return true;
+    }
+#else
+    if (VersionMajor < 7 && !IsWindowsServer())
+    {
+        Platform::Fatal(TEXT("Flax Engine requires Windows 7 or higher."));
+        return true;
+    }
+#endif
+
+    // Set the lowest possible timer resolution
+    const HMODULE ntdll = LoadLibraryW(L"ntdll.dll");
+    if (ntdll)
+    {
+        typedef LONG (WIN_API_CALLCONV *NtSetTimerResolution)(ULONG DesiredResolution, unsigned char SetResolution, ULONG* CurrentResolution);
+        const NtSetTimerResolution ntSetTimerResolution = (NtSetTimerResolution)GetProcAddress(ntdll, "NtSetTimerResolution");
+        if (ntSetTimerResolution)
+        {
+            ULONG currentResolution;
+            ntSetTimerResolution(1, TRUE, &currentResolution);
+        }
+        ::FreeLibrary(ntdll);
     }
 
     DWORD tmp;
     Char buffer[256];
+    ULONG bufferSize = ARRAY_COUNT(buffer), languagesCount = 0;
 
-    // Get user locale string
-    if (GetUserDefaultLocaleName(buffer, LOCALE_NAME_MAX_LENGTH))
+    // Get user locale strings
+    if (GetUserDefaultLocaleName(buffer, (int)bufferSize))
     {
         UserLocale = String(buffer);
+    }
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &languagesCount, buffer, &bufferSize))
+    {
+        // Get the first language
+        UserLanguage = String(buffer);
     }
 
     // Get computer name string
@@ -647,12 +794,16 @@ bool WindowsPlatform::Init()
     }
 
     // Get user name string
+    String userName;
     if (GetUserNameW(buffer, &tmp))
     {
-        UserName = String(buffer);
+        userName = String(buffer);
     }
+    OnPlatformUserAdd(New<User>(userName));
 
+#if !PLATFORM_SDL
     WindowsInput::Init();
+#endif
 
     return false;
 }
@@ -660,6 +811,12 @@ bool WindowsPlatform::Init()
 void WindowsPlatform::LogInfo()
 {
     Win32Platform::LogInfo();
+
+#if PLATFORM_ARCH_X86 || PLATFORM_ARCH_X64
+    // Log CPU brand
+    CPUBrand cpu;
+    LOG(Info, "CPU: {0}", String(cpu.Buffer));
+#endif
 
     LOG(Info, "Microsoft {0} {1}-bit ({2}.{3}.{4})", WindowsName, Platform::Is64BitPlatform() ? TEXT("64") : TEXT("32"), VersionMajor, VersionMinor, VersionBuild);
 
@@ -680,7 +837,9 @@ void WindowsPlatform::LogInfo()
 
 void WindowsPlatform::Tick()
 {
+#if !PLATFORM_SDL
     WindowsInput::Update();
+#endif
 
     // Check to see if any messages are waiting in the queue
     MSG msg;
@@ -699,7 +858,7 @@ void WindowsPlatform::BeforeExit()
 void WindowsPlatform::Exit()
 {
 #if CRASH_LOG_ENABLE
-    DbgHelpLock();
+    FlaxDbgHelpLock();
 #if !TRACY_ENABLE
     if (SymInitialized)
     {
@@ -708,18 +867,20 @@ void WindowsPlatform::Exit()
     }
 #endif
     SymbolsPath.Resize(0);
-    DbgHelpUnlock();
+    FlaxDbgHelpUnlock();
 #endif
 
+#if !PLATFORM_SDL
     // Unregister app class
-    UnregisterClassW(ApplicationWindowClass, nullptr);
+    UnregisterClassW(ApplicationClassName, nullptr);
+#endif
 
     Win32Platform::Exit();
 }
 
 #if !BUILD_RELEASE
 
-void WindowsPlatform::Log(const StringView& msg)
+void WindowsPlatform::Log(const StringView& msg, int32 logType)
 {
     Char buffer[512];
     Char* str;
@@ -764,6 +925,16 @@ void WindowsPlatform::SetHighDpiAwarenessEnabled(bool enable)
     ::FreeLibrary(shCoreDll);
 }
 
+String WindowsPlatform::GetSystemName()
+{
+    return WindowsName;
+}
+
+Version WindowsPlatform::GetSystemVersion()
+{
+    return Version(VersionMajor, VersionMinor, VersionBuild);
+}
+
 BatteryInfo WindowsPlatform::GetBatteryInfo()
 {
     BatteryInfo info;
@@ -779,9 +950,16 @@ BatteryInfo WindowsPlatform::GetBatteryInfo()
     return info;
 }
 
+#if !PLATFORM_SDL
 int32 WindowsPlatform::GetDpi()
 {
     return SystemDpi;
+}
+#endif
+
+String WindowsPlatform::GetUserLanguage()
+{
+    return UserLanguage.HasChars() ? UserLanguage : UserLocale;
 }
 
 String WindowsPlatform::GetUserLocaleName()
@@ -792,11 +970,6 @@ String WindowsPlatform::GetUserLocaleName()
 String WindowsPlatform::GetComputerName()
 {
     return ComputerName;
-}
-
-String WindowsPlatform::GetUserName()
-{
-    return UserName;
 }
 
 bool WindowsPlatform::GetHasFocus()
@@ -816,14 +989,26 @@ void WindowsPlatform::OpenUrl(const StringView& url)
     ::ShellExecuteW(nullptr, TEXT("open"), *url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+Float2 WindowsPlatform::GetMousePosition()
+{
+    POINT cursorPos;
+    GetCursorPos(&cursorPos);
+    return Float2((float)cursorPos.x, (float)cursorPos.y);
+}
+
+void WindowsPlatform::SetMousePosition(const Float2& pos)
+{
+    ::SetCursorPos((int)pos.X, (int)pos.Y);
+}
+
 struct GetMonitorBoundsData
 {
-    Vector2 Pos;
+    Float2 Pos;
     Rectangle Result;
 
-    GetMonitorBoundsData(const Vector2& pos)
+    GetMonitorBoundsData(const Float2& pos)
         : Pos(pos)
-        , Result(Vector2::Zero, WindowsPlatform::GetDesktopSize())
+        , Result(Float2::Zero, WindowsPlatform::GetDesktopSize())
     {
     }
 };
@@ -844,16 +1029,16 @@ BOOL CALLBACK EnumMonitorSize(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMoni
     return TRUE;
 }
 
-Rectangle WindowsPlatform::GetMonitorBounds(const Vector2& screenPos)
+Rectangle WindowsPlatform::GetMonitorBounds(const Float2& screenPos)
 {
     GetMonitorBoundsData data(screenPos);
     EnumDisplayMonitors(nullptr, nullptr, EnumMonitorSize, reinterpret_cast<LPARAM>(&data));
     return data.Result;
 }
 
-Vector2 WindowsPlatform::GetDesktopSize()
+Float2 WindowsPlatform::GetDesktopSize()
 {
-    return Vector2(
+    return Float2(
         static_cast<float>(GetSystemMetrics(SM_CXSCREEN)),
         static_cast<float>(GetSystemMetrics(SM_CYSCREEN))
     );
@@ -909,7 +1094,7 @@ bool WindowsPlatform::GetEnvironmentVariable(const String& name, String& value)
     DWORD result = GetEnvironmentVariableW(*name, buffer, bufferSize);
     if (result == 0)
     {
-        LOG_WIN32_LAST_ERROR;
+        //LOG_WIN32_LAST_ERROR;
         return true;
     }
     if (bufferSize < result)
@@ -939,54 +1124,12 @@ bool WindowsPlatform::SetEnvironmentVariable(const String& name, const String& v
     return false;
 }
 
-int32 WindowsPlatform::StartProcess(const StringView& filename, const StringView& args, const StringView& workingDir, bool hiddenWindow, bool waitForEnd)
-{
-    // Info
-    LOG(Info, "Command: {0} {1}", filename, args);
-    if (workingDir.HasChars())
-    {
-        LOG(Info, "Working directory: {0}", workingDir);
-    }
-
-    String filenameString(filename);
-
-    SHELLEXECUTEINFOW shExecInfo = { 0 };
-    shExecInfo.cbSize = sizeof(SHELLEXECUTEINFOW);
-    shExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-    shExecInfo.lpFile = filenameString.GetText();
-    shExecInfo.lpParameters = args.HasChars() ? args.Get() : nullptr;
-    shExecInfo.lpDirectory = workingDir.HasChars() ? workingDir.Get() : nullptr;
-    shExecInfo.nShow = hiddenWindow ? SW_HIDE : SW_SHOW;
-    if (ShellExecuteExW(&shExecInfo) == FALSE)
-    {
-        LOG(Warning, "Cannot start process '{0}' with arguments '{2}'. Error code: {1:x}", filename, (int64)GetLastError(), args);
-        return 1;
-    }
-
-    int32 result = 0;
-    if (waitForEnd)
-    {
-        WaitForSingleObject(shExecInfo.hProcess, INFINITE);
-        DWORD exitCode;
-        if (GetExitCodeProcess(shExecInfo.hProcess, &exitCode) != 0)
-            result = exitCode;
-        CloseHandle(shExecInfo.hProcess);
-    }
-
-    return result;
-}
-
-int32 WindowsPlatform::RunProcess(const StringView& cmdLine, const StringView& workingDir, bool hiddenWindow)
-{
-    return RunProcess(cmdLine, workingDir, Dictionary<String, String>(), hiddenWindow);
-}
-
 bool IsProcRunning(HANDLE handle)
 {
     return WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
 }
 
-void ReadPipe(HANDLE pipe, Array<char>& rawData, Array<Char>& logData, LogType logType)
+void ReadPipe(HANDLE pipe, Array<char>& rawData, Array<Char>& logData, LogType logType, CreateProcessSettings& settings)
 {
     // Check if any data is ready to read
     DWORD bytesAvailable = 0;
@@ -1000,6 +1143,8 @@ void ReadPipe(HANDLE pipe, Array<char>& rawData, Array<Char>& logData, LogType l
         {
             // Skip Windows-style lines
             rawData.RemoveAllKeepOrder('\r');
+            if (rawData.IsEmpty())
+                return;
 
             // Remove last new line character
             if (rawData.Last() == '\n')
@@ -1008,178 +1153,209 @@ void ReadPipe(HANDLE pipe, Array<char>& rawData, Array<Char>& logData, LogType l
             // Log contents
             logData.Clear();
             logData.Resize(rawData.Count() + 1);
-            StringUtils::ConvertANSI2UTF16(rawData.Get(), logData.Get(), rawData.Count());
+            int32 tmp;
+            StringUtils::ConvertANSI2UTF16(rawData.Get(), logData.Get(), rawData.Count(), tmp);
             logData.Last() = '\0';
-            Log::Logger::Write(logType, StringView(logData.Get(), rawData.Count()));
+#if LOG_ENABLE
+            if (settings.LogOutput)
+                Log::Logger::Write(logType, StringView(logData.Get(), rawData.Count()));
+#endif
+            if (settings.SaveOutput)
+                settings.Output.Add(logData.Get(), rawData.Count());
         }
     }
 }
 
-int32 WindowsPlatform::RunProcess(const StringView& cmdLine, const StringView& workingDir, const Dictionary<String, String>& environment, bool hiddenWindow)
+int32 WindowsPlatform::CreateProcess(CreateProcessSettings& settings)
 {
-    const bool captureStdOut = true;
-
-    // Info
-    LOG(Info, "Command: {0}", cmdLine);
-    if (workingDir.HasChars())
+    LOG(Info, "Command: {0} {1}", settings.FileName, settings.Arguments);
+    if (settings.WorkingDirectory.HasChars())
     {
-        LOG(Info, "Working directory: {0}", workingDir);
+        LOG(Info, "Working directory: {0}", settings.WorkingDirectory);
     }
+    const bool captureStdOut = settings.LogOutput || settings.SaveOutput;
 
-    int32 result = -1;
-
-    STARTUPINFOEX startupInfoEx;
-    ZeroMemory(&startupInfoEx, sizeof(startupInfoEx));
-    startupInfoEx.StartupInfo.cb = sizeof(startupInfoEx);
-    if (hiddenWindow)
+    int32 result = 0;
+    if (settings.ShellExecute)
     {
-        startupInfoEx.StartupInfo.dwFlags |= STARTF_USESHOWWINDOW;
-        startupInfoEx.StartupInfo.wShowWindow |= SW_HIDE | SW_SHOWNOACTIVATE;
-    }
-
-    DWORD dwCreationFlags = NORMAL_PRIORITY_CLASS | DETACHED_PROCESS;
-    if (hiddenWindow)
-        dwCreationFlags |= CREATE_NO_WINDOW;
-
-    Char* environmentStr = nullptr;
-    if (environment.HasItems())
-    {
-        dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
-
-        int32 totalLength = 1;
-        for (auto& e : environment)
-            totalLength += e.Key.Length() + e.Value.Length() + 2;
-
-        environmentStr = (Char*)Allocator::Allocate(totalLength * sizeof(Char));
-
-        Char* env = environmentStr;
-        for (auto& e : environment)
+        SHELLEXECUTEINFOW shExecInfo = { 0 };
+        shExecInfo.cbSize = sizeof(SHELLEXECUTEINFOW);
+        shExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+        shExecInfo.lpFile = settings.FileName.GetText();
+        shExecInfo.lpParameters = settings.Arguments.HasChars() ? settings.Arguments.Get() : nullptr;
+        shExecInfo.lpDirectory = settings.WorkingDirectory.HasChars() ? settings.WorkingDirectory.Get() : nullptr;
+        shExecInfo.nShow = settings.HiddenWindow ? SW_HIDE : SW_SHOW;
+        if (ShellExecuteExW(&shExecInfo) == FALSE)
         {
-            auto& key = e.Key;
-            auto& value = e.Value;
-            Platform::MemoryCopy(env, key.Get(), key.Length() * sizeof(Char));
-            env += key.Length();
-            *env++ = '=';
-            Platform::MemoryCopy(env, value.Get(), value.Length() * sizeof(Char));
-            env += value.Length();
-            *env++ = 0;
+            result = 1;
+            LOG(Warning, "Cannot start process. Error code: 0x{0:x}", (uint64)GetLastError());
         }
-        *env++ = 0;
-        ASSERT((uint64)env - (uint64)environmentStr == (uint64)(totalLength * sizeof(Char)));
-    }
-
-    HANDLE stdOutRead = nullptr;
-    HANDLE stdErrRead = nullptr;
-    Array<byte> attributeList;
-
-    if (captureStdOut)
-    {
-        dwCreationFlags |= EXTENDED_STARTUPINFO_PRESENT;
-        startupInfoEx.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-        SECURITY_ATTRIBUTES securityAttributes;
-        securityAttributes.nLength = sizeof(SECURITY_ATTRIBUTES);
-        securityAttributes.bInheritHandle = TRUE;
-        securityAttributes.lpSecurityDescriptor = nullptr;
-
-        if (!CreatePipe(&stdOutRead, &startupInfoEx.StartupInfo.hStdOutput, &securityAttributes, 0) ||
-            !CreatePipe(&stdErrRead, &startupInfoEx.StartupInfo.hStdError, &securityAttributes, 0))
+        else if (settings.WaitForEnd)
         {
-            LOG(Warning, "CreatePipe failed");
-            return 1;
+            WaitForSingleObject(shExecInfo.hProcess, INFINITE);
+            DWORD exitCode;
+            if (GetExitCodeProcess(shExecInfo.hProcess, &exitCode) != 0)
+                result = exitCode;
+            CloseHandle(shExecInfo.hProcess);
+        }
+        else if (shExecInfo.hProcess)
+        {
+            // Not waiting for the process, so close its handle (SEE_MASK_NOCLOSEPROCESS returns it)
+            CloseHandle(shExecInfo.hProcess);
+        }
+    }
+    else
+    {
+        result = -1;
+        const String cmdLine = settings.FileName + TEXT(" ") + settings.Arguments;
+
+        STARTUPINFOEX startupInfoEx;
+        ZeroMemory(&startupInfoEx, sizeof(startupInfoEx));
+        startupInfoEx.StartupInfo.cb = sizeof(startupInfoEx);
+        if (settings.HiddenWindow)
+        {
+            startupInfoEx.StartupInfo.dwFlags |= STARTF_USESHOWWINDOW;
+            startupInfoEx.StartupInfo.wShowWindow |= SW_HIDE | SW_SHOWNOACTIVATE;
         }
 
-        SIZE_T bufferSize = 0;
-        if (!InitializeProcThreadAttributeList(nullptr, 1, 0, &bufferSize) && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+        DWORD dwCreationFlags = NORMAL_PRIORITY_CLASS | DETACHED_PROCESS;
+        if (settings.HiddenWindow)
+            dwCreationFlags |= CREATE_NO_WINDOW;
+
+        Char* environmentStr = nullptr;
+        if (settings.Environment.HasItems())
         {
-            attributeList.Resize((int32)bufferSize);
-            startupInfoEx.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)attributeList.Get();
-            if (!InitializeProcThreadAttributeList(startupInfoEx.lpAttributeList, 1, 0, &bufferSize))
+            dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
+
+            int32 totalLength = 1;
+            for (auto& e : settings.Environment)
+                totalLength += e.Key.Length() + e.Value.Length() + 2;
+
+            environmentStr = (Char*)Allocator::Allocate(totalLength * sizeof(Char));
+
+            Char* env = environmentStr;
+            for (auto& e : settings.Environment)
             {
-                LOG(Warning, "InitializeProcThreadAttributeList failed");
+                auto& key = e.Key;
+                auto& value = e.Value;
+                Platform::MemoryCopy(env, key.Get(), key.Length() * sizeof(Char));
+                env += key.Length();
+                *env++ = '=';
+                Platform::MemoryCopy(env, value.Get(), value.Length() * sizeof(Char));
+                env += value.Length();
+                *env++ = 0;
+            }
+            *env++ = 0;
+            ASSERT((uint64)env - (uint64)environmentStr == (uint64)(totalLength * sizeof(Char)));
+        }
+
+        HANDLE stdOutRead = nullptr;
+        HANDLE stdErrRead = nullptr;
+
+        if (captureStdOut)
+        {
+            dwCreationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+            startupInfoEx.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+            SECURITY_ATTRIBUTES securityAttributes;
+            securityAttributes.nLength = sizeof(SECURITY_ATTRIBUTES);
+            securityAttributes.bInheritHandle = TRUE;
+            securityAttributes.lpSecurityDescriptor = nullptr;
+
+            if (!CreatePipe(&stdOutRead, &startupInfoEx.StartupInfo.hStdOutput, &securityAttributes, 0) ||
+                !CreatePipe(&stdErrRead, &startupInfoEx.StartupInfo.hStdError, &securityAttributes, 0))
+            {
+                LOG(Warning, "CreatePipe failed");
+                return 1;
+            }
+
+            SIZE_T bufferSize = 0;
+            if (!InitializeProcThreadAttributeList(nullptr, 1, 0, &bufferSize) && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+            {
+                startupInfoEx.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)Allocator::Allocate(bufferSize);
+                if (!InitializeProcThreadAttributeList(startupInfoEx.lpAttributeList, 1, 0, &bufferSize))
+                {
+                    LOG(Warning, "InitializeProcThreadAttributeList failed");
+                    goto ERROR_EXIT;
+                }
+            }
+
+            HANDLE inheritHandles[2] = { startupInfoEx.StartupInfo.hStdOutput, startupInfoEx.StartupInfo.hStdError };
+            if (!UpdateProcThreadAttribute(startupInfoEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritHandles, sizeof(inheritHandles), nullptr, nullptr))
+            {
+                LOG(Warning, "UpdateProcThreadAttribute failed");
                 goto ERROR_EXIT;
             }
         }
 
-        HANDLE inheritHandles[2] = { startupInfoEx.StartupInfo.hStdOutput, startupInfoEx.StartupInfo.hStdError };
-        if (!UpdateProcThreadAttribute(startupInfoEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritHandles, sizeof(inheritHandles), nullptr, nullptr))
+        // Create the process
+        PROCESS_INFORMATION procInfo;
+        if (!CreateProcessW(nullptr, const_cast<LPWSTR>(cmdLine.GetText()), nullptr, nullptr, TRUE, dwCreationFlags, (LPVOID)environmentStr, settings.WorkingDirectory.HasChars() ? settings.WorkingDirectory.Get() : nullptr, &startupInfoEx.StartupInfo, &procInfo))
         {
-            LOG(Warning, "UpdateProcThreadAttribute failed");
+            LOG(Warning, "Cannot start process. Error code: 0x{0:x}", (uint64)GetLastError());
             goto ERROR_EXIT;
         }
-    }
 
-    // Create the process
-    PROCESS_INFORMATION procInfo;
-    if (!CreateProcessW(nullptr, const_cast<LPWSTR>(String(cmdLine).GetText()), nullptr, nullptr, TRUE, dwCreationFlags, (LPVOID)environmentStr, workingDir.HasChars() ? workingDir.Get() : nullptr, &startupInfoEx.StartupInfo, &procInfo))
-    {
-        LOG(Warning, "Cannot start process '{0}'. Error code: 0x{1:x}", cmdLine, static_cast<int64>(GetLastError()));
-        goto ERROR_EXIT;
-    }
-
-    if (environmentStr)
-        Allocator::Free(environmentStr);
-
-    if (stdOutRead != nullptr)
-    {
-        // Keep reading std output and std error streams until process is running
-        Array<char> rawData;
-        Array<Char> logData;
-        do
+        if (stdOutRead != nullptr)
         {
-            ReadPipe(stdOutRead, rawData, logData, LogType::Info);
-            ReadPipe(stdErrRead, rawData, logData, LogType::Error);
-            Sleep(1);
-        } while (IsProcRunning(procInfo.hProcess));
-        ReadPipe(stdOutRead, rawData, logData, LogType::Info);
-        ReadPipe(stdErrRead, rawData, logData, LogType::Error);
-    }
-    else
-    {
-        WaitForSingleObject(procInfo.hProcess, INFINITE);
-    }
+            // Keep reading std output and std error streams until process is running
+            Array<char> rawData;
+            Array<Char> logData;
+            do
+            {
+                ReadPipe(stdOutRead, rawData, logData, LogType::Info, settings);
+                ReadPipe(stdErrRead, rawData, logData, LogType::Error, settings);
+                Sleep(1);
+            } while (IsProcRunning(procInfo.hProcess));
+            ReadPipe(stdOutRead, rawData, logData, LogType::Info, settings);
+            ReadPipe(stdErrRead, rawData, logData, LogType::Error, settings);
+        }
+        else
+        {
+            WaitForSingleObject(procInfo.hProcess, INFINITE);
+        }
 
-    DWORD exitCode;
-    if (GetExitCodeProcess(procInfo.hProcess, &exitCode) != 0)
-        result = exitCode;
+        DWORD exitCode;
+        if (GetExitCodeProcess(procInfo.hProcess, &exitCode) != 0)
+            result = exitCode;
 
-    CloseHandle(procInfo.hProcess);
-    CloseHandle(procInfo.hThread);
+        CloseHandle(procInfo.hProcess);
+        CloseHandle(procInfo.hThread);
 
-    // Cleanup
-ERROR_EXIT:
-    if (startupInfoEx.StartupInfo.hStdOutput != nullptr)
-    {
-        CloseHandle(startupInfoEx.StartupInfo.hStdOutput);
-    }
-    if (startupInfoEx.StartupInfo.hStdError != nullptr)
-    {
-        CloseHandle(startupInfoEx.StartupInfo.hStdError);
-    }
-    if (stdOutRead != nullptr)
-    {
-        CloseHandle(stdOutRead);
-    }
-    if (stdErrRead != nullptr)
-    {
-        CloseHandle(stdErrRead);
-    }
-    if (startupInfoEx.lpAttributeList != nullptr)
-    {
-        DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
+        // Cleanup
+    ERROR_EXIT:
+        if (startupInfoEx.StartupInfo.hStdOutput != nullptr)
+            CloseHandle(startupInfoEx.StartupInfo.hStdOutput);
+        if (startupInfoEx.StartupInfo.hStdError != nullptr)
+            CloseHandle(startupInfoEx.StartupInfo.hStdError);
+        if (stdOutRead != nullptr)
+            CloseHandle(stdOutRead);
+        if (stdErrRead != nullptr)
+            CloseHandle(stdErrRead);
+        if (startupInfoEx.lpAttributeList != nullptr)
+        {
+            DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
+            Allocator::Free(startupInfoEx.lpAttributeList);
+        }
+        if (environmentStr)
+            Allocator::Free(environmentStr);
     }
 
     return result;
 }
 
+#if !PLATFORM_SDL
 Window* WindowsPlatform::CreateWindow(const CreateWindowSettings& settings)
 {
     return New<WindowsWindow>(settings);
 }
+#endif
 
 void* WindowsPlatform::LoadLibrary(const Char* filename)
 {
     ASSERT(filename);
+    PROFILE_CPU();
+    ZoneText(filename, StringUtils::Length(filename));
 
     // Add folder to search path to load dependency libraries
     StringView folder = StringUtils::GetDirectoryName(filename);
@@ -1187,11 +1363,8 @@ void* WindowsPlatform::LoadLibrary(const Char* filename)
         folder = StringView::Empty;
     if (folder.HasChars())
     {
-        Char& end = ((Char*)folder.Get())[folder.Length()];
-        const Char c = end;
-        end = 0;
-        SetDllDirectoryW(*folder);
-        end = c;
+        const String folderNullTerminated(folder);
+        AddDllDirectory(folderNullTerminated.Get());
     }
 
     // Avoiding windows dialog boxes if missing
@@ -1199,7 +1372,10 @@ void* WindowsPlatform::LoadLibrary(const Char* filename)
     DWORD prevErrorMode = 0;
     const BOOL hasErrorMode = SetThreadErrorMode(errorMode, &prevErrorMode);
 
-    // Load the DLL
+    // Ensure that dll is properly searched
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
+
+    // Load the library
     void* handle = ::LoadLibraryW(filename);
     if (!handle)
     {
@@ -1210,31 +1386,28 @@ void* WindowsPlatform::LoadLibrary(const Char* filename)
     {
         SetThreadErrorMode(prevErrorMode, nullptr);
     }
-    if (folder.HasChars())
-    {
-        SetDllDirectoryW(nullptr);
-    }
 
 #if CRASH_LOG_ENABLE
     // Refresh modules info during next stack trace collecting to have valid debug symbols information
-    DbgHelpLock();
+    FlaxDbgHelpLock();
     if (folder.HasChars() && !SymbolsPath.Contains(folder))
     {
         SymbolsPath.Add(folder);
         SymbolsPath.Last().Replace('/', '\\');
         OnSymbolsPathModified();
     }
-    DbgHelpUnlock();
+    FlaxDbgHelpUnlock();
 #endif
 
     return handle;
 }
 
+#if CRASH_LOG_ENABLE
+
 Array<PlatformBase::StackFrame> WindowsPlatform::GetStackFrames(int32 skipCount, int32 maxDepth, void* context)
 {
     Array<StackFrame> result;
-#if CRASH_LOG_ENABLE
-    DbgHelpLock();
+    FlaxDbgHelpLock();
 
     // Initialize
     HANDLE process = GetCurrentProcess();
@@ -1301,6 +1474,14 @@ Array<PlatformBase::StackFrame> WindowsPlatform::GetStackFrames(int32 skipCount,
         stack.AddrBStore.Mode = AddrModeFlat;
         stack.AddrStack.Offset = ctx.IntSp;
         stack.AddrStack.Mode = AddrModeFlat;
+#elif _M_ARM64
+        imageType = IMAGE_FILE_MACHINE_ARM64;
+        stack.AddrPC.Offset = ctx.Pc;
+        stack.AddrPC.Mode = AddrModeFlat;
+        stack.AddrFrame.Offset = ctx.Fp;
+        stack.AddrFrame.Mode = AddrModeFlat;
+        stack.AddrStack.Offset = ctx.Sp;
+        stack.AddrStack.Mode = AddrModeFlat;
 #else
 #error "Platform not supported!"
 #endif
@@ -1358,12 +1539,9 @@ Array<PlatformBase::StackFrame> WindowsPlatform::GetStackFrames(int32 skipCount,
         }
     }
 
-    DbgHelpUnlock();
-#endif
+    FlaxDbgHelpUnlock();
     return result;
 }
-
-#if CRASH_LOG_ENABLE
 
 void WindowsPlatform::CollectCrashData(const String& crashDataFolder, void* context)
 {
@@ -1396,6 +1574,51 @@ void WindowsPlatform::CollectCrashData(const String& crashDataFolder, void* cont
     DWORD threadID;
     const auto handle = CreateThread(0, 0x8000, threadFunc, &crashInfo, 0, &threadID);
     WaitForSingleObject(handle, INFINITE);
+}
+
+#endif
+
+#if USE_EDITOR
+
+#include "Engine/Core/Math/Color32.h"
+
+WIN_API COLORREF WIN_API_CALLCONV GetPixel(_In_ HDC hdc, _In_ int x, _In_ int y);
+#define GetRValue(rgb) (LOBYTE(rgb))
+#define GetGValue(rgb) (LOBYTE(((WORD)(rgb)) >> 8))
+#define GetBValue(rgb) (LOBYTE((rgb) >> 16))
+#pragma comment(lib, "Gdi32.lib")
+
+static HHOOK MouseCallbackHook;
+
+LRESULT CALLBACK OnScreenUtilsMouseCallback(_In_ int nCode, _In_ WPARAM wParam, _In_ LPARAM lParam)
+{
+    if (nCode >= 0 && wParam == WM_LBUTTONDOWN)
+    {
+        UnhookWindowsHookEx(MouseCallbackHook);
+
+        // Push event with the picked color
+        const Float2 cursorPos = Platform::GetMousePosition();
+        const Color32 colorPicked = PlatformBase::GetScreenColorAt(cursorPos);
+        PlatformBase::PickScreenColorDone(colorPicked);
+        return 1;
+    }
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
+Color32 WindowsPlatform::GetScreenColorAt(const Float2& pos)
+{
+    PROFILE_CPU();
+    HDC deviceContext = GetDC(NULL);
+    COLORREF color = GetPixel(deviceContext, (int)pos.X, (int)pos.Y);
+    ReleaseDC(NULL, deviceContext);
+    return Color32(GetRValue(color), GetGValue(color), GetBValue(color), 255);
+}
+
+void WindowsPlatform::PickScreenColor()
+{
+    MouseCallbackHook = SetWindowsHookEx(WH_MOUSE_LL, OnScreenUtilsMouseCallback, NULL, NULL);
+    if (MouseCallbackHook == NULL)
+        LOG(Warning, "Failed to set mouse hook (GetLastError={})", GetLastError());
 }
 
 #endif

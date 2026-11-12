@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,24 +15,54 @@
 #endif
 
 // Amount of back buffers to use
+#ifndef VULKAN_BACK_BUFFERS_COUNT
 #define VULKAN_BACK_BUFFERS_COUNT 2
-#define VULKAN_BACK_BUFFERS_COUNT_MAX 16
+#endif
+#ifndef VULKAN_BACK_BUFFERS_COUNT_MAX
+#define VULKAN_BACK_BUFFERS_COUNT_MAX 4
+#endif
 
 /// <summary>
 /// Default amount of frames to wait until resource delete.
 /// </summary>
-#define VULKAN_RESOURCE_DELETE_SAFE_FRAMES_COUNT 10
+#define VULKAN_RESOURCE_DELETE_SAFE_FRAMES_COUNT 20
 
 #define VULKAN_ENABLE_API_DUMP 0
-#define VULKAN_RESET_QUERY_POOLS 0
-#define VULKAN_HASH_POOLS_WITH_TYPES_USAGE_ID 1
-#define VULKAN_USE_DEBUG_LAYER GPU_ENABLE_DIAGNOSTICS
+#define VULKAN_RESET_QUERY_POOLS 1
+#define VULKAN_HASH_POOLS_WITH_LAYOUT_TYPES 1
+#define VULKAN_USE_DEBUG_LAYER GPU_ENABLE_DEBUG_LAYER
+#define VULKAN_USE_DEBUG_DATA (GPU_ENABLE_DEBUG_LAYER && COMPILE_WITH_DEV_ENV)
+#define VULKAN_USE_PERF_SDK 0 // (!BUILD_RELEASE && PLATFORM_WINDOWS) TODO: fix using RenderDoc when PerfSDK is installed
 
-#ifndef VULKAN_USE_QUERIES
-#define VULKAN_USE_QUERIES 1
+#ifndef VULKAN_USE_PIPELINE_CACHE
+#define VULKAN_USE_PIPELINE_CACHE 1
 #endif
-#ifndef VULKAN_HAS_PHYSICAL_DEVICE_PROPERTIES2
-#define VULKAN_HAS_PHYSICAL_DEVICE_PROPERTIES2 0
+
+#ifndef VULKAN_USE_VALIDATION_CACHE
+#ifdef VK_EXT_validation_cache
+#define VULKAN_USE_VALIDATION_CACHE VK_EXT_validation_cache
+#else
+#define VULKAN_USE_VALIDATION_CACHE 0
 #endif
+#endif
+
+#ifndef VULKAN_USE_TIMER_QUERIES
+#define VULKAN_USE_TIMER_QUERIES 1
+#endif
+
+#ifndef VULKAN_USE_TRACY_GPU
+#define VULKAN_USE_TRACY_GPU (GPU_ENABLE_TRACY && VULKAN_USE_TIMER_QUERIES)
+#endif
+
+// Fence wait operation timeout in seconds
+#ifndef VULKAN_WAIT_TIMEOUT
+#define VULKAN_WAIT_TIMEOUT 5.0f
+#endif
+
+// Toggles GPUTimerQueryVulkan to use BeginQuery/EndQuery via GPuContext rather than old custom implementation
+#define GPU_VULKAN_QUERY_NEW 1
+
+// Toggles pausing and resuming all GPU timer queries when command buffer is being flushed (for more exact timings)
+#define GPU_VULKAN_PAUSE_QUERIES 0
 
 #endif

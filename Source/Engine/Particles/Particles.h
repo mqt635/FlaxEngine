@@ -1,11 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "Engine/Scripting/ScriptingType.h"
+#include "Engine/Graphics/Enums.h"
 
 class TaskGraphSystem;
-struct RenderContext;
+struct RenderContextBatch;
 struct RenderView;
 class ParticleEmitter;
 class ParticleSystemInstance;
@@ -20,15 +21,17 @@ class Actor;
 /// </summary>
 API_CLASS(Static) class FLAXENGINE_API Particles
 {
-DECLARE_SCRIPTING_TYPE_NO_SPAWN(Particles);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(Particles);
 
     /// <summary>
     /// The system for Particles update.
     /// </summary>
     API_FIELD(ReadOnly) static TaskGraphSystem* System;
 
-public:
+    // Data access locker for particles data.
+    static ReadWriteLock SystemLocker;
 
+public:
     /// <summary>
     /// Updates the effect during next particles simulation tick.
     /// </summary>
@@ -42,16 +45,23 @@ public:
     static void OnEffectDestroy(ParticleEffect* effect);
 
 public:
-
     /// <summary>
     /// Draws the particles.
     /// </summary>
-    /// <param name="renderContext">The rendering context.</param>
+    /// <param name="renderContextBatch">The rendering context.</param>
     /// <param name="effect">The owning actor.</param>
-    static void DrawParticles(RenderContext& renderContext, ParticleEffect* effect);
+    /// <param name="drawModes">The drawing modes.</param>
+    static void DrawParticles(RenderContextBatch& renderContextBatch, ParticleEffect* effect, DrawPass drawModes);
+
+#if USE_EDITOR
+    /// <summary>
+    /// Draws the particles debug shapes.
+    /// </summary>
+    /// <param name="effect">The owning actor.</param>
+    static void DebugDraw(ParticleEffect* effect);
+#endif
 
 public:
-
     /// <summary>
     /// Enables or disables particle buffer pooling.
     /// </summary>

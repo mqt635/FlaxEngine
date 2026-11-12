@@ -1,32 +1,32 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ObjectsRemovalService.h"
+#include "Utilities.h"
 #include "Collections/Dictionary.h"
-#include "Engine/Engine/EngineService.h"
-#include "Engine/Threading/Threading.h"
 #include "Engine/Engine/Time.h"
+#include "Engine/Engine/EngineService.h"
+#include "Engine/Platform/CriticalSection.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Scripting/ScriptingObject.h"
-#include "Log.h"
 
-namespace ObjectsRemovalServiceImpl
+const Char* BytesSizesData[] = { TEXT("b"), TEXT("Kb"), TEXT("Mb"), TEXT("Gb"), TEXT("Tb"), TEXT("Pb"), TEXT("Eb"), TEXT("Zb"), TEXT("Yb") };
+const Char* HertzSizesData[] = { TEXT("Hz"), TEXT("KHz"), TEXT("MHz"), TEXT("GHz"), TEXT("THz"), TEXT("PHz"), TEXT("EHz"), TEXT("ZHz"), TEXT("YHz") };
+Span<const Char*> Utilities::Private::BytesSizes(BytesSizesData, ARRAY_COUNT(BytesSizesData));
+Span<const Char*> Utilities::Private::HertzSizes(HertzSizesData, ARRAY_COUNT(HertzSizesData));
+
+namespace
 {
-    bool IsReady = false;
     CriticalSection PoolLocker;
-    CriticalSection NewItemsLocker;
-    DateTime LastUpdate;
+    double LastUpdate;
     float LastUpdateGameTime;
-    Dictionary<RemovableObject*, float> Pool(8192);
-    Dictionary<RemovableObject*, float> NewItemsPool(2048);
+    Dictionary<Object*, float> Pool;
+    uint64 PoolCounter = 0;
 }
 
-using namespace ObjectsRemovalServiceImpl;
-
-class ObjectsRemovalServiceService : public EngineService
+class ObjectsRemoval : public EngineService
 {
 public:
-
-    ObjectsRemovalServiceService()
+    ObjectsRemoval()
         : EngineService(TEXT("Objects Removal Service"), -1000)
     {
     }
@@ -36,157 +36,97 @@ public:
     void Dispose() override;
 };
 
-ObjectsRemovalServiceService ObjectsRemovalServiceServiceInstance;
+ObjectsRemoval ObjectsRemovalInstance;
 
-bool ObjectsRemovalService::IsInPool(RemovableObject* obj)
+bool ObjectsRemovalService::IsInPool(Object* obj)
 {
-    if (!IsReady)
-        return false;
-
-    {
-        ScopeLock lock(NewItemsLocker);
-        if (NewItemsPool.ContainsKey(obj))
-            return true;
-    }
-
-    {
-        ScopeLock lock(PoolLocker);
-        if (Pool.ContainsKey(obj))
-            return true;
-    }
-
-    return false;
-}
-
-bool ObjectsRemovalService::HasNewItemsForFlush()
-{
-    NewItemsLocker.Lock();
-    const bool result = NewItemsPool.HasItems();
-    NewItemsLocker.Unlock();
-
+    PoolLocker.Lock();
+    const bool result = Pool.ContainsKey(obj);
+    PoolLocker.Unlock();
     return result;
 }
 
-void ObjectsRemovalService::Dereference(RemovableObject* obj)
+void ObjectsRemovalService::Dereference(Object* obj)
 {
-    if (!IsReady)
-        return;
-
-    NewItemsLocker.Lock();
-    NewItemsPool.Remove(obj);
-    NewItemsLocker.Unlock();
-
     PoolLocker.Lock();
     Pool.Remove(obj);
     PoolLocker.Unlock();
 }
 
-void ObjectsRemovalService::Add(RemovableObject* obj, float timeToLive, bool useGameTime)
+void ObjectsRemovalService::Add(Object* obj, float timeToLive, bool useGameTime)
 {
-    ScopeLock lock(NewItemsLocker);
-
     obj->Flags |= ObjectFlags::WasMarkedToDelete;
     if (useGameTime)
         obj->Flags |= ObjectFlags::UseGameTimeForDelete;
     else
         obj->Flags &= ~ObjectFlags::UseGameTimeForDelete;
-    NewItemsPool[obj] = timeToLive;
+
+    PoolLocker.Lock();
+    Pool[obj] = timeToLive;
+    PoolCounter++;
+    PoolLocker.Unlock();
 }
 
 void ObjectsRemovalService::Flush(float dt, float gameDelta)
 {
-    // Add new items
-    {
-        ScopeLock lock(NewItemsLocker);
+    PROFILE_CPU();
 
-        for (auto i = NewItemsPool.Begin(); i.IsNotEnd(); ++i)
-        {
-            Pool[i->Key] = i->Value;
-        }
-        NewItemsPool.Clear();
-    }
+    PoolLocker.Lock();
+    PoolCounter = 0;
 
     // Update timeouts and delete objects that timed out
+    for (auto i = Pool.Begin(); i.IsNotEnd(); ++i)
     {
-        ScopeLock lock(PoolLocker);
+        auto& bucket = *i;
+        Object* obj = bucket.Key;
+        const float ttl = bucket.Value - ((obj->Flags & ObjectFlags::UseGameTimeForDelete) != ObjectFlags::None ? gameDelta : dt);
+        if (ttl <= 0.0f)
+        {
+            Pool.Remove(i);
+            obj->OnDeleteObject();
+        }
+        else
+        {
+            bucket.Value = ttl;
+        }
+    }
 
+    // If any object was added to the pool while removing objects (by this thread) then retry removing any nested objects (but without delta time)
+    if (PoolCounter != 0)
+    {
+    RETRY:
+        PoolCounter = 0;
         for (auto i = Pool.Begin(); i.IsNotEnd(); ++i)
         {
-            auto obj = i->Key;
-            const float ttl = i->Value - (obj->Flags & ObjectFlags::UseGameTimeForDelete ? gameDelta : dt);
-            if (ttl <= ZeroTolerance)
+            if (i->Value <= 0.0f)
             {
+                Object* obj = i->Key;
                 Pool.Remove(i);
-
-#if BUILD_DEBUG || BUILD_DEVELOPMENT
-                if (NewItemsPool.ContainsKey(obj))
-                {
-                    const auto asScriptingObj = dynamic_cast<ScriptingObject*>(obj);
-                    if (asScriptingObj)
-                    {
-                        LOG(Warning, "Object {0} was marked to delete after delete timeout", asScriptingObj->GetID());
-                    }
-                }
-#endif
-                NewItemsPool.Remove(obj);
-                //ASSERT(!NewItemsPool.ContainsKey(obj));
-
                 obj->OnDeleteObject();
             }
-            else
-            {
-                i->Value = ttl;
-            }
         }
+        if (PoolCounter != 0)
+            goto RETRY;
     }
 
-    // Perform removing in loop
-    // Note: objects during OnDeleteObject call can register new objects to remove with timeout=0, for example Actors do that to remove children and scripts
-    while (HasNewItemsForFlush())
-    {
-        // Add new items
-        {
-            ScopeLock lock(NewItemsLocker);
-
-            for (auto i = NewItemsPool.Begin(); i.IsNotEnd(); ++i)
-            {
-                Pool[i->Key] = i->Value;
-            }
-            NewItemsPool.Clear();
-        }
-
-        // Delete objects that timed out
-        {
-            ScopeLock lock(PoolLocker);
-
-            for (auto i = Pool.Begin(); i.IsNotEnd(); ++i)
-            {
-                if (i->Value <= ZeroTolerance)
-                {
-                    auto obj = i->Key;
-                    Pool.Remove(i);
-                    ASSERT(!NewItemsPool.ContainsKey(obj));
-                    obj->OnDeleteObject();
-                }
-            }
-        }
-    }
+    PoolLocker.Unlock();
 }
 
-bool ObjectsRemovalServiceService::Init()
+bool ObjectsRemoval::Init()
 {
-    LastUpdate = DateTime::NowUTC();
+    Pool.EnsureCapacity(8192);
+    LastUpdate = Platform::GetTimeSeconds();
     LastUpdateGameTime = 0;
     return false;
 }
 
-void ObjectsRemovalServiceService::LateUpdate()
+void ObjectsRemoval::LateUpdate()
 {
     PROFILE_CPU();
 
     // Delete all objects
-    const auto now = DateTime::NowUTC();
-    const float dt = (now - LastUpdate).GetTotalSeconds();
+    const double now = Platform::GetTimeSeconds();
+    const float dt = (float)(now - LastUpdate);
     float gameDelta = Time::Update.DeltaTime.GetTotalSeconds();
     if (Time::GetGamePaused())
         gameDelta = 0;
@@ -194,22 +134,42 @@ void ObjectsRemovalServiceService::LateUpdate()
     LastUpdate = now;
 }
 
-void ObjectsRemovalServiceService::Dispose()
+void ObjectsRemoval::Dispose()
 {
     // Collect new objects
     ObjectsRemovalService::Flush();
 
     // Delete all remaining objects
     {
-        ScopeLock lock(PoolLocker);
+        PoolLocker.Lock();
         for (auto i = Pool.Begin(); i.IsNotEnd(); ++i)
         {
-            auto obj = i->Key;
+            Object* obj = i->Key;
             Pool.Remove(i);
             obj->OnDeleteObject();
         }
         Pool.Clear();
+        PoolLocker.Unlock();
     }
+}
 
-    IsReady = false;
+Object::~Object()
+{
+#if BUILD_DEBUG && 0
+    // Prevent removing object that is still reverenced by the removal service
+    //ASSERT(!ObjectsRemovalService::IsInPool(this));
+#endif
+}
+
+void Object::DeleteObjectNow()
+{
+    ObjectsRemovalService::Dereference(this);
+
+    OnDeleteObject();
+}
+
+void Object::DeleteObject(float timeToLive, bool useGameTime)
+{
+    // Add to deferred remove (or just update timeout but don't remove object here)
+    ObjectsRemovalService::Add(this, timeToLive, useGameTime);
 }

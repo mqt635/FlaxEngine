@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -8,6 +8,7 @@
 #include "Engine/Graphics/GPUResource.h"
 #include "../IncludeDirectXHeaders.h"
 #include "ResourceOwnerDX12.h"
+#include "UploadBufferDX12.h"
 #include "QueryHeapDX12.h"
 #include "DescriptorHeapDX12.h"
 
@@ -21,9 +22,21 @@ class Engine;
 class WindowsWindow;
 class GPUContextDX12;
 class GPUSwapChainDX12;
-class UploadBufferDX12;
 class CommandQueueDX12;
 class CommandSignatureDX12;
+
+// D3D12MemoryAllocator config
+namespace D3D12MA
+{
+    class Allocator;
+    class Allocation;
+};
+#define _D3D12MA_JSON_WRITER 0
+#define _D3D12MA_STRING_BUILDER 0
+#define D3D12MA_NO_HELPERS 1
+#if !BUILD_DEBUG
+#define D3D12MA_ASSERT(cond)
+#endif
 
 /// <summary>
 /// Implementation of Graphics Device for DirectX 12 rendering system
@@ -38,13 +51,20 @@ private:
     struct DisposeResourceEntry
     {
         IGraphicsUnknown* Resource;
+        D3D12MA::Allocation* Allocation;
         uint64 TargetFrame;
     };
 
 private:
 
     // Private Stuff
-    ID3D12Device* _device;
+    ID3D12Device* _device = nullptr;
+#ifdef __ID3D12Device1_FWD_DEFINED__
+    ID3D12Device1* _device1 = nullptr;
+#endif
+#ifdef __ID3D12Device2_FWD_DEFINED__
+    ID3D12Device2* _device2 = nullptr;
+#endif
     IDXGIFactory4* _factoryDXGI;
     CriticalSection _res2DisposeLock;
     Array<DisposeResourceEntry> _res2Dispose;
@@ -65,21 +85,15 @@ public:
     ~GPUDeviceDX12();
 
 public:
-
-    /// <summary>
-    /// Upload buffer for general purpose
-    /// </summary>
-    UploadBufferDX12* UploadBuffer;
-
-    /// <summary>
-    /// The timestamp queries heap.
-    /// </summary>
-    QueryHeapDX12 TimestampQueryHeap;
-
+    D3D12MA::Allocator* Allocator = nullptr;
+    UploadBufferDX12 UploadBuffer;
     bool AllowTearing = false;
     CommandSignatureDX12* DispatchIndirectCommandSignature = nullptr;
     CommandSignatureDX12* DrawIndexedIndirectCommandSignature = nullptr;
     CommandSignatureDX12* DrawIndirectCommandSignature = nullptr;
+    GPUBuffer* DummyVB = nullptr;
+    Array<QueryHeapDX12*, InlinedAllocation<8>> QueryHeaps;
+    Array<ID3D12Resource*> PendingResourceDiscards;
 
     D3D12_CPU_DESCRIPTOR_HANDLE NullSRV(D3D12_SRV_DIMENSION dimension) const;
     D3D12_CPU_DESCRIPTOR_HANDLE NullUAV() const;
@@ -93,6 +107,12 @@ public:
     {
         return _device;
     }
+#ifdef __ID3D12Device1_FWD_DEFINED__
+    FORCE_INLINE ID3D12Device1* GetDevice1() const { return _device1; }
+#endif
+#ifdef __ID3D12Device2_FWD_DEFINED__
+    FORCE_INLINE ID3D12Device2* GetDevice2() const { return _device2; }
+#endif
 
     /// <summary>
     /// Gets DXGI factory.
@@ -136,6 +156,8 @@ public:
         return _mainContext;
     }
 
+    GPUQueryDX12 AllocQuery(GPUQueryType type);
+
 public:
 
     DescriptorHeapPoolDX12 Heap_CBV_SRV_UAV;
@@ -148,7 +170,7 @@ public:
 public:
 
     // Add resource to late release service (will be released after 'safeFrameCount' frames)
-    void AddResourceToLateRelease(IGraphicsUnknown* resource, uint32 safeFrameCount = DX12_RESOURCE_DELETE_SAFE_FRAMES_COUNT);
+    void AddResourceToLateRelease(IGraphicsUnknown* resource, D3D12MA::Allocation* allocation = nullptr, uint32 safeFrameCount = DX12_RESOURCE_DELETE_SAFE_FRAMES_COUNT);
 
     static FORCE_INLINE uint32 GetMaxMSAAQuality(uint32 sampleCount)
     {
@@ -158,8 +180,8 @@ public:
     }
 
 #if PLATFORM_XBOX_SCARLETT ||PLATFORM_XBOX_ONE
-    void OnSuspend();
-    void OnResume();
+    void OnSuspended();
+    void OnResumed();
 #endif
 
 private:
@@ -170,7 +192,6 @@ private:
     void updateRes2Dispose();
 
 public:
-
     // [GPUDeviceDX]
     GPUContext* GetMainContext() override
     {
@@ -180,18 +201,24 @@ public:
     {
         return _device;
     }
+    QueueInfo GetNativeQueue() const override;
+    GPUMemoryStats GetMemoryStats() override;
     bool Init() override;
     void DrawBegin() override;
     void RenderEnd() override;
+    void OnCrash() override;
     void Dispose() final override;
     void WaitForGPU() override;
+    bool GetQueryResult(uint64 queryID, uint64& result, bool wait = false) override;
     GPUTexture* CreateTexture(const StringView& name) override;
     GPUShader* CreateShader(const StringView& name) override;
     GPUPipelineState* CreatePipelineState() override;
     GPUTimerQuery* CreateTimerQuery() override;
     GPUBuffer* CreateBuffer(const StringView& name) override;
     GPUSampler* CreateSampler() override;
+    GPUVertexLayout* CreateVertexLayout(const VertexElements& elements, bool explicitOffsets) override;
     GPUSwapChain* CreateSwapChain(Window* window) override;
+    GPUConstantBuffer* CreateConstantBuffer(uint32 size, const StringView& name) override;
 };
 
 /// <summary>
@@ -208,7 +235,7 @@ public:
     /// <param name="device">The graphics device.</param>
     /// <param name="name">The resource name.</param>
     GPUResourceDX12(GPUDeviceDX12* device, const StringView& name)
-        : GPUResourceBase(device, name)
+        : GPUResourceBase<GPUDeviceDX12, BaseType>(device, name)
     {
     }
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -15,16 +15,14 @@ template<typename CharType>
 class TextWriter : public Object, public NonCopyable
 {
 private:
-
     MemoryWriteStream _buffer;
 
 public:
-
     /// <summary>
     /// Init with default capacity
     /// </summary>
     /// <param name="capacity">Initial capacity in bytes</param>
-    TextWriter(uint32 capacity)
+    TextWriter(uint32 capacity = 1024)
         : _buffer(capacity)
     {
     }
@@ -37,27 +35,23 @@ public:
     }
 
 public:
-
     /// <summary>
-    /// Gets writer private buffer
+    /// Gets writer private buffer.
     /// </summary>
-    /// <returns>Buffer</returns>
     FORCE_INLINE MemoryWriteStream* GetBuffer()
     {
         return &_buffer;
     }
 
     /// <summary>
-    /// Gets writer private buffer
+    /// Gets writer private buffer.
     /// </summary>
-    /// <returns>Buffer</returns>
-    const FORCE_INLINE MemoryWriteStream* GetBuffer() const
+    FORCE_INLINE const MemoryWriteStream* GetBuffer() const
     {
         return &_buffer;
     }
 
 public:
-
     /// <summary>
     /// Write line terminator sign
     /// </summary>
@@ -139,7 +133,6 @@ public:
     }
 
 public:
-
     /// <summary>
     /// Clear whole data
     /// </summary>
@@ -149,7 +142,6 @@ public:
     }
 
 public:
-
     // [Object]
     String ToString() const override
     {

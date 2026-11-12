@@ -1,14 +1,15 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if AUDIO_API_XAUDIO2
 
 #include "AudioBackendXAudio2.h"
-#include "Engine/Audio/AudioSettings.h"
+#include "Engine/Audio/AudioBackendTools.h"
 #include "Engine/Core/Collections/Array.h"
+#include "Engine/Core/Collections/ChunkedArray.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Audio/Audio.h"
-#include "Engine/Audio/AudioSource.h"
-#include "Engine/Audio/AudioListener.h"
+#include "Engine/Threading/Threading.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 
 #if PLATFORM_WINDOWS
 // Tweak Win ver
@@ -19,57 +20,25 @@
 // Include XAudio library
 // Documentation: https://docs.microsoft.com/en-us/windows/desktop/xaudio2/xaudio2-apis-portal
 #include <xaudio2.h>
-//#include <xaudio2fx.h>
-#include <x3daudio.h>
 
-#define MAX_INPUT_CHANNELS 2
-#define MAX_OUTPUT_CHANNELS 8
+// TODO: implement multi-channel support (eg. 5.1, 7.1)
+#define MAX_INPUT_CHANNELS 6
+#define MAX_OUTPUT_CHANNELS 2
 #define MAX_CHANNELS_MATRIX_SIZE (MAX_INPUT_CHANNELS*MAX_OUTPUT_CHANNELS)
-
-#define FLAX_POS_TO_XAUDIO(vec) X3DAUDIO_VECTOR(vec.X * 0.01f,  vec.Y *  0.01f, vec.Z * 0.01f)
-#define FLAX_VEC_TO_XAUDIO(vec) (*((X3DAUDIO_VECTOR*)&vec))
+#if ENABLE_ASSERTION
+#define XAUDIO2_CHECK_ERROR(method) \
+    if (hr != 0) \
+    { \
+        LOG(Error, "XAudio2 method {0} failed with error 0x{1:X} (at line {2})", TEXT(#method), (uint32)hr, __LINE__ - 1); \
+    }
+#else
+#define XAUDIO2_CHECK_ERROR(method)
+#endif
 
 namespace XAudio2
 {
-    struct Listener
+    struct Listener : AudioBackendTools::Listener
     {
-        AudioListener* AudioListener;
-        X3DAUDIO_LISTENER Data;
-
-        Listener()
-        {
-            Init();
-        }
-
-        void Init()
-        {
-            AudioListener = nullptr;
-            Data.pCone = nullptr;
-        }
-
-        bool IsFree() const
-        {
-            return AudioListener == nullptr;
-        }
-
-        void UpdateTransform()
-        {
-            const Vector3& position = AudioListener->GetPosition();
-            const Quaternion& orientation = AudioListener->GetOrientation();
-            const Vector3 front = orientation * Vector3::Forward;
-            const Vector3 top = orientation * Vector3::Up;
-
-            Data.OrientFront = FLAX_VEC_TO_XAUDIO(front);
-            Data.OrientTop = FLAX_VEC_TO_XAUDIO(top);
-            Data.Position = FLAX_POS_TO_XAUDIO(position);
-        }
-
-        void UpdateVelocity()
-        {
-            const Vector3& velocity = AudioListener->GetVelocity();
-
-            Data.Velocity = FLAX_POS_TO_XAUDIO(velocity);
-        }
     };
 
     class VoiceCallback : public IXAudio2VoiceCallback
@@ -99,29 +68,32 @@ namespace XAudio2
 
         COM_DECLSPEC_NOTHROW void STDMETHODCALLTYPE OnVoiceError(THIS_ void* pBufferContext, HRESULT Error) override
         {
+#if ENABLE_ASSERTION
             LOG(Warning, "IXAudio2VoiceCallback::OnVoiceError! Error: 0x{0:x}", Error);
+#endif
         }
 
     public:
-
-        AudioSource* Source;
+        uint32 SourceID;
 
         void PeekSamples();
     };
 
-    struct Source
+    struct Source : AudioBackendTools::Source
     {
         IXAudio2SourceVoice* Voice;
-        X3DAUDIO_EMITTER Data;
         WAVEFORMATEX Format;
+        AudioDataInfo Info;
         XAUDIO2_SEND_DESCRIPTOR Destination;
-        float Pitch;
-        float StartTime;
+        float StartTimeForQueueBuffer;
+        float LastBufferStartTime;
         uint64 LastBufferStartSamplesPlayed;
         int32 BuffersProcessed;
+        int32 Channels;
         bool IsDirty;
-        bool Is3D;
         bool IsPlaying;
+        bool IsLoop;
+        uint32 LastBufferID;
         VoiceCallback Callback;
 
         Source()
@@ -132,15 +104,17 @@ namespace XAudio2
         void Init()
         {
             Voice = nullptr;
-            Platform::MemoryClear(&Data, sizeof(Data));
-            Data.CurveDistanceScaler = 1.0f;
             Destination.Flags = 0;
             Destination.pOutputVoice = nullptr;
             Pitch = 1.0f;
-            StartTime = 0.0f;
+            Pan = 0.0f;
+            StartTimeForQueueBuffer = 0.0f;
+            LastBufferStartTime = 0.0f;
             IsDirty = false;
             Is3D = false;
             IsPlaying = false;
+            IsLoop = false;
+            LastBufferID = 0;
             LastBufferStartSamplesPlayed = 0;
             BuffersProcessed = 0;
         }
@@ -148,25 +122,6 @@ namespace XAudio2
         bool IsFree() const
         {
             return Voice == nullptr;
-        }
-
-        void UpdateTransform(const AudioSource* source)
-        {
-            const Vector3& position = source->GetPosition();
-            const Quaternion& orientation = source->GetOrientation();
-            const Vector3 front = orientation * Vector3::Forward;
-            const Vector3 top = orientation * Vector3::Up;
-
-            Data.OrientFront = FLAX_VEC_TO_XAUDIO(front);
-            Data.OrientTop = FLAX_VEC_TO_XAUDIO(top);
-            Data.Position = FLAX_POS_TO_XAUDIO(position);
-        }
-
-        void UpdateVelocity(const AudioSource* source)
-        {
-            const Vector3& velocity = source->GetVelocity();
-
-            Data.Velocity = FLAX_POS_TO_XAUDIO(velocity);
         }
     };
 
@@ -194,45 +149,21 @@ namespace XAudio2
 
     IXAudio2* Instance = nullptr;
     IXAudio2MasteringVoice* MasteringVoice = nullptr;
-    X3DAUDIO_HANDLE X3DInstance;
+    int32 Channels;
     DWORD ChannelMask;
-    UINT32 SampleRate;
-    UINT32 Channels;
-    bool UseRedirectToLFE;
     bool ForceDirty = true;
-    Listener Listeners[AUDIO_MAX_LISTENERS];
-    Array<Source> Sources(32); // TODO: use ChunkedArray for better performance
-    Array<Buffer*> Buffers(64); // TODO: use ChunkedArray for better performance or use buffers pool?
+    AudioBackendTools::Settings Settings;
+    Listener Listener;
+    CriticalSection Locker;
+    ChunkedArray<Source, 32> Sources;
+    ChunkedArray<Buffer*, 64> Buffers; // TODO: use ChunkedArray for better performance or use buffers pool?
     EngineCallback Callback;
-    float MatrixCoefficients[MAX_CHANNELS_MATRIX_SIZE];
 
-    Listener* GetListener()
+    Source* GetSource(uint32 sourceID)
     {
-        for (int32 i = 0; i < AUDIO_MAX_LISTENERS; i++)
-        {
-            if (Listeners[i].AudioListener)
-                return &Listeners[i];
-        }
-
-        return nullptr;
-    }
-
-    Listener* GetListener(const AudioListener* listener)
-    {
-        for (int32 i = 0; i < AUDIO_MAX_LISTENERS; i++)
-        {
-            if (Listeners[i].AudioListener == listener)
-                return &Listeners[i];
-        }
-
-        return nullptr;
-    }
-
-    Source* GetSource(const AudioSource* source)
-    {
-        const AUDIO_SOURCE_ID_TYPE sourceId = source->SourceIDs[0];
-        // 0 is invalid ID so shift them
-        return &Sources[sourceId - 1];
+        if (sourceID == 0)
+            return nullptr;
+        return &Sources[sourceID - 1]; // 0 is invalid ID so shift them
     }
 
     void MarkAllDirty()
@@ -240,105 +171,74 @@ namespace XAudio2
         ForceDirty = true;
     }
 
-    void QueueBuffer(Source* aSource, const AudioSource* source, const int32 bufferId, XAUDIO2_BUFFER& buffer)
+    void QueueBuffer(Source* aSource, const int32 bufferID, XAUDIO2_BUFFER& buffer)
     {
-        Buffer* aBuffer = Buffers[bufferId - 1];
+        Buffer* aBuffer = Buffers[bufferID - 1];
         buffer.pAudioData = aBuffer->Data.Get();
         buffer.AudioBytes = aBuffer->Data.Count();
 
-        if (aSource->StartTime > ZeroTolerance)
+        if (aSource->StartTimeForQueueBuffer > ZeroTolerance)
         {
-            buffer.PlayBegin = (UINT32)(aSource->StartTime * (aBuffer->Info.SampleRate * aBuffer->Info.NumChannels));
-            buffer.PlayLength = aBuffer->Info.NumSamples / aBuffer->Info.NumChannels - buffer.PlayBegin;
-            aSource->StartTime = 0;
+            // Offset start position when playing buffer with a custom time offset
+            const uint32 bytesPerSample = aBuffer->Info.BitDepth / 8 * aBuffer->Info.NumChannels;
+            buffer.PlayBegin = (UINT32)(aSource->StartTimeForQueueBuffer * aBuffer->Info.SampleRate);
+            buffer.PlayLength = (buffer.AudioBytes / bytesPerSample) - buffer.PlayBegin;
+            aSource->LastBufferStartTime = aSource->StartTimeForQueueBuffer;
+            aSource->StartTimeForQueueBuffer = 0;
         }
 
         const HRESULT hr = aSource->Voice->SubmitSourceBuffer(&buffer);
-        if (FAILED(hr))
-        {
-            LOG(Warning, "XAudio2: Failed to submit source buffer (error: 0x{0:x})", hr);
-        }
+        XAUDIO2_CHECK_ERROR(SubmitSourceBuffer);
     }
 
     void VoiceCallback::OnBufferEnd(void* pBufferContext)
     {
-        auto aSource = GetSource(Source);
+        auto aSource = GetSource(SourceID);
         if (aSource->IsPlaying)
             aSource->BuffersProcessed++;
     }
 
     void VoiceCallback::PeekSamples()
     {
-        auto aSource = GetSource(Source);
+        auto aSource = GetSource(SourceID);
         XAUDIO2_VOICE_STATE state;
         aSource->Voice->GetState(&state);
         aSource->LastBufferStartSamplesPlayed = state.SamplesPlayed;
     }
 }
 
-void AudioBackendXAudio2::Listener_OnAdd(AudioListener* listener)
+void AudioBackendXAudio2::Listener_Reset()
 {
-    // Get first free listener
-    XAudio2::Listener* aListener = nullptr;
-    for (int32 i = 0; i < AUDIO_MAX_LISTENERS; i++)
-    {
-        if (XAudio2::Listeners[i].IsFree())
-        {
-            aListener = &XAudio2::Listeners[i];
-            break;
-        }
-    }
-    ASSERT(aListener);
-
-    // Setup
-    aListener->AudioListener = listener;
-    aListener->UpdateTransform();
-    aListener->UpdateVelocity();
-
+    XAudio2::Listener.Reset();
     XAudio2::MarkAllDirty();
 }
 
-void AudioBackendXAudio2::Listener_OnRemove(AudioListener* listener)
+void AudioBackendXAudio2::Listener_VelocityChanged(const Vector3& velocity)
 {
-    // Free listener
-    XAudio2::Listener* aListener = XAudio2::GetListener(listener);
-    if (aListener)
-    {
-        aListener->Init();
-        XAudio2::MarkAllDirty();
-    }
+    XAudio2::Listener.Velocity = velocity;
+    XAudio2::MarkAllDirty();
 }
 
-void AudioBackendXAudio2::Listener_VelocityChanged(AudioListener* listener)
+void AudioBackendXAudio2::Listener_TransformChanged(const Vector3& position, const Quaternion& orientation)
 {
-    XAudio2::Listener* aListener = XAudio2::GetListener(listener);
-    if (aListener)
-    {
-        aListener->UpdateVelocity();
-        XAudio2::MarkAllDirty();
-    }
+    XAudio2::Listener.Position = position;
+    XAudio2::Listener.Orientation = orientation;
+    XAudio2::MarkAllDirty();
 }
 
-void AudioBackendXAudio2::Listener_TransformChanged(AudioListener* listener)
+void AudioBackendXAudio2::Listener_ReinitializeAll()
 {
-    XAudio2::Listener* aListener = XAudio2::GetListener(listener);
-    if (aListener)
-    {
-        aListener->UpdateTransform();
-        XAudio2::MarkAllDirty();
-    }
+    // TODO: Implement XAudio2 reinitialization; read HRTF audio value from Audio class
 }
 
-void AudioBackendXAudio2::Source_OnAdd(AudioSource* source)
+uint32 AudioBackendXAudio2::Source_Add(const AudioDataInfo& format, const Vector3& position, const Quaternion& orientation, float volume, float pitch, float pan, bool loop, bool spatial, float attenuation, float minDistance, float doppler)
 {
-    // Skip if has no clip (needs audio data to create a source - needs data format information)
-    if (source->Clip == nullptr || !source->Clip->IsLoaded())
-        return;
-    auto clip = source->Clip.Get();
+    PROFILE_MEM(Audio);
+    ScopeLock lock(XAudio2::Locker);
 
     // Get first free source
     XAudio2::Source* aSource = nullptr;
-    AUDIO_SOURCE_ID_TYPE sourceID;
+    uint32 sourceID = 0;
     for (int32 i = 0; i < XAudio2::Sources.Count(); i++)
     {
         if (XAudio2::Sources[i].IsFree())
@@ -356,167 +256,54 @@ void AudioBackendXAudio2::Source_OnAdd(AudioSource* source)
         XAudio2::Sources.Add(src);
         aSource = &XAudio2::Sources[sourceID];
     }
+    sourceID++; // 0 is invalid ID so shift them
 
     // Initialize audio data format information (from clip)
-    auto& header = clip->AudioHeader;
-    auto& format = aSource->Format;
-    format.wFormatTag = WAVE_FORMAT_PCM;
-    format.nChannels = header.Info.NumChannels;
-    format.nSamplesPerSec = header.Info.SampleRate;
-    format.wBitsPerSample = header.Info.BitDepth;
-    format.nBlockAlign = (WORD)(format.nChannels * (format.wBitsPerSample / 8));
-    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
-    format.cbSize = 0;
+    aSource->Info = format;
+    auto& aFormat = aSource->Format;
+    aFormat.wFormatTag = WAVE_FORMAT_PCM;
+    aFormat.nChannels = spatial ? 1 : format.NumChannels; // 3d audio is always mono (AudioClip auto-converts before buffer write if FeatureFlags::SpatialMultiChannel is unset)
+    aFormat.nSamplesPerSec = format.SampleRate;
+    aFormat.wBitsPerSample = format.BitDepth;
+    aFormat.nBlockAlign = (WORD)(aFormat.nChannels * (aFormat.wBitsPerSample / 8));
+    aFormat.nAvgBytesPerSec = aFormat.nSamplesPerSec * aFormat.nBlockAlign;
+    aFormat.cbSize = 0;
 
     // Setup dry effect
     aSource->Destination.pOutputVoice = XAudio2::MasteringVoice;
 
     // Create voice
-    const XAUDIO2_VOICE_SENDS sendList =
-    {
-        1,
-        &aSource->Destination
-    };
-    const HRESULT hr = XAudio2::Instance->CreateSourceVoice(&aSource->Voice, &aSource->Format, 0, 2.0f, &aSource->Callback, &sendList);
+    const XAUDIO2_VOICE_SENDS sendList = { 1, &aSource->Destination };
+    HRESULT hr = XAudio2::Instance->CreateSourceVoice(&aSource->Voice, &aSource->Format, 0, 2.0f, &aSource->Callback, &sendList);
+    XAUDIO2_CHECK_ERROR(CreateSourceVoice);
     if (FAILED(hr))
-    {
-        LOG(Error, "Failed to create XAudio2 voice. Error: 0x{0:x}", hr);
-        return;
-    }
+        return 0;
 
     // Prepare source state
-    aSource->Callback.Source = source;
+    aSource->Callback.SourceID = sourceID;
     aSource->IsDirty = true;
-    aSource->Data.ChannelCount = header.Info.NumChannels;
-    aSource->Is3D = source->Is3D();
-    aSource->Pitch = source->GetPitch();
-    aSource->Data.InnerRadius = source->GetMinDistance();
-    aSource->UpdateTransform(source);
-    aSource->UpdateVelocity(source);
+    aSource->IsLoop = loop;
+    aSource->Is3D = spatial;
+    aSource->Pitch = pitch;
+    aSource->Pan = pan;
+    aSource->DopplerFactor = doppler;
+    aSource->Volume = volume;
+    aSource->MinDistance = minDistance;
+    aSource->Attenuation = attenuation;
+    aSource->Channels = aFormat.nChannels;
+    aSource->Position = position;
+    aSource->Orientation = orientation;
+    aSource->Velocity = Vector3::Zero;
+    hr = aSource->Voice->SetVolume(volume);
+    XAUDIO2_CHECK_ERROR(SetVolume);
 
-    // 0 is invalid ID so shift them
-    sourceID++;
-
-    source->SourceIDs.Add(sourceID);
-
-    source->Restore();
+    return sourceID;
 }
 
-void AudioBackendXAudio2::Source_OnRemove(AudioSource* source)
+void AudioBackendXAudio2::Source_Remove(uint32 sourceID)
 {
-    source->Cleanup();
-}
-
-void AudioBackendXAudio2::Source_VelocityChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource)
-    {
-        aSource->UpdateVelocity(source);
-        aSource->IsDirty = true;
-    }
-}
-
-void AudioBackendXAudio2::Source_TransformChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource)
-    {
-        aSource->UpdateTransform(source);
-        aSource->IsDirty = true;
-    }
-}
-
-void AudioBackendXAudio2::Source_VolumeChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource && aSource->Voice)
-    {
-        aSource->Voice->SetVolume(source->GetVolume());
-    }
-}
-
-void AudioBackendXAudio2::Source_PitchChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource)
-    {
-        aSource->Pitch = source->GetPitch();
-        aSource->IsDirty = true;
-    }
-}
-
-void AudioBackendXAudio2::Source_IsLoopingChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (!aSource || !aSource->Voice)
-        return;
-
-    // Skip if has no buffers (waiting for data or sth)
-    XAUDIO2_VOICE_STATE state;
-    aSource->Voice->GetState(&state);
-    if (state.BuffersQueued == 0)
-        return;
-
-    // Looping is defined during buffer submission so reset source buffer (this is called only for non-streamable sources that ue single buffer)
-
-    const uint32 bufferId = source->Clip->Buffers[0];
-    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferId - 1];
-
-    const bool isPlaying = source->IsActuallyPlayingSth();
-    if (isPlaying)
-        aSource->Voice->Stop();
-
-    aSource->Voice->FlushSourceBuffers();
-    aSource->LastBufferStartSamplesPlayed = 0;
-    aSource->BuffersProcessed = 0;
-
-    XAUDIO2_BUFFER buffer = { 0 };
-    buffer.pContext = aBuffer;
-    buffer.Flags = XAUDIO2_END_OF_STREAM;
-    if (source->GetIsLooping())
-        buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
-
-    // Restore play position
-    const UINT32 totalSamples = aBuffer->Info.NumSamples / aBuffer->Info.NumChannels;
-    buffer.PlayBegin = state.SamplesPlayed % totalSamples;
-    buffer.PlayLength = totalSamples - buffer.PlayBegin;
-    aSource->StartTime = 0;
-
-    XAudio2::QueueBuffer(aSource, source, bufferId, buffer);
-
-    if (isPlaying)
-        aSource->Voice->Start();
-}
-
-void AudioBackendXAudio2::Source_MinDistanceChanged(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource)
-    {
-        aSource->Data.InnerRadius = source->GetMinDistance();
-        aSource->IsDirty = true;
-    }
-}
-
-void AudioBackendXAudio2::Source_AttenuationChanged(AudioSource* source)
-{
-    // TODO: implement it
-}
-
-void AudioBackendXAudio2::Source_ClipLoaded(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
-    if (!aSource)
-    {
-        // Register source if clip was missing
-        Source_OnAdd(source);
-    }
-}
-
-void AudioBackendXAudio2::Source_Cleanup(AudioSource* source)
-{
-    auto aSource = XAudio2::GetSource(source);
+    ScopeLock lock(XAudio2::Locker);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (!aSource)
         return;
 
@@ -528,106 +315,237 @@ void AudioBackendXAudio2::Source_Cleanup(AudioSource* source)
     aSource->Init();
 }
 
-void AudioBackendXAudio2::Source_Play(AudioSource* source)
+void AudioBackendXAudio2::Source_VelocityChanged(uint32 sourceID, const Vector3& velocity)
 {
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource)
+    {
+        aSource->Velocity = velocity;
+        aSource->IsDirty = true;
+    }
+}
+
+void AudioBackendXAudio2::Source_TransformChanged(uint32 sourceID, const Vector3& position, const Quaternion& orientation)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource)
+    {
+        aSource->Position = position;
+        aSource->Orientation = orientation;
+        aSource->IsDirty = true;
+    }
+}
+
+void AudioBackendXAudio2::Source_VolumeChanged(uint32 sourceID, float volume)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource && aSource->Voice)
     {
+        aSource->Volume = volume;
+        const HRESULT hr = aSource->Voice->SetVolume(volume);
+        XAUDIO2_CHECK_ERROR(SetVolume);
+    }
+}
+
+void AudioBackendXAudio2::Source_PitchChanged(uint32 sourceID, float pitch)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource)
+    {
+        aSource->Pitch = pitch;
+        aSource->IsDirty = true;
+    }
+}
+
+void AudioBackendXAudio2::Source_PanChanged(uint32 sourceID, float pan)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource)
+    {
+        aSource->Pan = pan;
+        aSource->IsDirty = true;
+    }
+}
+
+void AudioBackendXAudio2::Source_IsLoopingChanged(uint32 sourceID, bool loop)
+{
+    ScopeLock lock(XAudio2::Locker);
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (!aSource || !aSource->Voice)
+        return;
+    aSource->IsLoop = loop;
+
+    // Skip if has no buffers (waiting for data or sth)
+    XAUDIO2_VOICE_STATE state;
+    aSource->Voice->GetState(&state);
+    if (state.BuffersQueued == 0)
+        return;
+
+    // Looping is defined during buffer submission so reset source buffer (this is called only for non-streamable sources that use a single buffer)
+    const uint32 bufferID = aSource->LastBufferID;
+    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferID - 1];
+
+    HRESULT hr;
+    const bool isPlaying = aSource->IsPlaying;
+    if (isPlaying)
+    {
+        hr = aSource->Voice->Stop();
+        XAUDIO2_CHECK_ERROR(Stop);
+    }
+
+    hr = aSource->Voice->FlushSourceBuffers();
+    XAUDIO2_CHECK_ERROR(FlushSourceBuffers);
+    aSource->LastBufferStartSamplesPlayed = 0;
+    aSource->LastBufferStartTime = 0;
+    aSource->BuffersProcessed = 0;
+
+    XAUDIO2_BUFFER buffer = { 0 };
+    buffer.pContext = aBuffer;
+    buffer.Flags = XAUDIO2_END_OF_STREAM;
+    if (loop)
+        buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+
+    // Restore play position
+    const UINT32 totalSamples = aBuffer->Info.NumSamples / aBuffer->Info.NumChannels;
+    buffer.PlayBegin = state.SamplesPlayed % totalSamples;
+    buffer.PlayLength = totalSamples - buffer.PlayBegin;
+    aSource->StartTimeForQueueBuffer = 0;
+
+    XAudio2::QueueBuffer(aSource, bufferID, buffer);
+
+    if (isPlaying)
+    {
+        hr = aSource->Voice->Start();
+        XAUDIO2_CHECK_ERROR(Start);
+    }
+}
+
+void AudioBackendXAudio2::Source_SpatialSetupChanged(uint32 sourceID, bool spatial, float attenuation, float minDistance, float doppler)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource)
+    {
+        aSource->Is3D = spatial;
+        aSource->MinDistance = minDistance;
+        aSource->Attenuation = attenuation;
+        aSource->DopplerFactor = doppler;
+        aSource->IsDirty = true;
+    }
+}
+
+void AudioBackendXAudio2::Source_Play(uint32 sourceID)
+{
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource && aSource->Voice && !aSource->IsPlaying)
+    {
         // Play
-        aSource->Voice->Start();
+        const HRESULT hr = aSource->Voice->Start();
+        XAUDIO2_CHECK_ERROR(Start);
         aSource->IsPlaying = true;
     }
 }
 
-void AudioBackendXAudio2::Source_Pause(AudioSource* source)
+void AudioBackendXAudio2::Source_Pause(uint32 sourceID)
 {
-    auto aSource = XAudio2::GetSource(source);
-    if (aSource && aSource->Voice)
+    auto aSource = XAudio2::GetSource(sourceID);
+    if (aSource && aSource->Voice && aSource->IsPlaying)
     {
         // Pause
-        aSource->Voice->Stop();
+        const HRESULT hr = aSource->Voice->Stop();
+        XAUDIO2_CHECK_ERROR(Stop);
         aSource->IsPlaying = false;
     }
 }
 
-void AudioBackendXAudio2::Source_Stop(AudioSource* source)
+void AudioBackendXAudio2::Source_Stop(uint32 sourceID)
 {
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource && aSource->Voice)
     {
-        aSource->StartTime = 0.0f;
+        aSource->StartTimeForQueueBuffer = 0.0f;
+        aSource->LastBufferStartTime = 0.0f;
 
         // Pause
-        aSource->Voice->Stop();
+        HRESULT hr = aSource->Voice->Stop();
+        XAUDIO2_CHECK_ERROR(Stop);
         aSource->IsPlaying = false;
 
         // Unset streaming buffers to rewind
-        aSource->Voice->FlushSourceBuffers();
+        hr = aSource->Voice->FlushSourceBuffers();
+        XAUDIO2_CHECK_ERROR(FlushSourceBuffers);
+        Platform::Sleep(10); // TODO: find a better way to handle case when VoiceCallback::OnBufferEnd is called after source was stopped thus BuffersProcessed != 0, probably via buffers contexts ptrs
         aSource->BuffersProcessed = 0;
         aSource->Callback.PeekSamples();
     }
 }
 
-void AudioBackendXAudio2::Source_SetCurrentBufferTime(AudioSource* source, float value)
+void AudioBackendXAudio2::Source_SetCurrentBufferTime(uint32 sourceID, float value)
 {
-    const auto aSource = XAudio2::GetSource(source);
+    const auto aSource = XAudio2::GetSource(sourceID);
     if (aSource)
     {
         // Store start time so next buffer submitted will start from here (assumes audio is stopped)
-        aSource->StartTime = value;
+        aSource->StartTimeForQueueBuffer = value;
     }
 }
 
-float AudioBackendXAudio2::Source_GetCurrentBufferTime(const AudioSource* source)
+float AudioBackendXAudio2::Source_GetCurrentBufferTime(uint32 sourceID)
 {
     float time = 0;
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource)
     {
-        ASSERT(source->Clip && source->Clip->IsLoaded());
-        const auto& clipInfo = source->Clip->AudioHeader.Info;
+        const auto& clipInfo = aSource->Info;
         XAUDIO2_VOICE_STATE state;
         aSource->Voice->GetState(&state);
-        const UINT32 totalSamples = clipInfo.NumSamples / clipInfo.NumChannels;
-        state.SamplesPlayed -= aSource->LastBufferStartSamplesPlayed % totalSamples; // Offset by the last buffer start to get time relative to its begin
-        time = aSource->StartTime + (state.SamplesPlayed % totalSamples) / static_cast<float>(Math::Max(1U, clipInfo.SampleRate));
+        const uint32 totalSamples = clipInfo.NumSamples / clipInfo.NumChannels;
+        const uint32 sampleRate = clipInfo.SampleRate; // / clipInfo.NumChannels;
+        uint64 lastBufferStartSamplesPlayed = aSource->LastBufferStartSamplesPlayed;
+        if (totalSamples > 0)
+            lastBufferStartSamplesPlayed %= totalSamples;
+        state.SamplesPlayed -= lastBufferStartSamplesPlayed % totalSamples; // Offset by the last buffer start to get time relative to its begin
+        if (totalSamples > 0)
+            state.SamplesPlayed %= totalSamples;
+        time = aSource->LastBufferStartTime + state.SamplesPlayed / static_cast<float>(Math::Max(1U, sampleRate));
     }
     return time;
 }
 
-void AudioBackendXAudio2::Source_SetNonStreamingBuffer(AudioSource* source)
+void AudioBackendXAudio2::Source_SetNonStreamingBuffer(uint32 sourceID, uint32 bufferID)
 {
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (!aSource)
         return;
+    aSource->LastBufferID = bufferID; // Use for looping change
 
-    const uint32 bufferId = source->Clip->Buffers[0];
-    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferId - 1];
+    XAudio2::Locker.Lock();
+    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferID - 1];
+    XAudio2::Locker.Unlock();
 
     XAUDIO2_BUFFER buffer = { 0 };
     buffer.pContext = aBuffer;
     buffer.Flags = XAUDIO2_END_OF_STREAM;
-    if (source->GetIsLooping())
+    if (aSource->IsLoop)
         buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
 
     // Queue single buffer
-    XAudio2::QueueBuffer(aSource, source, bufferId, buffer);
+    XAudio2::QueueBuffer(aSource, bufferID, buffer);
 }
 
-void AudioBackendXAudio2::Source_GetProcessedBuffersCount(AudioSource* source, int32& processedBuffersCount)
+void AudioBackendXAudio2::Source_GetProcessedBuffersCount(uint32 sourceID, int32& processedBuffersCount)
 {
     processedBuffersCount = 0;
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource && aSource->Voice)
     {
         processedBuffersCount = aSource->BuffersProcessed;
     }
 }
 
-void AudioBackendXAudio2::Source_GetQueuedBuffersCount(AudioSource* source, int32& queuedBuffersCount)
+void AudioBackendXAudio2::Source_GetQueuedBuffersCount(uint32 sourceID, int32& queuedBuffersCount)
 {
     queuedBuffersCount = 0;
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource && aSource->Voice)
     {
         XAUDIO2_VOICE_STATE state;
@@ -636,36 +554,38 @@ void AudioBackendXAudio2::Source_GetQueuedBuffersCount(AudioSource* source, int3
     }
 }
 
-void AudioBackendXAudio2::Source_QueueBuffer(AudioSource* source, uint32 bufferId)
+void AudioBackendXAudio2::Source_QueueBuffer(uint32 sourceID, uint32 bufferID)
 {
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (!aSource)
         return;
+    aSource->LastBufferID = bufferID; // Use for looping change
 
-    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferId - 1];
+    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferID - 1];
 
     XAUDIO2_BUFFER buffer = { 0 };
     buffer.pContext = aBuffer;
 
-    XAudio2::QueueBuffer(aSource, source, bufferId, buffer);
+    XAudio2::QueueBuffer(aSource, bufferID, buffer);
 }
 
-void AudioBackendXAudio2::Source_DequeueProcessedBuffers(AudioSource* source)
+void AudioBackendXAudio2::Source_DequeueProcessedBuffers(uint32 sourceID)
 {
-    auto aSource = XAudio2::GetSource(source);
+    auto aSource = XAudio2::GetSource(sourceID);
     if (aSource && aSource->Voice)
     {
         const HRESULT hr = aSource->Voice->FlushSourceBuffers();
-        if (FAILED(hr))
-        {
-            LOG(Warning, "XAudio2: FlushSourceBuffers failed. Error: 0x{0:x}", hr);
-        }
+        XAUDIO2_CHECK_ERROR(FlushSourceBuffers);
         aSource->BuffersProcessed = 0;
     }
 }
 
-void AudioBackendXAudio2::Buffer_Create(uint32& bufferId)
+uint32 AudioBackendXAudio2::Buffer_Create()
 {
+    PROFILE_MEM(Audio);
+    uint32 bufferID;
+    ScopeLock lock(XAudio2::Locker);
+
     // Get first free buffer slot
     XAudio2::Buffer* aBuffer = nullptr;
     for (int32 i = 0; i < XAudio2::Buffers.Count(); i++)
@@ -674,7 +594,7 @@ void AudioBackendXAudio2::Buffer_Create(uint32& bufferId)
         {
             aBuffer = New<XAudio2::Buffer>();
             XAudio2::Buffers[i] = aBuffer;
-            bufferId = i + 1;
+            bufferID = i + 1;
             break;
         }
     }
@@ -683,26 +603,32 @@ void AudioBackendXAudio2::Buffer_Create(uint32& bufferId)
         // Add new slot
         aBuffer = New<XAudio2::Buffer>();
         XAudio2::Buffers.Add(aBuffer);
-        bufferId = XAudio2::Buffers.Count();
+        bufferID = XAudio2::Buffers.Count();
     }
 
     aBuffer->Data.Resize(0);
+    return bufferID;
 }
 
-void AudioBackendXAudio2::Buffer_Delete(uint32& bufferId)
+void AudioBackendXAudio2::Buffer_Delete(uint32 bufferID)
 {
-    XAudio2::Buffer*& aBuffer = XAudio2::Buffers[bufferId - 1];
+    ScopeLock lock(XAudio2::Locker);
+    XAudio2::Buffer*& aBuffer = XAudio2::Buffers[bufferID - 1];
     aBuffer->Data.Resize(0);
     Delete(aBuffer);
     aBuffer = nullptr;
 }
 
-void AudioBackendXAudio2::Buffer_Write(uint32 bufferId, byte* samples, const AudioDataInfo& info)
+void AudioBackendXAudio2::Buffer_Write(uint32 bufferID, byte* samples, const AudioDataInfo& info)
 {
-    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferId - 1];
+    PROFILE_MEM(Audio);
+    CHECK(info.NumChannels <= MAX_INPUT_CHANNELS);
 
-    const uint32 bytesPerSample = info.BitDepth / 8;
-    const int32 samplesLength = info.NumSamples * bytesPerSample;
+    XAudio2::Locker.Lock();
+    XAudio2::Buffer* aBuffer = XAudio2::Buffers[bufferID - 1];
+    XAudio2::Locker.Unlock();
+
+    const uint32 samplesLength = info.NumSamples * info.BitDepth / 8;
 
     aBuffer->Info = info;
     aBuffer->Data.Set(samples, samplesLength);
@@ -713,12 +639,18 @@ const Char* AudioBackendXAudio2::Base_Name()
     return TEXT("XAudio2");
 }
 
+AudioBackend::FeatureFlags AudioBackendXAudio2::Base_Features()
+{
+    return FeatureFlags::None;
+}
+
 void AudioBackendXAudio2::Base_OnActiveDeviceChanged()
 {
 }
 
 void AudioBackendXAudio2::Base_SetDopplerFactor(float value)
 {
+    XAudio2::Settings.DopplerFactor = value;
     XAudio2::MarkAllDirty();
 }
 
@@ -726,7 +658,9 @@ void AudioBackendXAudio2::Base_SetVolume(float value)
 {
     if (XAudio2::MasteringVoice)
     {
-        XAudio2::MasteringVoice->SetVolume(value);
+        XAudio2::Settings.Volume = 1.0f; // Volume is applied via MasteringVoice
+        const HRESULT hr = XAudio2::MasteringVoice->SetVolume(value);
+        XAUDIO2_CHECK_ERROR(SetVolume);
     }
 }
 
@@ -738,7 +672,7 @@ bool AudioBackendXAudio2::Base_Init()
     HRESULT hr = XAudio2Create(&XAudio2::Instance, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr))
     {
-        LOG(Error, "Failed to initalize XAudio2. Error: 0x{0:x}", hr);
+        LOG(Error, "Failed to initialize XAudio2. Error: 0x{0:x}", hr);
         return true;
     }
     XAudio2::Instance->RegisterForCallbacks(&XAudio2::Callback);
@@ -747,12 +681,13 @@ bool AudioBackendXAudio2::Base_Init()
     hr = XAudio2::Instance->CreateMasteringVoice(&XAudio2::MasteringVoice);
     if (FAILED(hr))
     {
-        LOG(Error, "Failed to initalize XAudio2 mastering voice. Error: 0x{0:x}", hr);
+        LOG(Error, "Failed to initialize XAudio2 mastering voice. Error: 0x{0:x}", hr);
         return true;
     }
     XAUDIO2_VOICE_DETAILS details;
     XAudio2::MasteringVoice->GetVoiceDetails(&details);
-    XAudio2::SampleRate = details.InputSampleRate;
+#if MAX_OUTPUT_CHANNELS > 2
+    // TODO: implement multi-channel support (eg. 5.1, 7.1)
     XAudio2::Channels = details.InputChannels;
     hr = XAudio2::MasteringVoice->GetChannelMask(&XAudio2::ChannelMask);
     if (FAILED(hr))
@@ -760,20 +695,11 @@ bool AudioBackendXAudio2::Base_Init()
         LOG(Error, "Failed to get XAudio2 mastering voice channel mask. Error: 0x{0:x}", hr);
         return true;
     }
-    XAudio2::UseRedirectToLFE = ((XAudio2::ChannelMask & SPEAKER_LOW_FREQUENCY) != 0);
-
-    // Initialize spatial audio subsystem
-    DWORD dwChannelMask;
-    XAudio2::MasteringVoice->GetChannelMask(&dwChannelMask);
-    hr = X3DAudioInitialize(dwChannelMask, X3DAUDIO_SPEED_OF_SOUND, XAudio2::X3DInstance);
-    if (FAILED(hr))
-    {
-        LOG(Error, "Failed to initalize XAudio2 3D support. Error: 0x{0:x}", hr);
-        return true;
-    }
-
-    // Info
-    LOG(Info, "XAudio2: {0} channels at {1} kHz (channel mask {2})", XAudio2::Channels, XAudio2::SampleRate / 1000.0f, XAudio2::ChannelMask);
+#else
+    XAudio2::Channels = 2;
+    XAudio2::ChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+#endif
+    LOG(Info, "XAudio2: {0} channels at {1} kHz", XAudio2::Channels, details.InputSampleRate / 1000.0f);
 
     // Dummy device
     devices.Resize(1);
@@ -785,44 +711,20 @@ bool AudioBackendXAudio2::Base_Init()
 
 void AudioBackendXAudio2::Base_Update()
 {
-    // Note: only one listener is supported for now
-    const auto listener = XAudio2::GetListener();
-    if (!listener)
-    {
-        // How can we play audio when no one is listening
-        return;
-    }
-
     // Update dirty voices
-    const float dopplerFactor = AudioSettings::Get()->DopplerFactor;
-    X3DAUDIO_DSP_SETTINGS dsp = { 0 };
-    dsp.DstChannelCount = XAudio2::Channels;
-    dsp.pMatrixCoefficients = XAudio2::MatrixCoefficients;
+    float outputMatrix[MAX_CHANNELS_MATRIX_SIZE];
     for (int32 i = 0; i < XAudio2::Sources.Count(); i++)
     {
         auto& source = XAudio2::Sources[i];
         if (source.IsFree() || !(source.IsDirty || XAudio2::ForceDirty))
             continue;
 
-        dsp.SrcChannelCount = source.Data.ChannelCount;
-        if (source.Is3D)
-        {
-            X3DAudioCalculate(XAudio2::X3DInstance, &listener->Data, &source.Data, X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_DOPPLER, &dsp);
-        }
-        else
-        {
-            dsp.DopplerFactor = 1.0f;
+        auto mix = AudioBackendTools::CalculateSoundMix(XAudio2::Settings, XAudio2::Listener, source, XAudio2::Channels);
+        mix.VolumeIntoChannels();
+        AudioBackendTools::MapChannels(source.Channels, XAudio2::Channels, mix.Channels, outputMatrix);
 
-            // TODO: implement proper matrix setup to convert input channels into output mastering voice
-            // hardcoded case for mono audio -> stereo speakers
-            Platform::MemoryClear(dsp.pMatrixCoefficients, sizeof(XAudio2::MatrixCoefficients));
-            dsp.pMatrixCoefficients[0] = 0.5f;
-            dsp.pMatrixCoefficients[1] = 0.5f;
-        }
-
-        const float frequencyRatio = dopplerFactor * source.Pitch * dsp.DopplerFactor;
-        source.Voice->SetFrequencyRatio(frequencyRatio);
-        source.Voice->SetOutputMatrix(XAudio2::MasteringVoice, dsp.SrcChannelCount, dsp.DstChannelCount, dsp.pMatrixCoefficients);
+        source.Voice->SetFrequencyRatio(mix.Pitch);
+        source.Voice->SetOutputMatrix(XAudio2::MasteringVoice, source.Channels, XAudio2::Channels, outputMatrix);
 
         source.IsDirty = false;
     }

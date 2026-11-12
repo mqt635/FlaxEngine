@@ -1,9 +1,12 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Builder.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Types/TimeSpan.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Renderer/Renderer.h"
+#include "Engine/Renderer/DrawCall.h"
+#include "Engine/Renderer/Lightmaps.h"
 #include "Engine/Level/Scene/Lightmap.h"
 #include "Engine/Level/Actors/StaticModel.h"
 #include "Engine/Level/Actors/BoxBrush.h"
@@ -22,7 +25,7 @@
 
 namespace ShadowsOfMordor
 {
-    PACK_STRUCT(struct ShaderData {
+    GPU_CB_STRUCT(ShaderData {
         Rectangle LightmapArea;
         Matrix WorldMatrix;
         Matrix ToTangentSpace;
@@ -30,8 +33,8 @@ namespace ShadowsOfMordor
         uint32 TexelAddress;
         uint32 AtlasSize;
         float TerrainChunkSizeLOD0;
-        Vector4 HeightmapUVScaleBias;
-        Vector3 WorldInvScale;
+        Float4 HeightmapUVScaleBias;
+        Float3 WorldInvScale;
         float Dummy1;
         });
 }
@@ -115,7 +118,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
 
             // Render entry
             auto& entry = scene->Entries[lightmapEntry.Entries[_workerStagePosition1]];
-            auto cb = _shader->GetShader()->GetCB(0);
+            auto cb = _shader->GPU->GetCB(0);
             switch (entry.Type)
             {
             case GeometryType::StaticModel:
@@ -124,9 +127,9 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
                 auto& lod = staticModel->Model->LODs[0];
 
                 Matrix worldMatrix;
-                staticModel->GetWorld(&worldMatrix);
+                staticModel->GetLocalToWorldMatrix(worldMatrix);
                 Matrix::Transpose(worldMatrix, shaderData.WorldMatrix);
-                shaderData.LightmapArea = staticModel->Lightmap.UVsArea;
+                shaderData.LightmapArea = staticModel->Lightmap.UVsArea.ToFloat4();
 
                 context->UpdateCB(cb, &shaderData);
                 context->BindCB(0, cb);
@@ -150,27 +153,34 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
                 auto patch = terrain->GetPatch(entry.AsTerrain.PatchIndex);
                 auto chunk = &patch->Chunks[entry.AsTerrain.ChunkIndex];
                 auto chunkSize = terrain->GetChunkSize();
+                if (!patch->Heightmap)
+                {
+                    LOG(Error, "Terrain actor {0} is missing heightmap for baking, skipping baking stage.", terrain->GetName());
+                    _wasStageDone = true;
+                    scene->EntriesLocker.Unlock();
+                    return;
+                }
                 const auto heightmap = patch->Heightmap.Get()->GetTexture();
 
                 Matrix world;
-                chunk->GetWorld(&world);
+                chunk->GetTransform().GetWorld(world);
                 Matrix::Transpose(world, shaderData.WorldMatrix);
-                shaderData.LightmapArea = chunk->Lightmap.UVsArea;
+                shaderData.LightmapArea = chunk->Lightmap.UVsArea.ToFloat4();
                 shaderData.TerrainChunkSizeLOD0 = TERRAIN_UNITS_PER_VERTEX * chunkSize;
-                chunk->GetHeightmapUVScaleBias(&shaderData.HeightmapUVScaleBias);
+                shaderData.HeightmapUVScaleBias = chunk->GetHeightmapUVScaleBias();
 
                 // Extract per axis scales from LocalToWorld transform
-                const float scaleX = Vector3(world.M11, world.M12, world.M13).Length();
-                const float scaleY = Vector3(world.M21, world.M22, world.M23).Length();
-                const float scaleZ = Vector3(world.M31, world.M32, world.M33).Length();
-                shaderData.WorldInvScale = Vector3(
+                const float scaleX = Float3(world.M11, world.M12, world.M13).Length();
+                const float scaleY = Float3(world.M21, world.M22, world.M23).Length();
+                const float scaleZ = Float3(world.M31, world.M32, world.M33).Length();
+                shaderData.WorldInvScale = Float3(
                     scaleX > 0.00001f ? 1.0f / scaleX : 0.0f,
                     scaleY > 0.00001f ? 1.0f / scaleY : 0.0f,
                     scaleZ > 0.00001f ? 1.0f / scaleZ : 0.0f);
 
                 DrawCall drawCall;
                 if (TerrainManager::GetChunkGeometry(drawCall, chunkSize, 0))
-                    return;
+                    break;
 
                 context->UpdateCB(cb, &shaderData);
                 context->BindCB(0, cb);
@@ -188,8 +198,10 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
                 auto& instance = foliage->Instances[entry.AsFoliage.InstanceIndex];
                 auto& type = foliage->FoliageTypes[entry.AsFoliage.TypeIndex];
 
-                Matrix::Transpose(instance.World, shaderData.WorldMatrix);
-                shaderData.LightmapArea = instance.Lightmap.UVsArea;
+                Matrix world;
+                foliage->GetTransform().LocalToWorld(instance.Transform).GetWorld(world);
+                Matrix::Transpose(world, shaderData.WorldMatrix);
+                shaderData.LightmapArea = instance.LightmapUVsArea.ToFloat4();
 
                 context->UpdateCB(cb, &shaderData);
                 context->BindCB(0, cb);
@@ -219,8 +231,10 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
 
         auto tempDesc = GPUTextureDescription::New2D(atlasSize, atlasSize, HemispheresFormatToPixelFormat[CACHE_POSITIONS_FORMAT]);
         auto resultPositions = RenderTargetPool::Get(tempDesc);
+        RENDER_TARGET_POOL_SET_NAME(_cachePositions, "ShadowsOfMordor.Positions");
         tempDesc.Format = HemispheresFormatToPixelFormat[CACHE_NORMALS_FORMAT];
         auto resultNormals = RenderTargetPool::Get(tempDesc);
+        RENDER_TARGET_POOL_SET_NAME(_cachePositions, "ShadowsOfMordor.Normals");
         if (resultPositions == nullptr || resultNormals == nullptr)
         {
             RenderTargetPool::Release(resultPositions);
@@ -247,7 +261,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
 
         ShaderData shaderData;
         shaderData.AtlasSize = atlasSize;
-        auto cb = _shader->GetShader()->GetCB(0);
+        auto cb = _shader->GPU->GetCB(0);
         context->UpdateCB(cb, &shaderData);
         context->BindCB(0, cb);
 
@@ -274,7 +288,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
         auto& lightmapEntry = scene->Lightmaps[_workerStagePosition0];
 
         // All black everything!
-        context->ClearUA(lightmapEntry.LightmapData, Vector4::Zero);
+        context->ClearUA(lightmapEntry.LightmapData, Float4::Zero);
 
         _wasStageDone = true;
         break;
@@ -332,6 +346,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
 #if COMPILE_WITH_PROFILER
         auto gpuProfilerEnabled = ProfilerGPU::Enabled;
         ProfilerGPU::Enabled = false;
+        ProfilerGPU::EventsEnabled = false;
 #endif
 
         // Render hemispheres
@@ -343,12 +358,12 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
             auto& hemisphere = lightmapEntry.Hemispheres[_workerStagePosition1];
 
             // Create tangent frame
-            Vector3 tangent;
-            Vector3 c1 = Vector3::Cross(hemisphere.Normal, Vector3(0.0, 0.0, 1.0));
-            Vector3 c2 = Vector3::Cross(hemisphere.Normal, Vector3(0.0, 1.0, 0.0));
+            Float3 tangent;
+            Float3 c1 = Float3::Cross(hemisphere.Normal, Float3(0.0, 0.0, 1.0));
+            Float3 c2 = Float3::Cross(hemisphere.Normal, Float3(0.0, 1.0, 0.0));
             tangent = c1.Length() > c2.Length() ? c1 : c2;
-            tangent = Vector3::Normalize(tangent);
-            const Vector3 binormal = Vector3::Cross(tangent, hemisphere.Normal);
+            tangent = Float3::Normalize(tangent);
+            const Float3 binormal = Float3::Cross(tangent, hemisphere.Normal);
 
             // Setup view
             const Vector3 pos = hemisphere.Position + hemisphere.Normal * 0.001f;
@@ -363,7 +378,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
             EnableLightmapsUsage = _giBounceRunningIndex != 0;
             //
             Renderer::Render(_task);
-            context->ClearState();
+            context->ResetState();
             //
             IsRunningRadiancePass = false;
             EnableLightmapsUsage = true;
@@ -375,15 +390,15 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
 
             // Setup shader data
             Matrix worldToTangent;
-            worldToTangent.SetRow1(Vector4(tangent, 0.0f));
-            worldToTangent.SetRow2(Vector4(binormal, 0.0f));
-            worldToTangent.SetRow3(Vector4(hemisphere.Normal, 0.0f));
-            worldToTangent.SetRow4(Vector4(0.0f, 0.0f, 0.0f, 1.0f));
+            worldToTangent.SetRow1(Float4(tangent, 0.0f));
+            worldToTangent.SetRow2(Float4(binormal, 0.0f));
+            worldToTangent.SetRow3(Float4(hemisphere.Normal, 0.0f));
+            worldToTangent.SetRow4(Float4(0.0f, 0.0f, 0.0f, 1.0f));
             worldToTangent.Invert();
             //
             Matrix viewToWorld; // viewToWorld is inverted view, since view is worldToView
             Matrix::Invert(view, viewToWorld);
-            viewToWorld.SetRow4(Vector4(0.0f, 0.0f, 0.0f, 1.0f)); // reset translation row
+            viewToWorld.SetRow4(Float4(0.0f, 0.0f, 0.0f, 1.0f)); // reset translation row
             Matrix viewToTangent;
             Matrix::Multiply(viewToWorld, worldToTangent, viewToTangent);
             Matrix::Transpose(viewToTangent, shaderData.ToTangentSpace);
@@ -392,24 +407,24 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
             shaderData.TexelAddress = (hemisphere.TexelY * atlasSize + hemisphere.TexelX) * NUM_SH_TARGETS;
 
             // Calculate per pixel irradiance using compute shaders
-            auto cb = _shader->GetShader()->GetCB(0);
+            auto cb = _shader->GPU->GetCB(0);
             context->UpdateCB(cb, &shaderData);
             context->BindCB(0, cb);
             context->BindUA(0, _irradianceReduction->View());
             context->BindSR(0, radianceMap);
-            context->Dispatch(_shader->GetShader()->GetCS("CS_Integrate"), 1, HEMISPHERES_RESOLUTION, 1);
+            context->Dispatch(_shader->GPU->GetCS("CS_Integrate"), 1, HEMISPHERES_RESOLUTION, 1);
+            context->ResetUA();
+            context->ResetSR();
 
             // Downscale H-basis to 1x1 and copy results to lightmap data buffer
             context->BindUA(0, lightmapEntry.LightmapData->View());
-            context->FlushState();
             context->BindSR(0, _irradianceReduction->View());
             // TODO: cache shader handle
-            context->Dispatch(_shader->GetShader()->GetCS("CS_Reduction"), 1, NUM_SH_TARGETS, 1);
+            context->Dispatch(_shader->GPU->GetCS("CS_Reduction"), 1, NUM_SH_TARGETS, 1);
 
             // Unbind slots now to make rendering backend live easier
-            context->UnBindSR(0);
-            context->UnBindUA(0);
-            context->FlushState();
+            context->ResetSR();
+            context->ResetUA();
 
             // Keep GPU busy
             if (hemispheresToRenderBeforeSyncLeft-- < 0)
@@ -420,10 +435,11 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
         }
 #if COMPILE_WITH_PROFILER
         ProfilerGPU::Enabled = gpuProfilerEnabled;
+        ProfilerGPU::EventsEnabled = gpuProfilerEnabled;
 #endif
 
         // Report progress
-        float hemispheresProgress = static_cast<float>(_workerStagePosition1) / lightmapEntry.Hemispheres.Count();
+        float hemispheresProgress = static_cast<float>(_workerStagePosition1) / Math::Max(lightmapEntry.Hemispheres.Count(), 1);
         float lightmapsProgress = static_cast<float>(_workerStagePosition0 + hemispheresProgress) / scene->Lightmaps.Count();
         float bouncesProgress = static_cast<float>(_giBounceRunningIndex) / _bounceCount;
         reportProgress(BuildProgressStep::RenderHemispheres, lightmapsProgress / _bounceCount + bouncesProgress);
@@ -453,7 +469,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
         auto& lightmapEntry = scene->Lightmaps[_workerStagePosition0];
         ShaderData shaderData;
         shaderData.AtlasSize = atlasSize;
-        auto cb = _shader->GetShader()->GetCB(0);
+        auto cb = _shader->GPU->GetCB(0);
         context->UpdateCB(cb, &shaderData);
         context->BindCB(0, cb);
 
@@ -461,7 +477,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
         context->ResetRenderTarget();
         context->BindSR(0, lightmapEntry.LightmapData->View());
         context->BindUA(0, scene->TempLightmapData->View());
-        context->Dispatch(_shader->GetShader()->GetCS("CS_BlurEmpty"), atlasSize, atlasSize, 1);
+        context->Dispatch(_shader->GPU->GetCS("CS_BlurEmpty"), atlasSize, atlasSize, 1);
 
         // Swap temporary buffer used as output with lightmap entry data (these buffers are the same)
         // So we can rewrite data from one buffer to another with custom sampling
@@ -473,13 +489,12 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
             blurPasses = 0; // TODO: fix CS_Dilate passes on D3D12 (probably UAV synchronization issue)
         for (int32 blurPassIndex = 0; blurPassIndex < blurPasses; blurPassIndex++)
         {
-            context->UnBindSR(0);
-            context->UnBindUA(0);
-            context->FlushState();
+            context->ResetSR();
+            context->ResetUA();
 
             context->BindSR(0, lightmapEntry.LightmapData->View());
             context->BindUA(0, scene->TempLightmapData->View());
-            context->Dispatch(_shader->GetShader()->GetCS("CS_Dilate"), atlasSize, atlasSize, 1);
+            context->Dispatch(_shader->GPU->GetCS("CS_Dilate"), atlasSize, atlasSize, 1);
 
             Swap(scene->TempLightmapData, lightmapEntry.LightmapData);
         }
@@ -487,7 +502,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
         context->BindUA(0, lightmapEntry.LightmapData->View());
 
         // Remove the BACKGROUND_TEXELS_MARK from the unused texels (see shader for more info)
-        context->Dispatch(_shader->GetShader()->GetCS("CS_Finalize"), atlasSize, atlasSize, 1);
+        context->Dispatch(_shader->GPU->GetCS("CS_Finalize"), atlasSize, atlasSize, 1);
 
         // Move to another lightmap
         _workerStagePosition0++;
@@ -502,7 +517,7 @@ void ShadowsOfMordor::Builder::onJobRender(GPUContext* context)
     }
 
     // Cleanup after rendering
-    context->ClearState();
+    context->ResetState();
 
     // Mark job as done
     Platform::AtomicStore(&_wasJobDone, 1);

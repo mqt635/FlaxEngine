@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System.Collections;
 using System.Collections.Generic;
 using FlaxEngine;
+using FlaxEngine.Utilities;
 
 namespace FlaxEditor.CustomEditors.Editors
 {
@@ -20,7 +21,7 @@ namespace FlaxEditor.CustomEditors.Editors
         {
             var listType = Values.Type;
             var list = (IList)listType.CreateInstance();
-            var defaultValue = Scripting.TypeUtils.GetDefaultValue(ElementType);
+            var defaultValue = TypeUtils.GetDefaultValue(ElementType);
             for (int i = 0; i < size; i++)
                 list.Add(defaultValue);
             return list;
@@ -55,7 +56,7 @@ namespace FlaxEditor.CustomEditors.Editors
                     else
                     {
                         // Initialize new entries with default values
-                        var defaultValue = Scripting.TypeUtils.GetDefaultValue(elementType);
+                        var defaultValue = TypeUtils.GetDefaultValue(elementType);
                         for (int i = oldSize; i < newSize; i++)
                             newValues.Add(defaultValue);
                     }
@@ -63,7 +64,7 @@ namespace FlaxEditor.CustomEditors.Editors
                 else if (newSize > 0)
                 {
                     // Fill new entries with default value
-                    var defaultValue = Scripting.TypeUtils.GetDefaultValue(elementType);
+                    var defaultValue = TypeUtils.GetDefaultValue(elementType);
                     for (int i = oldSize; i < newSize; i++)
                         newValues.Add(defaultValue);
                 }

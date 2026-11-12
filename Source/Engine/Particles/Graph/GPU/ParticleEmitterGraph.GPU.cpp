@@ -1,8 +1,9 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_PARTICLE_GPU_GRAPH
 
 #include "ParticleEmitterGraph.GPU.h"
+#include "Engine/Core/Math/Matrix.h"
 #include "Engine/Serialization/FileReadStream.h"
 #include "Engine/Visject/ShaderGraphUtilities.h"
 #include "Engine/Engine/Globals.h"
@@ -29,10 +30,10 @@ void ParticleEmitterGraphGPU::ClearCache()
 {
     for (int32 i = 0; i < Nodes.Count(); i++)
     {
-        auto& node = Nodes[i];
+        ParticleEmitterGraphGPUNode& node = Nodes.Get()[i];
         for (int32 j = 0; j < node.Boxes.Count(); j++)
         {
-            node.Boxes[j].Cache.Clear();
+            node.Boxes.Get()[j].Cache.Clear();
         }
     }
 }
@@ -85,16 +86,14 @@ bool ParticleEmitterGPUGenerator::Generate(WriteStream& source, BytesContainer& 
     auto& layout = baseGraph->Layout;
     _attributeValues.Resize(layout.Attributes.Count());
     for (int32 i = 0; i < _attributeValues.Count(); i++)
-    {
         _attributeValues[i] = AttributeCache();
-    }
     _contextUsesKill = false;
 
     // Cache attributes
-    const int32 positionIdx = layout.FindAttribute(StringView(TEXT("Position")), ParticleAttribute::ValueTypes::Vector3);
-    const int32 velocityIdx = layout.FindAttribute(StringView(TEXT("Velocity")), ParticleAttribute::ValueTypes::Vector3);
-    const int32 rotationIdx = layout.FindAttribute(StringView(TEXT("Rotation")), ParticleAttribute::ValueTypes::Vector3);
-    const int32 angularVelocityIdx = layout.FindAttribute(StringView(TEXT("AngularVelocity")), ParticleAttribute::ValueTypes::Vector3);
+    const int32 positionIdx = layout.FindAttribute(StringView(TEXT("Position")), ParticleAttribute::ValueTypes::Float3);
+    const int32 velocityIdx = layout.FindAttribute(StringView(TEXT("Velocity")), ParticleAttribute::ValueTypes::Float3);
+    const int32 rotationIdx = layout.FindAttribute(StringView(TEXT("Rotation")), ParticleAttribute::ValueTypes::Float3);
+    const int32 angularVelocityIdx = layout.FindAttribute(StringView(TEXT("AngularVelocity")), ParticleAttribute::ValueTypes::Float3);
     const int32 ageIdx = layout.FindAttribute(StringView(TEXT("Age")), ParticleAttribute::ValueTypes::Float);
     const int32 lifetimeIdx = layout.FindAttribute(StringView(TEXT("Lifetime")), ParticleAttribute::ValueTypes::Float);
 
@@ -111,7 +110,7 @@ bool ParticleEmitterGPUGenerator::Generate(WriteStream& source, BytesContainer& 
 
         for (int32 i = 0; i < baseGraph->InitModules.Count(); i++)
         {
-            ProcessModule(baseGraph->InitModules[i]);
+            ProcessModule(baseGraph->InitModules.Get()[i]);
         }
 
         WriteParticleAttributesWrites();
@@ -134,7 +133,7 @@ bool ParticleEmitterGPUGenerator::Generate(WriteStream& source, BytesContainer& 
 
         for (int32 i = 0; i < baseGraph->UpdateModules.Count(); i++)
         {
-            ProcessModule(baseGraph->UpdateModules[i]);
+            ProcessModule(baseGraph->UpdateModules.Get()[i]);
         }
 
         // Dead particles removal
@@ -192,13 +191,13 @@ bool ParticleEmitterGPUGenerator::Generate(WriteStream& source, BytesContainer& 
             case ParticleAttribute::ValueTypes::Float:
                 typeName = TEXT("float");
                 break;
-            case ParticleAttribute::ValueTypes::Vector2:
+            case ParticleAttribute::ValueTypes::Float2:
                 typeName = TEXT("float2");
                 break;
-            case ParticleAttribute::ValueTypes::Vector3:
+            case ParticleAttribute::ValueTypes::Float3:
                 typeName = TEXT("float3");
                 break;
-            case ParticleAttribute::ValueTypes::Vector4:
+            case ParticleAttribute::ValueTypes::Float4:
                 typeName = TEXT("float4");
                 break;
             case ParticleAttribute::ValueTypes::Int:
@@ -208,7 +207,7 @@ bool ParticleEmitterGPUGenerator::Generate(WriteStream& source, BytesContainer& 
                 typeName = TEXT("uint");
                 break;
             default:
-            CRASH;
+                CRASH;
             }
             _writer.Write(TEXT("// {0:^6} | {1:^6} | {2}\n"), a.Offset, typeName, a.Name);
         }
@@ -320,22 +319,22 @@ void ParticleEmitterGPUGenerator::clearCache()
     // Reset cached boxes values
     for (int32 i = 0; i < _graphs.Count(); i++)
     {
-        _graphs[i]->ClearCache();
+        _graphs.Get()[i]->ClearCache();
     }
-    for (auto& e : _functions)
+    for (const auto& e : _functions)
     {
-        for (auto& node : e.Value->Nodes)
+        auto& nodes = ((ParticleEmitterGraphGPU*)e.Value)->Nodes;
+        for (int32 i = 0; i < nodes.Count(); i++)
         {
+            ParticleEmitterGraphGPUNode& node = nodes.Get()[i];
             for (int32 j = 0; j < node.Boxes.Count(); j++)
-                node.Boxes[j].Cache.Clear();
+                node.Boxes.Get()[j].Cache.Clear();
         }
     }
 
     // Reset cached attributes
     for (int32 i = 0; i < _attributeValues.Count(); i++)
-    {
-        _attributeValues[i] = AttributeCache();
-    }
+        _attributeValues.Get()[i] = AttributeCache();
 
     _contextUsesKill = false;
 }
@@ -343,10 +342,11 @@ void ParticleEmitterGPUGenerator::clearCache()
 void ParticleEmitterGPUGenerator::WriteParticleAttributesWrites()
 {
     bool hadAnyWrite = false;
+    ParticleEmitterGraphGPU* graph = GetRootGraph();
     for (int32 i = 0; i < _attributeValues.Count(); i++)
     {
         auto& value = _attributeValues[i];
-        auto& attribute = ((ParticleEmitterGraphGPU*)_graphStack.Peek())->Layout.Attributes[i];
+        auto& attribute = graph->Layout.Attributes[i];
 
         // Skip not used attributes or read-only attributes
         if (value.Variable.Type == VariantType::Null || ((int)value.Access & (int)AccessMode::Write) == 0)
@@ -366,13 +366,13 @@ void ParticleEmitterGPUGenerator::WriteParticleAttributesWrites()
         case ParticleAttribute::ValueTypes::Float:
             format = TEXT("\tSetParticleFloat(context.ParticleIndex, {0}, {1});\n");
             break;
-        case ParticleAttribute::ValueTypes::Vector2:
+        case ParticleAttribute::ValueTypes::Float2:
             format = TEXT("\tSetParticleVec2(context.ParticleIndex, {0}, {1});\n");
             break;
-        case ParticleAttribute::ValueTypes::Vector3:
+        case ParticleAttribute::ValueTypes::Float3:
             format = TEXT("\tSetParticleVec3(context.ParticleIndex, {0}, {1});\n");
             break;
-        case ParticleAttribute::ValueTypes::Vector4:
+        case ParticleAttribute::ValueTypes::Float4:
             format = TEXT("\tSetParticleVec4(context.ParticleIndex, {0}, {1});\n");
             break;
         case ParticleAttribute::ValueTypes::Int:
@@ -447,17 +447,30 @@ void ParticleEmitterGPUGenerator::PrepareGraph(ParticleEmitterGraphGPU* graph)
             mp.Type = MaterialParameterType::Float;
             mp.AsFloat = param->Value.AsFloat;
             break;
-        case VariantType::Vector2:
+        case VariantType::Float2:
             mp.Type = MaterialParameterType::Vector2;
-            mp.AsVector2 = param->Value.AsVector2();
+            mp.AsFloat2 = param->Value.AsFloat2();
             break;
-        case VariantType::Vector3:
+        case VariantType::Float3:
             mp.Type = MaterialParameterType::Vector3;
-            mp.AsVector3 = param->Value.AsVector3();
+            mp.AsFloat3 = param->Value.AsFloat3();
             break;
-        case VariantType::Vector4:
+        case VariantType::Float4:
+        case VariantType::Quaternion:
             mp.Type = MaterialParameterType::Vector4;
-            *(Vector4*)&mp.AsData = param->Value.AsVector4();
+            *(Float4*)&mp.AsData = param->Value.AsFloat4();
+            break;
+        case VariantType::Double2:
+            mp.Type = MaterialParameterType::Float;
+            mp.AsFloat2 = (Float2)param->Value.AsDouble2();
+            break;
+        case VariantType::Double3:
+            mp.Type = MaterialParameterType::Vector3;
+            mp.AsFloat3 = (Float3)param->Value.AsDouble3();
+            break;
+        case VariantType::Double4:
+            mp.Type = MaterialParameterType::Vector4;
+            *(Float4*)&mp.AsData = (Float4)param->Value.AsDouble4();
             break;
         case VariantType::Color:
             mp.Type = MaterialParameterType::Color;
@@ -485,6 +498,8 @@ void ParticleEmitterGPUGenerator::PrepareGraph(ParticleEmitterGraphGPU* graph)
             }
             if (StringUtils::Compare(param->Type.TypeName, "FlaxEngine.GPUTexture") == 0)
                 mp.Type = MaterialParameterType::GPUTexture;
+            else if (StringUtils::Compare(param->Type.TypeName, "FlaxEngine.GPUBuffer") == 0)
+                mp.Type = MaterialParameterType::GPUBuffer;
             else
                 OnError(nullptr, nullptr, String::Format(TEXT("Invalid or unsupported particle parameter type {0}."), param->Type));
             mp.AsGuid = (Guid)param->Value;

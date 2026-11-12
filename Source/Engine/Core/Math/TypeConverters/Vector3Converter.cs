@@ -1,33 +1,22 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
+#if FLAX_EDITOR
 using System;
 using System.ComponentModel;
 using System.Globalization;
 
 namespace FlaxEngine.TypeConverters
 {
-    internal class Vector3Converter : TypeConverter
+    internal class Vector3Converter : VectorConverter
     {
-        /// <inheritdoc />
-        public override bool CanConvertFrom(ITypeDescriptorContext context, Type sourceType)
-        {
-            if (sourceType == typeof(string))
-            {
-                return true;
-            }
-
-            return base.CanConvertFrom(context, sourceType);
-        }
-
         /// <inheritdoc />
         public override object ConvertFrom(ITypeDescriptorContext context, CultureInfo culture, object value)
         {
             if (value is string str)
             {
-                string[] v = str.Split(',');
-                return new Vector3(float.Parse(v[0]), float.Parse(v[1]), float.Parse(v[2]));
+                string[] v = GetParts(str);
+                return new Vector3(float.Parse(v[0], culture), float.Parse(v[1], culture), float.Parse(v[2], culture));
             }
-
             return base.ConvertFrom(context, culture, value);
         }
 
@@ -36,10 +25,11 @@ namespace FlaxEngine.TypeConverters
         {
             if (destinationType == typeof(string))
             {
-                return ((Vector3)value).X + "," + ((Vector3)value).Y + "," + ((Vector3)value).Z;
+                var v = (Vector3)value;
+                return v.X.ToString(culture) + "," + v.Y.ToString(culture) + "," + v.Z.ToString(culture);
             }
-
             return base.ConvertTo(context, culture, value, destinationType);
         }
     }
 }
+#endif

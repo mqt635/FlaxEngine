@@ -1,14 +1,18 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "FlaxStorage.h"
 #include "FlaxFile.h"
 #include "FlaxPackage.h"
 #include "ContentStorageManager.h"
 #include "Engine/Core/Log.h"
+#include "Engine/Core/ScopeExit.h"
 #include "Engine/Core/Types/TimeSpan.h"
 #include "Engine/Platform/File.h"
 #include "Engine/Profiler/ProfilerCPU.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #include "Engine/Serialization/FileWriteStream.h"
+#include "Engine/Content/Asset.h"
+#include "Engine/Content/Content.h"
 #include "Engine/Threading/Threading.h"
 #if USE_EDITOR
 #include "Engine/Serialization/JsonWriter.h"
@@ -18,19 +22,58 @@
 #endif
 #include <ThirdParty/LZ4/lz4.h>
 
+int32 AssetHeader::GetChunksCount() const
+{
+    int32 result = 0;
+    for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
+    {
+        if (Chunks[i] != nullptr)
+            result++;
+    }
+    return result;
+}
+
+void AssetHeader::DeleteChunks()
+{
+    for (int32 i = 0; i < ASSET_FILE_DATA_CHUNKS; i++)
+    {
+        SAFE_DELETE(Chunks[i]);
+    }
+}
+
+void AssetHeader::UnlinkChunks()
+{
+    Platform::MemoryClear(Chunks, sizeof(Chunks));
+}
+
 String AssetHeader::ToString() const
 {
     return String::Format(TEXT("ID: {0}, TypeName: {1}, Chunks Count: {2}"), ID, TypeName, GetChunksCount());
 }
 
+uint32 AssetInitData::GetHashCode() const
+{
+    // Do not use Metadata/Dependencies because it may not be loaded (it's optional)
+    uint32 hashCode = GetHash(Header.ID);
+    hashCode = (hashCode * 397) ^ SerializedVersion;
+    hashCode = (hashCode * 397) ^ CustomData.Length();
+    return hashCode;
+}
+
 void FlaxChunk::RegisterUsage()
 {
-    Platform::AtomicStore(&LastAccessTime, DateTime::NowUTC().Ticks);
+    LastAccessTime = Platform::GetTimeSeconds();
+}
+
+FlaxChunk* FlaxChunk::Clone() const
+{
+    PROFILE_MEM(ContentFiles);
+    auto chunk = New<FlaxChunk>();
+    chunk->Data.Copy(Data);
+    return chunk;
 }
 
 const int32 FlaxStorage::MagicCode = 1180124739;
-
-FlaxStorage::LockData FlaxStorage::LockData::Invalid(nullptr);
 
 struct Header
 {
@@ -192,40 +235,46 @@ const Char* TypeId2TypeName(const uint32 typeId)
 }
 
 FlaxStorage::FlaxStorage(const StringView& path)
-    : _refCount(0)
-    , _chunksLock(0)
-    , _version(0)
-    , _path(path)
+    : _path(path)
 {
-}
-
-void FlaxStorage::AddRef()
-{
-    _refCount++;
-}
-
-void FlaxStorage::RemoveRef()
-{
-    if (_refCount > 0)
-    {
-        _refCount--;
-        if (_refCount == 0)
-        {
-            _lastRefLostTime = DateTime::NowUTC();
-        }
-    }
 }
 
 FlaxStorage::~FlaxStorage()
 {
     // Validate if has been disposed
     ASSERT(IsDisposed());
-
-    // Validate other fields
-    // Note: disposed storage has no open files
-    CHECK(_chunksLock == 0);
-    CHECK(_refCount == 0);
+    CHECK_NO_RETURN(_chunksLock == 0);
+    CHECK_NO_RETURN(_refCount == 0);
+    CHECK_NO_RETURN(_isUnloadingData == 0);
     ASSERT(_chunks.IsEmpty());
+
+#if USE_EDITOR
+    // Ensure to close any outstanding file handles to prevent file locking in case it failed to load
+    Array<FileReadStream*> streams;
+    _file.GetValues(streams);
+    for (FileReadStream* stream : streams)
+    {
+        if (stream)
+            Delete(stream);
+    }
+    Platform::AtomicStore(&_files, 0);
+#endif
+}
+
+void FlaxStorage::LockChunks()
+{
+RETRY:
+    Platform::InterlockedIncrement(&_chunksLock);
+    if (Platform::AtomicRead(&_isUnloadingData) != 0)
+    {
+        // Someone else is closing file handles or freeing chunks so wait for it to finish and retry
+        Platform::InterlockedDecrement(&_chunksLock);
+        do
+        {
+            Platform::Sleep(1);
+        } while (Platform::AtomicRead(&_isUnloadingData) != 0);
+        goto RETRY;
+    }
 }
 
 FlaxStorage::LockData FlaxStorage::LockSafe()
@@ -235,9 +284,16 @@ FlaxStorage::LockData FlaxStorage::LockSafe()
     return lock;
 }
 
+uint32 FlaxStorage::GetRefCount() const
+{
+    return (uint32)Platform::AtomicRead(&_refCount);
+}
+
 bool FlaxStorage::ShouldDispose() const
 {
-    return _refCount == 0 && Platform::AtomicRead((int64*)&_chunksLock) == 0 && DateTime::NowUTC() - _lastRefLostTime >= TimeSpan::FromMilliseconds(500);
+    return Platform::AtomicRead(&_refCount) == 0 &&
+            Platform::AtomicRead(&_chunksLock) == 0 &&
+            Platform::GetTimeSeconds() - _lastRefLostTime >= ContentStorageManager::UnusedStorageLifetime.GetTotalSeconds();
 }
 
 uint32 FlaxStorage::GetMemoryUsage() const
@@ -250,19 +306,12 @@ uint32 FlaxStorage::GetMemoryUsage() const
 
 bool FlaxStorage::Load()
 {
-    // Check if was already loaded
     if (IsLoaded())
-    {
         return false;
-    }
-
-    // Prevent loading by more than one thread
+    PROFILE_MEM(ContentFiles);
     ScopeLock lock(_loadLocker);
     if (IsLoaded())
-    {
-        // Other thread loaded it
         return false;
-    }
     ASSERT(GetEntriesCount() == 0);
 
     // Open file
@@ -288,7 +337,7 @@ bool FlaxStorage::Load()
     {
         // Custom storage data
         CustomData customData;
-        stream->Read(&customData);
+        stream->Read(customData);
 
 #if USE_EDITOR
         // Block loading packaged games content
@@ -308,7 +357,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < assetsCount; i++)
         {
             SerializedEntryV9 se;
-            stream->Read(&se);
+            stream->ReadBytes(&se, sizeof(se));
             Entry e(se.ID, se.TypeName.Data, se.Address);
             AddEntry(e);
         }
@@ -319,7 +368,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < chunksCount; i++)
         {
             FlaxChunk::Location e;
-            stream->Read(&e);
+            stream->ReadBytes(&e, sizeof(e));
             if (e.Size == 0)
             {
                 LOG(Warning, "Empty chunk found.");
@@ -339,7 +388,7 @@ bool FlaxStorage::Load()
 
         // Custom storage data
         CustomData customData;
-        stream->Read(&customData);
+        stream->Read(customData);
 
 #if USE_EDITOR
         // Block loading packaged games content
@@ -359,7 +408,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < assetsCount; i++)
         {
             OldSerializedEntryV7 se;
-            stream->Read(&se);
+            stream->ReadBytes(&se, sizeof(se));
             Entry e(se.ID, se.TypeName.Data, se.Address);
             AddEntry(e);
         }
@@ -370,7 +419,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < chunksCount; i++)
         {
             FlaxChunk::Location e;
-            stream->Read(&e);
+            stream->ReadBytes(&e, sizeof(e));
             if (e.Size == 0)
             {
                 LOG(Warning, "Empty chunk found.");
@@ -394,7 +443,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < assetsCount; i++)
         {
             OldSerializedEntryV7 se;
-            stream->Read(&se);
+            stream->ReadBytes(&se, sizeof(se));
             Entry e(se.ID, se.TypeName.Data, se.Address);
             AddEntry(e);
         }
@@ -405,7 +454,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < chunksCount; i++)
         {
             FlaxChunk::Location e;
-            stream->Read(&e);
+            stream->ReadBytes(&e, sizeof(e));
             if (e.Size == 0)
             {
                 LOG(Warning, "Empty chunk found.");
@@ -428,7 +477,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < assetsCount; i++)
         {
             OldEntryV6 ee;
-            stream->Read(&ee);
+            stream->ReadBytes(&ee, sizeof(ee));
 
             Entry e(ee.ID, TypeId2TypeName(ee.TypeID), ee.Adress);
             AddEntry(e);
@@ -440,7 +489,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < chunksCount; i++)
         {
             FlaxChunk::Location e;
-            stream->Read(&e);
+            stream->ReadBytes(&e, sizeof(e));
             if (e.Size == 0)
             {
                 LOG(Warning, "Empty chunk found.");
@@ -459,7 +508,7 @@ bool FlaxStorage::Load()
 
         // Package Time
         DateTime packTime;
-        stream->Read(&packTime);
+        stream->Read(packTime);
 
         // Asset Entries
         int32 assetsCount;
@@ -467,7 +516,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < assetsCount; i++)
         {
             OldEntryV6 ee;
-            stream->Read(&ee);
+            stream->ReadBytes(&ee, sizeof(ee));
 
             Entry e(ee.ID, TypeId2TypeName(ee.TypeID), ee.Adress);
             AddEntry(e);
@@ -479,7 +528,7 @@ bool FlaxStorage::Load()
         for (int32 i = 0; i < chunksCount; i++)
         {
             FlaxChunk::Location e;
-            stream->Read(&e);
+            stream->ReadBytes(&e, sizeof(e));
             if (e.Size == 0)
             {
                 LOG(Warning, "Empty chunk found.");
@@ -508,7 +557,7 @@ bool FlaxStorage::Load()
         e.Address = stream->GetPosition();
 
         // Asset ID
-        stream->Read(&e.ID);
+        stream->Read(e.ID);
 
         // Type ID
         uint32 typeId;
@@ -521,9 +570,9 @@ bool FlaxStorage::Load()
         {
             DateTime tmpDate;
             String strTmp;
-            stream->Read(&tmpDate);
-            stream->ReadString(&strTmp, -76);
-            stream->ReadString(&strTmp, 1301);
+            stream->Read(tmpDate);
+            stream->Read(strTmp, -76);
+            stream->Read(strTmp, 1301);
         }
 
         // Check char
@@ -554,10 +603,8 @@ bool FlaxStorage::Load()
     }
     break;
     default:
-    {
         LOG(Warning, "Unsupported storage format version: {1}. {0}", ToString(), _version);
         return true;
-    }
     }
 
     // Mark as loaded (version number describes 'isLoaded' state)
@@ -570,22 +617,78 @@ bool FlaxStorage::Load()
 
 bool FlaxStorage::Reload()
 {
-    // Check if wasn't already loaded
     if (!IsLoaded())
-    {
-        LOG(Warning, "{0} isn't loaded.", ToString());
         return false;
-    }
+    PROFILE_CPU();
 
     OnReloading(this);
 
     // Perform clean reloading
     Dispose();
-    bool failed = Load();
+    const bool failed = Load();
 
     OnReloaded(this, failed);
 
     return failed;
+}
+
+bool FlaxStorage::ReloadSilent()
+{
+    ScopeLock lock(_loadLocker);
+    if (!IsLoaded())
+        return false;
+
+    // Open file
+    auto stream = OpenFile();
+    if (stream == nullptr)
+        return true;
+
+    // Magic Code
+    uint32 magicCode;
+    stream->ReadUint32(&magicCode);
+    if (magicCode != MagicCode)
+    {
+        LOG(Warning, "Invalid asset magic code in {0}", ToString());
+        return true;
+    }
+
+    // Version
+    uint32 version;
+    stream->ReadUint32(&version);
+    if (version == 9)
+    {
+        _version = version;
+
+        // Custom storage data
+        CustomData customData;
+        stream->Read(customData);
+
+        // Entries
+        int32 assetsCount;
+        stream->ReadInt32(&assetsCount);
+        if (assetsCount != GetEntriesCount())
+        {
+            LOG(Warning, "Incorrect amount of assets ({} instead of {}) saved in {}", assetsCount, GetEntriesCount(), ToString());
+            return true;
+        }
+        for (int32 i = 0; i < assetsCount; i++)
+        {
+            SerializedEntryV9 se;
+            stream->ReadBytes(&se, sizeof(se));
+            Entry e(se.ID, se.TypeName.Data, se.Address);
+            SetEntry(i, e);
+        }
+
+        // TODO: load chunks metadata? compare against loaded chunks?
+    }
+    else
+    {
+        // Fallback to full reload
+        LOG(Warning, "Fallback to full reload of {0}", ToString());
+        Reload();
+    }
+
+    return false;
 }
 
 #endif
@@ -602,16 +705,21 @@ bool FlaxStorage::LoadAssetHeader(const Guid& id, AssetInitData& data)
         return true;
     }
 
-    // Load header
     return LoadAssetHeader(e, data);
 }
 
 bool FlaxStorage::LoadAssetChunk(FlaxChunk* chunk)
 {
+    PROFILE_MEM(ContentFiles);
     ASSERT(IsLoaded());
     ASSERT(chunk != nullptr && _chunks.Contains(chunk));
 
-    // Check if already loaded
+#if PLATFORM_THREADS_LIMIT > 1
+    // Protect against loading the same chunk from multiple threads at once
+    while (Platform::InterlockedCompareExchange(&chunk->IsLoading, 1, 0) != 0)
+        Platform::Sleep(1);
+    SCOPE_EXIT{ Platform::AtomicStore(&chunk->IsLoading, 0); };
+#endif
     if (chunk->IsLoaded())
         return false;
 
@@ -632,9 +740,36 @@ bool FlaxStorage::LoadAssetChunk(FlaxChunk* chunk)
         // Seek
         stream->SetPosition(chunk->LocationInFile.Address);
 
+        if (stream->HasError())
+        {
+            // Sometimes stream->HasError() from setposition. result in a crash or missing media in release (stream _file._handle = nullptr).
+            // When retrying, it looks like it works and we can continue. We need this to success.
+
+            for (int retry = 0; retry < 5; retry++)
+            {
+                Platform::Sleep(50);
+                stream = OpenFile();
+                failed = stream == nullptr;
+                if (!failed)
+                {
+                    stream->SetPosition(chunk->LocationInFile.Address);
+                    if (!stream->HasError())
+                        break;
+                }
+            }
+        }
+
+        if (!stream || stream->HasError())
+        {
+            failed = true;
+            UnlockChunks();
+            LOG(Warning, "SetPosition failed on chunk {0}.", ToString());
+            return failed;
+        }
+
         // Load data
         auto size = chunk->LocationInFile.Size;
-        if (chunk->Flags & FlaxChunkFlags::CompressedLZ4)
+        if (EnumHasAnyFlags(chunk->Flags, FlaxChunkFlags::CompressedLZ4))
         {
             // Compressed
             size -= sizeof(int32); // Don't count original size int
@@ -661,12 +796,10 @@ bool FlaxStorage::LoadAssetChunk(FlaxChunk* chunk)
             // Raw data
             chunk->Data.Read(stream, size);
         }
-        ASSERT(chunk->IsLoaded());
         chunk->RegisterUsage();
     }
 
     UnlockChunks();
-
     return failed;
 }
 
@@ -678,7 +811,7 @@ bool FlaxStorage::ChangeAssetID(Entry& e, const Guid& newId)
 
     // TODO: validate entry
     ASSERT(newId.IsValid());
-    ASSERT(AllowDataModifications());
+    ASSERT(!IsReadOnly());
 
     LOG(Info, "Changing asset \'{0}\' id to \'{1}\' (storage: \'{2}\')", e.ID, newId, _path);
 
@@ -715,7 +848,11 @@ bool FlaxStorage::ChangeAssetID(Entry& e, const Guid& newId)
     }
 
     // Close file
-    CloseFileHandles();
+    if (CloseFileHandles())
+    {
+        LOG(Error, "Cannot close file access for '{}'", _path);
+        return true;
+    }
 
     // Change ID
     // TODO: here we could extend it and load assets from the storage and call asset ID change event to change references
@@ -748,8 +885,9 @@ bool FlaxStorage::ChangeAssetID(Entry& e, const Guid& newId)
 
 FlaxChunk* FlaxStorage::AllocateChunk()
 {
-    if (AllowDataModifications())
+    if (!IsReadOnly())
     {
+        PROFILE_MEM(ContentFiles);
         auto chunk = New<FlaxChunk>();
         _chunks.Add(chunk);
         return chunk;
@@ -761,8 +899,10 @@ FlaxChunk* FlaxStorage::AllocateChunk()
 
 #if USE_EDITOR
 
-bool FlaxStorage::Create(const StringView& path, const AssetInitData* data, int32 dataCount, bool silentMode, const CustomData* customData)
+bool FlaxStorage::Create(const StringView& path, Span<AssetInitData> assets, bool silentMode, const CustomData* customData)
 {
+    PROFILE_CPU();
+    ZoneText(*path, path.Length());
     LOG(Info, "Creating package at \'{0}\'. Silent Mode: {1}", path, silentMode);
 
     // Prepare to have access to the file
@@ -774,24 +914,32 @@ bool FlaxStorage::Create(const StringView& path, const AssetInitData* data, int3
         return true;
 
     // Create package
-    bool result = Create(stream, data, dataCount, customData);
+    bool result = Create(stream, assets, customData);
 
     // Close file
     Delete(stream);
 
-    // Reload storage container (only if not in silent mode)
-    if (storage && !silentMode)
+    // Reload storage container
+    if (storage && storage->IsLoaded())
     {
-        storage->Reload();
+        if (silentMode)
+        {
+            // Silent data-only reload (loaded chunks location in file has been updated)
+            storage->ReloadSilent();
+        }
+        else
+        {
+            // Full reload
+            storage->Reload();
+        }
     }
 
     return result;
 }
 
-bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 dataCount, const CustomData* customData)
+bool FlaxStorage::Create(WriteStream* stream, Span<AssetInitData> assets, const CustomData* customData)
 {
-    // Validate inputs
-    if (data == nullptr || dataCount <= 0)
+    if (assets.Get() == nullptr || assets.Length() <= 0)
     {
         LOG(Warning, "Cannot create new package. No assets to write.");
         return true;
@@ -799,27 +947,31 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
 
     // Prepare data
     Array<SerializedEntryV9, InlinedAllocation<1>> entries;
-    entries.Resize(dataCount);
+    entries.Resize(assets.Length());
     Array<FlaxChunk*> chunks;
-
-    // Get all chunks
-    for (int32 i = 0; i < dataCount; i++)
-        data[i].Header.GetLoadedChunks(chunks);
-    int32 chunksCount = chunks.Count();
+    for (const AssetInitData& asset : assets)
+    {
+        for (FlaxChunk* chunk : asset.Header.Chunks)
+        {
+            if (chunk && chunk->IsLoaded())
+                chunks.Add(chunk);
+        }
+    }
+    const int32 chunksCount = chunks.Count();
 
     // TODO: sort chunks by size? smaller ones first?
     // Calculate start address of the first asset header location
     // 0 -> Header -> Entries Count -> Entries -> Chunks Count -> Chunk Locations
     int32 currentAddress = sizeof(Header)
             + sizeof(int32)
-            + sizeof(SerializedEntryV9) * dataCount
+            + sizeof(SerializedEntryV9) * assets.Length()
             + sizeof(int32)
             + (sizeof(FlaxChunk::Location) + sizeof(int32)) * chunksCount;
 
     // Initialize entries offsets in the file
-    for (int32 i = 0; i < dataCount; i++)
+    for (int32 i = 0; i < assets.Length(); i++)
     {
-        auto& asset = data[i];
+        const AssetInitData& asset = assets[i];
         entries[i] = SerializedEntryV9(asset.Header.ID, asset.Header.TypeName, currentAddress);
 
         // Move forward by asset header data size
@@ -844,7 +996,7 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
     for (int32 i = 0; i < chunksCount; i++)
     {
         const FlaxChunk* chunk = chunks[i];
-        if (chunk->Flags & FlaxChunkFlags::CompressedLZ4)
+        if (EnumHasAnyFlags(chunk->Flags, FlaxChunkFlags::CompressedLZ4))
         {
             PROFILE_CPU_NAMED("CompressLZ4");
             const int32 srcSize = chunk->Data.Length();
@@ -881,39 +1033,38 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
         mainHeader.CustomData = *customData;
     else
         Platform::MemoryClear(&mainHeader.CustomData, sizeof(CustomData));
-    stream->Write(&mainHeader);
+    stream->Write(mainHeader);
 
     // Write asset entries
-    stream->WriteInt32(dataCount);
-    stream->WriteBytes(entries.Get(), sizeof(SerializedEntryV9) * dataCount);
+    stream->WriteInt32(assets.Length());
+    stream->WriteBytes(entries.Get(), sizeof(SerializedEntryV9) * assets.Length());
 
     // Write chunk locations and meta
     stream->WriteInt32(chunksCount);
     for (int32 i = 0; i < chunksCount; i++)
     {
         FlaxChunk* chunk = chunks[i];
-        stream->Write(&chunk->LocationInFile);
-        stream->WriteInt32((int32)chunk->Flags);
+        stream->WriteBytes(&chunk->LocationInFile, sizeof(chunk->LocationInFile));
+        FlaxChunkFlags flags = chunk->Flags & ~(FlaxChunkFlags::KeepInMemory); // Skip saving runtime-only flags
+        stream->WriteInt32((int32)flags);
     }
 
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-
     // Check calculated position of first asset header
-    if (dataCount > 0 && stream->GetPosition() != entries[0].Address)
+    if (assets.Length() > 0 && stream->GetPosition() != entries[0].Address)
     {
         LOG(Warning, "Error while asset header location computation.");
         return true;
     }
-
 #endif
 
     // Write asset headers
-    for (int32 i = 0; i < dataCount; i++)
+    for (int32 i = 0; i < assets.Length(); i++)
     {
-        auto& header = data[i];
+        const AssetInitData& header = assets[i];
 
         // ID
-        stream->Write(&header.Header.ID);
+        stream->Write(header.Header.ID);
 
         // Type Name
         SerializedTypeNameV9 typeName(header.Header.TypeName);
@@ -923,9 +1074,10 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
         stream->WriteUint32(header.SerializedVersion);
 
         // Chunks mapping
-        for (int32 chunkIndex = 0; chunkIndex < ARRAY_COUNT(header.Header.Chunks); chunkIndex++)
+        for (const FlaxChunk* chunk : header.Header.Chunks)
         {
-            const int32 index = chunks.Find(header.Header.Chunks[chunkIndex]);
+            const int32 index = chunks.Find(chunk);
+            ASSERT_LOW_LAYER(index >= -1 && index <= ALL_ASSET_CHUNKS);
             stream->WriteInt32(index);
         }
 
@@ -942,18 +1094,17 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
 
         // Asset Dependencies
         stream->WriteInt32(header.Dependencies.Count());
-        stream->Write(header.Dependencies.Get(), header.Dependencies.Count());
+        stream->WriteBytes(header.Dependencies.Get(), header.Dependencies.Count() * sizeof(Pair<Guid, DateTime>));
+        static_assert(sizeof(Pair<Guid, DateTime>) == sizeof(Guid) + sizeof(DateTime), "Invalid data size.");
     }
 
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-
     // Check calculated position of first asset chunk
     if (chunksCount > 0 && stream->GetPosition() != chunks[0]->LocationInFile.Address)
     {
         LOG(Warning, "Error while asset data chunk location computation.");
         return true;
     }
-
 #endif
 
     // Write chunks data
@@ -961,9 +1112,9 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
     {
         if (compressedChunks[i].HasItems())
         {
-            // Compressed chunk data (write additional size of the original data
+            // Compressed chunk data (write additional size of the original data)
             stream->WriteInt32(chunks[i]->Data.Length());
-            stream->Write(compressedChunks[i].Get(), compressedChunks[i].Count());
+            stream->WriteBytes(compressedChunks[i].Get(), compressedChunks[i].Count());
         }
         else
         {
@@ -981,10 +1132,10 @@ bool FlaxStorage::Create(WriteStream* stream, const AssetInitData* data, int32 d
     return false;
 }
 
-bool FlaxStorage::Save(AssetInitData& data, bool silentMode)
+bool FlaxStorage::Save(const AssetInitData& data, bool silentMode)
 {
     // Check if can modify the storage
-    if (!AllowDataModifications())
+    if (IsReadOnly())
         return true;
 
     // Note: we support saving only single asset, to save more assets in single package use FlaxStorage::Create(..)
@@ -996,6 +1147,7 @@ bool FlaxStorage::Save(AssetInitData& data, bool silentMode)
 
 bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
 {
+    PROFILE_MEM(ContentFiles);
     ASSERT(IsLoaded());
 
     auto lock = Lock();
@@ -1016,7 +1168,7 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
     case 9:
     {
         // ID
-        stream->Read(&data.Header.ID);
+        stream->Read(data.Header.ID);
 
         // Type name
         SerializedTypeNameV9 typeName;
@@ -1036,9 +1188,9 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         {
             int32 chunkIndex;
             stream->ReadInt32(&chunkIndex);
-            if (chunkIndex >= _chunks.Count())
+            if (chunkIndex < -1 || chunkIndex >= _chunks.Count())
             {
-                LOG(Warning, "Invalid chunks mapping.");
+                LOG(Warning, "Invalid chunks mapping ({} -> {}).", i, chunkIndex);
                 return true;
             }
             data.Header.Chunks[i] = chunkIndex == INVALID_INDEX ? nullptr : _chunks[chunkIndex];
@@ -1068,7 +1220,7 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         int32 dependencies;
         stream->ReadInt32(&dependencies);
         data.Dependencies.Resize(dependencies);
-        stream->Read(data.Dependencies.Get(), dependencies);
+        stream->ReadBytes(data.Dependencies.Get(), dependencies * sizeof(Pair<Guid, DateTime>));
 #endif
         break;
     }
@@ -1078,7 +1230,7 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         // [Deprecated on 4/17/2020, expires on 4/17/2022]
 
         // ID
-        stream->Read(&data.Header.ID);
+        stream->Read(data.Header.ID);
 
         // Type Name
         OldSerializedTypeNameV7 typeName;
@@ -1093,9 +1245,9 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         {
             int32 chunkIndex;
             stream->ReadInt32(&chunkIndex);
-            if (chunkIndex >= _chunks.Count())
+            if (chunkIndex < -1 || chunkIndex >= _chunks.Count())
             {
-                LOG(Warning, "Invalid chunks mapping.");
+                LOG(Warning, "Invalid chunks mapping ({} -> {}).", i, chunkIndex);
                 return true;
             }
             data.Header.Chunks[i] = chunkIndex == INVALID_INDEX ? nullptr : _chunks[chunkIndex];
@@ -1133,7 +1285,7 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         // [Deprecated on 4/17/2020, expires on 4/17/2022]
 
         // ID
-        stream->Read(&data.Header.ID);
+        stream->Read(data.Header.ID);
 
         // Type ID
         uint32 typeId;
@@ -1148,9 +1300,9 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         {
             int32 chunkIndex;
             stream->ReadInt32(&chunkIndex);
-            if (chunkIndex >= _chunks.Count())
+            if (chunkIndex < -1 || chunkIndex >= _chunks.Count())
             {
-                LOG(Warning, "Invalid chunks mapping.");
+                LOG(Warning, "Invalid chunks mapping ({} -> {}).", i, chunkIndex);
                 return true;
             }
             data.Header.Chunks[i] = chunkIndex == INVALID_INDEX ? nullptr : _chunks[chunkIndex];
@@ -1188,7 +1340,7 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
 
         // Load data
         data.SerializedVersion = 1;
-        stream->Read(&data.Header.ID);
+        stream->Read(data.Header.ID);
         uint32 typeId;
         stream->ReadUint32(&typeId);
         data.Header.TypeName = TypeId2TypeName(typeId);
@@ -1197,9 +1349,9 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
         {
             DateTime importDate;
             String importPath, importUsername;
-            stream->Read(&importDate);
-            stream->ReadString(&importPath, -76);
-            stream->ReadString(&importUsername, 1301);
+            stream->Read(importDate);
+            stream->Read(importPath, -76);
+            stream->Read(importUsername, 1301);
 
 #if USE_EDITOR
             // Convert old metadata into the new format
@@ -1243,7 +1395,6 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
     }
 
 #if ASSETS_LOADING_EXTRA_VERIFICATION
-
     // Validate loaded header (asset ID and type ID must be the same)
     if (e.ID != data.Header.ID)
     {
@@ -1253,7 +1404,6 @@ bool FlaxStorage::LoadAssetHeader(const Entry& e, AssetInitData& data)
     {
         LOG(Error, "Loading asset header data mismatch! Expected Type Name: {0}, loaded header: {1}.\nSource: {2}", e.TypeName, data.Header.ToString(), ToString());
     }
-
 #endif
 
     return false;
@@ -1269,6 +1419,8 @@ FileReadStream* FlaxStorage::OpenFile()
     auto& stream = _file.Get();
     if (stream == nullptr)
     {
+        PROFILE_MEM(ContentFiles);
+
         // Open file
         auto file = File::Open(_path, FileMode::OpenExisting, FileAccess::Read, FileShare::Read);
         if (file == nullptr)
@@ -1276,6 +1428,7 @@ FileReadStream* FlaxStorage::OpenFile()
             LOG(Error, "Cannot open Flax Storage file \'{0}\'.", _path);
             return nullptr;
         }
+        Platform::InterlockedIncrement(&_files);
 
         // Create file reading stream
         stream = New<FileReadStream>(file);
@@ -1283,18 +1436,58 @@ FileReadStream* FlaxStorage::OpenFile()
     return stream;
 }
 
-void FlaxStorage::CloseFileHandles()
+bool FlaxStorage::CloseFileHandles()
 {
+    if (Platform::AtomicRead(&_chunksLock) == 0 && Platform::AtomicRead(&_files) == 0)
+        return false; // Early out when no files are opened
+    PROFILE_CPU();
+    PROFILE_MEM(ContentFiles);
+
     // Note: this is usually called by the content manager when this file is not used or on exit
     // In those situations all the async tasks using this storage should be cancelled externally
 
     // Ensure that no one is using this resource
-    int32 waitTime = 500;
+    int32 waitTime = 100;
     while (Platform::AtomicRead(&_chunksLock) != 0 && waitTime-- > 0)
-        Platform::Sleep(10);
-    ASSERT(_chunksLock == 0);
+        Platform::Sleep(1);
+    if (Platform::AtomicRead(&_chunksLock) != 0)
+    {
+        // File can be locked by some streaming tasks (eg. AudioClip::StreamingTask or StreamModelLODTask)
+        Entry e;
+        for (int32 i = 0; i < GetEntriesCount(); i++)
+        {
+            GetEntry(i, e);
+            Asset* asset = Content::GetAsset(e.ID);
+            if (asset)
+            {
+                LOG(Info, "Canceling streaming for asset {0}", asset->ToString());
+                asset->CancelStreaming();
+            }
+        }
+    }
 
-    _file.DeleteAll();
+    // Guard the whole process so if new thread wants to lock the chunks will need to wait for this to end
+    Platform::InterlockedIncrement(&_isUnloadingData);
+    SCOPE_EXIT{ Platform::InterlockedDecrement(&_isUnloadingData); };
+
+    // Wait for chunks lock again (with larger timeout for longer tasks)
+    waitTime = 1000;
+    while (Platform::AtomicRead(&_chunksLock) != 0 && waitTime-- > 0)
+        Platform::Sleep(1);
+    if (Platform::AtomicRead(&_chunksLock) != 0)
+        return true; // Failed, someone is still accessing the file
+
+    // Close file handles (from all threads)
+    Array<FileReadStream*, InlinedAllocation<8>> streams;
+    _file.GetValues(streams);
+    for (FileReadStream* stream : streams)
+    {
+        if (stream)
+            Delete(stream);
+    }
+    _file.Clear();
+    Platform::AtomicStore(&_files, 0);
+    return false;
 }
 
 void FlaxStorage::Dispose()
@@ -1303,33 +1496,48 @@ void FlaxStorage::Dispose()
         return;
 
     // Close file
-    CloseFileHandles();
+    if (CloseFileHandles())
+    {
+        LOG(Error, "Cannot close file access for '{}'", _path);
+    }
 
     // Release data
     _chunks.ClearDelete();
     _version = 0;
 }
 
-void FlaxStorage::Tick()
+void FlaxStorage::Tick(double time)
 {
-    // Check if chunks are locked
+    // Skip if file is in use
     if (Platform::AtomicRead(&_chunksLock) != 0)
         return;
 
-    const auto now = DateTime::NowUTC();
     bool wasAnyUsed = false;
+    const float unusedDataChunksLifetime = ContentStorageManager::UnusedDataChunksLifetime.GetTotalSeconds();
     for (int32 i = 0; i < _chunks.Count(); i++)
     {
-        auto chunk = _chunks[i];
-        const bool wasUsed = (now - DateTime(Platform::AtomicRead(&chunk->LastAccessTime))) < ContentStorageManager::UnusedDataChunksLifetime;
-        if (!wasUsed && chunk->IsLoaded())
+        auto chunk = _chunks.Get()[i];
+        const bool wasUsed = (time - chunk->LastAccessTime) < unusedDataChunksLifetime;
+        if (!wasUsed && 
+            chunk->IsLoaded() && 
+            EnumHasNoneFlags(chunk->Flags, FlaxChunkFlags::KeepInMemory) && 
+            Platform::AtomicRead(&chunk->IsLoading) == 0)
         {
+            // Guard the unloading so if other thread wants to lock the chunks will need to wait for this to end
+            Platform::InterlockedIncrement(&_isUnloadingData);
+            if (Platform::AtomicRead(&_chunksLock) != 0 || Platform::AtomicRead(&chunk->IsLoading) != 0)
+            {
+                // Someone started loading so skip ticking
+                Platform::InterlockedDecrement(&_isUnloadingData);
+                return;
+            }
             chunk->Unload();
+            Platform::InterlockedDecrement(&_isUnloadingData);
         }
         wasAnyUsed |= wasUsed;
     }
 
-    // Release file handles in none of chunks was not used
+    // Release file handles in none of chunks is in use
     if (!wasAnyUsed && Platform::AtomicRead(&_chunksLock) == 0)
     {
         CloseFileHandles();
@@ -1340,7 +1548,7 @@ void FlaxStorage::Tick()
 
 void FlaxStorage::OnRename(const StringView& newPath)
 {
-    ASSERT(AllowDataModifications());
+    ASSERT(!IsReadOnly());
     _path = newPath;
 }
 
@@ -1362,9 +1570,9 @@ bool FlaxFile::IsPackage() const
     return false;
 }
 
-bool FlaxFile::AllowDataModifications() const
+bool FlaxFile::IsReadOnly() const
 {
-    return true;
+    return false;
 }
 
 bool FlaxFile::HasAsset(const Guid& id) const
@@ -1386,11 +1594,20 @@ int32 FlaxFile::GetEntriesCount() const
     return _asset.ID.IsValid() ? 1 : 0;
 }
 
-void FlaxFile::GetEntry(int32 index, Entry& output) const
+void FlaxFile::GetEntry(int32 index, Entry& value) const
 {
     ASSERT(index == 0);
-    output = _asset;
+    value = _asset;
 }
+
+#if USE_EDITOR
+
+void FlaxFile::SetEntry(int32 index, const Entry& value)
+{
+    ASSERT(index == 0);
+    _asset = value;
+}
+#endif
 
 void FlaxFile::GetEntries(Array<Entry>& output) const
 {
@@ -1400,10 +1617,8 @@ void FlaxFile::GetEntries(Array<Entry>& output) const
 
 void FlaxFile::Dispose()
 {
-    // Base
     FlaxStorage::Dispose();
 
-    // Clean
     _asset.ID = Guid::Empty;
 }
 
@@ -1435,9 +1650,9 @@ bool FlaxPackage::IsPackage() const
     return true;
 }
 
-bool FlaxPackage::AllowDataModifications() const
+bool FlaxPackage::IsReadOnly() const
 {
-    return false;
+    return true;
 }
 
 bool FlaxPackage::HasAsset(const Guid& id) const
@@ -1448,7 +1663,7 @@ bool FlaxPackage::HasAsset(const Guid& id) const
 bool FlaxPackage::HasAsset(const AssetInfo& info) const
 {
     ASSERT(_path == info.Path);
-    Entry* e = _entries.TryGet(info.ID);
+    const Entry* e = _entries.TryGet(info.ID);
     return e && e->TypeName == info.TypeName;
 }
 
@@ -1457,18 +1672,35 @@ int32 FlaxPackage::GetEntriesCount() const
     return _entries.Count();
 }
 
-void FlaxPackage::GetEntry(int32 index, Entry& output) const
+void FlaxPackage::GetEntry(int32 index, Entry& value) const
 {
     ASSERT(index >= 0 && index < _entries.Count());
     for (auto i = _entries.Begin(); i.IsNotEnd(); ++i)
     {
         if (index-- <= 0)
         {
-            output = i->Value;
+            value = i->Value;
             return;
         }
     }
 }
+
+#if USE_EDITOR
+
+void FlaxPackage::SetEntry(int32 index, const Entry& value)
+{
+    ASSERT(index >= 0 && index < _entries.Count());
+    for (auto i = _entries.Begin(); i.IsNotEnd(); ++i)
+    {
+        if (index-- <= 0)
+        {
+            i->Value = value;
+            return;
+        }
+    }
+}
+
+#endif
 
 void FlaxPackage::GetEntries(Array<Entry>& output) const
 {
@@ -1477,10 +1709,8 @@ void FlaxPackage::GetEntries(Array<Entry>& output) const
 
 void FlaxPackage::Dispose()
 {
-    // Base
     FlaxStorage::Dispose();
 
-    // Clean
     _entries.Clear();
 }
 

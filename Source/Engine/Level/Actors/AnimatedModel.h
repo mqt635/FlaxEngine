@@ -1,22 +1,38 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
 #include "ModelInstanceActor.h"
 #include "Engine/Content/Assets/SkinnedModel.h"
 #include "Engine/Content/Assets/AnimationGraph.h"
-#include "Engine/Graphics/Models/SkinnedMeshDrawData.h"
-#include "Engine/Renderer/DrawCall.h"
 #include "Engine/Core/Delegate.h"
 
 /// <summary>
 /// Performs an animation and renders a skinned model.
 /// </summary>
-API_CLASS() class FLAXENGINE_API AnimatedModel : public ModelInstanceActor
+API_CLASS(Attributes="ActorContextMenu(\"New/Animation/Animated Model\"), ActorToolbox(\"Visuals\")")
+class FLAXENGINE_API AnimatedModel : public ModelInstanceActor, IAssetReference
 {
-DECLARE_SCENE_OBJECT(AnimatedModel);
+    DECLARE_SCENE_OBJECT(AnimatedModel);
     friend class AnimationsSystem;
-public:
+
+    /// <summary>
+    /// Keeps the data of a Node and its relevant Transform Matrix together when passing it between functions.
+    /// </summary>
+    API_STRUCT() struct NodeTransformation
+    {
+        DECLARE_SCRIPTING_TYPE_MINIMAL(NodeTransformation);
+
+        /// <summary>
+        /// The index of the node in the node hierarchy.
+        /// </summary>
+        API_FIELD() uint32 NodeIndex;
+
+        /// <summary>
+        /// The transformation matrix of the node
+        /// </summary>
+        API_FIELD() Matrix NodeMatrix;
+    };
 
     /// <summary>
     /// Describes the animation graph updates frequency for the animated model.
@@ -55,118 +71,147 @@ public:
     };
 
 private:
+    struct BlendShapeMesh
+    {
+        uint16 LODIndex;
+        uint16 MeshIndex;
+        uint32 Usages;
+    };
 
-    BoundingBox _boxLocal;
-    Matrix _world;
-    GeometryDrawStateData _drawState;
-    SkinnedMeshDrawData _skinningData;
+    struct SkinnedBones
+    {
+        uint32 GlobalBufferOffset; // In bytes
+        uint16 BonesCount;
+        uint16 IsAllocated : 1;
+        uint16 IsDirty : 1;
+        uint16 IsPrevBones : 1;
+        uint16 IsPrevFlushed : 1;
+        uint16 HasPrevBones : 1;
+
+        SkinnedBones();
+        ~SkinnedBones();
+
+        void Update(const SkeletonData& skeleton, const Array<Matrix>& nodesPose, bool perBoneMotionBlur, bool reset = false);
+        void Flush();
+    };
+
     AnimationUpdateMode _actualMode;
+    SkinnedBones _bones;
     uint32 _counter;
-    float _lastMinDstSqr;
+    Real _lastMinDstSqr;
+    bool _isDuringUpdateEvent = false;
     uint64 _lastUpdateFrame;
-    BlendShapesInstance _blendShapes;
+    mutable MeshDeformation* _deformation = nullptr;
     ScriptingObjectReference<AnimatedModel> _masterPose;
+    Array<Pair<String, float>> _blendShapeWeights;
+    Array<BlendShapeMesh> _blendShapeMeshes;
 
 public:
+    ~AnimatedModel();
 
     /// <summary>
     /// The skinned model asset used for rendering.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(10), DefaultValue(null), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(10), DefaultValue(null), EditorDisplay(\"Skeleton\")")
     AssetReference<SkinnedModel> SkinnedModel;
 
     /// <summary>
     /// The animation graph asset used for the skinned mesh skeleton bones evaluation (controls the animation).
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(15), DefaultValue(null), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(15), DefaultValue(null), EditorDisplay(\"Skeleton\")")
     AssetReference<AnimationGraph> AnimationGraph;
 
     /// <summary>
     /// If true, use per-bone motion blur on this skeletal model. It requires additional rendering, can be disabled to save performance.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(20), DefaultValue(true), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(20), DefaultValue(true), EditorDisplay(\"Drawing\")")
     bool PerBoneMotionBlur = true;
 
     /// <summary>
-    /// If true, animation speed will be affected by the global time scale parameter.
+    /// If true, animation speed will be affected by the global timescale parameter.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(30), DefaultValue(true), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(30), DefaultValue(true), EditorDisplay(\"Updating\")")
     bool UseTimeScale = true;
 
     /// <summary>
     /// If true, the animation will be updated even when an actor cannot be seen by any camera. Otherwise, the animations themselves will also stop running when the actor is off-screen.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(40), DefaultValue(false), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(40), DefaultValue(false), EditorDisplay(\"Updating\")")
     bool UpdateWhenOffscreen = false;
 
     /// <summary>
-    /// The animation update delta time scale. Can be used to speed up animation playback or create slow motion effect.
+    /// The animation update delta timescale. Can be used to speed up animation playback or create slow motion effect.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(45), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(45), Limit(0, float.MaxValue, 0.025f), EditorDisplay(\"Updating\")")
     float UpdateSpeed = 1.0f;
 
     /// <summary>
     /// The animation update mode. Can be used to optimize the performance.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(50), DefaultValue(AnimationUpdateMode.Auto), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(50), DefaultValue(AnimationUpdateMode.Auto), EditorDisplay(\"Updating\")")
     AnimationUpdateMode UpdateMode = AnimationUpdateMode::Auto;
 
     /// <summary>
-    /// The master scale parameter for the actor bounding box. Helps reducing mesh flickering effect on screen edges.
+    /// The master scale parameter for the actor bounding box. Helps to reduce mesh flickering effect on screen edges.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(60), DefaultValue(1.5f), Limit(0), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(60), DefaultValue(1.5f), Limit(0, float.MaxValue, 0.025f), EditorDisplay(\"Drawing\")")
     float BoundsScale = 1.5f;
 
     /// <summary>
     /// The custom bounds(in actor local space). If set to empty bounds then source skinned model bind pose bounds will be used.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(70), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(70), EditorDisplay(\"Drawing\")")
     BoundingBox CustomBounds = BoundingBox::Zero;
 
     /// <summary>
     /// The model Level Of Detail bias value. Allows to increase or decrease rendered model quality.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(80), DefaultValue(0), Limit(-100, 100, 0.1f), EditorDisplay(\"Skinned Model\", \"LOD Bias\")")
+    API_FIELD(Attributes="EditorOrder(80), DefaultValue(0), Limit(-100, 100, 0.1f), EditorDisplay(\"Drawing\", \"LOD Bias\")")
     int32 LODBias = 0;
 
     /// <summary>
     /// Gets the model forced Level Of Detail index. Allows to bind the given model LOD to show. Value -1 disables this feature.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(90), DefaultValue(-1), Limit(-1, 100, 0.1f), EditorDisplay(\"Skinned Model\", \"Forced LOD\")")
+    API_FIELD(Attributes="EditorOrder(90), DefaultValue(-1), Limit(-1, 100, 0.1f), EditorDisplay(\"Drawing\", \"Forced LOD\")")
     int32 ForcedLOD = -1;
 
     /// <summary>
     /// The draw passes to use for rendering this object.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(100), DefaultValue(DrawPass.Default), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(100), DefaultValue(DrawPass.Default), EditorDisplay(\"Drawing\")")
     DrawPass DrawModes = DrawPass::Default;
 
     /// <summary>
-    /// The shadows casting mode.
+    /// The object sort order key used when sorting drawable objects during rendering. Use lower values to draw object before others, higher values are rendered later (on top). Can be used to control transparency drawing.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(110), DefaultValue(ShadowsCastingMode.All), EditorDisplay(\"Skinned Model\")")
-    ShadowsCastingMode ShadowsMode = ShadowsCastingMode::All;
+    API_FIELD(Attributes="EditorOrder(110), DefaultValue(0), EditorDisplay(\"Drawing\")")
+    int8 SortOrder = 0;
+
+    /// <summary>
+    /// The shadows casting mode.
+    /// [Deprecated on 26.10.2022, expires on 26.10.2024]
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(110), DefaultValue(ShadowsCastingMode.All), EditorDisplay(\"Drawing\")")
+    DEPRECATED() ShadowsCastingMode ShadowsMode = ShadowsCastingMode::All;
 
     /// <summary>
     /// The animation root motion apply target. If not specified the animated model will apply it itself.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(120), DefaultValue(null), EditorDisplay(\"Skinned Model\")")
+    API_FIELD(Attributes="EditorOrder(120), DefaultValue(null), EditorDisplay(\"Skeleton\")")
     ScriptingObjectReference<Actor> RootMotionTarget;
 
-public:
+#if USE_EDITOR
+    /// <summary>
+    /// If checked, the skeleton pose will be shown during debug shapes drawing.
+    /// </summary>
+    API_FIELD(Attributes="EditorOrder(200), EditorDisplay(\"Skeleton\"), VisibleIf(nameof(ShowDebugDrawOptions))") bool ShowDebugDrawSkeleton = false;
+#endif
 
+public:
     /// <summary>
     /// The graph instance data container. For dynamic usage only at runtime, not serialized.
     /// </summary>
     AnimGraphInstanceData GraphInstance;
-
-    /// <summary>
-    /// Gets the model world matrix transform.
-    /// </summary>
-    FORCE_INLINE void GetWorld(Matrix* world) const
-    {
-        *world = _world;
-    }
 
     /// <summary>
     /// Resets the animation state (clears the instance state data but preserves the instance parameters values).
@@ -177,7 +222,7 @@ public:
     /// Performs the full animation update. The actual update will be performed during gameplay tick.
     /// </summary>
     API_FUNCTION() void UpdateAnimation();
-    
+
     /// <summary>
     /// Called after animation gets updated (new skeleton pose).
     /// </summary>
@@ -185,8 +230,9 @@ public:
 
     /// <summary>
     /// Validates and creates a proper skinning data.
+    /// [Deprecated in v1.13]
     /// </summary>
-    API_FUNCTION() void SetupSkinningData();
+    API_FUNCTION() DEPRECATED("Not used anymore. Does nothing.") void SetupSkinningData();
 
     /// <summary>
     /// Creates and setups the skinning data (writes the identity bones transformations).
@@ -194,11 +240,22 @@ public:
     API_FUNCTION() void PreInitSkinningData();
 
     /// <summary>
+    /// Gets the skeleton bones data used for skinning. It contains the reference to GPU buffer with final transformations of the skeleton nodes (bones) that are used for skinning the mesh inside vertex shader.
+    /// </summary>
+    API_PROPERTY() SkinnedMeshBones GetSkinnedMeshBones() const;
+
+    /// <summary>
     /// Gets the per-node final transformations (skeleton pose).
     /// </summary>
     /// <param name="nodesTransformation">The output per-node final transformation matrices.</param>
     /// <param name="worldSpace">True if convert matrices into world-space, otherwise returned values will be in local-space of the actor.</param>
     API_FUNCTION() void GetCurrentPose(API_PARAM(Out) Array<Matrix>& nodesTransformation, bool worldSpace = false) const;
+
+    /// <summary>
+    /// Gets the per-node final transformations (skeleton pose).
+    /// </summary>
+    /// <param name="nodesTransformation">The output per-node final transformation matrices.</param>
+    void GetCurrentPose(Span<Matrix>& nodesTransformation) const;
 
     /// <summary>
     /// Sets the per-node final transformations (skeleton pose).
@@ -224,6 +281,38 @@ public:
     API_FUNCTION() void GetNodeTransformation(const StringView& nodeName, API_PARAM(Out) Matrix& nodeTransformation, bool worldSpace = false) const;
 
     /// <summary>
+    /// Gets the node final transformation for a series of nodes.
+    /// </summary>
+    /// <param name="nodeTransformations">The series of nodes that will be returned</param>
+    /// <param name="worldSpace">True if convert matrices into world-space, otherwise returned values will be in local-space of the actor.</param>
+    /// <returns></returns>
+    API_FUNCTION() void GetNodeTransformation(API_PARAM(Ref) Array<NodeTransformation>& nodeTransformations, bool worldSpace = false) const;
+
+    /// <summary>
+    /// Sets the node final transformation. If multiple nodes are to be set within a frame, do not use set worldSpace to true, and do the conversion yourself to avoid recalculation of inv matrices. 
+    /// </summary>
+    /// <param name="nodeIndex">The index of the skinned model skeleton node.</param>
+    /// <param name="nodeTransformation">The final node transformation matrix.</param>
+    /// <param name="worldSpace">True if convert matrices from world-space, otherwise values will be in local-space of the actor.</param>
+    API_FUNCTION() void SetNodeTransformation(int32 nodeIndex, const Matrix& nodeTransformation, bool worldSpace = false);
+
+    /// <summary>
+    /// Sets the node final transformation. If multiple nodes are to be set within a frame, do not use set worldSpace to true, and do the conversion yourself to avoid recalculation of inv matrices. 
+    /// </summary>
+    /// <param name="nodeName">The name of the skinned model skeleton node.</param>
+    /// <param name="nodeTransformation">The final node transformation matrix.</param>
+    /// <param name="worldSpace">True if convert matrices from world-space, otherwise values will be in local-space of the actor.</param>
+    API_FUNCTION() void SetNodeTransformation(const StringView& nodeName, const Matrix& nodeTransformation, bool worldSpace = false);
+
+    /// <summary>
+    /// Sets a group of nodes final transformation.
+    /// </summary>
+    /// <param name="nodeTransformations">Array of the final node transformation matrix.</param>
+    /// <param name="worldSpace">True if convert matrices from world-space, otherwise values will be in local-space of the actor.</param>
+    /// <returns></returns>
+    API_FUNCTION() void SetNodeTransformation(const Array<NodeTransformation>& nodeTransformations, bool worldSpace = false);
+
+    /// <summary>
     /// Finds the closest node to a given location.
     /// </summary>
     /// <param name="location">The text location (in local-space of the actor or world-space depending on <paramref name="worldSpace"/>).</param>
@@ -237,8 +326,28 @@ public:
     /// <param name="masterPose">The master pose actor to use.</param>
     API_FUNCTION() void SetMasterPoseModel(AnimatedModel* masterPose);
 
-public:
+    /// <summary>
+    /// Enables extracting animation playback insights for debugging or custom scripting.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") bool GetEnableTracing() const
+    {
+        return GraphInstance.EnableTracing;
+    }
 
+    /// <summary>
+    /// Enables extracting animation playback insights for debugging or custom scripting.
+    /// </summary>
+    API_PROPERTY() void SetEnableTracing(bool value)
+    {
+        GraphInstance.EnableTracing = value;
+    }
+
+    /// <summary>
+    /// Gets the trace events from the last animation update. Valid only when EnableTracing is active.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") const Array<AnimGraphTraceEvent>& GetTraceEvents() const;
+
+public:
     /// <summary>
     /// Gets the anim graph instance parameters collection.
     /// </summary>
@@ -259,7 +368,7 @@ public:
     /// </summary>
     /// <param name="name">The parameter name.</param>
     /// <returns>The value.</returns>
-    API_FUNCTION() Variant GetParameterValue(const StringView& name);
+    API_FUNCTION() const Variant& GetParameterValue(const StringView& name) const;
 
     /// <summary>
     /// Sets the anim graph instance parameter value.
@@ -273,7 +382,7 @@ public:
     /// </summary>
     /// <param name="id">The parameter id.</param>
     /// <returns>The value.</returns>
-    API_FUNCTION() Variant GetParameterValue(const Guid& id);
+    API_FUNCTION() const Variant& GetParameterValue(const Guid& id) const;
 
     /// <summary>
     /// Sets the anim graph instance parameter value.
@@ -283,7 +392,6 @@ public:
     API_FUNCTION() void SetParameterValue(const Guid& id, const Variant& value);
 
 public:
-
     /// <summary>
     /// Gets the weight of the blend shape.
     /// </summary>
@@ -299,18 +407,75 @@ public:
     API_FUNCTION() void SetBlendShapeWeight(const StringView& name, float value);
 
     /// <summary>
-    /// Clears the weights of the blend shapes (disabled any used blend shapes).
+    /// Clears the weights of the blend shapes (disables any used blend shapes).
     /// </summary>
     API_FUNCTION() void ClearBlendShapeWeights();
 
-private:
+public:
+    /// <summary>
+    /// Plays the animation on the slot in Anim Graph.
+    /// </summary>
+    /// <remarks>If animation is paused, it will be resumed. If animation is not playing, it will be started. If animation is playing, it will be blended out (call StopSlotAnimation before to do an immediate transition).</remarks>
+    /// <param name="slotName">The name of the slot.</param>
+    /// <param name="anim">The animation to play.</param>
+    /// <param name="speed">The playback speed.</param>
+    /// <param name="blendInTime">The animation blending in time (in seconds). Cam be used to smooth the slot animation playback with the input pose when starting the animation.</param>
+    /// <param name="blendOutTime">The animation blending out time (in seconds). Cam be used to smooth the slot animation playback with the input pose when ending animation.</param>
+    /// <param name="loopCount">The amount of loops to play the animation: 0 to play once, -1 to play infinite, 1 or higher to loop once or more.</param>
+    API_FUNCTION() void PlaySlotAnimation(const StringView& slotName, Animation* anim, float speed = 1.0f, float blendInTime = 0.2f, float blendOutTime = 0.2f, int32 loopCount = 0);
 
-    void ApplyRootMotion(const RootMotionData& rootMotionDelta);
+    /// <summary>
+    /// Stops all the animations playback on the all slots in Anim Graph.
+    /// </summary>
+    API_FUNCTION() void StopSlotAnimation();
+
+    /// <summary>
+    /// Stops the animation playback on the slot in Anim Graph.
+    /// </summary>
+    /// <param name="slotName">The name of the slot.</param>
+    /// <param name="anim">The animation to check. Null to use slot name only. Can be used to explicitly stop a specific animation (if it's playing right now, otherwise doesn't stop other one).</param>
+    API_FUNCTION() void StopSlotAnimation(const StringView& slotName, Animation* anim = nullptr);
+
+    /// <summary>
+    /// Pauses all the animations playback on the all slots in Anim Graph.
+    /// </summary>
+    API_FUNCTION() void PauseSlotAnimation();
+
+    /// <summary>
+    /// Pauses the animation playback on the slot in Anim Graph.
+    /// </summary>
+    /// <param name="slotName">The name of the slot.</param>
+    /// <param name="anim">The animation to check. Null to use slot name only.</param>
+    API_FUNCTION() void PauseSlotAnimation(const StringView& slotName, Animation* anim = nullptr);
+
+    /// <summary>
+    /// Checks if any  animation playback is active on any  slot in Anim Graph (not paused).
+    /// </summary>
+    API_FUNCTION() bool IsPlayingSlotAnimation();
+
+    /// <summary>
+    /// Checks if the animation playback is active on the slot in Anim Graph (not paused).
+    /// </summary>
+    /// <param name="slotName">The name of the slot.</param>
+    /// <param name="anim">The animation to check. Null to use slot name only.</param>
+    API_FUNCTION() bool IsPlayingSlotAnimation(const StringView& slotName, Animation* anim = nullptr);
+
+private:
+#if USE_EDITOR
+    /// <summary>
+    /// Used to hide <see cref="ShowDebugDrawSkeleton"/> options if when the skinned model or animation graph is null.
+    /// </summary>
+    API_PROPERTY(Attributes="HideInEditor, NoSerialize") bool GetShowDebugDrawOptions() const
+    {
+        return SkinnedModel != nullptr && AnimationGraph != nullptr;
+    }
+#endif
+
+    void ApplyRootMotion(const Transform& rootMotionDelta);
     void SyncParameters();
+    void RunBlendShapeDeformer(const MeshBase* mesh, struct MeshDeformationData& deformation);
 
     void Update();
-    void UpdateLocalBounds();
-    void UpdateBounds();
     void UpdateSockets();
     void OnAnimationUpdated_Async();
     void OnAnimationUpdated_Sync();
@@ -322,28 +487,42 @@ private:
     void OnGraphChanged();
     void OnGraphLoaded();
 
-public:
+    // [IAssetReference]
+    void OnAssetChanged(Asset* asset, void* caller) override;
+    void OnAssetLoaded(Asset* asset, void* caller) override;
+    void OnAssetUnloaded(Asset* asset, void* caller) override;
 
+public:
     // [ModelInstanceActor]
     bool HasContentLoaded() const override;
-    void Draw(RenderContext& renderContext) override;
-    void DrawGeneric(RenderContext& renderContext) override;
+    void Draw(RenderContextBatch& renderContextBatch) override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;
+    void OnDebugDraw() override;
+    BoundingBox GetEditorBoundingBox() const override;
 #endif
-    bool IntersectsItself(const Ray& ray, float& distance, Vector3& normal) override;
+    bool IntersectsItself(const Ray& ray, Real& distance, Vector3& normal) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-    bool IntersectsEntry(int32 entryIndex, const Ray& ray, float& distance, Vector3& normal) override;
-    bool IntersectsEntry(const Ray& ray, float& distance, Vector3& normal, int32& entryIndex) override;
+    const Span<MaterialSlot> GetMaterialSlots() const override;
+    MaterialBase* GetMaterial(int32 entryIndex) override;
+    ModelBase* GetModel() override;
+    bool IntersectsEntry(int32 entryIndex, const Ray& ray, Real& distance, Vector3& normal) override;
+    bool IntersectsEntry(const Ray& ray, Real& distance, Vector3& normal, int32& entryIndex) override;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+    bool GetMeshData(const MeshReference& ref, MeshBufferType type, BytesContainer& result, int32& count, GPUVertexLayout** layout) const override;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+    MeshBase* GetMesh(const MeshReference& ref) const override;
+    void UpdateBounds() override;
+    MeshDeformation* GetMeshDeformation() const override;
+    void OnDeleteObject() override;
 
 protected:
-
     // [ModelInstanceActor]
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void OnEnable() override;
     void OnDisable() override;
     void OnActiveInTreeChanged() override;
-    void OnTransformChanged() override;
+    void WaitForModelLoad() override;
 };

@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Render2D.h"
 #include "Font.h"
+#include "FontAsset.h"
 #include "FontManager.h"
 #include "FontTextureAtlas.h"
 #include "RotatedRectangle.h"
@@ -11,26 +12,31 @@
 #include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Profiler/Profiler.h"
+#include "Engine/Graphics/Graphics.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUPipelineState.h"
+#include "Engine/Graphics/GPUPass.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderTargetPool.h"
 #include "Engine/Graphics/DynamicBuffer.h"
+#include "Engine/Graphics/PixelFormatExtensions.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
+#include "Engine/Graphics/Shaders/GPUVertexLayout.h"
 #include "Engine/Animations/AnimationUtils.h"
+#include "Engine/Core/Log.h"
 #include "Engine/Core/Math/Half.h"
 #include "Engine/Core/Math/Math.h"
 #include "Engine/Engine/EngineService.h"
 
 #if USE_EDITOR
 #define RENDER2D_CHECK_RENDERING_STATE \
-	if (!Render2D::IsRendering()) \
-	{ \
-		LOG(Error, "Calling Render2D is only valid during rendering."); \
-		return; \
-	}
+    if (!Render2D::IsRendering()) \
+    { \
+        LOG(Error, "Calling Render2D is only valid during rendering."); \
+        return; \
+    }
 #else
 #define RENDER2D_CHECK_RENDERING_STATE
 #endif
@@ -45,22 +51,25 @@
 
 #define RENDER2D_BLUR_MAX_SAMPLES 64
 
+#define RENDER2D_REMOVE_GAMMA_BEGIN(t, getFormat) const bool removeGamma = IsRemoveGammaEnabled && t && PixelFormatExtensions::IsSRGB(t->getFormat()); if (removeGamma) Features |= RenderingFeatures::RemoveGamma
+#define RENDER2D_REMOVE_GAMMA_END() if (removeGamma) Features &= ~RenderingFeatures::RemoveGamma
+
 // The format for the blur effect temporary buffer
 #define PS_Blur_Format PixelFormat::R8G8B8A8_UNorm
 
 // True if enable downscaling when rendering blur
 const bool DownsampleForBlur = false;
 
-PACK_STRUCT(struct Data {
+GPU_CB_STRUCT(Data {
     Matrix ViewProjection;
     });
 
-PACK_STRUCT(struct BlurData {
-    Vector2 InvBufferSize;
+GPU_CB_STRUCT(BlurData {
+    Float2 InvBufferSize;
     uint32 SampleCount;
     float Dummy0;
-    Vector4 Bounds;
-    Vector4 WeightAndOffsets[RENDER2D_BLUR_MAX_SAMPLES / 2];
+    Float4 Bounds;
+    Float4 WeightAndOffsets[RENDER2D_BLUR_MAX_SAMPLES / 2];
     });
 
 enum class DrawCallType : byte
@@ -71,6 +80,7 @@ enum class DrawCallType : byte
     FillTexture,
     FillTexturePoint,
     DrawChar,
+    DrawCharMSDF,
     DrawCharMaterial,
     Custom,
     Material,
@@ -114,6 +124,8 @@ struct Render2DDrawCall
         struct
         {
             MaterialBase* Mat;
+            float Width;
+            float Height;
         } AsMaterial;
 
         struct
@@ -139,10 +151,10 @@ struct Render2DDrawCall
 
 struct Render2DVertex
 {
-    Vector2 Position;
+    Float2 Position;
     Half2 TexCoord;
     Color Color;
-    Vector2 CustomData;
+    Float2 CustomData;
     RotatedRectangle ClipMask;
 };
 
@@ -159,6 +171,7 @@ struct CachedPSO
     GPUPipelineState* PS_Color_NoAlpha;
 
     GPUPipelineState* PS_Font;
+    GPUPipelineState* PS_FontMSDF;
 
     GPUPipelineState* PS_BlurH;
     GPUPipelineState* PS_BlurV;
@@ -177,7 +190,7 @@ struct ClipMask
     Rectangle Bounds;
 };
 
-Render2D::RenderingFeatures Render2D::Features = RenderingFeatures::VertexSnapping;
+Render2D::RenderingFeatures Render2D::Features = RenderingFeatures::VertexSnapping | RenderingFeatures::FallbackFonts;
 
 namespace
 {
@@ -185,15 +198,16 @@ namespace
     GPUContext* Context = nullptr;
     GPUTextureView* Output = nullptr;
     GPUTextureView* DepthBuffer = nullptr;
-    Viewport View;
+    Viewport ViewViewport;
     Matrix ViewProjection;
 
     // Drawing
     Array<Render2DDrawCall> DrawCalls;
-    Array<FontLineCache> Lines;
-    Array<Vector2> Lines2;
+    Array<FontLineCache, InlinedAllocation<8>> Lines;
+    Array<Float2> Lines2;
     bool IsScissorsRectEmpty;
     bool IsScissorsRectEnabled;
+    bool IsRemoveGammaEnabled;
 
     // Transform
     // Note: we use Matrix3x3 instead of Matrix because we use only 2D transformations on CPU side
@@ -213,8 +227,8 @@ namespace
     CachedPSO PsoDepth;
     CachedPSO PsoNoDepth;
     CachedPSO* CurrentPso = nullptr;
-    DynamicVertexBuffer VB(RENDER2D_INITIAL_VB_CAPACITY, (uint32)sizeof(Render2DVertex), TEXT("Render2D.VB"));
-    DynamicIndexBuffer IB(RENDER2D_INITIAL_IB_CAPACITY, sizeof(uint32), TEXT("Render2D.IB"));
+    DynamicVertexBuffer VB(0, (uint32)sizeof(Render2DVertex), TEXT("Render2D.VB"));
+    DynamicIndexBuffer IB(0, sizeof(uint32), TEXT("Render2D.IB"));
     uint32 VBIndex = 0;
     uint32 IBIndex = 0;
 }
@@ -228,9 +242,16 @@ namespace
     indices[5] = VBIndex + 0; \
     IB.Write(indices, sizeof(indices))
 
-FORCE_INLINE void ApplyTransform(const Vector2& value, Vector2& result)
+FORCE_INLINE void ApplyTransform(const Float2& value, Float2& result)
 {
     Matrix3x3::Transform2DPoint(value, TransformCached, result);
+}
+
+FORCE_INLINE float GetTransformScale()
+{
+    const Float2 axisX(TransformCached.M11, TransformCached.M12);
+    const Float2 axisY(TransformCached.M21, TransformCached.M22);
+    return (axisX.Length() + axisY.Length()) * 0.5f;
 }
 
 void ApplyTransform(const Rectangle& value, RotatedRectangle& result)
@@ -241,9 +262,9 @@ void ApplyTransform(const Rectangle& value, RotatedRectangle& result)
     Matrix3x3::Transform2DVector(rotated.ExtentY, TransformCached, result.ExtentY);
 }
 
-FORCE_INLINE Render2DVertex MakeVertex(const Vector2& pos, const Vector2& uv, const Color& color)
+FORCE_INLINE Render2DVertex MakeVertex(const Float2& pos, const Float2& uv, const Color& color)
 {
-    Vector2 point;
+    Float2 point;
     ApplyTransform(pos, point);
 
     return
@@ -256,19 +277,19 @@ FORCE_INLINE Render2DVertex MakeVertex(const Vector2& pos, const Vector2& uv, co
     };
 }
 
-FORCE_INLINE Render2DVertex MakeVertex(const Vector2& point, const Vector2& uv, const Color& color, const RotatedRectangle& mask, const Vector2& customData)
+FORCE_INLINE Render2DVertex MakeVertex(const Float2& point, const Float2& uv, const Color& color, const RotatedRectangle& mask, const Float2& customData)
 {
     return
     {
         point,
         Half2(uv),
-        color,
+        color * TintLayersStack.Peek(),
         customData,
         mask,
     };
 }
 
-FORCE_INLINE Render2DVertex MakeVertex(const Vector2& point, const Vector2& uv, const Color& color, const RotatedRectangle& mask, const Vector2& customData, const Color& tint)
+FORCE_INLINE Render2DVertex MakeVertex(const Float2& point, const Float2& uv, const Color& color, const RotatedRectangle& mask, const Float2& customData, const Color& tint)
 {
     return
     {
@@ -280,7 +301,7 @@ FORCE_INLINE Render2DVertex MakeVertex(const Vector2& point, const Vector2& uv, 
     };
 }
 
-void WriteTri(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Vector2& uv0, const Vector2& uv1, const Vector2& uv2, const Color& color0, const Color& color1, const Color& color2)
+void WriteTri(const Float2& p0, const Float2& p1, const Float2& p2, const Float2& uv0, const Float2& uv1, const Float2& uv2, const Color& color0, const Color& color1, const Color& color2)
 {
     Render2DVertex tris[3];
     tris[0] = MakeVertex(p0, uv0, color0);
@@ -298,26 +319,26 @@ void WriteTri(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Vec
     IBIndex += 3;
 }
 
-void WriteTri(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Color& color0, const Color& color1, const Color& color2)
+FORCE_INLINE void WriteTri(const Float2& p0, const Float2& p1, const Float2& p2, const Color& color0, const Color& color1, const Color& color2)
 {
-    WriteTri(p0, p1, p2, Vector2::Zero, Vector2::Zero, Vector2::Zero, color0, color1, color2);
+    WriteTri(p0, p1, p2, Float2::Zero, Float2::Zero, Float2::Zero, color0, color1, color2);
 }
 
-void WriteTri(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Vector2& uv0, const Vector2& uv1, const Vector2& uv2)
+FORCE_INLINE void WriteTri(const Float2& p0, const Float2& p1, const Float2& p2, const Float2& uv0, const Float2& uv1, const Float2& uv2)
 {
     WriteTri(p0, p1, p2, uv0, uv1, uv2, Color::Black, Color::Black, Color::Black);
 }
 
 void WriteRect(const Rectangle& rect, const Color& color1, const Color& color2, const Color& color3, const Color& color4)
 {
-    const Vector2 uvUpperLeft = Vector2::Zero;
-    const Vector2 uvBottomRight = Vector2::One;
+    const Float2 uvUpperLeft = Float2::Zero;
+    const Float2 uvBottomRight = Float2::One;
 
     Render2DVertex quad[4];
     quad[0] = MakeVertex(rect.GetBottomRight(), uvBottomRight, color3);
-    quad[1] = MakeVertex(rect.GetBottomLeft(), Vector2(uvUpperLeft.X, uvBottomRight.Y), color4);
+    quad[1] = MakeVertex(rect.GetBottomLeft(), Float2(uvUpperLeft.X, uvBottomRight.Y), color4);
     quad[2] = MakeVertex(rect.GetUpperLeft(), uvUpperLeft, color1);
-    quad[3] = MakeVertex(rect.GetUpperRight(), Vector2(uvBottomRight.X, uvUpperLeft.Y), color2);
+    quad[3] = MakeVertex(rect.GetUpperRight(), Float2(uvBottomRight.X, uvUpperLeft.Y), color2);
     VB.Write(quad, sizeof(quad));
 
     uint32 indices[6];
@@ -327,13 +348,13 @@ void WriteRect(const Rectangle& rect, const Color& color1, const Color& color2, 
     IBIndex += 6;
 }
 
-void WriteRect(const Rectangle& rect, const Color& color, const Vector2& uvUpperLeft, const Vector2& uvBottomRight)
+void WriteRect(const Rectangle& rect, const Color& color, const Float2& uvUpperLeft, const Float2& uvBottomRight)
 {
     Render2DVertex quad[4];
     quad[0] = MakeVertex(rect.GetBottomRight(), uvBottomRight, color);
-    quad[1] = MakeVertex(rect.GetBottomLeft(), Vector2(uvUpperLeft.X, uvBottomRight.Y), color);
+    quad[1] = MakeVertex(rect.GetBottomLeft(), Float2(uvUpperLeft.X, uvBottomRight.Y), color);
     quad[2] = MakeVertex(rect.GetUpperLeft(), uvUpperLeft, color);
-    quad[3] = MakeVertex(rect.GetUpperRight(), Vector2(uvBottomRight.X, uvUpperLeft.Y), color);
+    quad[3] = MakeVertex(rect.GetUpperRight(), Float2(uvBottomRight.X, uvUpperLeft.Y), color);
     VB.Write(quad, sizeof(quad));
 
     uint32 indices[6];
@@ -345,56 +366,56 @@ void WriteRect(const Rectangle& rect, const Color& color, const Vector2& uvUpper
 
 FORCE_INLINE void WriteRect(const Rectangle& rect, const Color& color)
 {
-    WriteRect(rect, color, Vector2::Zero, Vector2::One);
+    WriteRect(rect, color, Float2::Zero, Float2::One);
 }
 
-void Write9SlicingRect(const Rectangle& rect, const Color& color, const Vector4& border, const Vector4& borderUVs)
+void Write9SlicingRect(const Rectangle& rect, const Color& color, const Float4& border, const Float4& borderUVs)
 {
     const Rectangle upperLeft(rect.Location.X, rect.Location.Y, border.X, border.Z);
     const Rectangle upperRight(rect.Location.X + rect.Size.X - border.Y, rect.Location.Y, border.Y, border.Z);
     const Rectangle bottomLeft(rect.Location.X, rect.Location.Y + rect.Size.Y - border.W, border.X, border.W);
     const Rectangle bottomRight(rect.Location.X + rect.Size.X - border.Y, rect.Location.Y + rect.Size.Y - border.W, border.Y, border.W);
 
-    const Vector2 upperLeftUV(borderUVs.X, borderUVs.Z);
-    const Vector2 upperRightUV(1.0f - borderUVs.Y, borderUVs.Z);
-    const Vector2 bottomLeftUV(borderUVs.X, 1.0f - borderUVs.W);
-    const Vector2 bottomRightUV(1.0f - borderUVs.Y, 1.0f - borderUVs.W);
+    const Float2 upperLeftUV(borderUVs.X, borderUVs.Z);
+    const Float2 upperRightUV(1.0f - borderUVs.Y, borderUVs.Z);
+    const Float2 bottomLeftUV(borderUVs.X, 1.0f - borderUVs.W);
+    const Float2 bottomRightUV(1.0f - borderUVs.Y, 1.0f - borderUVs.W);
 
-    WriteRect(upperLeft, color, Vector2::Zero, upperLeftUV);
-    WriteRect(upperRight, color, Vector2(upperRightUV.X, 0), Vector2(1, upperLeftUV.Y));
-    WriteRect(bottomLeft, color, Vector2(0, bottomLeftUV.Y), Vector2(bottomLeftUV.X, 1));
-    WriteRect(bottomRight, color, bottomRightUV, Vector2::One);
+    WriteRect(upperLeft, color, Float2::Zero, upperLeftUV); // Upper left corner
+    WriteRect(upperRight, color, Float2(upperRightUV.X, 0), Float2(1, upperLeftUV.Y)); // Upper right corner
+    WriteRect(bottomLeft, color, Float2(0, bottomLeftUV.Y), Float2(bottomLeftUV.X, 1)); // Bottom left corner
+    WriteRect(bottomRight, color, bottomRightUV, Float2::One); // Bottom right corner
 
-    WriteRect(Rectangle(upperLeft.GetUpperRight(), upperRight.GetBottomLeft() - upperLeft.GetUpperRight()), color, Vector2(upperLeftUV.X, 0), upperRightUV);
-    WriteRect(Rectangle(upperLeft.GetBottomLeft(), bottomLeft.GetUpperRight() - upperLeft.GetBottomLeft()), color, Vector2(0, upperLeftUV.Y), bottomLeftUV);
-    WriteRect(Rectangle(bottomLeft.GetUpperRight(), bottomRight.GetBottomLeft() - bottomLeft.GetUpperRight()), color, bottomLeftUV, Vector2(bottomRightUV.X, 1));
-    WriteRect(Rectangle(upperRight.GetBottomLeft(), bottomRight.GetUpperRight() - upperRight.GetBottomLeft()), color, upperRightUV, Vector2(1, bottomRightUV.Y));
+    WriteRect(Rectangle(upperLeft.GetUpperRight(), upperRight.GetBottomLeft() - upperLeft.GetUpperRight()), color, Float2(upperLeftUV.X, 0), upperRightUV); // Top side
+    WriteRect(Rectangle(upperLeft.GetBottomLeft(), bottomLeft.GetUpperRight() - upperLeft.GetBottomLeft()), color, Float2(0, upperLeftUV.Y), bottomLeftUV); // Left side
+    WriteRect(Rectangle(bottomLeft.GetUpperRight(), bottomRight.GetBottomLeft() - bottomLeft.GetUpperRight()), color, bottomLeftUV, Float2(bottomRightUV.X, 1)); // Bottom side
+    WriteRect(Rectangle(upperRight.GetBottomLeft(), bottomRight.GetUpperRight() - upperRight.GetBottomLeft()), color, upperRightUV, Float2(1, bottomRightUV.Y)); // Right Side
 
-    WriteRect(Rectangle(upperLeft.GetBottomRight(), bottomRight.GetUpperLeft() - upperLeft.GetBottomRight()), color, upperRightUV, bottomRightUV);
+    WriteRect(Rectangle(upperLeft.GetBottomRight(), bottomRight.GetUpperLeft() - upperLeft.GetBottomRight()), color, upperLeftUV, bottomRightUV); // Center
 }
 
-void Write9SlicingRect(const Rectangle& rect, const Color& color, const Vector4& border, const Vector4& borderUVs, const Vector2& uvLocation, const Vector2& uvSize)
+void Write9SlicingRect(const Rectangle& rect, const Color& color, const Float4& border, const Float4& borderUVs, const Float2& uvLocation, const Float2& uvSize)
 {
     const Rectangle upperLeft(rect.Location.X, rect.Location.Y, border.X, border.Z);
     const Rectangle upperRight(rect.Location.X + rect.Size.X - border.Y, rect.Location.Y, border.Y, border.Z);
     const Rectangle bottomLeft(rect.Location.X, rect.Location.Y + rect.Size.Y - border.W, border.X, border.W);
     const Rectangle bottomRight(rect.Location.X + rect.Size.X - border.Y, rect.Location.Y + rect.Size.Y - border.W, border.Y, border.W);
 
-    const Vector2 upperLeftUV = Vector2(borderUVs.X, borderUVs.Z) * uvSize + uvLocation;
-    const Vector2 upperRightUV = Vector2(1.0f - borderUVs.Y, borderUVs.Z) * uvSize + uvLocation;
-    const Vector2 bottomLeftUV = Vector2(borderUVs.X, 1.0f - borderUVs.W) * uvSize + uvLocation;
-    const Vector2 bottomRightUV = Vector2(1.0f - borderUVs.Y, 1.0f - borderUVs.W) * uvSize + uvLocation;
-    const Vector2 uvEnd = uvLocation + uvSize;
+    const Float2 upperLeftUV = Float2(borderUVs.X, borderUVs.Z) * uvSize + uvLocation;
+    const Float2 upperRightUV = Float2(1.0f - borderUVs.Y, borderUVs.Z) * uvSize + uvLocation;
+    const Float2 bottomLeftUV = Float2(borderUVs.X, 1.0f - borderUVs.W) * uvSize + uvLocation;
+    const Float2 bottomRightUV = Float2(1.0f - borderUVs.Y, 1.0f - borderUVs.W) * uvSize + uvLocation;
+    const Float2 uvEnd = uvLocation + uvSize;
 
     WriteRect(upperLeft, color, uvLocation, upperLeftUV);
-    WriteRect(upperRight, color, Vector2(upperRightUV.X, uvLocation.Y), Vector2(uvEnd.X, upperLeftUV.Y));
-    WriteRect(bottomLeft, color, Vector2(uvLocation.X, bottomLeftUV.Y), Vector2(bottomLeftUV.X, uvEnd.Y));
+    WriteRect(upperRight, color, Float2(upperRightUV.X, uvLocation.Y), Float2(uvEnd.X, upperLeftUV.Y));
+    WriteRect(bottomLeft, color, Float2(uvLocation.X, bottomLeftUV.Y), Float2(bottomLeftUV.X, uvEnd.Y));
     WriteRect(bottomRight, color, bottomRightUV, uvEnd);
 
-    WriteRect(Rectangle(upperLeft.GetUpperRight(), upperRight.GetBottomLeft() - upperLeft.GetUpperRight()), color, Vector2(upperLeftUV.X, uvLocation.Y), upperRightUV);
-    WriteRect(Rectangle(upperLeft.GetBottomLeft(), bottomLeft.GetUpperRight() - upperLeft.GetBottomLeft()), color, Vector2(uvLocation.X, upperLeftUV.Y), bottomLeftUV);
-    WriteRect(Rectangle(bottomLeft.GetUpperRight(), bottomRight.GetBottomLeft() - bottomLeft.GetUpperRight()), color, bottomLeftUV, Vector2(bottomRightUV.X, uvEnd.Y));
-    WriteRect(Rectangle(upperRight.GetBottomLeft(), bottomRight.GetUpperRight() - upperRight.GetBottomLeft()), color, upperRightUV, Vector2(uvEnd.X, bottomRightUV.Y));
+    WriteRect(Rectangle(upperLeft.GetUpperRight(), upperRight.GetBottomLeft() - upperLeft.GetUpperRight()), color, Float2(upperLeftUV.X, uvLocation.Y), upperRightUV);
+    WriteRect(Rectangle(upperLeft.GetBottomLeft(), bottomLeft.GetUpperRight() - upperLeft.GetBottomLeft()), color, Float2(uvLocation.X, upperLeftUV.Y), bottomLeftUV);
+    WriteRect(Rectangle(bottomLeft.GetUpperRight(), bottomRight.GetBottomLeft() - bottomLeft.GetUpperRight()), color, bottomLeftUV, Float2(bottomRightUV.X, uvEnd.Y));
+    WriteRect(Rectangle(upperRight.GetBottomLeft(), bottomRight.GetUpperRight() - upperRight.GetBottomLeft()), color, upperRightUV, Float2(uvEnd.X, bottomRightUV.Y));
 
     WriteRect(Rectangle(upperLeft.GetBottomRight(), bottomRight.GetUpperLeft() - upperLeft.GetBottomRight()), color, upperRightUV, bottomRightUV);
 }
@@ -450,6 +471,7 @@ CanDrawCallCallback CanDrawCallBatch[] =
     CanDrawCallCallbackTexture, // FillTexture,
     CanDrawCallCallbackTexture, // FillTexturePoint,
     CanDrawCallCallbackChar, // DrawChar,
+    CanDrawCallCallbackChar, // DrawCharMSDF,
     CanDrawCallCallbackCharMaterial, // DrawCharMaterial,
     CanDrawCallCallbackFalse, // Custom,
     CanDrawCallCallbackMaterial, // Material,
@@ -478,7 +500,7 @@ bool CachedPSO::Init(GPUShader* shader, bool useDepth)
 
     // Create pipeline states
     GPUPipelineState::Description desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
-    desc.DepthTestEnable = desc.DepthWriteEnable = useDepth;
+    desc.DepthEnable = useDepth;
     desc.DepthWriteEnable = false;
     desc.DepthClipEnable = false;
     desc.VS = shader->GetVS("VS");
@@ -510,6 +532,12 @@ bool CachedPSO::Init(GPUShader* shader, bool useDepth)
     desc.PS = shader->GetPS("PS_Font");
     PS_Font = GPUDevice::Instance->CreatePipelineState();
     if (PS_Font->Init(desc))
+        return true;
+    //
+    desc.BlendMode = BlendingMode::AlphaBlend;
+    desc.PS = shader->GetPS("PS_FontMSDF");
+    PS_FontMSDF = GPUDevice::Instance->CreatePipelineState();
+    if (PS_FontMSDF->Init(desc))
         return true;
     //
     desc.PS = shader->GetPS("PS_LineAA");
@@ -560,7 +588,6 @@ void CachedPSO::Dispose()
 class Render2DService : public EngineService
 {
 public:
-
     Render2DService()
         : EngineService(TEXT("Render2D"), 10)
     {
@@ -579,7 +606,7 @@ bool Render2D::IsRendering()
 
 const Viewport& Render2D::GetViewport()
 {
-    return View;
+    return ViewViewport;
 }
 
 #if COMPILE_WITH_DEV_ENV
@@ -594,15 +621,27 @@ void OnGUIShaderReloading(Asset* obj)
 
 bool Render2DService::Init()
 {
+    PROFILE_MEM(UI);
+
     // GUI Shader
     GUIShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/GUI"));
     if (GUIShader == nullptr)
         return true;
 #if COMPILE_WITH_DEV_ENV
-    GUIShader.Get()->OnReloading.Bind<OnGUIShaderReloading>();
+    GUIShader.Get()->Reloading.Bind<OnGUIShaderReloading>();
 #endif
 
+    VB.SetLayout(GPUVertexLayout::Get({
+        { VertexElement::Types::Position, 0, 0, 0, PixelFormat::R32G32_Float },
+        { VertexElement::Types::TexCoord, 0, 0, 0, PixelFormat::R16G16_Float },
+        { VertexElement::Types::Color, 0, 0, 0, PixelFormat::R32G32B32A32_Float },
+        { VertexElement::Types::TexCoord1, 0, 0, 0, PixelFormat::R32G32B32A32_Float },
+        { VertexElement::Types::TexCoord2, 0, 0, 0, PixelFormat::R32G32B32A32_Float },
+    }));
+
     DrawCalls.EnsureCapacity(RENDER2D_INITIAL_DRAW_CALL_CAPACITY);
+    VB.Data.EnsureCapacity(RENDER2D_INITIAL_VB_CAPACITY);
+    IB.Data.EnsureCapacity(RENDER2D_INITIAL_IB_CAPACITY);
 
     return false;
 }
@@ -666,9 +705,10 @@ void Render2D::Begin(GPUContext* context, GPUTextureView* output, GPUTextureView
     Context = context;
     Output = output;
     DepthBuffer = depthBuffer;
-    View = viewport;
+    ViewViewport = viewport;
     ViewProjection = viewProjection;
     DrawCalls.Clear();
+    IsRemoveGammaEnabled = Graphics::GammaColorSpace == false;
 
     // Initialize default transform
     const Matrix3x3 defaultTransform = Matrix3x3::Identity;
@@ -677,7 +717,7 @@ void Render2D::Begin(GPUContext* context, GPUTextureView* output, GPUTextureView
     TransformCached = defaultTransform;
 
     // Initialize default clip mask
-    const Rectangle defaultBounds(viewport.Location, viewport.Size);
+    const Rectangle defaultBounds(Float2::Zero, Float2(GPU_MAX_TEXTURE_SIZE, GPU_MAX_TEXTURE_SIZE));
     const RotatedRectangle defaultMask(defaultBounds);
     ClipLayersStack.Clear();
     ClipLayersStack.Add({ defaultMask, defaultBounds });
@@ -724,17 +764,20 @@ void Render2D::End()
             Output = nullptr;
             return;
         }
-        shader = GUIShader->GetShader();
+        shader = GUIShader->GPU;
     }
 
     // Flush geometry buffers
-    VB.Flush(Context);
-    IB.Flush(Context);
+    {
+        GPUMemoryPass pass(Context);
+        VB.Flush(Context);
+        IB.Flush(Context);
+    }
 
     // Set output
     Context->ResetSR();
     Context->SetRenderTarget(DepthBuffer, Output);
-    Context->SetViewportAndScissors(View);
+    Context->SetViewportAndScissors(ViewViewport);
     Context->FlushState();
 
     // Prepare constant buffer
@@ -747,8 +790,8 @@ void Render2D::End()
     // Prepare PSO
     if (!PsoDepth.Inited)
     {
-        PsoDepth.Init(GUIShader.Get()->GetShader(), true);
-        PsoNoDepth.Init(GUIShader.Get()->GetShader(), false);
+        PsoDepth.Init(GUIShader.Get()->GPU, true);
+        PsoNoDepth.Init(GUIShader.Get()->GPU, false);
     }
     CurrentPso = DepthBuffer ? &PsoDepth : &PsoNoDepth;
 
@@ -757,10 +800,7 @@ void Render2D::End()
     IsScissorsRectEmpty = false;
     for (int32 i = 0; i < DrawCalls.Count(); i++)
     {
-        // Peek draw call
         const auto& drawCall = DrawCalls[i];
-
-        // Check if cannot add element to the batching
         if (batchSize != 0 && !CanBatchDrawCalls(DrawCalls[batchStart], drawCall))
         {
             // Flush batched elements
@@ -839,10 +879,11 @@ void Render2D::PushClip(const Rectangle& clipRect)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 
+    const auto& mask = ClipLayersStack.Peek();
     RotatedRectangle clipRectTransformed;
     ApplyTransform(clipRect, clipRectTransformed);
-    const Rectangle bounds = Rectangle::Shared(clipRectTransformed.ToBoundingRect(), ClipLayersStack.Peek().Bounds);
-    ClipLayersStack.Push({ clipRectTransformed, bounds });
+    const Rectangle bounds = Rectangle::Shared(clipRectTransformed.ToBoundingRect(), mask.Bounds);
+    ClipLayersStack.Push({ RotatedRectangle::Shared(clipRectTransformed, mask.Bounds), bounds });
 
     OnClipScissors();
 }
@@ -904,7 +945,7 @@ static float GetWeight(float dist, float strength)
     return (1.0f / Math::Sqrt(2 * PI * strength2)) * Math::Exp(-(dist * dist) / (2 * strength2));
 }
 
-static Vector2 GetWeightAndOffset(float dist, float sigma)
+static Float2 GetWeightAndOffset(float dist, float sigma)
 {
     float offset1 = dist;
     float weight1 = GetWeight(offset1, sigma);
@@ -920,17 +961,17 @@ static Vector2 GetWeightAndOffset(float dist, float sigma)
         offset = (weight1 * offset1 + weight2 * offset2) / totalWeight;
     }
 
-    return Vector2(totalWeight, offset);
+    return Float2(totalWeight, offset);
 }
 
-static uint32 ComputeBlurWeights(int32 kernelSize, float sigma, Vector4* outWeightsAndOffsets)
+static uint32 ComputeBlurWeights(int32 kernelSize, float sigma, Float4* outWeightsAndOffsets)
 {
     const uint32 numSamples = Math::DivideAndRoundUp((uint32)kernelSize, 2u);
-    outWeightsAndOffsets[0] = Vector4(Vector2(GetWeight(0, sigma), 0), GetWeightAndOffset(1, sigma));
+    outWeightsAndOffsets[0] = Float4(Float2(GetWeight(0, sigma), 0), GetWeightAndOffset(1, sigma));
     uint32 sampleIndex = 1;
     for (int32 x = 3; x < kernelSize; x += 4)
     {
-        outWeightsAndOffsets[sampleIndex] = Vector4(GetWeightAndOffset((float)x, sigma), GetWeightAndOffset((float)(x + 2), sigma));
+        outWeightsAndOffsets[sampleIndex] = Float4(GetWeightAndOffset((float)x, sigma), GetWeightAndOffset((float)(x + 2), sigma));
         sampleIndex++;
     }
     return numSamples;
@@ -979,12 +1020,20 @@ void DrawBatch(int32 startIndex, int32 count)
         Context->BindSR(0, d.AsChar.Tex);
         Context->SetState(CurrentPso->PS_Font);
         break;
+    case DrawCallType::DrawCharMSDF:
+        Context->BindSR(0, d.AsChar.Tex);
+        Context->SetState(CurrentPso->PS_FontMSDF);
+        break;
     case DrawCallType::DrawCharMaterial:
     {
         // Apply and bind material
         auto material = d.AsChar.Mat;
         MaterialBase::BindParameters bindParams(Context, *(RenderContext*)nullptr);
-        bindParams.CustomData = &ViewProjection;
+        Render2D::CustomData customData;
+        customData.ViewProjection = ViewProjection;
+        customData.ViewSize = Float2::One;
+        customData.UseDepthBuffer = DepthBuffer != nullptr;
+        bindParams.CustomData = &customData;
         material->Bind(bindParams);
 
         // Bind font atlas as a material parameter
@@ -1003,7 +1052,7 @@ void DrawBatch(int32 startIndex, int32 count)
         Context->DrawIndexed(countIb, 0, d.StartIB);
 
         // Restore pipeline (material apply overrides it)
-        const auto cb = GUIShader->GetShader()->GetCB(0);
+        const auto cb = GUIShader->GPU->GetCB(0);
         Context->BindCB(0, cb);
 
         return;
@@ -1017,7 +1066,11 @@ void DrawBatch(int32 startIndex, int32 count)
         // Bind material
         auto material = (MaterialBase*)d.AsMaterial.Mat;
         MaterialBase::BindParameters bindParams(Context, *(RenderContext*)nullptr);
-        bindParams.CustomData = &ViewProjection;
+        Render2D::CustomData customData;
+        customData.ViewProjection = ViewProjection;
+        customData.ViewSize = Float2(d.AsMaterial.Width, d.AsMaterial.Height);
+        customData.UseDepthBuffer = DepthBuffer != nullptr;
+        bindParams.CustomData = &customData;
         material->Bind(bindParams);
 
         // Bind index and vertex buffers
@@ -1028,7 +1081,7 @@ void DrawBatch(int32 startIndex, int32 count)
         Context->DrawIndexed(countIb, 0, d.StartIB);
 
         // Restore pipeline (material apply overrides it)
-        const auto cb = GUIShader->GetShader()->GetCB(0);
+        const auto cb = GUIShader->GPU->GetCB(0);
         Context->BindCB(0, cb);
 
         return;
@@ -1037,9 +1090,9 @@ void DrawBatch(int32 startIndex, int32 count)
     {
         PROFILE_GPU("Blur");
 
-        const Vector4 bounds(d.AsBlur.UpperLeftX, d.AsBlur.UpperLeftY, d.AsBlur.BottomRightX, d.AsBlur.BottomRightY);
+        const Float4 bounds(d.AsBlur.UpperLeftX, d.AsBlur.UpperLeftY, d.AsBlur.BottomRightX, d.AsBlur.BottomRightY);
         float blurStrength = Math::Max(d.AsBlur.Strength, 1.0f);
-        auto& limits = GPUDevice::Instance->Limits;
+        const auto& limits = GPUDevice::Instance->Limits;
         int32 renderTargetWidth = Math::Min(Math::RoundToInt(d.AsBlur.Width), limits.MaximumTexture2DSize);
         int32 renderTargetHeight = Math::Min(Math::RoundToInt(d.AsBlur.Height), limits.MaximumTexture2DSize);
 
@@ -1053,15 +1106,17 @@ void DrawBatch(int32 startIndex, int32 count)
         }
 
         // Skip if no chance to render anything
+        renderTargetWidth = Math::AlignDown(renderTargetWidth, 4);
+        renderTargetHeight = Math::AlignDown(renderTargetHeight, 4);
         if (renderTargetWidth <= 0 || renderTargetHeight <= 0)
-        {
             return;
-        }
 
         // Get temporary textures
         auto desc = GPUTextureDescription::New2D(renderTargetWidth, renderTargetHeight, PS_Blur_Format);
         auto blurA = RenderTargetPool::Get(desc);
         auto blurB = RenderTargetPool::Get(desc);
+        RENDER_TARGET_POOL_SET_NAME(blurA, "Render2D.BlurA");
+        RENDER_TARGET_POOL_SET_NAME(blurB, "Render2D.BlurB");
 
         // Prepare blur data
         BlurData data;
@@ -1072,7 +1127,7 @@ void DrawBatch(int32 startIndex, int32 count)
         data.InvBufferSize.X = 1.0f / (float)renderTargetWidth;
         data.InvBufferSize.Y = 1.0f / (float)renderTargetHeight;
         data.SampleCount = ComputeBlurWeights(kernelSize, blurStrength, data.WeightAndOffsets);
-        const auto cb = GUIShader->GetShader()->GetCB(1);
+        const auto cb = GUIShader->GPU->GetCB(1);
         Context->UpdateCB(cb, &data);
         Context->BindCB(1, cb);
 
@@ -1101,7 +1156,7 @@ void DrawBatch(int32 startIndex, int32 count)
         // Restore output
         Context->ResetRenderTarget();
         Context->SetRenderTarget(DepthBuffer, Output);
-        Context->SetViewportAndScissors(View);
+        Context->SetViewportAndScissors(ViewViewport);
         Context->UnBindCB(1);
 
         // Link for drawing final blur as a texture
@@ -1122,33 +1177,35 @@ void DrawBatch(int32 startIndex, int32 count)
         break;
 #if !BUILD_RELEASE
     default:
-    CRASH;
+        CRASH;
 #endif
     }
 
     // Draw
-    Context->BindVB(ToSpan(&vb, 1)); // TODO: reduce bindings frequency
-    Context->BindIB(ib); // TODO: reduce bindings frequency
+    Context->BindVB(ToSpan(&vb, 1));
+    Context->BindIB(ib);
     Context->DrawIndexed(countIb, 0, d.StartIB);
 }
 
-void Render2D::DrawText(Font* font, const StringView& text, const Color& color, const Vector2& location, MaterialBase* customMaterial)
+void Render2D::DrawText(Font* font, const StringView& text, const Color& color, const Float2& location, MaterialBase* customMaterial)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 
     // Check if there is no need to do anything
     if (font == nullptr ||
-        text.IsEmpty() ||
+        text.Length() < 0 ||
         (customMaterial && (!customMaterial->IsReady() || !customMaterial->IsGUI())))
         return;
 
     // Temporary data
     uint32 fontAtlasIndex = 0;
     FontTextureAtlas* fontAtlas = nullptr;
-    Vector2 invAtlasSize = Vector2::One;
+    Float2 invAtlasSize = Float2::One;
     FontCharacterEntry previous;
     int32 kerning;
-    float scale = 1.0f / FontManager::FontScale;
+    const FontOptions& options = font->GetAsset()->GetOptions();
+    const float scale = font->GetScale(1.0f);
+    const bool enableFallbackFonts = EnumHasAllFlags(Features, RenderingFeatures::FallbackFonts);
 
     // Render all characters
     FontCharacterEntry entry;
@@ -1160,11 +1217,11 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
     }
     else
     {
-        drawCall.Type = DrawCallType::DrawChar;
+        drawCall.Type = options.RasterMode == FontRasterMode::MSDF ? DrawCallType::DrawCharMSDF : DrawCallType::DrawChar;
         drawCall.AsChar.Mat = nullptr;
     }
-    Vector2 pointer = location;
-    for (int32 currentIndex = 0; currentIndex <= text.Length(); currentIndex++)
+    Float2 pointer = location;
+    for (int32 currentIndex = 0; currentIndex < text.Length(); currentIndex++)
     {
         // Cache current character
         const Char currentChar = text[currentIndex];
@@ -1173,7 +1230,10 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
         if (currentChar != '\n')
         {
             // Get character entry
-            font->GetCharacter(currentChar, entry);
+            font->GetCharacter(currentChar, entry, enableFallbackFonts);
+
+            // Fallback fonts may have different MSDFSize, so we need to calculate scale per character
+            const float entryScale = entry.Font->GetScale(1.0f);
 
             // Check if need to select/change font atlas (since characters even in the same font may be located in different atlases)
             if (fontAtlas == nullptr || entry.TextureIndex != fontAtlasIndex)
@@ -1200,26 +1260,24 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
             // Get kerning
             if (!isWhitespace && previous.IsValid)
             {
-                kerning = font->GetKerning(previous.Character, entry.Character);
+                kerning = entry.Font->GetKerning(previous.Character, entry.Character);
             }
             else
             {
                 kerning = 0;
             }
-            pointer.X += kerning * scale;
+            pointer.X += kerning * entryScale;
             previous = entry;
 
             // Omit whitespace characters
             if (!isWhitespace)
             {
                 // Calculate character size and atlas coordinates
-                const float x = pointer.X + entry.OffsetX * scale;
-                const float y = pointer.Y + (font->GetHeight() + font->GetDescender() - entry.OffsetY) * scale;
-
-                Rectangle charRect(x, y, entry.UVSize.X * scale, entry.UVSize.Y * scale);
-
-                Vector2 upperLeftUV = entry.UV * invAtlasSize;
-                Vector2 rightBottomUV = (entry.UV + entry.UVSize) * invAtlasSize;
+                const float x = pointer.X + entry.OffsetX * entryScale;
+                const float y = pointer.Y - entry.OffsetY * entryScale + (font->GetHeight() + font->GetDescender()) * scale;
+                Rectangle charRect(x, y, entry.UVSize.X * entryScale, entry.UVSize.Y * entryScale);
+                Float2 upperLeftUV = entry.UV * invAtlasSize;
+                Float2 rightBottomUV = (entry.UV + entry.UVSize) * invAtlasSize;
 
                 // Add draw call
                 drawCall.StartIB = IBIndex;
@@ -1229,7 +1287,7 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
             }
 
             // Move
-            pointer.X += entry.AdvanceX * scale;
+            pointer.X += entry.AdvanceX * entryScale;
         }
         else
         {
@@ -1240,9 +1298,9 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
     }
 }
 
-void Render2D::DrawText(Font* font, const StringView& text, const TextRange& textRange, const Color& color, const Vector2& location, MaterialBase* customMaterial)
+void Render2D::DrawText(Font* font, const StringView& text, const TextRange& textRange, const Color& color, const Float2& location, MaterialBase* customMaterial)
 {
-    DrawText(font, StringView(text.Get() + textRange.StartIndex, textRange.Length()), color, location, customMaterial);
+    DrawText(font, textRange.Substring(text), color, location, customMaterial);
 }
 
 void Render2D::DrawText(Font* font, const StringView& text, const Color& color, const TextLayoutOptions& layout, MaterialBase* customMaterial)
@@ -1259,10 +1317,12 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
     // Temporary data
     uint32 fontAtlasIndex = 0;
     FontTextureAtlas* fontAtlas = nullptr;
-    Vector2 invAtlasSize = Vector2::One;
+    Float2 invAtlasSize = Float2::One;
     FontCharacterEntry previous;
     int32 kerning;
-    float scale = layout.Scale / FontManager::FontScale;
+    const FontOptions& options = font->GetAsset()->GetOptions();
+    const float scale = font->GetScale(layout.Scale);
+    const bool enableFallbackFonts = EnumHasAllFlags(Features, RenderingFeatures::FallbackFonts);
 
     // Process text to get lines
     Lines.Clear();
@@ -1278,21 +1338,28 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
     }
     else
     {
-        drawCall.Type = DrawCallType::DrawChar;
+        drawCall.Type = options.RasterMode == FontRasterMode::MSDF ? DrawCallType::DrawCharMSDF : DrawCallType::DrawChar;
         drawCall.AsChar.Mat = nullptr;
     }
     for (int32 lineIndex = 0; lineIndex < Lines.Count(); lineIndex++)
     {
         const FontLineCache& line = Lines[lineIndex];
-        Vector2 pointer = line.Location;
+        Float2 pointer = line.Location;
 
         // Render all characters from the line
         for (int32 charIndex = line.FirstCharIndex; charIndex <= line.LastCharIndex; charIndex++)
         {
-            const Char c = text[charIndex];
-            if (c != '\n')
+            // Cache current character
+            const Char currentChar = text[charIndex];
+
+            // Check if it isn't a newline character
+            if (currentChar != '\n')
             {
-                font->GetCharacter(c, entry);
+                // Get character entry
+                font->GetCharacter(currentChar, entry, enableFallbackFonts);
+
+                // Fallback fonts may have different MSDFSize, so we need to calculate scale per character
+                const float entryScale = entry.Font->GetScale(layout.Scale);
 
                 // Check if need to select/change font atlas (since characters even in the same font may be located in different atlases)
                 if (fontAtlas == nullptr || entry.TextureIndex != fontAtlasIndex)
@@ -1314,30 +1381,28 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
                 }
 
                 // Get kerning
-                const bool isWhitespace = StringUtils::IsWhitespace(c);
+                const bool isWhitespace = StringUtils::IsWhitespace(currentChar);
                 if (!isWhitespace && previous.IsValid)
                 {
-                    kerning = font->GetKerning(previous.Character, entry.Character);
+                    kerning = entry.Font->GetKerning(previous.Character, entry.Character);
                 }
                 else
                 {
                     kerning = 0;
                 }
-                pointer.X += (float)kerning * scale;
+                pointer.X += (float)kerning * entryScale;
                 previous = entry;
 
                 // Omit whitespace characters
                 if (!isWhitespace)
                 {
                     // Calculate character size and atlas coordinates
-                    const float x = pointer.X + entry.OffsetX * scale;
-                    const float y = pointer.Y + (font->GetHeight() + font->GetDescender() - entry.OffsetY) * scale;
-
-                    Rectangle charRect(x, y, entry.UVSize.X * scale, entry.UVSize.Y * scale);
+                    const float x = pointer.X + entry.OffsetX * entryScale;
+                    const float y = pointer.Y - entry.OffsetY * entryScale + Math::Ceil((font->GetHeight() + font->GetDescender()) * scale);
+                    Rectangle charRect(x, y, entry.UVSize.X * entryScale, entry.UVSize.Y * entryScale);
                     charRect.Offset(layout.Bounds.Location);
-
-                    Vector2 upperLeftUV = entry.UV * invAtlasSize;
-                    Vector2 rightBottomUV = (entry.UV + entry.UVSize) * invAtlasSize;
+                    Float2 upperLeftUV = entry.UV * invAtlasSize;
+                    Float2 rightBottomUV = (entry.UV + entry.UVSize) * invAtlasSize;
 
                     // Add draw call
                     drawCall.StartIB = IBIndex;
@@ -1347,7 +1412,7 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
                 }
 
                 // Move
-                pointer.X += entry.AdvanceX * scale;
+                pointer.X += entry.AdvanceX * entryScale;
             }
         }
     }
@@ -1355,27 +1420,31 @@ void Render2D::DrawText(Font* font, const StringView& text, const Color& color, 
 
 void Render2D::DrawText(Font* font, const StringView& text, const TextRange& textRange, const Color& color, const TextLayoutOptions& layout, MaterialBase* customMaterial)
 {
-    DrawText(font, StringView(text.Get() + textRange.StartIndex, textRange.Length()), color, layout, customMaterial);
+    DrawText(font, textRange.Substring(text), color, layout, customMaterial);
 }
 
 FORCE_INLINE bool NeedAlphaWithTint(const Color& color)
 {
-    return (color.A * TintLayersStack.Peek().A) < 1.0f;
+    const float tint = TintLayersStack.Peek().A;
+    return color.A * tint < 1.0f;
 }
 
 FORCE_INLINE bool NeedAlphaWithTint(const Color& color1, const Color& color2)
 {
-    return (color1.A * TintLayersStack.Peek().A) < 1.0f || (color2.A * TintLayersStack.Peek().A) < 1.0f;
+    const float tint = TintLayersStack.Peek().A;
+    return color1.A * tint < 1.0f || color2.A * tint < 1.0f;
 }
 
 FORCE_INLINE bool NeedAlphaWithTint(const Color& color1, const Color& color2, const Color& color3)
 {
-    return (color1.A * TintLayersStack.Peek().A) < 1.0f || (color2.A * TintLayersStack.Peek().A) < 1.0f || (color3.A * TintLayersStack.Peek().A) < 1.0f;
+    const float tint = TintLayersStack.Peek().A;
+    return color1.A * tint < 1.0f || color2.A * tint < 1.0f || color3.A * tint < 1.0f;
 }
 
 FORCE_INLINE bool NeedAlphaWithTint(const Color& color1, const Color& color2, const Color& color3, const Color& color4)
 {
-    return (color1.A * TintLayersStack.Peek().A) < 1.0f || (color2.A * TintLayersStack.Peek().A) < 1.0f || (color3.A * TintLayersStack.Peek().A) < 1.0f || (color4.A * TintLayersStack.Peek().A) < 1.0f;
+    const float tint = TintLayersStack.Peek().A;
+    return color1.A * tint < 1.0f || color2.A * tint < 1.0f || color3.A * tint < 1.0f || color4.A * tint < 1.0f;
 }
 
 void Render2D::FillRectangle(const Rectangle& rect, const Color& color)
@@ -1405,9 +1474,29 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
     RENDER2D_CHECK_RENDERING_STATE;
 
     const auto& mask = ClipLayersStack.Peek().Mask;
-    thickness *= (TransformCached.M11 + TransformCached.M22 + TransformCached.M33) * 0.3333333f;
+    float thick = thickness;
+    thickness *= GetTransformScale();
 
-    Vector2 points[5];
+    // When lines thickness is very large, don't use corner caps and place line ends to not overlap
+    if (thickness > 4.0f)
+    {
+        thick *= Math::Lerp(0.6f, 1.0f, Math::Saturate(thick - 4.0f)); // Smooth transition between soft LineAA and harsh FillRect
+        Float2 totalMin = rect.GetUpperLeft() - Float2(thick * 0.5f);
+        Float2 totalMax = rect.GetBottomRight() + Float2(thick * 0.5f);
+        Float2 size = totalMax - totalMin;
+        Render2DDrawCall& drawCall = DrawCalls.AddOne();
+        drawCall.Type = NeedAlphaWithTint(color1, color2, color3, color4) ? DrawCallType::FillRect : DrawCallType::FillRectNoAlpha;
+        drawCall.StartIB = IBIndex;
+        drawCall.CountIB = 6 * 4;
+        // TODO: interpolate colors from corners to extended rectangle edges properly
+        WriteRect(Rectangle(totalMin.X, totalMin.Y, size.X, thick), color1, color2, color2, color1);
+        WriteRect(Rectangle(totalMin.X, totalMin.Y + rect.Size.Y, size.X, thick), color4, color3, color3, color4);
+        WriteRect(Rectangle(totalMin.X, totalMin.Y + thick, thick, rect.Size.Y - thick), color1, color1, color4, color4);
+        WriteRect(Rectangle(totalMax.X - thick, totalMin.Y + thick, thick, rect.Size.Y - thick), color2, color2, color3, color3);
+        return;
+    }
+
+    Float2 points[5];
     ApplyTransform(rect.GetUpperLeft(), points[0]);
     ApplyTransform(rect.GetUpperRight(), points[1]);
     ApplyTransform(rect.GetBottomRight(), points[2]);
@@ -1423,7 +1512,7 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
 
     Render2DVertex v[4];
     uint32 indices[6];
-    Vector2 p1t, p2t;
+    Float2 p1t, p2t;
     Color c1t, c2t;
 
     p1t = points[0];
@@ -1444,16 +1533,16 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
         p2t = points[i];
         c2t = colors[i];
 
-        Vector2 line = p2t - p1t;
-        Vector2 up = thicknessHalf * Vector2::Normalize(Vector2(-line.Y, line.X));
-        Vector2 right = thicknessHalf * Vector2::Normalize(line);
+        Float2 line = p2t - p1t;
+        Float2 up = thicknessHalf * Float2::Normalize(Float2(-line.Y, line.X));
+        Float2 right = thicknessHalf * Float2::Normalize(line);
 
         // Line
 
-        v[0] = MakeVertex(p2t + up, Vector2::UnitX, c2t, mask, { thickness, (float)Features });
-        v[1] = MakeVertex(p1t + up, Vector2::UnitX, c1t, mask, { thickness, (float)Features });
-        v[2] = MakeVertex(p1t - up, Vector2::Zero, c1t, mask, { thickness, (float)Features });
-        v[3] = MakeVertex(p2t - up, Vector2::Zero, c2t, mask, { thickness, (float)Features });
+        v[0] = MakeVertex(p2t + up, Float2::UnitX, c2t, mask, { thickness, (float)Features });
+        v[1] = MakeVertex(p1t + up, Float2::UnitX, c1t, mask, { thickness, (float)Features });
+        v[2] = MakeVertex(p1t - up, Float2::Zero, c1t, mask, { thickness, (float)Features });
+        v[3] = MakeVertex(p2t - up, Float2::Zero, c2t, mask, { thickness, (float)Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 0;
@@ -1470,9 +1559,9 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
         // Corner cap
 
         const float tmp = thickness * 0.69f;
-        v[0] = MakeVertex(p2t - up, Vector2::Zero, c2t, mask, { tmp, (float)Features });
-        v[1] = MakeVertex(p2t + right, Vector2::Zero, c2t, mask, { tmp, (float)Features });
-        v[2] = MakeVertex(p2t, Vector2(0.5f, 0.0f), c2t, mask, { tmp, (float)Features });
+        v[0] = MakeVertex(p2t - up, Float2::Zero, c2t, mask, { tmp, (float)Features });
+        v[1] = MakeVertex(p2t + right, Float2::Zero, c2t, mask, { tmp, (float)Features });
+        v[2] = MakeVertex(p2t, Float2(0.5f, 0.0f), c2t, mask, { tmp, (float)Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 1;
@@ -1500,16 +1589,16 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
         p2t = points[i];
         c2t = colors[i];
 
-        Vector2 line = p2t - p1t;
-        Vector2 up = thicknessHalf * Vector2::Normalize(Vector2(-line.Y, line.X));
-        Vector2 right = thicknessHalf * Vector2::Normalize(line);
+        Float2 line = p2t - p1t;
+        Float2 up = thicknessHalf * Float2::Normalize(Float2(-line.Y, line.X));
+        Float2 right = thicknessHalf * Float2::Normalize(line);
 
         // Line
 
-        v[0] = MakeVertex(p2t + up, Vector2::UnitX, c2t, mask, { 0.0f, (float)Features });
-        v[1] = MakeVertex(p1t + up, Vector2::UnitX, c1t, mask, { 0.0f, (float)Features });
-        v[2] = MakeVertex(p1t - up, Vector2::Zero, c1t, mask, { 0.0f, (float)Features });
-        v[3] = MakeVertex(p2t - up, Vector2::Zero, c2t, mask, { 0.0f, (float)Features });
+        v[0] = MakeVertex(p2t + up, Float2::UnitX, c2t, mask, { 0.0f, (float)Features });
+        v[1] = MakeVertex(p1t + up, Float2::UnitX, c1t, mask, { 0.0f, (float)Features });
+        v[2] = MakeVertex(p1t - up, Float2::Zero, c1t, mask, { 0.0f, (float)Features });
+        v[3] = MakeVertex(p2t - up, Float2::Zero, c2t, mask, { 0.0f, (float)Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 0;
@@ -1525,9 +1614,9 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
 
         // Corner cap
 
-        v[0] = MakeVertex(p2t - up, Vector2::Zero, c2t, mask, { 0.0f, (float)Features });
-        v[1] = MakeVertex(p2t + right, Vector2::Zero, c2t, mask, { 0.0f, (float)Features });
-        v[2] = MakeVertex(p2t, Vector2(0.5f, 0.0f), c2t, mask, { 0.0f, (float)Features });
+        v[0] = MakeVertex(p2t - up, Float2::Zero, c2t, mask, { 0.0f, (float)Features });
+        v[1] = MakeVertex(p2t + right, Float2::Zero, c2t, mask, { 0.0f, (float)Features });
+        v[2] = MakeVertex(p2t, Float2(0.5f, 0.0f), c2t, mask, { 0.0f, (float)Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 1;
@@ -1548,6 +1637,7 @@ void Render2D::DrawRectangle(const Rectangle& rect, const Color& color1, const C
 void Render2D::DrawTexture(GPUTextureView* rt, const Rectangle& rect, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(rt, GetFormat);
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::FillRT;
@@ -1555,11 +1645,14 @@ void Render2D::DrawTexture(GPUTextureView* rt, const Rectangle& rect, const Colo
     drawCall.CountIB = 6;
     drawCall.AsRT.Ptr = rt;
     WriteRect(rect, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawTexture(GPUTexture* t, const Rectangle& rect, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall drawCall;
     drawCall.Type = DrawCallType::FillTexture;
@@ -1568,11 +1661,14 @@ void Render2D::DrawTexture(GPUTexture* t, const Rectangle& rect, const Color& co
     drawCall.AsTexture.Ptr = t;
     DrawCalls.Add(drawCall);
     WriteRect(rect, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawTexture(TextureBase* t, const Rectangle& rect, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall drawCall;
     drawCall.Type = DrawCallType::FillTexture;
@@ -1581,6 +1677,8 @@ void Render2D::DrawTexture(TextureBase* t, const Rectangle& rect, const Color& c
     drawCall.AsTexture.Ptr = t ? t->GetTexture() : nullptr;
     DrawCalls.Add(drawCall);
     WriteRect(rect, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawSprite(const SpriteHandle& spriteHandle, const Rectangle& rect, const Color& color)
@@ -1588,6 +1686,7 @@ void Render2D::DrawSprite(const SpriteHandle& spriteHandle, const Rectangle& rec
     RENDER2D_CHECK_RENDERING_STATE;
     if (spriteHandle.Index == INVALID_INDEX || !spriteHandle.Atlas || !spriteHandle.Atlas->GetTexture()->HasResidentMip())
         return;
+    RENDER2D_REMOVE_GAMMA_BEGIN(spriteHandle.Atlas->GetTexture(), Format);
 
     Sprite* sprite = &spriteHandle.Atlas->Sprites.At(spriteHandle.Index);
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
@@ -1596,11 +1695,14 @@ void Render2D::DrawSprite(const SpriteHandle& spriteHandle, const Rectangle& rec
     drawCall.CountIB = 6;
     drawCall.AsTexture.Ptr = spriteHandle.Atlas->GetTexture();
     WriteRect(rect, color, sprite->Area.GetUpperLeft(), sprite->Area.GetBottomRight());
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawTexturePoint(GPUTexture* t, const Rectangle& rect, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::FillTexturePoint;
@@ -1608,6 +1710,8 @@ void Render2D::DrawTexturePoint(GPUTexture* t, const Rectangle& rect, const Colo
     drawCall.CountIB = 6;
     drawCall.AsTexture.Ptr = t;
     WriteRect(rect, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawSpritePoint(const SpriteHandle& spriteHandle, const Rectangle& rect, const Color& color)
@@ -1615,6 +1719,7 @@ void Render2D::DrawSpritePoint(const SpriteHandle& spriteHandle, const Rectangle
     RENDER2D_CHECK_RENDERING_STATE;
     if (spriteHandle.Index == INVALID_INDEX || !spriteHandle.Atlas || !spriteHandle.Atlas->GetTexture()->HasResidentMip())
         return;
+    RENDER2D_REMOVE_GAMMA_BEGIN(spriteHandle.Atlas->GetTexture(), Format);
 
     Sprite* sprite = &spriteHandle.Atlas->Sprites.At(spriteHandle.Index);
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
@@ -1623,11 +1728,14 @@ void Render2D::DrawSpritePoint(const SpriteHandle& spriteHandle, const Rectangle
     drawCall.CountIB = 6;
     drawCall.AsTexture.Ptr = spriteHandle.Atlas->GetTexture();
     WriteRect(rect, color, sprite->Area.GetUpperLeft(), sprite->Area.GetBottomRight());
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::Draw9SlicingTexture(TextureBase* t, const Rectangle& rect, const Vector4& border, const Vector4& borderUVs, const Color& color)
+void Render2D::Draw9SlicingTexture(TextureBase* t, const Rectangle& rect, const Float4& border, const Float4& borderUVs, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall drawCall;
     drawCall.Type = DrawCallType::FillTexture;
@@ -1636,11 +1744,14 @@ void Render2D::Draw9SlicingTexture(TextureBase* t, const Rectangle& rect, const 
     drawCall.AsTexture.Ptr = t ? t->GetTexture() : nullptr;
     DrawCalls.Add(drawCall);
     Write9SlicingRect(rect, color, border, borderUVs);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::Draw9SlicingTexturePoint(TextureBase* t, const Rectangle& rect, const Vector4& border, const Vector4& borderUVs, const Color& color)
+void Render2D::Draw9SlicingTexturePoint(TextureBase* t, const Rectangle& rect, const Float4& border, const Float4& borderUVs, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall drawCall;
     drawCall.Type = DrawCallType::FillTexturePoint;
@@ -1649,13 +1760,16 @@ void Render2D::Draw9SlicingTexturePoint(TextureBase* t, const Rectangle& rect, c
     drawCall.AsTexture.Ptr = t ? t->GetTexture() : nullptr;
     DrawCalls.Add(drawCall);
     Write9SlicingRect(rect, color, border, borderUVs);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::Draw9SlicingSprite(const SpriteHandle& spriteHandle, const Rectangle& rect, const Vector4& border, const Vector4& borderUVs, const Color& color)
+void Render2D::Draw9SlicingSprite(const SpriteHandle& spriteHandle, const Rectangle& rect, const Float4& border, const Float4& borderUVs, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
     if (spriteHandle.Index == INVALID_INDEX || !spriteHandle.Atlas || !spriteHandle.Atlas->GetTexture()->HasResidentMip())
         return;
+    RENDER2D_REMOVE_GAMMA_BEGIN(spriteHandle.Atlas->GetTexture(), Format);
 
     Sprite* sprite = &spriteHandle.Atlas->Sprites.At(spriteHandle.Index);
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
@@ -1664,13 +1778,16 @@ void Render2D::Draw9SlicingSprite(const SpriteHandle& spriteHandle, const Rectan
     drawCall.CountIB = 6 * 9;
     drawCall.AsTexture.Ptr = spriteHandle.Atlas->GetTexture();
     Write9SlicingRect(rect, color, border, borderUVs, sprite->Area.Location, sprite->Area.Size);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::Draw9SlicingSpritePoint(const SpriteHandle& spriteHandle, const Rectangle& rect, const Vector4& border, const Vector4& borderUVs, const Color& color)
+void Render2D::Draw9SlicingSpritePoint(const SpriteHandle& spriteHandle, const Rectangle& rect, const Float4& border, const Float4& borderUVs, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
     if (spriteHandle.Index == INVALID_INDEX || !spriteHandle.Atlas || !spriteHandle.Atlas->GetTexture()->HasResidentMip())
         return;
+    RENDER2D_REMOVE_GAMMA_BEGIN(spriteHandle.Atlas->GetTexture(), Format);
 
     Sprite* sprite = &spriteHandle.Atlas->Sprites.At(spriteHandle.Index);
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
@@ -1679,6 +1796,8 @@ void Render2D::Draw9SlicingSpritePoint(const SpriteHandle& spriteHandle, const R
     drawCall.CountIB = 6 * 9;
     drawCall.AsTexture.Ptr = spriteHandle.Atlas->GetTexture();
     Write9SlicingRect(rect, color, border, borderUVs, sprite->Area.Location, sprite->Area.Size);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 void Render2D::DrawCustom(GPUTexture* t, const Rectangle& rect, GPUPipelineState* ps, const Color& color)
@@ -1686,6 +1805,7 @@ void Render2D::DrawCustom(GPUTexture* t, const Rectangle& rect, GPUPipelineState
     RENDER2D_CHECK_RENDERING_STATE;
     if (ps == nullptr || !ps->IsValid())
         return;
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::Custom;
@@ -1694,20 +1814,22 @@ void Render2D::DrawCustom(GPUTexture* t, const Rectangle& rect, GPUPipelineState
     drawCall.AsCustom.Tex = t;
     drawCall.AsCustom.Pso = ps;
     WriteRect(rect, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
 #if RENDER2D_USE_LINE_AA
 
-void DrawLineCap(const Vector2& capOrigin, const Vector2& capDirection, const Vector2& up, const Color& color, float thickness)
+void DrawLineCap(const Float2& capOrigin, const Float2& capDirection, const Float2& up, const Color& color, float thickness)
 {
     const auto& mask = ClipLayersStack.Peek().Mask;
 
     Render2DVertex v[5];
-    v[0] = MakeVertex(capOrigin, Vector2(0.5f, 0.0f), color, mask, { thickness, (float)Render2D::Features });
-    v[1] = MakeVertex(capOrigin + capDirection + up, Vector2::Zero, color, mask, { thickness, (float)Render2D::Features });
-    v[2] = MakeVertex(capOrigin + capDirection - up, Vector2::Zero, color, mask, { thickness, (float)Render2D::Features });
-    v[3] = MakeVertex(capOrigin + up, Vector2::Zero, color, mask, { thickness, (float)Render2D::Features });
-    v[4] = MakeVertex(capOrigin - up, Vector2::Zero, color, mask, { thickness, (float)Render2D::Features });
+    v[0] = MakeVertex(capOrigin, Float2(0.5f, 0.0f), color, mask, { thickness, (float)Render2D::Features });
+    v[1] = MakeVertex(capOrigin + capDirection + up, Float2::Zero, color, mask, { thickness, (float)Render2D::Features });
+    v[2] = MakeVertex(capOrigin + capDirection - up, Float2::Zero, color, mask, { thickness, (float)Render2D::Features });
+    v[3] = MakeVertex(capOrigin + up, Float2::Zero, color, mask, { thickness, (float)Render2D::Features });
+    v[4] = MakeVertex(capOrigin - up, Float2::Zero, color, mask, { thickness, (float)Render2D::Features });
     VB.Write(v, sizeof(v));
 
     uint32 indices[9];
@@ -1728,19 +1850,19 @@ void DrawLineCap(const Vector2& capOrigin, const Vector2& capDirection, const Ve
 
 #endif
 
-void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, const Color& color2, float thickness)
+void DrawLines(const Float2* points, int32 pointsCount, const Color& color1, const Color& color2, float thickness)
 {
     ASSERT(points && pointsCount >= 2);
     const auto& mask = ClipLayersStack.Peek().Mask;
 
-    thickness *= (TransformCached.M11 + TransformCached.M22 + TransformCached.M33) * 0.3333333f;
+    thickness *= GetTransformScale();
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.StartIB = IBIndex;
 
     Render2DVertex v[4];
     uint32 indices[6];
-    Vector2 p1t, p2t;
+    Float2 p1t, p2t;
 
 #if RENDER2D_USE_LINE_AA
     // This must be the same as in HLSL code
@@ -1750,9 +1872,9 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
     drawCall.Type = DrawCallType::LineAA;
     drawCall.CountIB = 9 + 9;
 
-    Vector2 line;
-    Vector2 normal;
-    Vector2 up;
+    Float2 line;
+    Float2 normal;
+    Float2 up;
     ApplyTransform(points[0], p1t);
 
     // Starting cap
@@ -1760,9 +1882,9 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
         ApplyTransform(points[1], p2t);
 
         line = p2t - p1t;
-        normal = Vector2::Normalize(Vector2(-line.Y, line.X));
+        normal = Float2::Normalize(Float2(-line.Y, line.X));
         up = normal * thicknessHalf;
-        const Vector2 capDirection = thicknessHalf * Vector2::Normalize(p1t - p2t);
+        const Float2 capDirection = thicknessHalf * Float2::Normalize(p1t - p2t);
 
         DrawLineCap(p1t, capDirection, up, color1, thickness);
     }
@@ -1773,13 +1895,13 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
         ApplyTransform(points[i], p2t);
 
         line = p2t - p1t;
-        normal = Vector2::Normalize(Vector2(-line.Y, line.X));
+        normal = Float2::Normalize(Float2(-line.Y, line.X));
         up = normal * thicknessHalf;
 
-        v[0] = MakeVertex(p2t + up, Vector2::UnitX, color2, mask, { thickness, (float)Render2D::Features });
-        v[1] = MakeVertex(p1t + up, Vector2::UnitX, color1, mask, { thickness, (float)Render2D::Features });
-        v[2] = MakeVertex(p1t - up, Vector2::Zero, color1, mask, { thickness, (float)Render2D::Features });
-        v[3] = MakeVertex(p2t - up, Vector2::Zero, color2, mask, { thickness, (float)Render2D::Features });
+        v[0] = MakeVertex(p2t + up, Float2::UnitX, color2, mask, { thickness, (float)Render2D::Features });
+        v[1] = MakeVertex(p1t + up, Float2::UnitX, color1, mask, { thickness, (float)Render2D::Features });
+        v[2] = MakeVertex(p1t - up, Float2::Zero, color1, mask, { thickness, (float)Render2D::Features });
+        v[3] = MakeVertex(p2t - up, Float2::Zero, color2, mask, { thickness, (float)Render2D::Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 0;
@@ -1799,10 +1921,10 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
 
     // Ending cap
     {
-        ApplyTransform(points[0], p1t);
-        ApplyTransform(points[1], p2t);
+        ApplyTransform(points[pointsCount - 2], p1t);
+        //ApplyTransform(points[pointsCount - 1], p2t);
 
-        const Vector2 capDirection = thicknessHalf * Vector2::Normalize(p2t - p1t);
+        const Float2 capDirection = thicknessHalf * Float2::Normalize(p2t - p1t);
 
         DrawLineCap(p2t, capDirection, up, color2, thickness);
     }
@@ -1817,14 +1939,14 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
     {
         ApplyTransform(points[i], p2t);
 
-        const Vector2 line = p2t - p1t;
-        const Vector2 direction = thicknessHalf * Vector2::Normalize(p2t - p1t);
-        const Vector2 normal = Vector2::Normalize(Vector2(-line.Y, line.X));
+        const Float2 line = p2t - p1t;
+        const Float2 direction = thicknessHalf * Float2::Normalize(p2t - p1t);
+        const Float2 normal = Float2::Normalize(Float2(-line.Y, line.X));
 
-        v[0] = MakeVertex(p2t + thicknessHalf * normal + direction, Vector2::Zero, color2, mask, { 0.0f, (float)Render2D::Features });
-        v[1] = MakeVertex(p1t + thicknessHalf * normal - direction, Vector2::Zero, color1, mask, { 0.0f, (float)Render2D::Features });
-        v[2] = MakeVertex(p1t - thicknessHalf * normal - direction, Vector2::Zero, color1, mask, { 0.0f, (float)Render2D::Features });
-        v[3] = MakeVertex(p2t - thicknessHalf * normal + direction, Vector2::Zero, color2, mask, { 0.0f, (float)Render2D::Features });
+        v[0] = MakeVertex(p2t + thicknessHalf * normal + direction, Float2::Zero, color2, mask, { 0.0f, (float)Render2D::Features });
+        v[1] = MakeVertex(p1t + thicknessHalf * normal - direction, Float2::Zero, color1, mask, { 0.0f, (float)Render2D::Features });
+        v[2] = MakeVertex(p1t - thicknessHalf * normal - direction, Float2::Zero, color1, mask, { 0.0f, (float)Render2D::Features });
+        v[3] = MakeVertex(p2t - thicknessHalf * normal + direction, Float2::Zero, color2, mask, { 0.0f, (float)Render2D::Features });
         VB.Write(v, sizeof(Render2DVertex) * 4);
 
         indices[0] = VBIndex + 0;
@@ -1844,40 +1966,67 @@ void DrawLines(const Vector2* points, int32 pointsCount, const Color& color1, co
 #endif
 }
 
-void Render2D::DrawLine(const Vector2& p1, const Vector2& p2, const Color& color1, const Color& color2, float thickness)
+void Render2D::DrawLine(const Float2& p1, const Float2& p2, const Color& color1, const Color& color2, float thickness)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 
-    Vector2 points[2];
+    Float2 points[2];
     points[0] = p1;
     points[1] = p2;
 
     DrawLines(points, 2, color1, color2, thickness);
 }
 
-void Render2D::DrawBezier(const Vector2& p1, const Vector2& p2, const Vector2& p3, const Vector2& p4, const Color& color, float thickness)
+void Render2D::DrawBezier(const Float2& p1, const Float2& p2, const Float2& p3, const Float2& p4, const Color& color, float thickness)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 
     // Find amount of segments to use
-    const Vector2 d1 = p2 - p1;
-    const Vector2 d2 = p3 - p2;
-    const Vector2 d3 = p4 - p3;
+    const Float2 d1 = p2 - p1;
+    const Float2 d2 = p3 - p2;
+    const Float2 d3 = p4 - p3;
     const float len = d1.Length() + d2.Length() + d3.Length();
-    const int32 segmentCount = Math::Clamp(Math::CeilToInt(len * 0.05f), 1, 100);
-    const float segmentCountInv = 1.0f / segmentCount;
+    const int32 segmentCount = Math::Clamp(Math::CeilToInt(len * 0.05f * Platform::GetDpiScale()), 1, 100);
+    const float segmentCountInv = 1.0f / (float)segmentCount;
 
     // Draw segmented curve
-    Vector2 p;
-    AnimationUtils::Bezier(p1, p2, p3, p4, 0, p);
     Lines2.Clear();
-    Lines2.Add(p);
-    for (int32 i = 1; i <= segmentCount; i++)
+    Lines2.Add(p1);
+    for (int32 i = 1; i < segmentCount; i++)
     {
-        const float t = i * segmentCountInv;
+        const float t = (float)i * segmentCountInv;
+        Float2 p;
         AnimationUtils::Bezier(p1, p2, p3, p4, t, p);
         Lines2.Add(p);
     }
+    Lines2.Add(p4);
+    DrawLines(Lines2.Get(), Lines2.Count(), color, color, thickness);
+}
+
+void Render2D::DrawSpline(const Float2& p1, const Float2& p2, const Float2& p3, const Float2& p4, const Color& color, float thickness)
+{
+    RENDER2D_CHECK_RENDERING_STATE;
+
+    // Find amount of segments to use
+    const Float2 d1 = p2 - p1;
+    const Float2 d2 = p3 - p2;
+    const Float2 d3 = p4 - p3;
+    const float len = d1.Length() + d2.Length() + d3.Length();
+    const int32 segmentCount = Math::Clamp(Math::CeilToInt(len * 0.05f * Platform::GetDpiScale()), 1, 100);
+    const float segmentCountInv = 1.0f / (float)segmentCount;
+
+    // Draw segmented curve
+    Lines2.Clear();
+    Lines2.Add(p1);
+    for (int32 i = 1; i < segmentCount; i++)
+    {
+        const float t = (float)i * segmentCountInv;
+        Float2 p;
+        p.X = Math::Lerp(p1.X, p4.X, t);
+        AnimationUtils::Bezier(p1.Y, p2.Y, p3.Y, p4.Y, t, p.Y);
+        Lines2.Add(p);
+    }
+    Lines2.Add(p4);
     DrawLines(Lines2.Get(), Lines2.Count(), color, color, thickness);
 }
 
@@ -1887,11 +2036,16 @@ void Render2D::DrawMaterial(MaterialBase* material, const Rectangle& rect, const
     if (material == nullptr || !material->IsReady() || !material->IsGUI())
         return;
 
+    // Auto-remove gamma flag if it's disabled
+    Features &= IsRemoveGammaEnabled ? ~RenderingFeatures::None : ~RenderingFeatures::RemoveGamma;
+
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::Material;
     drawCall.StartIB = IBIndex;
     drawCall.CountIB = 6;
     drawCall.AsMaterial.Mat = material;
+    drawCall.AsMaterial.Width = rect.GetWidth();
+    drawCall.AsMaterial.Height = rect.GetHeight();
     WriteRect(rect, color);
 }
 
@@ -1899,7 +2053,7 @@ void Render2D::DrawBlur(const Rectangle& rect, float blurStrength)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 
-    Vector2 p;
+    Float2 p;
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::Blur;
     drawCall.StartIB = IBIndex;
@@ -1916,45 +2070,145 @@ void Render2D::DrawBlur(const Rectangle& rect, float blurStrength)
     WriteRect(rect, Color::White);
 }
 
-void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Vector2>& vertices, const Span<Vector2>& uvs)
+void Render2D::DrawTriangles(const Span<Float2>& vertices, const Color& color, float thickness)
 {
     RENDER2D_CHECK_RENDERING_STATE;
-    CHECK(vertices.Length() == uvs.Length())
+    CHECK(vertices.Length() % 3 == 0);
+
+    Float2 points[2];
+    for (int32 i = 0; i < vertices.Length(); i += 3)
+    {
+#if 0
+        // TODO: fix this
+        DrawLines(&vertices.Get()[i], 3, color, color, thickness);
+#else
+        points[0] = vertices.Get()[i + 0];
+        points[1] = vertices.Get()[i + 1];
+        DrawLines(points, 2, color, color, thickness);
+        points[0] = vertices.Get()[i + 2];
+        DrawLines(points, 2, color, color, thickness);
+        points[1] = vertices.Get()[i + 0];
+        DrawLines(points, 2, color, color, thickness);
+#endif
+    }
+}
+
+void Render2D::DrawTriangles(const Span<Float2>& vertices, const Span<Color>& colors, float thickness)
+{
+    RENDER2D_CHECK_RENDERING_STATE;
+    CHECK(vertices.Length() % 3 == 0);
+
+    Float2 points[2];
+    Color cols[2];
+    for (int32 i = 0; i < vertices.Length(); i += 3)
+    {
+        points[0] = vertices.Get()[i + 0];
+        points[1] = vertices.Get()[i + 1];
+        cols[0] = colors.Get()[i + 0];
+        cols[1] = colors.Get()[i + 1];
+        DrawLines(points, 2, cols[0], cols[1], thickness);
+        points[0] = vertices.Get()[i + 2];
+        cols[0] = colors.Get()[i + 2];
+        DrawLines(points, 2, cols[0], cols[1], thickness);
+        points[1] = vertices.Get()[i + 0];
+        cols[1] = colors.Get()[i + 0];
+        DrawLines(points, 2, cols[0], cols[1], thickness);
+    }
+}
+
+void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Float2>& vertices, const Span<Float2>& uvs)
+{
+    RENDER2D_CHECK_RENDERING_STATE;
+    CHECK(vertices.Length() % 3 == 0);
+    CHECK(vertices.Length() == uvs.Length());
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::FillTexture;
     drawCall.StartIB = IBIndex;
     drawCall.CountIB = vertices.Length();
     drawCall.AsTexture.Ptr = t;
-
     for (int32 i = 0; i < vertices.Length(); i += 3)
         WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], uvs[i], uvs[i + 1], uvs[i + 2]);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Vector2>& vertices, const Span<Vector2>& uvs, const Color& color)
+void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Float2>& vertices, const Span<Float2>& uvs, const Color& color)
 {
-    Color colors[3] = { (Color)color, (Color)color, (Color)color };
-    Span<Color> spancolor(colors, 3);
-    DrawTexturedTriangles(t, vertices, uvs, spancolor);
+    RENDER2D_CHECK_RENDERING_STATE;
+    CHECK(vertices.Length() % 3 == 0);
+    CHECK(vertices.Length() == uvs.Length());
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
+
+    Render2DDrawCall& drawCall = DrawCalls.AddOne();
+    drawCall.Type = DrawCallType::FillTexture;
+    drawCall.StartIB = IBIndex;
+    drawCall.CountIB = vertices.Length();
+    drawCall.AsTexture.Ptr = t;
+    for (int32 i = 0; i < vertices.Length(); i += 3)
+        WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], uvs[i], uvs[i + 1], uvs[i + 2], color, color, color);
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Vector2>& vertices, const Span<Vector2>& uvs, const Span<Color>& colors)
+void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<Float2>& vertices, const Span<Float2>& uvs, const Span<Color>& colors)
+{
+    RENDER2D_CHECK_RENDERING_STATE;
+    CHECK(vertices.Length() % 3 == 0);
+    CHECK(vertices.Length() == uvs.Length());
+    CHECK(vertices.Length() == colors.Length());
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
+
+    Render2DDrawCall& drawCall = DrawCalls.AddOne();
+    drawCall.Type = DrawCallType::FillTexture;
+    drawCall.StartIB = IBIndex;
+    drawCall.CountIB = vertices.Length();
+    drawCall.AsTexture.Ptr = t;
+    for (int32 i = 0; i < vertices.Length(); i += 3)
+        WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], uvs[i], uvs[i + 1], uvs[i + 2], colors[i], colors[i + 1], colors[i + 2]);
+
+    RENDER2D_REMOVE_GAMMA_END();
+}
+
+void Render2D::DrawTexturedTriangles(GPUTexture* t, const Span<uint16>& indices, const Span<Float2>& vertices, const Span<Float2>& uvs, const Span<Color>& colors)
 {
     RENDER2D_CHECK_RENDERING_STATE;
     CHECK(vertices.Length() == uvs.Length());
     CHECK(vertices.Length() == colors.Length());
+    RENDER2D_REMOVE_GAMMA_BEGIN(t, Format);
 
     Render2DDrawCall& drawCall = DrawCalls.AddOne();
     drawCall.Type = DrawCallType::FillTexture;
     drawCall.StartIB = IBIndex;
-    drawCall.CountIB = vertices.Length();
+    drawCall.CountIB = indices.Length();
     drawCall.AsTexture.Ptr = t;
 
-    for (int32 i = 0; i < vertices.Length(); i += 3)
-        WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], uvs[i], uvs[i + 1], uvs[i + 2], colors[i], colors[i + 1], colors[i + 2]);
+    for (int32 i = 0; i < indices.Length();)
+    {
+        const uint16 i0 = indices.Get()[i++];
+        const uint16 i1 = indices.Get()[i++];
+        const uint16 i2 = indices.Get()[i++];
+        WriteTri(vertices[i0], vertices[i1], vertices[i2], uvs[i0], uvs[i1], uvs[i2], colors[i0], colors[i1], colors[i2]);
+    }
+
+    RENDER2D_REMOVE_GAMMA_END();
 }
 
-void Render2D::FillTriangles(const Span<Vector2>& vertices, const Span<Color>& colors, bool useAlpha)
+void Render2D::FillTriangles(const Span<Float2>& vertices, const Color& color)
+{
+    RENDER2D_CHECK_RENDERING_STATE;
+
+    Render2DDrawCall& drawCall = DrawCalls.AddOne();
+    drawCall.Type = NeedAlphaWithTint(color) ? DrawCallType::FillRect : DrawCallType::FillRectNoAlpha;
+    drawCall.StartIB = IBIndex;
+    drawCall.CountIB = vertices.Length();
+
+    for (int32 i = 0; i < vertices.Length(); i += 3)
+        WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], color, color, color);
+}
+
+void Render2D::FillTriangles(const Span<Float2>& vertices, const Span<Color>& colors, bool useAlpha)
 {
     CHECK(vertices.Length() == colors.Length());
     RENDER2D_CHECK_RENDERING_STATE;
@@ -1968,7 +2222,7 @@ void Render2D::FillTriangles(const Span<Vector2>& vertices, const Span<Color>& c
         WriteTri(vertices[i], vertices[i + 1], vertices[i + 2], colors[i], colors[i + 1], colors[i + 2]);
 }
 
-void Render2D::FillTriangle(const Vector2& p0, const Vector2& p1, const Vector2& p2, const Color& color)
+void Render2D::FillTriangle(const Float2& p0, const Float2& p1, const Float2& p2, const Color& color)
 {
     RENDER2D_CHECK_RENDERING_STATE;
 

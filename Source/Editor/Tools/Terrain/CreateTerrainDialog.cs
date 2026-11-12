@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.ComponentModel;
@@ -26,7 +26,9 @@ namespace FlaxEditor.Tools.Terrain
             _31 = 31,
             _63 = 63,
             _127 = 127,
+            _254 = 254,
             _255 = 255,
+            _511 = 511,
         }
 
         private class Options
@@ -34,7 +36,7 @@ namespace FlaxEditor.Tools.Terrain
             [EditorOrder(100), EditorDisplay("Layout", "Number Of Patches"), DefaultValue(typeof(Int2), "1,1"), Limit(0, 512), Tooltip("Amount of terrain patches in each direction (X and Z). Each terrain patch contains a grid of 16 chunks. Patches can be later added or removed from terrain using a terrain editor tool.")]
             public Int2 NumberOfPatches = new Int2(1, 1);
 
-            [EditorOrder(110), EditorDisplay("Layout"), DefaultValue(ChunkSizes._127), Tooltip("The size of the chunk (amount of quads per edge for the highest LOD). Must be power of two minus one (eg. 63).")]
+            [EditorOrder(110), EditorDisplay("Layout"), DefaultValue(ChunkSizes._127), Tooltip("The size of the chunk (amount of quads per edge for the highest LOD).")]
             public ChunkSizes ChunkSize = ChunkSizes._127;
 
             [EditorOrder(120), EditorDisplay("Layout", "LOD Count"), DefaultValue(6), Limit(1, FlaxEngine.Terrain.MaxLODs), Tooltip("The maximum Level Of Details count. The actual amount of LODs may be lower due to provided chunk size (each LOD has 4 times less quads).")]
@@ -43,15 +45,13 @@ namespace FlaxEditor.Tools.Terrain
             [EditorOrder(130), EditorDisplay("Layout"), DefaultValue(null), Tooltip("The default material used for terrain rendering (chunks can override this). It must have Domain set to terrain.")]
             public MaterialBase Material;
 
-            [EditorOrder(200), EditorDisplay("Collision"), DefaultValue(null), AssetReference(typeof(PhysicalMaterial), true), Tooltip("Terrain default physical material used to define the collider physical properties.")]
-            public JsonAsset PhysicalMaterial;
-
             [EditorOrder(210), EditorDisplay("Collision", "Collision LOD"), DefaultValue(-1), Limit(-1, 100, 0.1f), Tooltip("Terrain geometry LOD index used for collision.")]
             public int CollisionLOD = -1;
 
             [EditorOrder(300), EditorDisplay("Import Data"), DefaultValue(null), Tooltip("Custom heightmap texture to import. Used as a source for height field values (from channel Red).")]
             public Texture Heightmap;
 
+            [ValueCategory(Utils.ValueCategory.Distance)]
             [EditorOrder(310), EditorDisplay("Import Data"), DefaultValue(5000.0f), Tooltip("Custom heightmap texture values scale. Applied to adjust the normalized heightmap values into the world units.")]
             public float HeightmapScale = 5000.0f;
 
@@ -61,14 +61,15 @@ namespace FlaxEditor.Tools.Terrain
             [EditorOrder(330), EditorDisplay("Import Data"), DefaultValue(null), Tooltip("Custom terrain splat map used as a source of the terrain layers weights. Each channel from RGBA is used as an independent layer weight for terrain layers compositing.")]
             public Texture Splatmap2;
 
-            [EditorOrder(400), EditorDisplay("Transform", "Position"), DefaultValue(typeof(Vector3), "0,0,0"), Tooltip("Position of the terrain (importer offset it on the Y axis.)")]
-            public Vector3 Position = new Vector3(0.0f, 0.0f, 0.0f);
+            [ValueCategory(Utils.ValueCategory.Distance)]
+            [EditorOrder(400), EditorDisplay("Transform", "Position"), DefaultValue(typeof(Double3), "0,0,0"), Tooltip("Position of the terrain (importer offset it on the Y axis.)")]
+            public Double3 Position = new Double3(0.0f, 0.0f, 0.0f);
 
             [EditorOrder(410), EditorDisplay("Transform", "Rotation"), DefaultValue(typeof(Quaternion), "0,0,0,1"), Tooltip("Orientation of the terrain")]
             public Quaternion Orientation = Quaternion.Identity;
 
-            [EditorOrder(420), EditorDisplay("Transform", "Scale"), DefaultValue(typeof(Vector3), "1,1,1"), Limit(float.MinValue, float.MaxValue, 0.01f), Tooltip("Scale of the terrain")]
-            public Vector3 Scale = Vector3.One;
+            [EditorOrder(420), EditorDisplay("Transform", "Scale"), DefaultValue(1.0f), Limit(0.0001f, float.MaxValue, 0.01f), Tooltip("Scale of the terrain")]
+            public float Scale = 1.0f;
         }
 
         private readonly Options _options = new Options();
@@ -117,7 +118,7 @@ namespace FlaxEditor.Tools.Terrain
                 Offsets = new Margin(-ButtonsWidth - ButtonsMargin, ButtonsWidth, -ButtonsHeight - ButtonsMargin, ButtonsHeight),
                 Parent = this
             };
-            importButton.Clicked += OnCreate;
+            importButton.Clicked += OnSubmit;
             var cancelButton = new Button
             {
                 Text = "Cancel",
@@ -134,16 +135,13 @@ namespace FlaxEditor.Tools.Terrain
             settingsEditor.Panel.Parent = this;
             _editor = settingsEditor;
 
-            _dialogSize = new Vector2(TotalWidth, settingsEditor.Panel.Bottom);
+            _dialogSize = new Float2(TotalWidth, settingsEditor.Panel.Bottom);
 
             settingsEditor.Select(_options);
         }
 
         private void OnCreate()
         {
-            if (_isWorking)
-                return;
-
             var scene = Level.GetScene(0);
             if (scene == null)
                 throw new InvalidOperationException("No scene found to add terrain to it!");
@@ -151,9 +149,8 @@ namespace FlaxEditor.Tools.Terrain
             // Create terrain object and setup some options
             var terrain = new FlaxEngine.Terrain();
             terrain.Setup(_options.LODCount, (int)_options.ChunkSize);
-            terrain.Transform = new Transform(_options.Position, _options.Orientation, _options.Scale);
+            terrain.Transform = new Transform(_options.Position, _options.Orientation, new Float3(_options.Scale));
             terrain.Material = _options.Material;
-            terrain.PhysicalMaterial = _options.PhysicalMaterial;
             terrain.CollisionLOD = _options.CollisionLOD;
             if (_options.Heightmap)
                 terrain.Position -= new Vector3(0, _options.HeightmapScale * 0.5f, 0);
@@ -201,12 +198,22 @@ namespace FlaxEditor.Tools.Terrain
             _isDone = true;
         }
 
-        private void OnCancel()
+        /// <inheritdoc />
+        public override void OnSubmit()
         {
             if (_isWorking)
                 return;
 
-            Close(DialogResult.Cancel);
+            OnCreate();
+        }
+
+        /// <inheritdoc />
+        public override void OnCancel()
+        {
+            if (_isWorking)
+                return;
+
+            base.OnCancel();
         }
 
         /// <inheritdoc />
@@ -232,25 +239,6 @@ namespace FlaxEditor.Tools.Terrain
                 return false;
 
             return base.CanCloseWindow(reason);
-        }
-
-        /// <inheritdoc />
-        public override bool OnKeyDown(KeyboardKeys key)
-        {
-            if (_isWorking)
-                return true;
-
-            switch (key)
-            {
-            case KeyboardKeys.Escape:
-                OnCancel();
-                return true;
-            case KeyboardKeys.Return:
-                OnCreate();
-                return true;
-            }
-
-            return base.OnKeyDown(key);
         }
     }
 }

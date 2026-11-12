@@ -1,13 +1,37 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "ParticleEmitterFunction.h"
+#include "Particles.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Serialization/MemoryReadStream.h"
 #include "Engine/Threading/Threading.h"
+#include "Engine/Profiler/ProfilerMemory.h"
 #if USE_EDITOR
 #include "Engine/Core/Types/DataContainer.h"
+#include "Engine/Serialization/MemoryWriteStream.h"
 #endif
 #include "Engine/Content/Factories/BinaryAssetFactory.h"
+
+void InitParticleEmitterFunctionCall(const Guid& assetId, AssetReference<Asset>& asset, bool& usesParticleData, ParticleLayout& layout)
+{
+    const auto function = Content::Load<ParticleEmitterFunction>(assetId);
+    asset = function;
+    if (function)
+    {
+        // Insert any used particle data into the calling graph
+        for (const ParticleAttribute& e : function->Graph.Layout.Attributes)
+        {
+            if (layout.FindAttribute(e.Name, e.ValueType) == -1)
+                layout.AddAttribute(e.Name, e.ValueType);
+        }
+
+        // Detect if function needs to be evaluated per-particle
+        for (int32 i = 0; i < function->Outputs.Count() && !usesParticleData; i++)
+        {
+            usesParticleData = function->Graph.Nodes[function->Outputs.Get()[i]].UsesParticleData;
+        }
+    }
+}
 
 REGISTER_BINARY_ASSET(ParticleEmitterFunction, "FlaxEngine.ParticleEmitterFunction", false);
 
@@ -18,12 +42,14 @@ ParticleEmitterFunction::ParticleEmitterFunction(const SpawnParams& params, cons
 
 Asset::LoadResult ParticleEmitterFunction::load()
 {
+    PROFILE_MEM(Particles);
+
     // Load graph
     const auto surfaceChunk = GetChunk(0);
     if (!surfaceChunk || !surfaceChunk->IsLoaded())
         return LoadResult::MissingDataChunk;
     MemoryReadStream stream(surfaceChunk->Get(), surfaceChunk->Size());
-    if (Graph.Load(&stream, false))
+    if (Graph.Load(&stream, USE_EDITOR))
         return LoadResult::Failed;
     for (int32 i = 0; i < Graph.Nodes.Count(); i++)
     {
@@ -69,6 +95,7 @@ Asset::LoadResult ParticleEmitterFunction::load()
 
 void ParticleEmitterFunction::unload(bool isReloading)
 {
+    ScopeWriteLock systemScope(Particles::SystemLocker);
     Graph.Clear();
 #if COMPILE_WITH_PARTICLE_GPU_GRAPH
     GraphGPU.Clear();
@@ -82,8 +109,10 @@ AssetChunksFlag ParticleEmitterFunction::getChunksToPreload() const
     return GET_CHUNK_FLAG(0);
 }
 
-bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphCPU& graph)
+bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphCPU& graph, bool loadMeta)
 {
+    if (WaitForLoaded())
+        return true;
     ScopeLock lock(Locker);
     if (HasChunk(0))
     {
@@ -91,7 +120,7 @@ bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphCPU& graph)
         {
             const auto surfaceChunk = GetChunk(0);
             MemoryReadStream stream(surfaceChunk->Get(), surfaceChunk->Size());
-            return graph.Load(&stream, false);
+            return graph.Load(&stream, loadMeta);
         }
     }
     return true;
@@ -102,6 +131,8 @@ bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphCPU& graph)
 BytesContainer ParticleEmitterFunction::LoadSurface()
 {
     BytesContainer result;
+    if (WaitForLoaded())
+        return result;
     ScopeLock lock(Locker);
     if (HasChunk(0))
     {
@@ -116,8 +147,10 @@ BytesContainer ParticleEmitterFunction::LoadSurface()
 
 #if COMPILE_WITH_PARTICLE_GPU_GRAPH
 
-bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphGPU& graph)
+bool ParticleEmitterFunction::LoadSurface(ParticleEmitterGraphGPU& graph) const
 {
+    if (WaitForLoaded())
+        return true;
     ScopeLock lock(Locker);
     if (HasChunk(0))
     {
@@ -151,19 +184,10 @@ void ParticleEmitterFunction::GetSignature(Array<StringView, FixedAllocation<32>
     }
 }
 
-bool ParticleEmitterFunction::SaveSurface(BytesContainer& data)
+bool ParticleEmitterFunction::SaveSurface(const BytesContainer& data) const
 {
-    // Wait for asset to be loaded or don't if last load failed
-    if (LastLoadFailed())
-    {
-        LOG(Warning, "Saving asset that failed to load.");
-    }
-    else if (WaitForLoaded())
-    {
-        LOG(Error, "Asset loading failed. Cannot save it.");
+    if (OnCheckSave())
         return true;
-    }
-
     ScopeLock lock(Locker);
 
     // Set Visject Surface data
@@ -181,6 +205,19 @@ bool ParticleEmitterFunction::SaveSurface(BytesContainer& data)
     }
 
     return false;
+}
+
+bool ParticleEmitterFunction::Save(const StringView& path)
+{
+    if (OnCheckSave(path))
+        return true;
+    ScopeLock lock(Locker);
+    MemoryWriteStream writeStream;
+    if (Graph.Save(&writeStream, true))
+        return true;
+    BytesContainer data;
+    data.Link(ToSpan(writeStream));
+    return SaveSurface(data);
 }
 
 #endif

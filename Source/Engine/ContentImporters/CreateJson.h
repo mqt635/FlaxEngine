@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #pragma once
 
@@ -14,10 +14,9 @@
 class CreateJson
 {
 public:
-
     static bool Create(const StringView& path, rapidjson_flax::StringBuffer& data, const String& dataTypename);
     static bool Create(const StringView& path, rapidjson_flax::StringBuffer& data, const char* dataTypename);
-    static bool Create(const StringView& path, StringAnsiView& data, StringAnsiView& dataTypename);
+    static bool Create(const StringView& path, const StringAnsiView& data, const StringAnsiView& dataTypename);
     static CreateAssetResult ImportPo(CreateAssetContext& context);
 };
 

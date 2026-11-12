@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if COMPILE_WITH_GPU_PARTICLES
 
@@ -6,30 +6,33 @@
 #include "Engine/Particles/ParticleEmitter.h"
 #include "Engine/Particles/ParticleEffect.h"
 #include "Engine/Graphics/RenderTask.h"
+#include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/GPUBuffer.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
+#include "Engine/Profiler/Profiler.h"
 
-PACK_STRUCT(struct GPUParticlesData {
+GPU_CB_STRUCT(GPUParticlesData {
     Matrix ViewProjectionMatrix;
     Matrix InvViewProjectionMatrix;
     Matrix InvViewMatrix;
     Matrix ViewMatrix;
     Matrix WorldMatrix;
     Matrix InvWorldMatrix;
-    Vector3 ViewPos;
+    Float3 ViewPos;
     float ViewFar;
-    Vector3 ViewDir;
+    Float3 ViewDir;
     float Time;
-    Vector4 ViewInfo;
-    Vector4 ScreenSize;
-    Vector3 EffectPosition;
+    Float4 ViewInfo;
+    Float4 ScreenSize;
+    Float3 EffectPosition;
     float DeltaTime;
     Quaternion EffectRotation;
-    Vector3 EffectScale;
+    Float3 EffectScale;
     uint32 ParticleCounterOffset;
-    Vector3 Dummy0;
+    Float3 Dummy0;
     uint32 SpawnCount;
     });
 
@@ -64,12 +67,14 @@ bool GPUParticles::Init(ParticleEmitter* owner, MemoryReadStream& shaderCacheStr
         LOG(Warning, "Missing valid GPU particles constant buffer.");
         return true;
     }
-    if (cb0->GetSize() < sizeof(GPUParticlesData))
+    const int32 cbSize = cb0->GetSize();
+    if (cbSize < sizeof(GPUParticlesData))
     {
-        LOG(Warning, "Invalid size GPU particles constant buffer. required {0} bytes but got {1}", sizeof(GPUParticlesData), cb0->GetSize());
+        LOG(Warning, "Invalid size GPU particles constant buffer. required {0} bytes but got {1}", sizeof(GPUParticlesData), cbSize);
         return true;
     }
-    _cbData.Resize(cb0->GetSize());
+    _cbData.Resize(cbSize);
+    Platform::MemoryClear(_cbData.Get(), cbSize);
 
     // Load material parameters
     if (_params.Load(materialParamsStream))
@@ -125,13 +130,20 @@ void GPUParticles::CopyParticlesCount(GPUContext* context, ParticleEmitter* emit
     }
 }
 
-void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data)
+bool GPUParticles::CanSim(const ParticleEmitter* emitter, const ParticleEmitterInstance& data) const
 {
-    ASSERT(emitter->Graph.Version == data.Version);
-    ASSERT(emitter->Graph.Version == data.Buffer->Version);
+    const int32 threads = data.Buffer->GPU.ParticlesCountMax + data.GPU.SpawnCount;
+    return data.GPU.DeltaTime > 0.0f &&
+        emitter->Graph.Version == data.Version &&
+        emitter->Graph.Version == data.Buffer->Version &&
+        threads != 0 && 
+        _mainCS;
+}
+
+void GPUParticles::PreSim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data)
+{
     uint32 counterDefaultValue = 0;
     const uint32 counterOffset = data.Buffer->GPU.ParticleCounterOffset;
-    const bool hasCB = _cbData.HasItems();
 
     // Clear buffers if need to
     if (data.Buffer->GPU.PendingClear)
@@ -150,24 +162,27 @@ void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, Partic
         }
     }
 
-    // Skip if can
-    SceneRenderTask* viewTask = effect->GetRenderTask();
-    const int32 threads = data.Buffer->GPU.ParticlesCountMax + data.GPU.SpawnCount;
-    if (data.GPU.DeltaTime <= 0.0f || threads == 0 || !_mainCS)
-        return;
-
     // Clear destination buffer counter
     context->UpdateBuffer(data.Buffer->GPU.BufferSecondary, &counterDefaultValue, sizeof(counterDefaultValue), counterOffset);
+}
+
+void GPUParticles::Sim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data)
+{
+    PROFILE_CPU_ASSET(emitter);
+    const bool hasCB = _cbData.HasItems();
+    const int32 threads = data.Buffer->GPU.ParticlesCountMax + data.GPU.SpawnCount;
+    const uint32 counterOffset = data.Buffer->GPU.ParticleCounterOffset;
+    SceneRenderTask* viewTask = effect->GetRenderTask();
 
     // Setup parameters
     MaterialParameter::BindMeta bindMeta;
     bindMeta.Context = context;
-    bindMeta.Constants = hasCB ? Span<byte>(_cbData.Get() + sizeof(GPUParticlesData), _cbData.Count() - sizeof(GPUParticlesData)) : Span<byte>(nullptr, 0);
+    bindMeta.Constants = hasCB ? ToSpan(_cbData).Slice(sizeof(GPUParticlesData)) : Span<byte>(nullptr, 0);
     bindMeta.Input = nullptr;
     if (viewTask)
     {
         bindMeta.Buffers = viewTask->Buffers;
-        bindMeta.CanSampleDepth = bindMeta.CanSampleGBuffer = true;
+        bindMeta.CanSampleDepth = bindMeta.CanSampleGBuffer = bindMeta.Buffers && bindMeta.Buffers->GetWidth() != 0;
     }
     else
     {
@@ -178,7 +193,7 @@ void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, Partic
     for (int32 i = 0; i < data.Parameters.Count(); i++)
     {
         // Copy instance parameters values
-        _params[i].SetValue(data.Parameters[i]);
+        _params[i].SetValue(data.Parameters.Get()[i]);
     }
     MaterialParamsLink link;
     link.This = &_params;
@@ -216,11 +231,11 @@ void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, Partic
             Matrix::Transpose(Matrix::Identity, cbData->InvViewProjectionMatrix);
             Matrix::Transpose(Matrix::Identity, cbData->InvViewMatrix);
             Matrix::Transpose(Matrix::Identity, cbData->ViewMatrix);
-            cbData->ViewPos = Vector3::Zero;
+            cbData->ViewPos = Float3::Zero;
             cbData->ViewFar = 0.0f;
-            cbData->ViewDir = Vector3::Forward;
-            cbData->ViewInfo = Vector4::Zero;
-            cbData->ScreenSize = Vector4::Zero;
+            cbData->ViewDir = Float3::Forward;
+            cbData->ViewInfo = Float4::Zero;
+            cbData->ScreenSize = Float4::Zero;
         }
         cbData->Time = data.Time;
         if (emitter->SimulationSpace == ParticlesSimulationSpace::World)
@@ -231,7 +246,9 @@ void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, Partic
         else
         {
             Matrix worldMatrix;
-            effect->GetWorld(&worldMatrix);
+            effect->GetLocalToWorldMatrix(worldMatrix);
+            if (viewTask)
+                viewTask->View.GetWorldMatrix(worldMatrix);
             Matrix::Transpose(worldMatrix, cbData->WorldMatrix);
             worldMatrix.Invert();
             Matrix::Transpose(worldMatrix, cbData->InvWorldMatrix);
@@ -257,6 +274,11 @@ void GPUParticles::Execute(GPUContext* context, ParticleEmitter* emitter, Partic
     // Invoke Compute shader
     const int32 threadGroupSize = 1024;
     context->Dispatch(_mainCS, Math::Min(Math::DivideAndRoundUp(threads, threadGroupSize), GPU_MAX_CS_DISPATCH_THREAD_GROUPS), 1, 1);
+}
+
+void GPUParticles::PostSim(GPUContext* context, ParticleEmitter* emitter, ParticleEffect* effect, int32 emitterIndex, ParticleEmitterInstance& data)
+{
+    const uint32 counterOffset = data.Buffer->GPU.ParticleCounterOffset;
 
     // Copy custom data
     for (int32 i = 0; i < CustomDataSize; i += 4)

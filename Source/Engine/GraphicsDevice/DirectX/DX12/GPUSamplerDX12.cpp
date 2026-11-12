@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 #if GRAPHICS_API_DIRECTX12
 
@@ -76,6 +76,9 @@ bool GPUSamplerDX12::OnInit()
         break;
     case GPUSamplerCompareFunction::Less:
         samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS;
+        break;
+    case GPUSamplerCompareFunction::Greater:
+        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_GREATER;
         break;
     default:
         return true;

@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 using System.Runtime.CompilerServices;
@@ -17,7 +17,7 @@ namespace FlaxEditor.GUI
         private ColumnDefinition[] _columns;
         private float[] _splits;
         private int _movingSplit = -1;
-        private Vector2 _mousePos;
+        private Float2 _mousePos;
 
         /// <summary>
         /// Gets or sets the height of the table column headers.
@@ -82,6 +82,53 @@ namespace FlaxEditor.GUI
             }
         }
 
+        private bool _alternateRows = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether alternate row background colors should be applied.
+        /// </summary>
+        public bool AlternateRows
+        {
+            get => _alternateRows;
+            set
+            {
+                if (_alternateRows != value)
+                {
+                    _alternateRows = value;
+                    PerformLayout();
+                }
+            }
+        }
+
+        private Color? _rowColorEven;
+        private Color? _rowColorOdd;
+
+        /// <summary>
+        /// Gets or sets the background color of even rows.
+        /// </summary>
+        public Color RowColorEven
+        {
+            get => _rowColorEven ?? Color.Transparent;
+            set
+            {
+                _rowColorEven = value;
+                PerformLayout();
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the background color of odd rows.
+        /// </summary>
+        public Color RowColorOdd
+        {
+            get => _rowColorOdd ?? (Style.Current != null ? Style.Current.Background * 1.4f : Color.Transparent);
+            set
+            {
+                _rowColorOdd = value;
+                PerformLayout();
+            }
+        }
+
         /// <summary>
         /// Initializes a new instance of the <see cref="Table"/> class.
         /// </summary>
@@ -130,17 +177,19 @@ namespace FlaxEditor.GUI
 
             var style = Style.Current;
             var font = column.TitleFont ?? style.FontMedium;
-            Render2D.DrawText(font, column.Title, rect, column.TitleColor, TextAlignment.Center, TextAlignment.Center);
+            var textRect = rect;
+            column.TitleMargin.ShrinkRectangle(ref textRect);
+            Render2D.DrawText(font, column.Title, textRect, column.TitleColor, column.TitleAlignment, TextAlignment.Center);
 
             if (columnIndex < _columns.Length - 1)
             {
-                var splitRect = new Rectangle(rect.Right - 1, 2, 2, rect.Height - 4);
-                Render2D.FillRectangle(splitRect, _movingSplit == columnIndex || splitRect.Contains(_mousePos) ? style.BorderNormal : column.TitleBackgroundColor * 0.9f);
+                var splitRect = new Rectangle(rect.Right - 2, 2, 4, rect.Height - 4);
+                Render2D.FillRectangle(splitRect, _movingSplit == columnIndex || splitRect.Contains(_mousePos) ? style.BorderNormal : style.BackgroundTone);
             }
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left)
             {
@@ -151,7 +200,7 @@ namespace FlaxEditor.GUI
                     {
                         rect.Width = GetColumnWidth(i);
 
-                        var splitRect = new Rectangle(rect.Right - 1, 2, 2, rect.Height - 4);
+                        var splitRect = new Rectangle(rect.Right - 2, 2, 4, rect.Height - 4);
                         if (splitRect.Contains(location))
                         {
                             // Start moving splitter
@@ -170,7 +219,7 @@ namespace FlaxEditor.GUI
         }
 
         /// <inheritdoc />
-        public override void OnMouseMove(Vector2 location)
+        public override void OnMouseMove(Float2 location)
         {
             _mousePos = location;
 
@@ -193,12 +242,37 @@ namespace FlaxEditor.GUI
 
                 PerformLayout();
             }
+            else
+            {
+                if (_columns != null && _splits != null)
+                {
+                    Rectangle rect = new Rectangle(0, 0, 0, _headerHeight);
+                    for (int i = 0; i < _columns.Length - 1; i++)
+                    {
+                        rect.Width = GetColumnWidth(i);
+
+                        var splitRect = new Rectangle(rect.Right - 2, 2, 4, rect.Height - 4);
+                        if (splitRect.Contains(location))
+                        {
+                            // Start moving splitter
+                            Cursor = CursorType.SizeWE;
+                            break;
+                        }
+                        else
+                        {
+                            Cursor = CursorType.Default;
+                        }
+
+                        rect.X += rect.Width;
+                    }
+                }
+            }
 
             base.OnMouseMove(location);
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
             if (button == MouseButton.Left && _movingSplit != -1)
             {
@@ -223,6 +297,7 @@ namespace FlaxEditor.GUI
 
             // Arrange rows
             float y = _headerHeight;
+            int visibleRowIndex = 0;
             for (int i = 0; i < Children.Count; i++)
             {
                 var c = Children[i];
@@ -233,6 +308,12 @@ namespace FlaxEditor.GUI
                     bounds.Y = y;
                     c.Bounds = bounds;
                     y += bounds.Height + 1;
+
+                    if (_alternateRows && c is Row row)
+                    {
+                        row.BackgroundColor = visibleRowIndex % 2 == 1 ? RowColorOdd : RowColorEven;
+                        visibleRowIndex++;
+                    }
                 }
             }
 

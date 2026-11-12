@@ -1,4 +1,4 @@
-// Copyright (c) 2012-2021 Wojciech Figat. All rights reserved.
+// Copyright (c) Wojciech Figat. All rights reserved.
 
 using System;
 
@@ -7,10 +7,11 @@ namespace FlaxEngine.GUI
     /// <summary>
     /// Button control
     /// </summary>
-    public class Button : ContainerControl
+    [ActorToolbox("UI")]
+    public class Button : Label
     {
         /// <summary>
-        /// The default height fro the buttons.
+        /// The default height for the buttons.
         /// </summary>
         public const float DefaultHeight = 24.0f;
 
@@ -20,46 +21,57 @@ namespace FlaxEngine.GUI
         protected bool _isPressed;
 
         /// <summary>
-        /// The font.
-        /// </summary>
-        protected FontReference _font;
-
-        /// <summary>
-        /// The text.
-        /// </summary>
-        protected LocalizedString _text = new LocalizedString();
-
-        /// <summary>
-        /// Button text property.
-        /// </summary>
-        [EditorOrder(10), Tooltip("The button label text.")]
-        public LocalizedString Text
-        {
-            get => _text;
-            set => _text = value;
-        }
-
-        /// <summary>
-        /// Gets or sets the font used to draw button text.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public FontReference Font
-        {
-            get => _font;
-            set => _font = value;
-        }
-
-        /// <summary>
         /// Gets or sets the custom material used to render the text. It must has domain set to GUI and have a public texture parameter named Font used to sample font atlas texture with font characters data.
+        /// [Deprecated on 18.09.2024, expires on 18.09.2026]
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("Custom material used to render the text. It must has domain set to GUI and have a public texture parameter named Font used to sample font atlas texture with font characters data.")]
-        public MaterialBase TextMaterial { get; set; }
+        [Serialize, Obsolete("Use Material property instead."), NoUndo]
+        public MaterialBase TextMaterial
+        {
+            get => Material;
+            set => Material = value;
+        }
 
         /// <summary>
-        /// Gets or sets the color used to draw button text.
+        /// Gets or sets the background color when button is highlighted.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public Color TextColor;
+        [EditorDisplay("Background Style"), EditorOrder(2001)]
+        public Color BackgroundColorHighlighted { get; set; }
+
+        /// <summary>
+        /// Gets or sets the background color when button is selected.
+        /// </summary>
+        [EditorDisplay("Background Style"), EditorOrder(2002)]
+        public Color BackgroundColorSelected { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the button has a border.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2010), ExpandGroups]
+        public bool HasBorder { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the border thickness.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2011), Limit(0)]
+        public float BorderThickness { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Gets or sets the color of the border.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2012)]
+        public Color BorderColor { get; set; }
+
+        /// <summary>
+        /// Gets or sets the border color when button is highlighted.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2013)]
+        public Color BorderColorHighlighted { get; set; }
+
+        /// <summary>
+        /// Gets or sets the border color when button is selected.
+        /// </summary>
+        [EditorDisplay("Border Style"), EditorOrder(2013)]
+        public Color BorderColorSelected { get; set; }
 
         /// <summary>
         /// Event fired when user clicks on the button.
@@ -72,40 +84,14 @@ namespace FlaxEngine.GUI
         public event Action<Button> ButtonClicked;
 
         /// <summary>
-        /// Gets or sets the brush used for background drawing.
+        /// Event fired when users mouse enters the control.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000), Tooltip("The brush used for background drawing.")]
-        public IBrush BackgroundBrush { get; set; }
+        public event Action HoverBegin;
 
         /// <summary>
-        /// Gets or sets the color of the border.
+        /// Event fired when users mouse leaves the control.
         /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public Color BorderColor { get; set; }
-
-        /// <summary>
-        /// Gets or sets the background color when button is selected.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2010)]
-        public Color BackgroundColorSelected { get; set; }
-
-        /// <summary>
-        /// Gets or sets the border color when button is selected.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2020)]
-        public Color BorderColorSelected { get; set; }
-
-        /// <summary>
-        /// Gets or sets the background color when button is highlighted.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public Color BackgroundColorHighlighted { get; set; }
-
-        /// <summary>
-        /// Gets or sets the border color when button is highlighted.
-        /// </summary>
-        [EditorDisplay("Style"), EditorOrder(2000)]
-        public Color BorderColorHighlighted { get; set; }
+        public event Action HoverEnd;
 
         /// <summary>
         /// Gets a value indicating whether this button is being pressed (by mouse or touch).
@@ -130,6 +116,7 @@ namespace FlaxEngine.GUI
         public Button(float x, float y, float width = 120, float height = DefaultHeight)
         : base(x, y, width, height)
         {
+            AutoFocus = true;
             var style = Style.Current;
             if (style != null)
             {
@@ -145,7 +132,17 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
-        /// Called when mouse clicks the button.
+        /// Initializes a new instance of the <see cref="Button"/> class.
+        /// </summary>
+        /// <param name="location">Position</param>
+        /// <param name="size">Size</param>
+        public Button(Float2 location, Float2 size)
+        : this(location.X, location.Y, size.X, size.Y)
+        {
+        }
+
+        /// <summary>
+        /// Called when mouse or touch clicks the button.
         /// </summary>
         protected virtual void OnClick()
         {
@@ -154,7 +151,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
-        /// Called when buttons starts to be pressed by the used (via mouse or touch).
+        /// Called when button starts to be pressed by the used (via mouse or touch).
         /// </summary>
         protected virtual void OnPressBegin()
         {
@@ -164,7 +161,7 @@ namespace FlaxEngine.GUI
         }
 
         /// <summary>
-        /// Called when buttons ends to be pressed by the used (via mouse or touch).
+        /// Called when button ends to be pressed by the used (via mouse or touch).
         /// </summary>
         protected virtual void OnPressEnd()
         {
@@ -175,7 +172,7 @@ namespace FlaxEngine.GUI
         /// Sets the button colors palette based on a given main color.
         /// </summary>
         /// <param name="color">The main color.</param>
-        public void SetColors(Color color)
+        public virtual void SetColors(Color color)
         {
             BackgroundColor = color;
             BorderColor = color.RGBMultiplied(0.5f);
@@ -186,26 +183,32 @@ namespace FlaxEngine.GUI
         }
 
         /// <inheritdoc />
+        public override void ClearState()
+        {
+            base.ClearState();
+
+            if (_isPressed)
+                OnPressEnd();
+        }
+
+        /// <inheritdoc />
         public override void DrawSelf()
         {
-            // Cache data
-            Rectangle clientRect = new Rectangle(Vector2.Zero, Size);
+            Rectangle clientRect = new Rectangle(Float2.Zero, Size);
             bool enabled = EnabledInHierarchy;
             Color backgroundColor = BackgroundColor;
             Color borderColor = BorderColor;
-            Color textColor = TextColor;
             if (!enabled)
             {
                 backgroundColor *= 0.5f;
                 borderColor *= 0.5f;
-                textColor *= 0.6f;
             }
             else if (_isPressed)
             {
                 backgroundColor = BackgroundColorSelected;
                 borderColor = BorderColorSelected;
             }
-            else if (IsMouseOver)
+            else if (IsMouseOver || IsNavFocused)
             {
                 backgroundColor = BackgroundColorHighlighted;
                 borderColor = BorderColorHighlighted;
@@ -216,10 +219,22 @@ namespace FlaxEngine.GUI
                 BackgroundBrush.Draw(clientRect, backgroundColor);
             else
                 Render2D.FillRectangle(clientRect, backgroundColor);
-            Render2D.DrawRectangle(clientRect, borderColor);
+            if (HasBorder)
+                Render2D.DrawRectangle(clientRect, borderColor, BorderThickness);
 
             // Draw text
-            Render2D.DrawText(_font.GetFont(), TextMaterial, _text, clientRect, textColor, TextAlignment.Center, TextAlignment.Center);
+            backgroundColor = BackgroundColor;
+            BackgroundColor = Color.Transparent; // Skip background drawing in Control
+            base.DrawSelf();
+            BackgroundColor = backgroundColor;
+        }
+
+        /// <inheritdoc />
+        public override void OnMouseEnter(Float2 location)
+        {
+            base.OnMouseEnter(location);
+
+            HoverBegin?.Invoke();
         }
 
         /// <inheritdoc />
@@ -230,24 +245,46 @@ namespace FlaxEngine.GUI
                 OnPressEnd();
             }
 
+            HoverEnd?.Invoke();
+
             base.OnMouseLeave();
         }
 
         /// <inheritdoc />
-        public override bool OnMouseDown(Vector2 location, MouseButton button)
+        public override bool OnMouseDown(Float2 location, MouseButton button)
         {
+            if (base.OnMouseDown(location, button))
+                return true;
+
             if (button == MouseButton.Left && !_isPressed)
             {
                 OnPressBegin();
                 return true;
             }
-
-            return base.OnMouseDown(location, button);
+            return false;
         }
 
         /// <inheritdoc />
-        public override bool OnMouseUp(Vector2 location, MouseButton button)
+        public override bool OnMouseUp(Float2 location, MouseButton button)
         {
+            if (base.OnMouseUp(location, button))
+                return true;
+
+            if (button == MouseButton.Left && _isPressed)
+            {
+                OnPressEnd();
+                OnClick();
+                return true;
+            }
+            return false;
+        }
+
+        /// <inheritdoc />
+        public override bool OnMouseDoubleClick(Float2 location, MouseButton button)
+        {
+            if (base.OnMouseDoubleClick(location, button))
+                return true;
+
             if (button == MouseButton.Left && _isPressed)
             {
                 OnPressEnd();
@@ -255,32 +292,42 @@ namespace FlaxEngine.GUI
                 return true;
             }
 
-            return base.OnMouseUp(location, button);
-        }
-
-        /// <inheritdoc />
-        public override bool OnTouchDown(Vector2 location, int pointerId)
-        {
-            if (!_isPressed)
+            if (button == MouseButton.Left && !_isPressed)
             {
                 OnPressBegin();
                 return true;
             }
 
-            return base.OnTouchDown(location, pointerId);
+            return false;
         }
 
         /// <inheritdoc />
-        public override bool OnTouchUp(Vector2 location, int pointerId)
+        public override bool OnTouchDown(Float2 location, int pointerId)
         {
+            if (base.OnTouchDown(location, pointerId))
+                return true;
+
+            if (!_isPressed)
+            {
+                OnPressBegin();
+                return true;
+            }
+            return false;
+        }
+
+        /// <inheritdoc />
+        public override bool OnTouchUp(Float2 location, int pointerId)
+        {
+            if (base.OnTouchUp(location, pointerId))
+                return true;
+
             if (_isPressed)
             {
                 OnPressEnd();
                 OnClick();
                 return true;
             }
-
-            return base.OnTouchUp(location, pointerId);
+            return false;
         }
 
         /// <inheritdoc />
@@ -303,6 +350,14 @@ namespace FlaxEngine.GUI
             }
 
             base.OnLostFocus();
+        }
+
+        /// <inheritdoc />
+        public override void OnSubmit()
+        {
+            OnClick();
+
+            base.OnSubmit();
         }
     }
 }
